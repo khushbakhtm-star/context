@@ -16,11 +16,14 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   an activity or add time to reports. Activity color and text color remain separate controls.
 - Hold an inactive cell, then tap the last cell in the same day to select a range and open its
   **Auto fill / Group** popup. The **+** control also opens that popup with editable range times.
+- With no minute selected, **+** opens the phone calendar's new-event form. Its date fields use
+  that calendar app's date picker. With a minute selected, the editing bar's **+** opens range actions.
 - To make one activity from several cells, tap a minute, choose **+**, set the first and last minute,
   enter an activity title, choose its color, and tap **Group**. The last minute is included. Every
   cell keeps its own note and remains editable directly in the grid. Blank grouped minutes also
   count toward the activity's time. Group members use a solid activity-color fill and a title badge;
-  tap the badge or open **+** from a member to edit the group. **Auto fill** copies a nonblank active
+  open **+** from a member to edit the group. Tapping the title area follows the same inline-entry
+  behavior as the rest of the cell. **Auto fill** copies a nonblank active
   minute's text with the chosen activity color. An empty source preserves occupied target notes.
 - Activity/group color choices use [documented Google Calendar hex colors](https://developers.google.com/apps-script/reference/calendar/color)
   plus exact colors imported from connected [Google palettes](https://developers.google.com/workspace/calendar/api/v3/reference/colors)
