@@ -287,3 +287,110 @@ test('a local edit after migration causally follows a legacy record with a fast 
   assert.ok(after.revision > before.revision,
     'The new edit must follow the seeded revision even if the old installation clock was ahead');
 });
+
+test('explicit color-only minutes count in reports and round-trip through the cloud journal', async (t) => {
+  const first = createRepository(t).api;
+  const second = createRepository(t).api;
+  await first.initializeDatabase();
+  await second.initializeDatabase();
+  assert.deepEqual(plain(await first.saveMinuteRange({ dateKey: day, startMinute: 300,
+    durationMinutes: 1, text: '', categoryId: 'study' })), []);
+  await first.saveMinuteRange({ dateKey: day, startMinute: 300, durationMinutes: 1,
+    text: '', categoryId: 'study', allowEmptyText: true, queueInlineLink: true });
+  assert.equal((await first.getMinuteEntry(day, 300)).text, '');
+  assert.deepEqual(plain(await first.getCategoryTimeTotals(day, day)),
+    [{ dateKey: day, categoryId: 'study', minutes: 1 }]);
+  const documents = await first.getDocumentsForUpload('webdav:one');
+  assert.equal(documents.length, 1);
+  assert.equal(documents[0].value.text, '');
+  assert.equal(await second.mergeSyncDocuments(documents), 1);
+  assert.equal((await second.getMinuteEntry(day, 300)).text, '');
+  assert.equal((await second.getCategoryTimeTotals(day, day))[0].minutes, 1);
+  assert.equal((await second.getPendingInlineMinuteLinks()).length, 0,
+    'Importing another phone does not invent a new local inline-link intent');
+});
+
+test('restoring a conflicting color-only minute retains its blank text and creates a winning revision', async (t) => {
+  const { api } = createRepository(t);
+  await api.initializeDatabase();
+  await api.saveMinuteRange({ dateKey: day, startMinute: 310, durationMinutes: 1,
+    text: '', categoryId: 'study', allowEmptyText: true });
+  const local = (await api.getSyncDocuments('minute:'))[0];
+  const remote = { key: local.key, revision: revision(Date.now() + 60_000, 12),
+    value: value(310, 'Another phone text', { categoryId: 'work' }) };
+  await api.mergeSyncDocuments([remote]);
+  const conflict = (await api.getLedgerConflicts())[0];
+  assert.equal(conflict.value.text, '');
+  await api.restoreLedgerConflict(conflict);
+  const restored = await api.getMinuteEntry(day, 310);
+  assert.equal(restored.text, '');
+  assert.equal(restored.categoryId, 'study');
+  const document = (await api.getSyncDocuments('minute:'))[0];
+  assert.equal(document.value.text, '');
+  assert.ok(document.revision > remote.revision);
+  assert.equal((await api.getLedgerConflicts()).length, 0);
+});
+
+test('inline link tickets are scoped to explicit edits and stale acknowledgements retain newer work', async (t) => {
+  const { api } = createRepository(t);
+  await api.initializeDatabase();
+  await save(api, 320, 'An older ordinary entry');
+  assert.equal((await api.getPendingSyncDates()).length, 1);
+  assert.equal((await api.getPendingInlineMinuteLinks()).length, 0);
+  await api.saveMinuteRange({ dateKey: day, startMinute: 321, durationMinutes: 1,
+    text: 'First inline text', categoryId: 'study', queueInlineLink: true });
+  const first = (await api.getPendingInlineMinuteLinks())[0];
+  await api.saveMinuteRange({ dateKey: day, startMinute: 321, durationMinutes: 1,
+    text: 'Newer inline text', categoryId: 'study', queueInlineLink: true });
+  const newer = (await api.getPendingInlineMinuteLinks())[0];
+  assert.notEqual(newer.token, first.token);
+  assert.equal(await api.acknowledgeInlineMinuteLink(first), false);
+  assert.equal((await api.getPendingInlineMinuteLinks())[0].token, newer.token);
+  assert.equal(await api.acknowledgeInlineMinuteLink(newer), true);
+  await api.deleteMinuteEntry(day, 321, { queueInlineLink: true });
+  const deletion = (await api.getPendingInlineMinuteLinks())[0];
+  assert.equal(deletion.dateKey, day);
+  assert.equal(deletion.minuteIndex, 321);
+  assert.equal(await api.getMinuteEntry(day, 321), null);
+  assert.equal((await api.getSyncDocuments('minute:')).find((item) => item.key === minuteKey(321)).value, null);
+  assert.equal(await api.acknowledgeInlineMinuteLink(newer), false);
+  assert.equal(await api.acknowledgeInlineMinuteLink(deletion), true);
+  assert.equal((await api.getPendingInlineMinuteLinks()).length, 0);
+});
+
+test('newer inline tickets preserve dates touched by an unacknowledged cross-midnight merge', async (t) => {
+  const { api } = createRepository(t);
+  await api.initializeDatabase();
+  const previous = '2026-10-24';
+  await api.saveMinuteRange({ dateKey: previous, startMinute: 1438, durationMinutes: 1,
+    text: 'Earlier', categoryId: 'study' });
+  await save(api, 0, 'Following');
+  const affected = await api.saveMinuteRange({ dateKey: previous, startMinute: 1439, durationMinutes: 1,
+    text: 'Bridge midnight', categoryId: 'study', queueInlineLink: true });
+  assert.deepEqual(plain(affected), [previous, day]);
+  const before = (await api.getPendingInlineMinuteLinks())[0];
+  await api.saveMinuteRange({ dateKey: previous, startMinute: 1439, durationMinutes: 1,
+    text: 'Change only this minute', categoryId: 'work', queueInlineLink: true });
+  const after = (await api.getPendingInlineMinuteLinks())[0];
+  assert.deepEqual(plain(after.affectedDates), [previous, day]);
+  assert.equal(await api.acknowledgeInlineMinuteLink(before), false);
+  assert.equal((await api.getPendingInlineMinuteLinks())[0].token, after.token);
+});
+
+test('an inline link queue failure rolls back its minute, journal, and device outbox atomically', async (t) => {
+  const { api, sqlite } = createRepository(t);
+  await api.initializeDatabase();
+  sqlite.exec(`CREATE TRIGGER reject_inline_link BEFORE INSERT ON inline_minute_link_outbox
+    BEGIN SELECT RAISE(ABORT, 'inline link queue unavailable'); END;`);
+  await assert.rejects(api.saveMinuteRange({ dateKey: day, startMinute: 330, durationMinutes: 1,
+    text: 'Must be atomic', categoryId: 'study', queueInlineLink: true }), /inline link queue unavailable/);
+  assert.equal(await api.getMinuteEntry(day, 330), null);
+  assert.equal((await api.getSyncDocuments('minute:')).length, 0);
+  assert.equal((await api.getPendingSyncDates()).length, 0);
+  assert.equal((await api.getPendingInlineMinuteLinks()).length, 0);
+  await save(api, 331, 'Keep this if deleting fails');
+  const before = plain(await api.getSyncDocuments('minute:'));
+  await assert.rejects(api.deleteMinuteEntry(day, 331, { queueInlineLink: true }), /inline link queue unavailable/);
+  assert.equal((await api.getMinuteEntry(day, 331)).text, 'Keep this if deleting fails');
+  assert.deepEqual(plain(await api.getSyncDocuments('minute:')), before);
+});

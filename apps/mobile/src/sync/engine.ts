@@ -295,7 +295,7 @@ function buildWrite(projection: Projection, segment: ActivitySegment): CalendarE
   const mapping = categoryProviderColor(segment.categoryId,
     projection.accountId.startsWith('google:') ? 'google' : 'microsoft',
     projection.accountId, projection.calendarId);
-  return { title: projection.title ?? segment.entries[0]?.text.slice(0, 100) ?? categoryById(segment.categoryId).name,
+  return { title: projection.title ?? (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
     description: [preserved, log].filter(Boolean).join('\n\n'),
     start: zonedMinuteToInstant(segment.dateKey, segment.startMinute, zone),
     end: zonedMinuteToInstant(segment.entries.at(-1)!.dateKey,

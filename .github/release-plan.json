@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.2",
-  "sourceAndroidVersionCode": 3,
-  "sourceIosBuildNumber": "3",
+  "version": "0.1.3",
+  "sourceAndroidVersionCode": 4,
+  "sourceIosBuildNumber": "4",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Minute calendar with day/3-day/week views, safe-area layout, dark/light appearance, streamlined entry, and reviewed F-Droid source preparation. Native phone verification, successful source-build verification, public store release, and official F-Droid acceptance remain pending."
+  "notes": "Edit minute text directly in Today and choose its color through the timestamp strip. Inline autosave retains dated drafts and existing calendar consent rules. New native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
 }
