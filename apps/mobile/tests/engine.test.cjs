@@ -711,7 +711,7 @@ test('two independent phones exchange encrypted minute updates and deletion tomb
   const second = phone(t, remote, storageAccount);
   await prepare(first, true);
   await prepare(second, true);
-  const customCategory = await first.categories.createCategory({ name: 'Research & reflection', color: '#123456' });
+  const customCategory = await first.categories.createCategory({ name: 'Research & reflection', color: '#2952A3' });
   await saveRange(first, 500, 1, 'Private thought from Android', customCategory.id);
   await first.engine.synchronizeAccounts();
   assert.ok(remote.files.size > 0);
@@ -723,7 +723,7 @@ test('two independent phones exchange encrypted minute updates and deletion tomb
   assert.equal((await second.db.getMinuteEntry(day, 500)).text, 'Private thought from Android');
   const receivedCategory = (await second.categories.listCategories()).find((item) => item.id === customCategory.id);
   assert.equal(receivedCategory.name, 'Research & reflection');
-  assert.equal(receivedCategory.color, '#123456');
+  assert.equal(receivedCategory.color, '#2952A3');
   assert.equal((await second.db.getMinuteEntry(day, 500)).categoryId, receivedCategory.id);
   await second.categories.updateCategory(customCategory.id, { name: 'Private reflection', archived: true });
   await second.db.deleteMinuteEntry(day, 500);

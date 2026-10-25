@@ -32,10 +32,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.4
-    versionCode: 5
+  - versionName: 0.1.5
+    versionCode: 6
     disable: Pinned build-server toolchain, dependency scan, and native verification are pending
-    commit: 95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9
+    commit: 5d436ab684f17a2f437a79d725e834622448e51b
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -84,5 +84,5 @@ MaintainerNotes: |-
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.4
-CurrentVersionCode: 5
+CurrentVersion: 0.1.5
+CurrentVersionCode: 6

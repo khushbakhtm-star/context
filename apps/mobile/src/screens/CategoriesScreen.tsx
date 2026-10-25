@@ -4,7 +4,7 @@ import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from
 import { getAccounts } from '../sync/accounts';
 import type { ConnectedAccount } from '../sync/types';
 import {
-  createCategory, importAccountCategories, importDeviceCategories, listCategories, updateCategory,
+  createCategory, importAccountCategories, importDeviceCategories, listCategories, listGoogleActivityColors, updateCategory,
 } from '../services/categories';
 import { useAppTheme } from '../appearance';
 import type { ActivityCategory, AppColors } from '../theme';
@@ -19,7 +19,8 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
   const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState('');
-  const [color, setColor] = useState('#667B69');
+  const [color, setColor] = useState('');
+  const [palette, setPalette] = useState<string[]>([]);
   const [search, setSearch] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -28,7 +29,10 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
 
   const refresh = useCallback(async () => {
     const [values, connected] = await Promise.all([listCategories(), getAccounts()]);
+    const googleColors = await listGoogleActivityColors();
     setCategories(values);
+    setPalette(googleColors);
+    setColor((current) => current || googleColors[0] || '');
     setAccounts(connected.filter((account) => account.provider !== 'webdav' && account.consent.calendarRead));
   }, []);
   useEffect(() => { void refresh().catch((failure) => setError(String(failure))); }, [refresh]);
@@ -36,7 +40,10 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
   const visible = useMemo(() => categories.filter((category) =>
     (showArchived || !category.archived) && category.name.toLowerCase().includes(search.toLowerCase())),
   [categories, search, showArchived]);
-  const palette = useMemo(() => [...new Set(categories.map((category) => category.color))], [categories]);
+  const editingCategory = categories.find((category) => category.id === editing);
+  const unchangedColor = Boolean(editingCategory && editingCategory.color.toUpperCase() === color.toUpperCase());
+  const googleColorSelected = palette.includes(color.toUpperCase());
+  const canSaveColor = googleColorSelected || unchangedColor;
 
   async function perform(action: () => Promise<string | void>) {
     if (busy) return;
@@ -56,9 +63,9 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
 
   function save() {
     void perform(async () => {
-      if (editing) await updateCategory(editing, { name, color });
+      if (editing) await updateCategory(editing, { name, ...(unchangedColor ? {} : { color }) });
       else await createCategory({ name, color });
-      setEditing(null); setName('');
+      setEditing(null); setName(''); setColor(palette[0] ?? '');
       return 'Category saved';
     });
   }
@@ -68,8 +75,8 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
       <Text style={styles.eyebrow}>ACTIVITY CATEGORIES</Text>
       <Text style={styles.title}>Your own language for time</Text>
       <Text style={styles.intro}>
-        Add as many activity categories as you need. Import the colors and named categories available
-        in your connected calendars, then use them throughout your minute ledger.
+        Add as many activity categories as you need using Google Calendar colors. Import additional
+        Google calendar colors and labels to use them throughout your minute ledger.
       </Text>
 
       <View style={styles.card}>
@@ -78,22 +85,26 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
           placeholderTextColor={colors.muted} style={styles.input} maxLength={200} />
         <View style={styles.colorInputRow}>
           <View style={[styles.largeDot, { backgroundColor: /^#[0-9a-f]{6}$/i.test(color) ? color : colors.silver }]} />
-          <TextInput keyboardAppearance={resolvedMode} value={color} onChangeText={setColor} placeholder="#667B69" editable={!busy}
-            placeholderTextColor={colors.muted}
-            autoCapitalize="characters" autoCorrect={false} maxLength={7}
-            accessibilityLabel="Category color in hexadecimal" style={[styles.input, styles.colorInput]} />
+          <Text selectable accessibilityLabel={'Activity color ' + color.toUpperCase()} style={styles.selectedColorHex}>
+            {color.toUpperCase() || 'Choose a Google Calendar color'}
+          </Text>
         </View>
+        {editing && !googleColorSelected ? <Text style={styles.help}>Existing recorded color. Choose a Google Calendar color to change it.</Text> : null}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.palette}>
           {palette.map((value) => <Pressable key={value} onPress={() => setColor(value)} disabled={busy}
-            accessibilityLabel={`Use ${value}`} style={[styles.swatch, { backgroundColor: value },
-              value.toUpperCase() === color.toUpperCase() && styles.selectedSwatch]} />)}
+            accessibilityRole="radio" accessibilityState={{ checked: value === color.toUpperCase() }}
+            accessibilityLabel={`Use Google Calendar color ${value}`} style={[styles.swatchChoice,
+              value === color.toUpperCase() && styles.selectedSwatch]}>
+            <View style={[styles.swatch, { backgroundColor: value }]} />
+            <Text maxFontSizeMultiplier={1.4} style={styles.swatchHex}>{value}</Text>
+          </Pressable>)}
         </ScrollView>
         <View style={styles.actions}>
-          {editing ? <Pressable disabled={busy} onPress={() => { setEditing(null); setName(''); }}>
+          {editing ? <Pressable disabled={busy} onPress={() => { setEditing(null); setName(''); setColor(palette[0] ?? ''); }}>
             <Text style={styles.link}>Cancel edit</Text>
           </Pressable> : <View />}
-          <Pressable disabled={busy || !name.trim()} onPress={save}
-            style={[styles.button, (busy || !name.trim()) && styles.disabled]}>
+          <Pressable disabled={busy || !name.trim() || !canSaveColor} onPress={save}
+            style={[styles.button, (busy || !name.trim() || !canSaveColor) && styles.disabled]}>
             <Text style={styles.buttonText}>{busy ? 'Saving…' : 'Save category'}</Text>
           </Pressable>
         </View>
@@ -102,8 +113,8 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Import calendar colors & categories</Text>
         <Text style={styles.help}>
-          Provider palettes and labels are imported without a nine-category limit. A calendar's
-          color limits still apply when publishing events; several categories may share one color.
+          Imported labels have no nine-category limit. Activity color choices use Google Calendar
+          hex values; several activity categories may share one color. Other provider mappings remain available.
         </Text>
         {accounts.map((account) => <Pressable key={account.id} disabled={busy}
           onPress={() => void perform(async () => {
@@ -165,9 +176,14 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   help: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },
   input: { marginTop: 12, padding: 12, borderWidth: 1, borderColor: colors.hairline, borderRadius: 10,
     color: colors.ink, fontSize: 14, backgroundColor: colors.surface },
-  colorInputRow: { flexDirection: 'row', alignItems: 'center', gap: 12 }, colorInput: { flex: 1 },
+  colorInputRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  selectedColorHex: { flex: 1, marginTop: 12, color: colors.ink, fontSize: 14 },
   largeDot: { width: 28, height: 28, borderRadius: 14, marginTop: 12 },
-  palette: { gap: 11, paddingVertical: 14 }, swatch: { width: 24, height: 24, borderRadius: 12 },
+  palette: { gap: 5, paddingVertical: 14 },
+  swatchChoice: { width: 76, height: 60, borderWidth: 2, borderColor: 'transparent', borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center' },
+  swatch: { width: 28, height: 28, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
+  swatchHex: { color: colors.graphite, fontSize: 10, marginTop: 4 },
   selectedSwatch: { borderWidth: 2, borderColor: colors.ink },
   actions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 },
   button: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10, backgroundColor: colors.accent },

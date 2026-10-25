@@ -45,6 +45,8 @@ export type AccountCalendar = {
   id: string;
   title: string;
   color: string;
+  /** Exact validated provider value; color can instead be a UI fallback. */
+  providedColor?: string;
   writable: boolean;
 };
 

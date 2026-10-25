@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { calendarGridLayout, calendarZoomOffsets, normalizeCalendarZoom, parseCalendarMinute, revealCalendarDay } from '../src/utils/calendar-layout';
+import { minuteLabel } from '../src/utils/time';
 
 test('a day fills the visible ledger while multi-day views retain readable swipeable columns', () => {
   const single = calendarGridLayout(360, 1);
@@ -74,4 +75,39 @@ test('focusing an oversized zoomed column reveals its text start rather than its
   assert.ok(layout.dayWidth > layout.viewportWidth - layout.railWidth);
   assert.equal(revealCalendarDay(0, 1, layout), layout.dayWidth);
   assert.equal(revealCalendarDay(layout.maxOffset, 2, layout), layout.dayWidth * 2);
+});
+
+test('native-measured 12-hour and 24-hour rails fit time text with two pixels of total padding', () => {
+  const twelve = calendarGridLayout(360, 1, 1, 1, 66.2);
+  const twentyFour = calendarGridLayout(360, 1, 1, 1, 41.2);
+  assert.equal(twelve.railWidth, 69);
+  assert.equal(twentyFour.railWidth, 44);
+  assert.equal(twelve.railWidth + twelve.dayWidth, 360);
+  assert.equal(twentyFour.railWidth + twentyFour.dayWidth, 360,
+    'date headers and minute cells share the same first-column boundary and full remaining width');
+  const small = calendarGridLayout(360, 7, 0.5, 7, 41.2);
+  assert.equal(small.railWidth, 23, 'a passive label needs no 44dp touch-target minimum');
+  assert.ok(small.railWidth >= 41.2 * small.zoom + 2);
+  assert.equal(calendarGridLayout(360, 1, 1, 1, Number.NaN).railWidth, 88, 'invalid native measurements keep the safe fallback');
+});
+
+test('changing clock label width preserves the focal date and minute when the rail gets narrower', () => {
+  const anchor = { minute: 791.5, day: 4.25, viewportX: 220, viewportY: 160 };
+  for (const width of [66.2, 41.2, 85]) {
+    const layout = calendarGridLayout(360, 7, 1.5, 7, width);
+    const offset = calendarZoomOffsets(anchor, layout, 500);
+    assert.equal(layout.railWidth + anchor.day * layout.dayWidth - offset.x, anchor.viewportX);
+    assert.equal(anchor.minute * layout.rowHeight - offset.y, anchor.viewportY);
+  }
+});
+
+test('12-hour and 24-hour labels round-trip inclusive range minutes across midnight and noon', () => {
+  for (const [minute, twelve, twentyFour] of [
+    [0, '12:00 AM', '00:00'], [720, '12:00 PM', '12:00'], [791, '1:11 PM', '13:11'], [1439, '11:59 PM', '23:59'],
+  ] as const) {
+    assert.equal(minuteLabel(minute, true), twelve);
+    assert.equal(minuteLabel(minute, false), twentyFour);
+    assert.equal(parseCalendarMinute(twelve), minute);
+    assert.equal(parseCalendarMinute(twentyFour), minute);
+  }
 });

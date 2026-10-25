@@ -80,19 +80,23 @@ export type ActivityCategory = {
   providerCategoryName?: string;
   providerOriginalName?: string;
   providerOriginalColor?: string;
+  /** Google returned this exact color; absent on legacy calendar fallback records. */
+  googleColorVerified?: boolean;
   updatedAt?: string;
 };
 
+// New installations use documented Google Calendar hexes. Stored category records
+// are hydrated unchanged, so this does not recolor an existing ledger's history.
 export const DEFAULT_CATEGORIES: ActivityCategory[] = [
-  { id: 'sleep', name: 'Sleep', color: '#8B8199' },
-  { id: 'physiological', name: 'Physiological needs', color: '#3E5864' },
-  { id: 'work', name: 'Work', color: '#B49B55' },
-  { id: 'study', name: 'Study', color: '#8DAAB4' },
-  { id: 'family', name: 'Family & people', color: '#B87552' },
-  { id: 'care', name: 'Hygiene & care', color: '#B57C8B' },
-  { id: 'prayer', name: 'Prayer', color: '#667B69' },
-  { id: 'exercise', name: 'Exercise', color: '#6B7382' },
-  { id: 'unaccounted', name: 'Unaccounted', color: '#96938C' },
+  { id: 'sleep', name: 'Sleep', color: '#705770' },
+  { id: 'physiological', name: 'Physiological needs', color: '#29527A' },
+  { id: 'work', name: 'Work', color: '#AB8B00' },
+  { id: 'study', name: 'Study', color: '#1B887A' },
+  { id: 'family', name: 'Family & people', color: '#BE6D00' },
+  { id: 'care', name: 'Hygiene & care', color: '#B1365F' },
+  { id: 'prayer', name: 'Prayer', color: '#0D7813' },
+  { id: 'exercise', name: 'Exercise', color: '#5229A3' },
+  { id: 'unaccounted', name: 'Unaccounted', color: '#5A6986' },
 ];
 
 // Kept as a stable array reference so existing screens and categoryById see hydrated metadata.
@@ -106,5 +110,5 @@ export type CategoryId = string;
 
 export function categoryById(id: string) {
   return CATEGORIES.find((category) => category.id === id) ??
-    { id, name: id === 'unaccounted' ? 'Unaccounted' : 'Other recorded category', color: '#96938C' };
+    { id, name: id === 'unaccounted' ? 'Unaccounted' : 'Other recorded category', color: '#5A6986' };
 }

@@ -88,6 +88,7 @@ function AppController() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [dayCount, setDayCount] = useState<DayCount>(1);
   const [calendarZoom, setCalendarZoom] = useState(1);
+  const [clockFormat, setClockFormat] = useState<'12h' | '24h'>('12h');
   const viewWrites = useRef<Promise<unknown>>(Promise.resolve());
   const focusSequence = useRef(0);
   const [activeDate, setActiveDate] = useState(dateKey(new Date()));
@@ -130,10 +131,11 @@ function AppController() {
       try {
         await initializeDatabase();
         await listCategories();
-        const [savedPreferences, savedDayCount, savedZoom] = await Promise.all([
+        const [savedPreferences, savedDayCount, savedZoom, savedClockFormat] = await Promise.all([
           getSetting<CalendarPreferences>('calendar.preferences', DEFAULT_PREFERENCES),
           getSetting<unknown>('calendar.day-count', 1),
           getSetting<unknown>('calendar.zoom', 1),
+          getSetting<unknown>('calendar.clock-format', '12h'),
         ]);
         const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
         setAccountCalendarWrites(directWrites);
@@ -144,6 +146,7 @@ function AppController() {
         setPreferences(savedPreferences);
         setDayCount(savedDayCount === 3 || savedDayCount === 7 ? savedDayCount : 1);
         setCalendarZoom(normalizeCalendarZoom(savedZoom));
+        setClockFormat(savedClockFormat === '24h' ? '24h' : '12h');
         await refreshCalendars();
         if (mounted) setReady(true);
       } catch (error) {
@@ -308,6 +311,13 @@ function AppController() {
       .then(() => setSetting('calendar.zoom', value)).catch(() => undefined);
   }
 
+  function changeClockFormat(next: '12h' | '24h') {
+    const value = next === '24h' ? '24h' : '12h';
+    setClockFormat(value);
+    viewWrites.current = viewWrites.current.catch(() => undefined)
+      .then(() => setSetting('calendar.clock-format', value)).catch(() => undefined);
+  }
+
   function navigate(action: NavigationAction) {
     setMenuOpen(false);
     if (action === 'plan') {
@@ -367,6 +377,8 @@ function AppController() {
                   onDayCountChange={changeDayCount}
                   zoom={calendarZoom}
                   onZoomChange={changeCalendarZoom}
+                  clockFormat={clockFormat}
+                  onClockFormatChange={changeClockFormat}
                   onOpenMenu={() => setMenuOpen(true)}
                 />
               ) : null}

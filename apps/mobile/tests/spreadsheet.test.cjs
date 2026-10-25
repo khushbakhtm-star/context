@@ -148,6 +148,71 @@ test('a format write failure rolls back the entire fill, journal and calendar-li
   assert.equal((await api.getPendingInlineMinuteLinks()).length, 0);
 });
 
+test('an explicit Google color fills source notes and formats, preserving legacy two-argument behavior and Undo', async (t) => {
+  const device = harness(t); const { api, sheet } = device;
+  await api.initializeDatabase();
+  const categories = device.load(device.source('services/categories.ts'));
+  await categories.listCategories();
+  await api.putSyncDocument('category:legacy', { id: 'legacy', name: 'Old color', color: '#112233' });
+  await save(api, 220, 'Make coffee', 'legacy'); await save(api, 221, 'Original note', 'study');
+  await save(api, 223, 'Outside range', 'family');
+  await sheet.applyCellFormat(range(220), { bold: true, textColor: '#551122' });
+  await assert.rejects(sheet.fillMinuteRange(range(220, 222), 220, 'legacy'), /Google Calendar color/);
+  assert.equal((await api.getMinuteEntry(day, 221)).text, 'Original note');
+  await sheet.fillMinuteRange(range(220, 222), 220, 'prayer');
+  const filled = (await api.getDayEntries(day)).filter((entry) => entry.minuteIndex >= 220 && entry.minuteIndex <= 222);
+  assert.equal(filled.length, 3);
+  assert.ok(filled.every((entry) => entry.text === 'Make coffee' && entry.categoryId === 'prayer'));
+  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(222)), { bold: true, textColor: '#551122' });
+  assert.equal((await api.getMinuteEntry(day, 223)).text, 'Outside range');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 220)).categoryId, 'legacy');
+  assert.equal((await api.getMinuteEntry(day, 221)).text, 'Original note');
+  assert.equal(await api.getMinuteEntry(day, 222), null);
+  await sheet.fillMinuteRange(range(220, 222), 220);
+  assert.ok((await api.getDayEntries(day)).filter((entry) => entry.minuteIndex <= 222)
+    .every((entry) => entry.categoryId === 'legacy'), 'existing callers still copy the saved source color');
+});
+
+test('an explicit Google color on an empty fill source retains notes and records color-only blank minutes', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 231, 'Keep this thought', 'family');
+  await sheet.applyCellFormat(range(230), { italic: true });
+  await sheet.fillMinuteRange(range(230, 232), 230, 'prayer');
+  const filled = await api.getDayEntries(day);
+  assert.deepEqual(filled.map((entry) => entry.text), ['', 'Keep this thought', '']);
+  assert.ok(filled.every((entry) => entry.categoryId === 'prayer'));
+  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(232)), { italic: true });
+  await sheet.undoSpreadsheetEdit();
+  assert.equal(await api.getMinuteEntry(day, 230), null);
+  assert.equal((await api.getMinuteEntry(day, 231)).text, 'Keep this thought');
+  assert.equal((await api.getMinuteEntry(day, 231)).categoryId, 'family');
+  assert.equal(await api.getMinuteEntry(day, 232), null);
+  await api.saveMinuteRange({ dateKey: day, startMinute: 230, durationMinutes: 1,
+    text: '', categoryId: 'family', allowEmptyText: true });
+  await sheet.fillMinuteRange(range(230, 232), 230, 'prayer');
+  assert.deepEqual((await api.getDayEntries(day)).map((entry) => entry.text), ['', 'Keep this thought', ''],
+    'an explicitly colored but empty source also preserves occupied target notes');
+});
+
+test('grouping requires a selectable Google color without changing historical notes or Undo', async (t) => {
+  const device = harness(t); const { api, sheet } = device; await api.initializeDatabase();
+  await device.load(device.source('services/categories.ts')).listCategories();
+  await api.putSyncDocument('category:legacy', { id: 'legacy', name: 'Historical color', color: '#112233' });
+  await save(api, 240, 'Keep original note', 'legacy');
+  await assert.rejects(sheet.groupMinuteRange(range(240, 242), { title: 'New activity', categoryId: 'legacy' }),
+    /Google Calendar color/);
+  assert.equal((await api.getMinuteEntry(day, 240)).text, 'Keep original note');
+  assert.equal((await api.getMinuteEntry(day, 240)).categoryId, 'legacy');
+  assert.equal(await api.getMinuteEntry(day, 241), null);
+  await sheet.groupMinuteRange(range(240, 242), { title: 'New activity', categoryId: 'prayer' });
+  assert.equal((await api.getMinuteEntry(day, 240)).categoryId, 'prayer');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 240)).text, 'Keep original note');
+  assert.equal((await api.getMinuteEntry(day, 240)).categoryId, 'legacy');
+  assert.equal(await api.getMinuteEntry(day, 241), null);
+});
+
 test('Undo refuses an externally changed text or source block rather than overwrite it', async (t) => {
   const { api, sheet, inline, sqlite } = harness(t); await api.initializeDatabase();
   await save(api, 300, 'Before'); activate(inline, 300, 'Before');
@@ -301,6 +366,7 @@ test('recoloring one grouped minute preserves its note and activity identity whi
 
 test('group metadata and entries commit atomically and group operations reject stale note ownership', async (t) => {
   const device = harness(t); const { api, sheet, sqlite } = device; await api.initializeDatabase();
+  await device.load(device.source('services/categories.ts')).listCategories();
   await save(api, 850, 'Keep this');
   sqlite.exec(`CREATE TRIGGER reject_group_label BEFORE INSERT ON ledger_documents
     WHEN NEW.key = 'category:minuteFormat:2026-10-25:851' BEGIN SELECT RAISE(ABORT, 'group label unavailable'); END;`);

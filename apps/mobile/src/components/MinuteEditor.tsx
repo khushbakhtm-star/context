@@ -18,7 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '../appearance';
 import { CATEGORIES } from '../theme';
 import type { ActivityCategory, AppColors } from '../theme';
-import { listCategories } from '../services/categories';
+import { listSelectableActivityCategories } from '../services/categories';
 import type { MinuteEntry, PlannedEvent } from '../types';
 import { formatDayHeading, minuteLabel } from '../utils/time';
 
@@ -36,6 +36,7 @@ type Props = {
   visible: boolean;
   dateKey: string;
   minuteIndex: number;
+  clockFormat?: '12h' | '24h';
   entry: MinuteEntry | null;
   plan: PlannedEvent | null;
   planDurationMinutes?: number | null;
@@ -50,6 +51,7 @@ export function MinuteEditor({
   visible,
   dateKey,
   minuteIndex,
+  clockFormat = '12h',
   entry,
   plan,
   planDurationMinutes,
@@ -68,7 +70,7 @@ export function MinuteEditor({
   const [sourceScope, setSourceScope] = useState<'occurrence' | 'series'>('occurrence');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [availableCategories, setAvailableCategories] = useState<ActivityCategory[]>(CATEGORIES);
+  const [availableCategories, setAvailableCategories] = useState<ActivityCategory[]>([]);
   const [colorPanelOpen, setColorPanelOpen] = useState(false);
 
   const selectedColor = availableCategories.find((category) => category.id === categoryId)?.color ??
@@ -100,10 +102,10 @@ export function MinuteEditor({
   useEffect(() => {
     if (!visible) return;
     let current = true;
-    void listCategories().then((values) => {
+    void listSelectableActivityCategories().then((values) => {
       if (current) setAvailableCategories(values);
     }).catch(() => {
-      if (current) setAvailableCategories([...CATEGORIES]);
+      if (current) setAvailableCategories([]);
     });
     return () => { current = false; };
   }, [visible]);
@@ -208,10 +210,11 @@ export function MinuteEditor({
               style={[styles.colorToggle, busy && styles.disabled]}
             >
               <View style={[styles.currentColor, { backgroundColor: selectedColor }]} />
+              <Text maxFontSizeMultiplier={1.4} style={styles.colorHex}>{selectedColor.toUpperCase()}</Text>
             </Pressable>
             <View style={styles.timestamp}>
               <Text style={styles.eyebrow}>{formatDayHeading(dateKey)}</Text>
-              <Text style={styles.time}>{minuteLabel(minuteIndex, true)}</Text>
+              <Text style={styles.time}>{minuteLabel(minuteIndex, clockFormat === '12h')}</Text>
             </View>
           </View>
 
@@ -223,14 +226,13 @@ export function MinuteEditor({
               contentContainerStyle={styles.colorGrid}
               accessibilityLabel="Activity colors"
             >
-              {availableCategories.filter((category) => !category.archived || category.id === categoryId)
-                .map((category) => {
+              {availableCategories.map((category) => {
                   const selected = category.id === categoryId;
                   return (
                     <Pressable
                       key={category.id}
                       accessibilityRole="radio"
-                      accessibilityLabel={category.name}
+                      accessibilityLabel={category.name + ', ' + category.color.toUpperCase()}
                       accessibilityState={{ checked: selected, disabled: busy }}
                       disabled={busy}
                       onPress={() => {
@@ -240,6 +242,7 @@ export function MinuteEditor({
                       style={[styles.colorChoice, selected && styles.colorChoiceSelected]}
                     >
                       <View style={[styles.colorSwatch, { backgroundColor: category.color }]} />
+                      <Text maxFontSizeMultiplier={1.4} style={styles.colorHex}>{category.color.toUpperCase()}</Text>
                     </Pressable>
                   );
                 })}
@@ -392,11 +395,12 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   colorPanel: { maxHeight: 184, marginTop: 12, borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.hairline, borderRadius: 14, backgroundColor: colors.surface },
   colorGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: 12 },
-  colorChoice: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: 'transparent', borderRadius: 22 },
+  colorChoice: { width: 72, height: 60, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: 'transparent', borderRadius: 8 },
   colorChoiceSelected: { borderColor: colors.graphite },
   colorSwatch: { width: 30, height: 30, borderRadius: 15,
     borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
+  colorHex: { color: colors.graphite, fontSize: 10, marginTop: 4 },
   planCard: {
     flexDirection: 'row',
     alignItems: 'center',
