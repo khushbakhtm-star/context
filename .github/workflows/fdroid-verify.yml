@@ -1,0 +1,108 @@
+name: F-Droid independent source verification
+
+on:
+  push:
+    branches: ['codex/fdroid-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fdroid-diagnostics-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CONTEXT_SOURCE_COMMIT: 49cb65def8d6f951f5709e8ee5bd581d352b1693
+  FDROID_DATA_COMMIT: dbd57558e5e687a018116b4242c42dd52d00124a
+  FDROID_SERVER_SHA256: f9b52646264c732678e32e37e23a995db20cc61d45622dda5830ce23255547f4
+  FDROID_SERVER_SDIST: https://files.pythonhosted.org/packages/f4/d8/7beac4add64c4b3d03dac01a073dc7c6beb69a7adbd4215bc8def3075d46/fdroidserver-2.4.5.tar.gz
+  GRADLE_SHA256: 2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb
+
+jobs:
+  verify:
+    name: ${{ matrix.mode }} diagnostics
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [metadata, native]
+    steps:
+      - name: Initialize evidence directory
+        env:
+          VERIFY_MODE: ${{ matrix.mode }}
+        run: |
+          root="$RUNNER_TEMP/context-fdroid-$VERIFY_MODE"
+          mkdir -p "$root/reports"
+          echo "CONTEXT_FDROID_ROOT=$root" >> "$GITHUB_ENV"
+          echo "FDROID_VENV=$root/venv" >> "$GITHUB_ENV"
+          printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion" > "$root/reports/runner-image.txt"
+          df -h >> "$root/reports/runner-image.txt"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: khushbakhtm-star/context
+          ref: ${{ env.CONTEXT_SOURCE_COMMIT }}
+          path: release
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.15
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.19.0
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17.0.21+9
+      - name: Install the hash-verified official F-Droid release
+        run: |
+          curl --fail --location --retry 3 "$FDROID_SERVER_SDIST" -o "$CONTEXT_FDROID_ROOT/fdroidserver-2.4.5.tar.gz"
+          printf '%s  %s\n' "$FDROID_SERVER_SHA256" "$CONTEXT_FDROID_ROOT/fdroidserver-2.4.5.tar.gz" | sha256sum --check -
+          python -m venv "$FDROID_VENV"
+          "$FDROID_VENV/bin/python" -m pip install --disable-pip-version-check "$CONTEXT_FDROID_ROOT/fdroidserver-2.4.5.tar.gz" > "$CONTEXT_FDROID_ROOT/reports/fdroid-install.txt" 2>&1
+          "$FDROID_VENV/bin/python" -m pip freeze > "$CONTEXT_FDROID_ROOT/reports/pip-freeze.txt"
+          echo "$FDROID_VENV/bin" >> "$GITHUB_PATH"
+      - name: Pin Corepack and pnpm without altering the release checkout
+        run: |
+          npm install --prefix "$CONTEXT_FDROID_ROOT/node-tools" --ignore-scripts --no-audit --no-fund corepack@0.36.0
+          corepack="$CONTEXT_FDROID_ROOT/node-tools/node_modules/.bin/corepack"
+          "$corepack" enable --install-directory "$CONTEXT_FDROID_ROOT/node-tools/node_modules/.bin"
+          "$corepack" prepare pnpm@11.25.0 --activate
+          echo "$CONTEXT_FDROID_ROOT/node-tools/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Install exact official Android SDK packages
+        run: |
+          bootstrap="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$bootstrap" || { echo 'The Ubuntu runner has no official Android SDK bootstrap.'; exit 1; }
+          printf 'y\n%.0s' {1..100} | "$bootstrap" --sdk_root="$ANDROID_HOME" --licenses > "$CONTEXT_FDROID_ROOT/reports/android-bootstrap-licenses.txt"
+          "$bootstrap" --sdk_root="$ANDROID_HOME" 'cmdline-tools;23.0'
+          sdkmanager="$ANDROID_HOME/cmdline-tools/23.0/bin/sdkmanager"
+          printf 'y\n%.0s' {1..100} | "$sdkmanager" --sdk_root="$ANDROID_HOME" --licenses > "$CONTEXT_FDROID_ROOT/reports/android-licenses.txt"
+          "$sdkmanager" --sdk_root="$ANDROID_HOME" 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'
+          "$sdkmanager" --sdk_root="$ANDROID_HOME" --list_installed > "$CONTEXT_FDROID_ROOT/reports/android-packages.txt"
+      - name: Install the hash-verified Gradle distribution
+        run: |
+          curl --fail --location --retry 3 https://services.gradle.org/distributions/gradle-9.4.1-bin.zip -o "$CONTEXT_FDROID_ROOT/gradle.zip"
+          printf '%s  %s\n' "$GRADLE_SHA256" "$CONTEXT_FDROID_ROOT/gradle.zip" | sha256sum --check -
+          unzip -q "$CONTEXT_FDROID_ROOT/gradle.zip" -d "$CONTEXT_FDROID_ROOT"
+          echo "$CONTEXT_FDROID_ROOT/gradle-9.4.1/bin" >> "$GITHUB_PATH"
+      - name: Run actual checks and retain their exit statuses
+        env:
+          VERIFY_MODE: ${{ matrix.mode }}
+          EXPO_PUBLIC_CONTEXT_DISTRIBUTION: ${{ matrix.mode == 'native' && 'fdroid' || '' }}
+          CONTEXT_FDROID_SOURCE_BUILD: ${{ matrix.mode == 'native' && '1' || '' }}
+          CI: '1'
+        run: |
+          "$FDROID_VENV/bin/python" controller/.github/scripts/fdroid-verify.py "$VERIFY_MODE" --source release --candidate controller/fdroid/metadata/com.context.minuteledger.yml --root "$CONTEXT_FDROID_ROOT"
+      - name: Upload diagnostics even when checks fail
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: context-fdroid-${{ matrix.mode }}-diagnostics
+          path: ${{ runner.temp }}/context-fdroid-${{ matrix.mode }}/reports/
+          if-no-files-found: warn
+          retention-days: 30
