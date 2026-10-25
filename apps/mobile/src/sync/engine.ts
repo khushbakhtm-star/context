@@ -2,7 +2,7 @@ import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 
 import {
-  acknowledgeUploaded, getDayEntries, getDaySegments, getDocumentsForUpload, getEntriesBetween,
+  acknowledgeUploaded, getActivityTitleForEntries, getDayEntries, getDaySegments, getDocumentsForUpload, getEntriesBetween,
   getSetting, getSyncDocuments, hasSeenSyncFile,
   markSyncFileSeen, mergeSyncDocuments, putSyncDocument, replaceProjectedMinutes, setSetting,
 } from '../data/database';
@@ -317,7 +317,7 @@ function buildWrite(projection: Projection, segment: ActivitySegment): CalendarE
   const mapping = categoryProviderColor(segment.categoryId,
     projection.accountId.startsWith('google:') ? 'google' : 'microsoft',
     projection.accountId, projection.calendarId);
-  return { title: projection.title ?? (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
+  return { title: segment.activityTitle ?? projection.title ?? (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
     description: [preserved, log].filter(Boolean).join('\n\n'),
     start: zonedMinuteToInstant(segment.dateKey, segment.startMinute, zone),
     end: zonedMinuteToInstant(segment.entries.at(-1)!.dateKey,
@@ -347,7 +347,8 @@ async function getProjectionSegment(projection: Projection) {
   for (const entry of entries) {
     const previousGroup = groups.at(-1);
     const previous = previousGroup?.at(-1);
-    if (previous && civil(entry.dateKey, entry.minuteIndex) - civil(previous.dateKey, previous.minuteIndex) === 60000) {
+    if (previous && previous.categoryId === entry.categoryId &&
+        civil(entry.dateKey, entry.minuteIndex) - civil(previous.dateKey, previous.minuteIndex) === 60000) {
       previousGroup!.push(entry);
     } else groups.push([entry]);
   }
@@ -359,7 +360,8 @@ async function getProjectionSegment(projection: Projection) {
   if (selected.length > 1440) throw new Error('Split activities longer than 24 hours before calendar synchronization.');
   return { segmentKey: projection.id, blockId: projection.blockId, dateKey: selected[0]!.dateKey,
     startMinute: selected[0]!.minuteIndex, endMinute: selected.at(-1)!.minuteIndex,
-    categoryId: selected[0]!.categoryId, entries: selected } satisfies ActivitySegment;
+    categoryId: selected[0]!.categoryId, entries: selected,
+    activityTitle: await getActivityTitleForEntries(selected) } satisfies ActivitySegment;
 }
 
 async function importCalendarEvent(projection: Projection, event: RemoteCalendarEvent | null) {
@@ -409,7 +411,8 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
   await replaceProjectedMinutes({ blockId: projection.blockId, previousDate: projection.dateKey,
     previousEndDate: projection.endDateKey,
     previousStart: projection.startMinute, previousEnd: projection.endMinute,
-    expectedEntries: expectedSegment?.entries ?? [], entries });
+    expectedEntries: expectedSegment?.entries ?? [], expectedActivityTitle: expectedSegment?.activityTitle,
+    activityTitle: event?.title, entries });
   if (!event || event.deleted) {
     await saveProjection({ ...projection, state: 'deleted', baseEvent: event, baseLocalHash: null });
     return;

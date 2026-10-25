@@ -775,3 +775,68 @@ test('an existing pending encrypted upload is authenticated with the current pas
   assert.equal((await device.db.getDocumentsForUpload('google:person'))
     .filter((document) => document.key.startsWith('minute:')).length, 1);
 });
+
+async function explicitGroup(device, start, notes, title = 'Study activity', categoryId = 'study', blockId = 'activity_provider_test') {
+  const existing = new Map((await device.db.getDayEntries(day)).map((entry) => [entry.minuteIndex, entry]));
+  const before = notes.map((_text, index) => ({ minuteIndex: start + index,
+    entry: existing.get(start + index) ?? null, format: {} }));
+  const target = notes.map((text, index) => ({ minuteIndex: start + index,
+    entry: { text, categoryId, blockId }, format: { activityGroup: { id: blockId, title }, ...(index === 0 ? { italic: true } : {}) } }));
+  await device.db.applySpreadsheetCells(day, target, before, { textChanged: true, formatChanged: true });
+  await device.engine.linkActualsToAccounts([day], null, { dateKey: day, minuteIndex: start });
+  await device.engine.synchronizeAccounts();
+  return blockId;
+}
+
+test('a titled activity includes both selected endpoints, preserves minute notes, and imports calendar title/time edits atomically', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const start = 16 * 60 + 30;
+  const blockId = await explicitGroup(device, start, ['', 'Read introduction', 'Take notes', 'Check source', 'Finish'], 'Read a paper');
+  assert.equal((await device.db.getDayEntries(day)).length, 5);
+  assert.equal(remote.events.size, 1);
+  const event = [...remote.events.values()][0];
+  assert.equal(event.title, 'Read a paper'); assert.equal(event.start, iso(start)); assert.equal(event.end, iso(start + 5));
+  assert.match(event.description, /4:31 PM  Read introduction/);
+  assert.match(event.description, /4:34 PM  Finish/);
+  const movedStart = start + 10;
+  remote.edit('personal', event.id, { title: 'Review revised paper', start: iso(movedStart), end: iso(movedStart + 5) });
+  await device.engine.synchronizeAccounts();
+  const moved = await device.db.getDayEntries(day);
+  assert.equal(moved.length, 5);
+  assert.deepEqual(moved.map((entry) => entry.minuteIndex), [movedStart, movedStart + 1, movedStart + 2, movedStart + 3, movedStart + 4]);
+  assert.deepEqual(moved.map((entry) => entry.text), ['', 'Read introduction', 'Take notes', 'Check source', 'Finish']);
+  assert.ok(moved.every((entry) => entry.blockId === blockId));
+  const segments = await device.db.getDaySegments(day);
+  assert.equal(segments.length, 1); assert.equal(segments[0].activityTitle, 'Review revised paper');
+  const oldStyle = (await device.db.getSyncDocuments(`category:minuteFormat:${day}:${start}`))[0];
+  assert.deepEqual(plain(oldStyle.value), { kind: 'minuteFormat', format: { italic: true } });
+  const newLabel = (await device.db.getSyncDocuments(`category:minuteFormat:${day}:${movedStart}`))[0];
+  assert.equal(newLabel.value.format.activityGroup.title, 'Review revised paper');
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: movedStart + 2, text: 'A further thought', categoryId: moved[2].categoryId });
+  await device.engine.linkActualsToAccounts([day], null, { dateKey: day, minuteIndex: movedStart + 2 });
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1);
+  assert.equal([...remote.events.values()][0].title, 'Review revised paper');
+  assert.match([...remote.events.values()][0].description, /4:42 PM  A further thought/);
+});
+
+test('a differently colored minute inside an activity projects separately and imports its own title without retitling neighboring segments', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const start = 900;
+  const blockId = await explicitGroup(device, start, ['', '', '', '', ''], 'Sleep', 'sleep', 'activity_color_split');
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: start + 2, text: 'Bathroom break', categoryId: 'physiological' });
+  assert.equal((await device.db.getMinuteEntry(day, start + 2)).blockId, blockId);
+  await device.engine.linkActualsToAccounts([day], null, { dateKey: day, minuteIndex: start + 2 });
+  await device.engine.synchronizeAccounts();
+  const events = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
+  assert.equal(events.length, 3);
+  assert.deepEqual(events.map((event) => [event.start, event.end, event.categoryId]), [
+    [iso(start), iso(start + 2), 'sleep'], [iso(start + 2), iso(start + 3), 'physiological'], [iso(start + 3), iso(start + 5), 'sleep'],
+  ]);
+  remote.edit('personal', events[1].id, { title: 'Brief bathroom visit' });
+  await device.engine.synchronizeAccounts();
+  const segments = await device.db.getDaySegments(day);
+  assert.deepEqual(plain(segments.map((segment) => segment.activityTitle)), ['Sleep', 'Brief bathroom visit', 'Sleep']);
+  assert.equal([...remote.events.values()].find((event) => event.id === events[0].id).title, 'Sleep');
+  assert.equal([...remote.events.values()].find((event) => event.id === events[2].id).title, 'Sleep');
+});

@@ -14,8 +14,8 @@ import { flushPendingActuals, loadPlannedEvents, openPlannedEvent } from '../ser
 import { listCategories } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, subscribeInlineMinuteCommits,
   subscribeInlineMinuteLinkWarnings } from '../services/inline-minutes';
-import { applyCellFormat, clearMinuteRange, editInlineMinute, fillMinuteRange, getDayCellFormats,
-  redoSpreadsheetEdit, spreadsheetEditor, undoSpreadsheetEdit, type CellFormat } from '../services/spreadsheet';
+import { applyCellFormat, clearMinuteRange, editInlineMinute, fillMinuteRange, getDayActivityGroups, getDayCellFormats,
+  groupMinuteRange, redoSpreadsheetEdit, spreadsheetEditor, undoSpreadsheetEdit, type ActivityGroup, type CellFormat } from '../services/spreadsheet';
 import { CATEGORIES, categoryById, type ActivityCategory, type AppColors } from '../theme';
 import { inlineMinuteKey } from '../utils/inline-minute-drafts';
 import { calendarGridLayout, calendarZoomOffsets, normalizeCalendarZoom, parseCalendarMinute, revealCalendarDay,
@@ -37,7 +37,7 @@ const DAY_COUNTS: CalendarDayCount[] = [1, 3, 7];
 
 type FocusRequest = { dateKey: string; minuteIndex: number; token: number; openEditor?: boolean } | null;
 type DayData = { entries: MinuteEntry[]; plans: PlannedEvent[]; calendarReadError: boolean;
-  formats?: Map<number, CellFormat>; formatReadError?: boolean };
+  formats?: Map<number, CellFormat>; formatReadError?: boolean; groups?: ActivityGroup[]; groupReadError?: boolean };
 type Props = {
   activeDate: string;
   onDateChange: (value: string) => void;
@@ -126,8 +126,12 @@ export function TodayScreen({
   const [colorPanelOpen, setColorPanelOpen] = useState(false);
   const [spreadsheetState, setSpreadsheetState] = useState(() => spreadsheetEditor.snapshot());
   const [rangePanelOpen, setRangePanelOpen] = useState(false);
+  const [rangeStart, setRangeStart] = useState<number | null>(null);
+  const [rangeStartInput, setRangeStartInput] = useState('');
   const [rangeEnd, setRangeEnd] = useState<number | null>(null);
   const [rangeEndInput, setRangeEndInput] = useState('');
+  const [rangeTitle, setRangeTitle] = useState('');
+  const [rangeColorId, setRangeColorId] = useState('unaccounted');
   const [toolbarError, setToolbarError] = useState<string | null>(null);
   const [toolBusy, setToolBusy] = useState(false);
   const toolBusyRef = useRef(false);
@@ -300,15 +304,16 @@ export function TodayScreen({
     const currentLoadState = () => ({ mounted: mountedRef.current, rangeKey: rangeRef.current,
       token: loadTokenRef.current });
     const results = await Promise.allSettled(requestedDays.map(async (day) => {
-      const [entries, planResults, formats] = await Promise.all([
+      const [entries, planResults, formats, groups] = await Promise.all([
         getDayEntries(day),
         Promise.allSettled([
           loadPlannedEvents(preferences.selectedCalendarIds, day, calendars), loadAccountPlans(day),
         ]),
         getDayCellFormats(day).catch(() => null),
+        getDayActivityGroups(day).catch(() => null),
       ]);
       return { day, entries, plans: planResults.flatMap((result) => result.status === 'fulfilled' ? result.value : []),
-        calendarReadError: planResults.some((result) => result.status === 'rejected'), formats };
+        calendarReadError: planResults.some((result) => result.status === 'rejected'), formats, groups };
     }));
     if (!calendarLoadIsCurrent(request, currentLoadState())) return false;
     setDayData((previous) => {
@@ -323,7 +328,10 @@ export function TodayScreen({
           plans: value.plans, calendarReadError: value.calendarReadError,
           formats: value.formats && requestedFormatVersion === spreadsheetEditor.snapshot().formatVersion
             ? value.formats : previous[value.day]?.formats,
-          formatReadError: value.formats == null };
+          formatReadError: value.formats == null,
+          groups: value.groups && entriesStillCurrent && requestedFormatVersion === spreadsheetEditor.snapshot().formatVersion
+            ? value.groups : previous[value.day]?.groups,
+          groupReadError: value.groups == null };
       }
       return next;
     });
@@ -348,6 +356,7 @@ export function TodayScreen({
     setInlineSelection(null);
     setColorPanelOpen(false);
     setRangePanelOpen(false);
+    setRangeStart(null);
     setRangeEnd(null);
     setToolbarError(null);
     Keyboard.dismiss();
@@ -358,12 +367,6 @@ export function TodayScreen({
   useEffect(() => inlineMinuteDrafts.subscribe(() => setInlineVersion((value) => value + 1)), []);
   useEffect(() => subscribeInlineMinuteLinkWarnings(setInlineLinkWarning), []);
   useEffect(() => spreadsheetEditor.subscribe(() => setSpreadsheetState(spreadsheetEditor.snapshot())), []);
-
-  useEffect(() => {
-    setRangePanelOpen(false);
-    setRangeEnd(null);
-    setToolbarError(null);
-  }, [inlineSelection?.dateKey, inlineSelection?.minuteIndex]);
 
   useEffect(() => {
     let current = true;
@@ -428,6 +431,13 @@ export function TodayScreen({
   const indexedDays = useMemo(() => new Map(days.map((day) => {
     const data = dayData[day];
     return [day, indexCalendarDay(day, data?.entries ?? [], data?.plans ?? [])];
+  })), [days, dayData]);
+  const indexedGroups = useMemo(() => new Map(days.map((day) => {
+    const groups = new Map<number, ActivityGroup>();
+    for (const group of dayData[day]?.groups ?? []) {
+      for (let minute = group.startMinute; minute <= group.endMinute; minute += 1) groups.set(minute, group);
+    }
+    return [day, groups];
   })), [days, dayData]);
   const today = dateKey(now);
   const currentMinute = minuteIndexForDate(now);
@@ -502,7 +512,19 @@ export function TodayScreen({
     });
   }, []);
 
-  const openInlineMinute = useCallback(async (day: string, minute: number, showColors = false) => {
+  function configureRangePanel(selection: CalendarMinuteSelection, group?: ActivityGroup) {
+    const start = group?.startMinute ?? selection.minuteIndex;
+    const end = group?.endMinute ?? selection.minuteIndex;
+    setRangeStart(start); setRangeStartInput(minuteLabel(start, true));
+    setRangeEnd(end); setRangeEndInput(minuteLabel(end, true));
+    setRangeTitle(group?.title ?? '');
+    setRangeColorId(group?.categoryId ?? inlineMinuteDrafts.get(selection.dateKey, selection.minuteIndex)?.categoryId ??
+      selection.entry?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted');
+    setToolbarError(null); setColorPanelOpen(false); setRangePanelOpen(true);
+    Keyboard.dismiss();
+  }
+
+  const openInlineMinute = useCallback(async (day: string, minute: number, showColors = false, group?: ActivityGroup) => {
     const token = ++selectionTokenRef.current;
     const request = { dateKey: day, minuteIndex: minute, rangeKey: rangeRef.current, token };
     const currentState = () => ({ mounted: mountedRef.current, rangeKey: rangeRef.current,
@@ -520,8 +542,11 @@ export function TodayScreen({
       setInlineSelection(selection);
       setColorPanelOpen(showColors);
       setRangePanelOpen(false);
+      setRangeStart(null);
       setRangeEnd(null);
-      if (showColors) Keyboard.dismiss();
+      setToolbarError(null);
+      if (group) configureRangePanel(selection, group);
+      if (showColors || group) Keyboard.dismiss();
       revealInlineMinute(minute, day);
     } catch {
       if (mountedRef.current && token === selectionTokenRef.current) setActionError('This minute could not be opened. Please try again.');
@@ -529,8 +554,13 @@ export function TodayScreen({
   }, [revealInlineMinute]);
 
   useEffect(() => {
-    if (inlineSelection && !colorPanelOpen) requestAnimationFrame(() => inlineInputRef.current?.focus());
-  }, [inlineSelection?.dateKey, inlineSelection?.minuteIndex, colorPanelOpen]);
+    if (!inlineSelection || colorPanelOpen || rangePanelOpen) return;
+    const token = selectionTokenRef.current;
+    const frame = requestAnimationFrame(() => {
+      if (mountedRef.current && token === selectionTokenRef.current) inlineInputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [inlineSelection?.dateKey, inlineSelection?.minuteIndex, colorPanelOpen, rangePanelOpen]);
 
   useEffect(() => {
     const keyboard = Keyboard.addListener('keyboardDidShow', () => {
@@ -617,9 +647,10 @@ export function TodayScreen({
     for (const value of values) localEpochsRef.current.set(value, (localEpochsRef.current.get(value) ?? 0) + 1);
   }
 
-  function refreshLocalEntries(value: string) {
+  async function refreshLocalEntries(value: string) {
     const epoch = localEpochsRef.current.get(value) ?? 0;
-    void getDayEntries(value).then((entries) => {
+    const formatVersion = spreadsheetEditor.snapshot().formatVersion;
+    await Promise.all([getDayEntries(value), getDayActivityGroups(value).catch(() => null)]).then(([entries, groups]) => {
       if (!mountedRef.current || !visibleDaysRef.current.includes(value) ||
           (localEpochsRef.current.get(value) ?? 0) !== epoch) return;
       setDayData((previous) => {
@@ -627,6 +658,8 @@ export function TodayScreen({
         return { ...previous, [value]: {
           entries, plans: previous[value]?.plans ?? [], calendarReadError: previous[value]?.calendarReadError ?? false,
           formats: previous[value]?.formats, formatReadError: previous[value]?.formatReadError,
+          groups: groups && formatVersion === spreadsheetEditor.snapshot().formatVersion ? groups : previous[value]?.groups,
+          groupReadError: groups == null,
         } };
       });
     }).catch(() => { /* The committed ledger entry remains durable and refresh can retry. */ });
@@ -715,15 +748,19 @@ export function TodayScreen({
     (inlineLinkWarning ? 'Account synchronization needs a retry. Your minute is saved.' : null) ?? accountWarning ?? projectionWarning ??
     (loadError ? 'Some ledger rows could not refresh. Pull down to retry.' :
       calendarReadError ? 'Some calendar plans could not load. Pull down to retry.' :
-        days.some((day) => dayData[day]?.formatReadError) ? 'Some text styles could not refresh. Pull down to retry.' : null);
+        days.some((day) => dayData[day]?.formatReadError) ? 'Some text styles could not refresh. Pull down to retry.' :
+          days.some((day) => dayData[day]?.groupReadError) ? 'Some activity outlines could not refresh. Pull down to retry.' : null);
   const selectedDraft = inlineSelection
     ? draftsByKey.get(inlineMinuteKey(inlineSelection.dateKey, inlineSelection.minuteIndex)) : undefined;
   const selectedColor = selectedDraft ? categoryById(selectedDraft.categoryId) : undefined;
   const pickerColors = selectedColor && !availableColors.some((item) => item.id === selectedColor.id)
     ? [...availableColors, selectedColor] : availableColors;
+  const groupColor = categoryById(rangeColorId);
+  const groupPickerColors = availableColors.some((item) => item.id === groupColor.id)
+    ? availableColors : [...availableColors, groupColor];
   const selectedRange = inlineSelection ? { dateKey: inlineSelection.dateKey,
-    startMinute: Math.min(inlineSelection.minuteIndex, rangeEnd ?? inlineSelection.minuteIndex),
-    endMinute: Math.max(inlineSelection.minuteIndex, rangeEnd ?? inlineSelection.minuteIndex) } : null;
+    startMinute: Math.min(rangeStart ?? inlineSelection.minuteIndex, rangeEnd ?? inlineSelection.minuteIndex),
+    endMinute: Math.max(rangeStart ?? inlineSelection.minuteIndex, rangeEnd ?? inlineSelection.minuteIndex) } : null;
   const selectedFormat = inlineSelection
     ? dayData[inlineSelection.dateKey]?.formats?.get(inlineSelection.minuteIndex) ?? {} : {};
 
@@ -731,26 +768,38 @@ export function TodayScreen({
     if (toolBusyRef.current) return;
     toolBusyRef.current = true;
     setToolBusy(true); setToolbarError(null);
-    try { await work(); }
+    try { await work(); return true; }
     catch (error) { if (mountedRef.current) setToolbarError(error instanceof Error ? error.message : 'This edit could not be applied. Try again.'); }
     finally { toolBusyRef.current = false; if (mountedRef.current) setToolBusy(false); }
   }
 
   function openRangePanel() {
     if (!inlineSelection) return;
-    setColorPanelOpen(false);
-    setRangeEnd(inlineSelection.minuteIndex);
-    setRangeEndInput(minuteLabel(inlineSelection.minuteIndex, true));
-    setRangePanelOpen(true);
-    Keyboard.dismiss();
+    configureRangePanel(inlineSelection, indexedGroups.get(inlineSelection.dateKey)?.get(inlineSelection.minuteIndex));
   }
 
   function parsedRange() {
     if (!inlineSelection) return null;
+    const start = rangePanelOpen ? parseCalendarMinute(rangeStartInput) : inlineSelection.minuteIndex;
     const end = rangePanelOpen ? parseCalendarMinute(rangeEndInput) : inlineSelection.minuteIndex;
-    if (end == null) { setToolbarError('Enter an end time such as 10:20 AM.'); return null; }
-    return { dateKey: inlineSelection.dateKey, startMinute: Math.min(inlineSelection.minuteIndex, end),
-      endMinute: Math.max(inlineSelection.minuteIndex, end) };
+    if (start == null || end == null) { setToolbarError('Enter times such as 10:20 AM within this day.'); return null; }
+    return { dateKey: inlineSelection.dateKey, startMinute: Math.min(start, end), endMinute: Math.max(start, end) };
+  }
+
+  async function groupSelection() {
+    const range = parsedRange();
+    if (!range) return;
+    if (!rangeTitle.trim()) { setToolbarError('Enter an activity title.'); return; }
+    const generation = navigationGenerationRef.current;
+    const token = selectionTokenRef.current;
+    markLocalChange([range.dateKey]);
+    const applied = await runSpreadsheetTool(async () => {
+      await groupMinuteRange(range, { title: rangeTitle, categoryId: rangeColorId });
+      await refreshLocalEntries(range.dateKey);
+    });
+    if (applied && mountedRef.current && generation === navigationGenerationRef.current && token === selectionTokenRef.current) {
+      setRangePanelOpen(false); setRangeStart(null); setRangeEnd(null); setColorPanelOpen(false);
+    }
   }
 
   function formatSelection(patch: Partial<CellFormat>) {
@@ -884,10 +933,23 @@ export function TodayScreen({
 
       {rangePanelOpen && inlineSelection ? (
         <View style={styles.rangePanel}>
-          <Text style={styles.rangeCaption}>{formatDayHeading(inlineSelection.dateKey)} · From {minuteLabel(inlineSelection.minuteIndex, true)}</Text>
-          <Text style={styles.rangeCaveat}>Undo restores Context entries; calendar changes may need separate review.</Text>
+          <View style={styles.rangeHeading}>
+            <Text style={styles.rangeCaption}>{formatDayHeading(inlineSelection.dateKey)} · Includes both times</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close minute range"
+              onPress={() => { setRangePanelOpen(false); setRangeStart(null); setRangeEnd(null); setToolbarError(null); }} style={styles.colorPanelAction}>
+              <Text style={styles.colorPanelActionText}>×</Text>
+            </Pressable>
+          </View>
           <View style={styles.rangeControls}>
-            <Text style={styles.rangeCaption}>To</Text>
+            <Text style={styles.rangeCaption}>From</Text>
+            <TextInput value={rangeStartInput} accessibilityLabel="First minute of selected range"
+              placeholder="10:15 AM" placeholderTextColor={colors.muted} autoCapitalize="characters"
+              returnKeyType="done" onSubmitEditing={() => Keyboard.dismiss()}
+              onChangeText={(value) => {
+                setRangeStartInput(value); const parsed = parseCalendarMinute(value);
+                if (parsed != null) { setRangeStart(parsed); setToolbarError(null); }
+              }} style={styles.rangeInput} />
+            <Text style={styles.rangeCaption}>Through</Text>
             <TextInput value={rangeEndInput} accessibilityLabel="Last minute of selected range"
               placeholder="10:20 AM" placeholderTextColor={colors.muted} autoCapitalize="characters"
               returnKeyType="done" onSubmitEditing={() => Keyboard.dismiss()}
@@ -895,6 +957,29 @@ export function TodayScreen({
                 setRangeEndInput(value); const parsed = parseCalendarMinute(value);
                 if (parsed != null) { setRangeEnd(parsed); setToolbarError(null); }
               }} style={styles.rangeInput} />
+          </View>
+          <View style={styles.rangeControls}>
+            <TextInput value={rangeTitle} maxLength={200} accessibilityLabel="Activity title"
+              placeholder="Activity title" placeholderTextColor={colors.muted} onChangeText={setRangeTitle}
+              returnKeyType="done" onSubmitEditing={() => Keyboard.dismiss()} style={[styles.rangeInput, styles.activityTitleInput]} />
+            <Pressable accessibilityRole="button" disabled={toolBusy || spreadsheetState.busy}
+              accessibilityLabel="Group selected minutes as one activity without changing their notes"
+              onPress={() => void groupSelection()} style={styles.groupAction}>
+              <Text style={styles.groupActionText}>Group</Text>
+            </Pressable>
+          </View>
+          <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator
+            contentContainerStyle={styles.colorChoices}>
+            {groupPickerColors.map((item) => (
+              <Pressable key={item.id} accessibilityRole="radio" accessibilityLabel={'Activity color, ' + item.name + ', ' + item.color}
+                accessibilityState={{ checked: rangeColorId === item.id }} onPress={() => setRangeColorId(item.id)}
+                style={[styles.colorChoice, rangeColorId === item.id && styles.selectedColorChoice]}>
+                <View style={[styles.colorCircle, { backgroundColor: item.color }]} />
+              </Pressable>
+            ))}
+          </ScrollView>
+          <View style={styles.rangeFooter}>
+            <Text numberOfLines={1} style={styles.rangeColorName}>{groupColor.name}</Text>
             <Pressable accessibilityRole="button" disabled={toolBusy || spreadsheetState.busy}
               accessibilityLabel="Fill selected minutes from the active minute"
               onPress={() => { const range = parsedRange(); if (range) void runSpreadsheetTool(() => fillMinuteRange(range, inlineSelection.minuteIndex)); }}
@@ -903,11 +988,9 @@ export function TodayScreen({
               accessibilityLabel="Clear selected minutes"
               onPress={() => { const range = parsedRange(); if (range) void runSpreadsheetTool(() => clearMinuteRange(range)); }}
               style={styles.rangeAction}><Text style={styles.rangeActionText}>Clear</Text></Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Close minute range"
-              onPress={() => { setRangePanelOpen(false); setRangeEnd(null); setToolbarError(null); }} style={styles.colorPanelAction}>
-              <Text style={styles.colorPanelActionText}>×</Text>
-            </Pressable>
           </View>
+          <Text style={styles.rangeCaveat}>Group keeps every minute’s notes. Fill copies the active minute.</Text>
+          <Text style={styles.rangeCaveat}>Undo restores Context entries; calendar changes may need separate review.</Text>
         </View>
       ) : null}
 
@@ -973,6 +1056,12 @@ export function TodayScreen({
               const inline = inlineSelection?.dateKey === day && inlineSelection.minuteIndex === minute;
               const rangeSelected = rangePanelOpen && selectedRange?.dateKey === day &&
                 minute >= selectedRange.startMinute && minute <= selectedRange.endMinute;
+              const group = indexedGroups.get(day)?.get(minute);
+              const groupStarts = group?.startMinute === minute;
+              const groupColor = group ? categoryById(group.categoryId).color : undefined;
+              const cellVisibleWidth = Math.max(1, Math.min(gridLayout.dayWidth, gridLayout.viewportWidth - gridLayout.railWidth));
+              const badgeWidth = groupStarts ? Math.min(cellVisibleWidth * 0.45, Math.max(28, cellVisibleWidth * 0.4)) : 0;
+              const noteWidth = Math.max(1, cellVisibleWidth - badgeWidth - (groupStarts ? 18 : 12));
               const format = dayData[day]?.formats?.get(minute) ?? {};
               const textStyle = { fontWeight: format.bold ? '700' as const : '400' as const,
                 fontStyle: format.italic ? 'italic' as const : 'normal' as const, color: format.textColor ?? colors.ink };
@@ -997,6 +1086,9 @@ export function TodayScreen({
                     inline && styles.editingCell]}>
                   <View pointerEvents="none" style={[styles.cellBackground,
                     color && /^#[0-9a-f]{6}$/i.test(color) ? { backgroundColor: color + '30' } : null]} />
+                  {group ? <View pointerEvents="none" style={[styles.activityOutline,
+                    { borderColor: groupColor }, minute === group.startMinute && styles.activityFirstCell,
+                    minute === group.endMinute && styles.activityLastCell]} /> : null}
                   {inline && draft ? <TextInput ref={inlineInputRef} value={draft.text}
                     editable={!spreadsheetState.busy && !toolBusy}
                     multiline scrollEnabled returnKeyType="done" submitBehavior="blurAndSubmit"
@@ -1011,16 +1103,22 @@ export function TodayScreen({
                     onFocus={() => revealInlineMinute(minute)}
                     onSubmitEditing={() => {
                       inlineMinuteDrafts.close(inlineMinuteKey(day, minute));
-                      setInlineSelection(null); setColorPanelOpen(false); Keyboard.dismiss();
+                      setInlineSelection(null); setColorPanelOpen(false); setRangePanelOpen(false); Keyboard.dismiss();
                     }} style={[styles.cellText, styles.inlineInput, {
-                      width: Math.max(1, Math.min(gridLayout.dayWidth - 12,
-                        gridLayout.viewportWidth - gridLayout.railWidth - 12)),
+                      width: noteWidth,
                     }, textStyle]} />
                     : <Text numberOfLines={1} maxFontSizeMultiplier={1.4}
                       style={[styles.cellText, !entry && !draft && styles.planText,
-                        !displayedText && styles.placeholder, textStyle]}>
+                        !displayedText && styles.placeholder, groupStarts && { maxWidth: noteWidth }, textStyle]}>
                       {displayedText ?? ''}
                     </Text>}
+                  {group && groupStarts ? <Pressable accessibilityRole="button"
+                    accessibilityLabel={group.title + ', activity, ' + minuteLabel(group.startMinute, true) + ' through ' +
+                      minuteLabel(group.endMinute, true) + ', edit activity'}
+                    onPress={(event) => { event.stopPropagation(); void openInlineMinute(day, minute, false, group); }}
+                    style={[styles.activityBadge, { left: noteWidth + 9, width: badgeWidth, borderColor: groupColor }]}>
+                    <Text numberOfLines={1} style={styles.activityTitle}>{group.title}</Text>
+                  </Pressable> : null}
                   {isCurrent ? <View pointerEvents="none" style={styles.currentLine}>
                     <View style={styles.currentDot} />
                   </View> : null}
@@ -1140,16 +1238,30 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     colorName: { color: colors.muted, fontSize: 10, paddingLeft: 5, paddingTop: 2 },
     rangePanel: { paddingHorizontal: 10, paddingVertical: 6, borderBottomWidth: 1,
       borderBottomColor: gridLine, backgroundColor: colors.panel },
+    rangeHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
     rangeCaption: { color: colors.graphite, fontSize: 11 },
     rangeCaveat: { color: colors.muted, fontSize: 11, lineHeight: 15, marginTop: 3 },
     rangeControls: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4 },
     rangeInput: { flex: 1, minWidth: 90, minHeight: 40, borderWidth: 1, borderColor: colors.hairline,
       paddingHorizontal: 7, paddingVertical: 4, color: colors.ink, fontSize: 13, backgroundColor: colors.surface },
+    activityTitleInput: { minWidth: 120 },
+    groupAction: { minHeight: 40, minWidth: 62, paddingHorizontal: 10, justifyContent: 'center', alignItems: 'center',
+      backgroundColor: colors.accent },
+    groupActionText: { color: colors.onAccent, fontSize: 12, fontWeight: '600' },
+    rangeFooter: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+    rangeColorName: { flex: 1, color: colors.muted, fontSize: 11 },
     rangeAction: { minHeight: 40, minWidth: 42, paddingHorizontal: 7, justifyContent: 'center', alignItems: 'center' },
     rangeActionText: { color: colors.ink, fontSize: 12, fontWeight: '600' },
     dayCell: { height: rowHeight, justifyContent: 'center', paddingLeft: 5, paddingRight: 4,
       borderRightWidth: 1, borderBottomWidth: 1, borderColor: gridLine },
     cellBackground: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: grid },
+    activityOutline: { position: 'absolute', left: 1, right: 1, top: 0, bottom: 0,
+      borderLeftWidth: 1.5, borderRightWidth: 1.5 },
+    activityFirstCell: { borderTopWidth: 1.5 },
+    activityLastCell: { borderBottomWidth: 1.5 },
+    activityBadge: { position: 'absolute', top: 2, bottom: 2, justifyContent: 'center', paddingLeft: 4,
+      borderLeftWidth: 1, backgroundColor: grid },
+    activityTitle: { color: colors.ink, fontSize: Math.max(8, Math.round(11 * layout.zoom)), fontWeight: '600' },
     cellText: { color: colors.ink, fontSize: Math.round(16 * layout.zoom), lineHeight: Math.round(21 * layout.zoom), fontWeight: '400', includeFontPadding: false },
     editingCell: { borderWidth: 2, borderColor: focusedCell, zIndex: 2 },
     rangeCell: { borderLeftWidth: 2, borderLeftColor: focusedCell, borderRightWidth: 2, borderRightColor: focusedCell },

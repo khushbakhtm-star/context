@@ -2,6 +2,7 @@ import { acknowledgeInlineMinuteLink, deleteMinuteEntry, getMinuteEntry, getPend
 import { linkActualsToAccounts, synchronizeAccounts } from '../sync/engine';
 import type { MinuteEntry } from '../types';
 import { InlineMinuteDrafts, type InlineMinuteValue } from '../utils/inline-minute-drafts';
+import { isActivityGroupId } from '../utils/cell-format';
 
 export type InlineMinuteCommit = {
   dateKey: string;
@@ -12,9 +13,11 @@ export type InlineMinuteCommit = {
 };
 
 export const inlineMinuteDrafts = new InlineMinuteDrafts<InlineMinuteCommit>(async (value) => {
-  const affectedDates = value.text.trim() || value.keepColor
+  const previous = !value.text.trim() && !value.keepColor ? await getMinuteEntry(value.dateKey, value.minuteIndex) : null;
+  const keepColor = value.keepColor || isActivityGroupId(previous?.blockId);
+  const affectedDates = value.text.trim() || keepColor
     ? await saveMinuteRange({ dateKey: value.dateKey, startMinute: value.minuteIndex,
-      durationMinutes: 1, text: value.text, categoryId: value.categoryId, allowEmptyText: value.keepColor,
+      durationMinutes: 1, text: value.text, categoryId: value.categoryId, allowEmptyText: keepColor,
       queueInlineLink: true })
     : (await deleteMinuteEntry(value.dateKey, value.minuteIndex, { queueInlineLink: true }), [value.dateKey]);
   try { return { dateKey: value.dateKey, minuteIndex: value.minuteIndex, affectedDates,

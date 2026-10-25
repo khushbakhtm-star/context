@@ -12,8 +12,13 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
 - Choose **Details** in that strip, or hold an inactive cell, for ranges spanning midnight and advanced
   calendar-source controls. Holding text inside the active input retains normal text selection.
 - The bottom editing bar applies bold, italic, and text color to a cell or selected minute range.
-  The **+** control selects a range for filling or clearing. Formatting an empty cell does not record
+  The **+** control selects a range for grouping, filling, or clearing. Formatting an empty cell does not record
   an activity or add time to reports. Activity color and text color remain separate controls.
+- To make one activity from several cells, tap a minute, choose **+**, set the first and last minute,
+  enter an activity title, choose its color, and tap **Group**. The last minute is included. Every
+  cell keeps its own note and remains editable directly in the grid. Blank grouped minutes also
+  count toward the activity's time. The group has one outline and a title badge; tap its badge or
+  open **+** from a member to edit the group. **Fill** instead copies the active minute's text.
 - Pinch to zoom both axes, or use the zoom controls in the header's view menu. Wider day columns
   scroll horizontally while minute labels remain fixed. Zoom is remembered separately on each phone.
 - Undo and redo restore Context entries and cell formatting within the running editing session.
