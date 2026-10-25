@@ -1,7 +1,7 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Android standalone
-preview 0.1.4 (build 5), published on 2026-10-25 at 15:58:12 UTC. Official store entries remain absent
+preview 0.1.5 (build 6), published on 2026-10-25 at 17:54:11 UTC. Official store entries remain absent
 pending actual availability. A source tag alone, unpublished upload, review submission, or queued
 release must not add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
@@ -10,14 +10,20 @@ When a rollout is limited, keep the entry out until availability matches the fee
 
 ## Install the Android preview update
 
-Open the [0.1.4 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.4), expand
-**Assets**, and download `context-0.1.4-foss-preview.apk`. Open the downloaded APK and choose
+Open the [0.1.5 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.5), expand
+**Assets**, and download `context-0.1.5-foss-preview.apk`. Open the downloaded APK and choose
 **Update** over the existing Context installation. Keep Context installed to preserve its ledger.
-The new preview uses the same application ID and signing certificate as the verified 0.1.3 preview,
-with version code 5.
+The new preview uses the same application ID and signing certificate as the verified 0.1.4 preview,
+with version code 6.
 
-This release lets several minute cells share one activity title and color while each cell keeps its
-own editable note. Group a range through **+ → Group**; the final selected minute is included.
+This release uses documented Google Calendar activity colors and imported Google palette/label
+values, fills activity cells with their color, and adds a second-tap color/details popup. Long-press
+an inactive cell and choose the final cell for **Auto fill / Group**. Tap today's date to jump to
+the current minute; choose saved **12-hour / 24-hour** time labels in the header's view menu.
+With no minute selected, **+** opens the phone calendar's new-event form and its date picker.
+With a minute selected, the editing bar's **+** opens **Auto fill / Group**.
+The offline fallback is the 21 documented CalendarApp.Color values, not a claim to enumerate the
+current 24-color event picker. Text formatting keeps its separate palette.
 
 For an ongoing **Update** button, follow the one-time [Obtainium setup](ANDROID_UPDATES.md).
 Official F-Droid inclusion remains pending at [request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667);

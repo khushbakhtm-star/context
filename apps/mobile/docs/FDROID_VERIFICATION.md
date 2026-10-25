@@ -6,7 +6,64 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
-## Verified 0.1.4 outcome
+## Verified 0.1.5 outcome
+
+[Run 40217570243](https://github.com/khushbakhtm-star/context/actions/runs/40217570243), completed on
+2026-10-25, passed both jobs for **Context 0.1.5, Android version code 6**:
+
+- Application source: `87cc9df388e4350a51e5e6fc07bcf7a19447c600`.
+- Verification controller: `8aa08423a746b0cc6fd57032fa7b2c2e64ec429b`.
+- Public tagged source and signed preview: [v0.1.5](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.5), published on 2026-10-25 at 17:54:11 UTC.
+
+| Check | Observed result |
+| --- | --- |
+| Metadata lint | Exit 0 |
+| Structured source scanner | 0 errors, 0 warnings, 7 informational entries |
+| Normal integrated `fdroid build --test --stop --scan-binary` | Exit 0; built the exact final 0.1.5 source commit (828.97 seconds) |
+| Integrated APK scan | Exit 0 |
+| Independent unsigned Gradle assembly | Exit 0; `BUILD SUCCESSFUL in 11m 46s` |
+| Independent APK identity | `com.context.minuteledger`, version `0.1.5`, code `6` |
+| Independent signature check | Expected unsigned result, exit 1 |
+| Independent APK binary scan | Exit 0 |
+
+All **17 metadata checks and 15 independent native checks** passed.
+The Linux input audit records **100 removed files and five narrow source patches**. The sole
+hash-checked official Linux Hermes compiler exception and six normal Gradle-wrapper removals account
+for the seven source informational entries. The wrapper script, batch file, and JAR were absent
+before the successful normal integrated build. No broad scanner exclusion or skipped scan was added.
+
+- [Metadata/integrated-build artifact 12608720370](https://github.com/khushbakhtm-star/context/actions/runs/40217570243/artifacts/12608720370): ZIP SHA-256 `fa0ec5a63329268bde54a352d4a87474ffac35c3ad484fc3994af74f5ac1f179`.
+- [Independent native artifact 12608363201](https://github.com/khushbakhtm-star/context/actions/runs/40217570243/artifacts/12608363201): 32,559,343 bytes; ZIP SHA-256 `60a5e15d28905ef06c87f4047e40be547c199639d645f3e3e0f3ad63d9ea9736`.
+- Unsigned diagnostic APK: 77,578,252 bytes; SHA-256 `6d027f10150fe3e7c8acc8981563079374fcc9da42d200bf7ae6362b8c5dea0e`.
+
+The separately signed [standalone preview APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.5/context-0.1.5-foss-preview.apk)
+is 77,590,552 bytes, SHA-256 `2b112699c91a657d15fb0c15d7a30781b46dd962282487fecb9b6369c98fe176`.
+Signed preview ZIP integrity, embedded `com.context.minuteledger` / 0.1.5 / code 6, configured FOSS
+distribution, and forbidden native-marker checks passed. Its v2 signing certificate matches the
+public 0.1.4 preview. A certificate continuity check is not full cryptographic signature
+validation. This signed preview is distinct from the unsigned diagnostic artifact and any official
+F-Droid build.
+
+TypeScript, all **183 app tests**, five release guards, and upstream listing validation passed.
+The [v0.1.5 tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40218692984)
+passed at final source `87cc9df388e4350a51e5e6fc07bcf7a19447c600`. Store publication jobs were
+readiness-gated and skipped.
+Activity/group color choices use the 21 documented CalendarApp.Color values as an offline fallback
+plus exact imported Google API palette and label colors. This does not claim to enumerate the current
+24-color event picker. Historical activity colors remain intact, and text formatting keeps its own
+palette. Activity cells have solid fills with readable foregrounds. The first tap types inline, the
+second opens color/details; long-press an inactive cell and choose an endpoint for Auto fill / Group.
+Today's date jumps to the current minute. The measured time column supports a saved 12-hour/24-hour
+setting. With no minute selected, **+** opens the phone calendar's new-event form and
+its date picker; with a selected minute, the editing bar's **+** opens Auto fill / Group.
+Physical-phone validation is pending.
+
+These are independent Ubuntu-toolchain build and scan results. They do not establish byte-for-byte
+reproducibility, physical-phone QA, use of F-Droid's official server/VM, official signing, acceptance,
+or catalog publication. Updates belong on existing [packaging request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667).
+Diagnostic artifacts expire after 30 days; source pins, hashes, and observed results remain recorded here.
+
+## Historical verified 0.1.4 outcome
 
 [Run 40208555966](https://github.com/khushbakhtm-star/context/actions/runs/40208555966), completed on
 2026-10-25, passed both jobs for **Context 0.1.4, Android version code 5**:
@@ -151,7 +208,7 @@ fdroiddata configuration tree. It runs:
 
 ```sh
 fdroid lint com.context.minuteledger
-fdroid scanner --force --exit-code --json com.context.minuteledger:5
+fdroid scanner --force --exit-code --json com.context.minuteledger:6
 ```
 
 Scanner `--force` includes disabled builds. It does not suppress scanner findings. The scanner
@@ -166,7 +223,7 @@ A second scratch repository removes only the recipe's `disable` value, verifies 
 command resolves to hash-verified Gradle 9.4.1, and runs a normal integrated attempt:
 
 ```sh
-fdroid build --test --stop --scan-binary com.context.minuteledger:5
+fdroid build --test --stop --scan-binary com.context.minuteledger:6
 ```
 
 The candidate and template stay disabled. The ephemeral copy and its full diff are artifacts.
@@ -263,7 +320,8 @@ tests after each justified packaging change.
 
 | Tool or input | Pinned source |
 | --- | --- |
-| Latest verified app source | Public commit `95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9` (0.1.4/code 5) |
+| Latest verified app source | Public commit `87cc9df388e4350a51e5e6fc07bcf7a19447c600` (0.1.5/code 6) |
+| Prior verified app source | Public commit `95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9` (0.1.4/code 5) |
 | Prior verified app source | Public commit `761264dab4880b91843d6a500591de9c73a9f9f5` (0.1.3/code 4) |
 | Prior verified app source | Public commit `49cb65def8d6f951f5709e8ee5bd581d352b1693` (0.1.2/code 3) |
 | fdroidserver | Official 2.4.5 sdist, SHA-256 `f9b52646264c732678e32e37e23a995db20cc61d45622dda5830ce23255547f4`; release source commit `92229a9152a31d005503bac64d773551f0655494` |
