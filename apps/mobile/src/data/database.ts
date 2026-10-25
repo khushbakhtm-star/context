@@ -4,6 +4,7 @@ import { CATEGORIES, categoryById } from '../theme';
 import type { ActivitySegment, MinuteEntry, SearchResult, SyncBinding } from '../types';
 import { addDays, dateKey } from '../utils/time';
 import type { SyncDocument } from '../sync/types';
+import { cellFormatDocument, cellFormatKey, formatFromDocument, normalizeCellFormat, type CellFormat } from '../utils/cell-format';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -718,11 +719,12 @@ function canonicalValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export async function getSyncDocuments(prefix: string) {
+export async function getSyncDocuments(prefix: string, excludedPrefix?: string) {
   const db = await database();
   const rows = await db.getAllAsync<DocumentRow>(
-    `SELECT * FROM ledger_documents WHERE substr(key, 1, ?) = ? ORDER BY key`,
-    prefix.length, prefix,
+    `SELECT * FROM ledger_documents WHERE substr(key, 1, ?) = ?
+      ${excludedPrefix ? 'AND substr(key, 1, ?) <> ?' : ''} ORDER BY key`,
+    ...[prefix.length, prefix, ...(excludedPrefix ? [excludedPrefix.length, excludedPrefix] : [])],
   );
   return rows.map(mapDocument);
 }
@@ -730,17 +732,85 @@ export async function getSyncDocuments(prefix: string) {
 export async function putSyncDocument(key: string, value: Record<string, unknown> | null) {
   const db = await database();
   await db.withExclusiveTransactionAsync(async (txn) => {
-    const wall = Date.now();
-    await txn.runAsync(`UPDATE ledger_clock SET
+    await putSyncDocumentInside(txn, key, value);
+  });
+}
+
+async function putSyncDocumentInside(txn: Pick<SQLite.SQLiteDatabase, 'runAsync'>,
+  key: string, value: Record<string, unknown> | null) {
+  const wall = Date.now();
+  await txn.runAsync(`UPDATE ledger_clock SET
       counter = CASE WHEN wall >= ? THEN counter + 1 ELSE 0 END,
       wall = max(wall, ?) WHERE id = 1`, wall, wall);
-    await txn.runAsync(`INSERT INTO ledger_documents (key, revision, value_json, local_pending)
+  await txn.runAsync(`INSERT INTO ledger_documents (key, revision, value_json, local_pending)
       SELECT ?, printf('%016d:%08d:%s', wall, counter, device), ?, 1
       FROM ledger_clock WHERE id = 1
       ON CONFLICT(key) DO UPDATE SET revision = excluded.revision,
         value_json = excluded.value_json, local_pending = 1`,
-      key, value === null ? null : JSON.stringify(value));
+    key, value === null ? null : JSON.stringify(value));
+}
+
+export type SpreadsheetCellContent = Pick<MinuteEntry, 'text' | 'categoryId'> &
+  Partial<Pick<MinuteEntry, 'id' | 'blockId' | 'createdAt' | 'updatedAt' | 'source'>>;
+export type SpreadsheetCellState = { minuteIndex: number; entry: SpreadsheetCellContent | null; format: CellFormat };
+
+/** Atomic sheet commands use normal minute triggers and the exact inline-calendar outbox.
+ * Formatting is independent metadata, so a formatted empty cell remains unrecorded time. */
+export async function applySpreadsheetCells(day: string, target: SpreadsheetCellState[],
+  expected: SpreadsheetCellState[], options: { textChanged: boolean; formatChanged: boolean }) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !target.length || target.length > 1440 ||
+      target.length !== expected.length || new Set(target.map((cell) => cell.minuteIndex)).size !== target.length ||
+      target.some((cell, index) => !Number.isInteger(cell.minuteIndex) || cell.minuteIndex < 0 || cell.minuteIndex > 1439 ||
+        cell.minuteIndex !== expected[index]?.minuteIndex)) throw new Error('Invalid spreadsheet cell range.');
+  const db = await database();
+  const now = new Date().toISOString();
+  let textChanged = false;
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    const liveRows = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ?`, day);
+    const byMinute = new Map(liveRows.map((row) => [row.minute_index, row]));
+    const semantic = (entry: SpreadsheetCellContent | null) => entry ?
+      canonicalValue({ text: entry.text.trim(), categoryId: entry.categoryId }) : 'null';
+    for (let index = 0; index < target.length; index += 1) {
+      const cell = target[index]!;
+      const before = expected[index]!;
+      const row = byMinute.get(cell.minuteIndex);
+      if (options.textChanged && (semantic(row ? mapMinuteRow(row) : null) !== semantic(before.entry) ||
+          Boolean(before.entry?.blockId && row?.block_id !== before.entry.blockId))) {
+        throw new Error('A selected minute changed. Refresh it before applying this edit.');
+      }
+      if (options.formatChanged) {
+        const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
+          cellFormatKey(day, cell.minuteIndex));
+        const format = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
+        if (canonicalValue(format) !== canonicalValue(normalizeCellFormat(before.format))) {
+          throw new Error('A selected cell format changed. Refresh it before applying this edit.');
+        }
+      }
+    }
+    for (const cell of target) {
+      const row = byMinute.get(cell.minuteIndex);
+      if (options.textChanged && (semantic(row ? mapMinuteRow(row) : null) !== semantic(cell.entry) ||
+          Boolean(row && cell.entry?.blockId && row.block_id !== cell.entry.blockId))) {
+        textChanged = true;
+        if (!cell.entry) {
+          await txn.runAsync(`DELETE FROM minute_entries WHERE date_key = ? AND minute_index = ?`, day, cell.minuteIndex);
+        } else {
+          await txn.runAsync(`INSERT INTO minute_entries
+            (id, date_key, minute_index, text, category_id, block_id, source, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?)
+            ON CONFLICT(date_key, minute_index) DO UPDATE SET text = excluded.text,
+              category_id = excluded.category_id, block_id = excluded.block_id, source = 'manual', updated_at = excluded.updated_at`,
+            row?.id ?? cell.entry.id ?? makeId('minute'), day, cell.minuteIndex, cell.entry.text.trim(), cell.entry.categoryId,
+            cell.entry.blockId ?? row?.block_id ?? makeId('block'), cell.entry.createdAt ?? row?.created_at ?? now, now);
+        }
+        await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
+      }
+      if (options.formatChanged) await putSyncDocumentInside(txn, cellFormatKey(day, cell.minuteIndex), cellFormatDocument(cell.format));
+    }
+    if (textChanged) await txn.runAsync(`INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at)
+      VALUES (?, 0, NULL, ?) ON CONFLICT(date_key) DO UPDATE SET attempts = 0, last_error = NULL, updated_at = excluded.updated_at`, day, now);
   });
+  return { affectedDates: [day], textChanged };
 }
 
 export async function getDocumentsForUpload(storageKey: string, limit = 200) {

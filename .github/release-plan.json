@@ -8,5 +8,5 @@
     "ios": false,
     "fdroid": false
   },
-  "notes": "Edit minute text directly in Today and choose its color through the timestamp strip. Inline autosave retains dated drafts and existing calendar consent rules. New native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
+  "notes": "Spreadsheet-style Today with inline entry, activity colors, cell formatting, undo/redo, range fill/clear, and zoom. Autosave retains dated drafts and existing calendar consent rules. New native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
 }

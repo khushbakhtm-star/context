@@ -42,10 +42,12 @@ import { AppearanceProvider, useAppTheme } from './src/appearance';
 import type { AppColors } from './src/theme';
 import type { CalendarPreferences, DeviceCalendar, SearchResult } from './src/types';
 import { dateKey, minuteIndexForDate } from './src/utils/time';
+import { normalizeCalendarZoom } from './src/utils/calendar-layout';
 import { getAccounts } from './src/sync/accounts';
 import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
 import { flushInlineMinutes, retryInlineMinuteLinks, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
+import { subscribeSpreadsheetCommits } from './src/services/spreadsheet';
 import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/ReleaseUpdates';
 
 type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
@@ -85,6 +87,7 @@ function AppController() {
   const [tab, setTab] = useState<Tab>('today');
   const [menuOpen, setMenuOpen] = useState(false);
   const [dayCount, setDayCount] = useState<DayCount>(1);
+  const [calendarZoom, setCalendarZoom] = useState(1);
   const viewWrites = useRef<Promise<unknown>>(Promise.resolve());
   const focusSequence = useRef(0);
   const [activeDate, setActiveDate] = useState(dateKey(new Date()));
@@ -127,9 +130,10 @@ function AppController() {
       try {
         await initializeDatabase();
         await listCategories();
-        const [savedPreferences, savedDayCount] = await Promise.all([
+        const [savedPreferences, savedDayCount, savedZoom] = await Promise.all([
           getSetting<CalendarPreferences>('calendar.preferences', DEFAULT_PREFERENCES),
           getSetting<unknown>('calendar.day-count', 1),
+          getSetting<unknown>('calendar.zoom', 1),
         ]);
         const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
         setAccountCalendarWrites(directWrites);
@@ -139,6 +143,7 @@ function AppController() {
         );
         setPreferences(savedPreferences);
         setDayCount(savedDayCount === 3 || savedDayCount === 7 ? savedDayCount : 1);
+        setCalendarZoom(normalizeCalendarZoom(savedZoom));
         await refreshCalendars();
         if (mounted) setReady(true);
       } catch (error) {
@@ -225,8 +230,9 @@ function AppController() {
     void retryInlineMinuteLinks().catch(() => {});
     // This listener lives above Today so a write that finishes after opening Reports
     // still refreshes the app and queues the affected dates for the chosen calendar.
-    const unsubscribe = subscribeInlineMinuteCommits(({ affectedDates }) => {
+    const handleCommit = (affectedDates: string[], textChanged = true) => {
       dataChanged();
+      if (!textChanged) return;
       const project = async () => {
         const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
         const current = calendarProjectionConfigRef.current;
@@ -235,9 +241,12 @@ function AppController() {
       };
       inlineProjectionChain.current = inlineProjectionChain.current.then(project, project)
         .catch(() => { /* SQLite's durable calendar outbox keeps this work for retry. */ });
-    });
+    };
+    const unsubscribe = subscribeInlineMinuteCommits(({ affectedDates }) => handleCommit(affectedDates));
+    const unsubscribeSpreadsheet = subscribeSpreadsheetCommits(({ affectedDates, textChanged }) => handleCommit(affectedDates, textChanged));
     return () => {
       unsubscribe();
+      unsubscribeSpreadsheet();
       void flushInlineMinutes().catch(() => {});
     };
   }, [dataChanged, ready]);
@@ -290,6 +299,13 @@ function AppController() {
     setDayCount(next);
     viewWrites.current = viewWrites.current.catch(() => undefined)
       .then(() => setSetting('calendar.day-count', next)).catch(() => undefined);
+  }
+
+  function changeCalendarZoom(next: number) {
+    const value = normalizeCalendarZoom(next);
+    setCalendarZoom(value);
+    viewWrites.current = viewWrites.current.catch(() => undefined)
+      .then(() => setSetting('calendar.zoom', value)).catch(() => undefined);
   }
 
   function navigate(action: NavigationAction) {
@@ -349,6 +365,8 @@ function AppController() {
                   onOpenSettings={() => setTab('settings')}
                   dayCount={dayCount}
                   onDayCountChange={changeDayCount}
+                  zoom={calendarZoom}
+                  onZoomChange={changeCalendarZoom}
                   onOpenMenu={() => setMenuOpen(true)}
                 />
               ) : null}

@@ -20,11 +20,21 @@ function categoriesRuntime({ calendars = [], handler = async () => new Response(
   vm.runInNewContext(javascript, {
     module, exports: module.exports, Date, Map, Set, Promise, Response, console,
     require(name) {
+      if (name === '../utils/cell-format') {
+        const utility = { exports: {} };
+        const utilityFile = path.join(__dirname, '../src/utils/cell-format.ts');
+        const utilityCode = ts.transpileModule(fs.readFileSync(utilityFile, 'utf8'), {
+          compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+        }).outputText;
+        vm.runInNewContext(utilityCode, { module: utility, exports: utility.exports, Date }, { filename: utilityFile });
+        return utility.exports;
+      }
       if (name === 'expo-crypto') return { randomUUID: crypto.randomUUID };
       if (name === '../data/database') return {
         getSetting: async (key, fallback) => settings.get(key) ?? fallback,
         setSetting: async (key, value) => settings.set(key, value),
-        getSyncDocuments: async (prefix) => [...docs.entries()].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })),
+        getSyncDocuments: async (prefix, excluded) => [...docs.entries()].filter(([key]) => key.startsWith(prefix) &&
+          (!excluded || !key.startsWith(excluded))).map(([key, value]) => ({ key, value })),
         putSyncDocument: async (key, value) => docs.set(key, value),
       };
       if (name === '../sync/accounts') return { accountFetch: handler };

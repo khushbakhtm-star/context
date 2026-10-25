@@ -37,6 +37,29 @@ export class InlineMinuteDrafts<Result> {
   snapshot() { return [...this.records.values()].map((value) => ({ ...value })); }
   get(day: string, minute: number) { const value = this.records.get(inlineMinuteKey(day, minute)); return value ? { ...value } : null; }
 
+  /** Sheet commands share the writer with debounced individual edits. */
+  runExclusive<T>(work: () => Promise<T>): Promise<T> {
+    const job = this.writeChain.then(work, work);
+    this.writeChain = job.then(() => undefined, () => undefined);
+    return job;
+  }
+
+  /** Rebase only already-open drafts after an atomic range/undo command. The database
+   * has acknowledged these values; an old focused cache must not write them back later. */
+  rebaseCommitted(values: InlineMinuteValue[]) {
+    for (const value of values) {
+      const key = inlineMinuteKey(value.dateKey, value.minuteIndex);
+      const current = this.records.get(key);
+      if (!current) continue;
+      const timer = this.timers.get(key);
+      if (timer) clearTimeout(timer);
+      this.timers.delete(key);
+      this.records.set(key, { ...value, key, revision: current.revision + 1,
+        savedRevision: current.revision + 1, saving: false, error: false });
+    }
+    this.notify();
+  }
+
   activate(value: InlineMinuteValue) {
     const key = inlineMinuteKey(value.dateKey, value.minuteIndex);
     if (this.activeKey && this.activeKey !== key) this.close(this.activeKey);
