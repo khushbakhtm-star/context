@@ -379,6 +379,7 @@ function AppController() {
                   onZoomChange={changeCalendarZoom}
                   clockFormat={clockFormat}
                   onClockFormatChange={changeClockFormat}
+                  onCreatePlan={() => navigate('plan')}
                   onOpenMenu={() => setMenuOpen(true)}
                 />
               ) : null}

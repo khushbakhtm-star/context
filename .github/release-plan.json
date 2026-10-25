@@ -8,5 +8,5 @@
     "ios": false,
     "fdroid": false
   },
-  "notes": "Google Calendar activity-color choices with separate text formatting. Select a minute range for Auto fill or Group in a popup, fill grouped cells with the selected color, tap today's date for the current minute, and tap an active cell again for details. Compact time labels support a saved 12h/24h preference. Native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
+  "notes": "Google Calendar activity colors, solid fills, minute-range Auto fill/Group popups, date-to-current-minute jump, and second-tap details. With no selected cells, + opens the phone calendar event form; selected cells retain range actions. Compact time labels support saved 12h/24h display. Native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
 }

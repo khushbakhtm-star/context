@@ -59,12 +59,13 @@ type Props = {
   onZoomChange?: (zoom: number) => void;
   clockFormat?: '12h' | '24h';
   onClockFormatChange?: (value: '12h' | '24h') => void;
+  onCreatePlan?: () => void;
 };
 
 export function TodayScreen({
   activeDate, onDateChange, calendars, preferences, dataVersion, focusRequest,
   onFocusConsumed, onDataChanged, onOpenSettings, dayCount = 1, onDayCountChange, onOpenMenu,
-  zoom = 1, onZoomChange, clockFormat = '12h', onClockFormatChange,
+  zoom = 1, onZoomChange, clockFormat = '12h', onClockFormatChange, onCreatePlan,
 }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -1395,6 +1396,14 @@ export function TodayScreen({
       </Animated.ScrollView>
       </View>
 
+      {onCreatePlan && !inlineSelection && !rangeSelecting && !editor ? (
+        <Pressable accessibilityRole="button" accessibilityLabel="Create calendar event"
+          accessibilityHint="Opens your phone calendar's event form."
+          onPress={() => { Keyboard.dismiss(); onCreatePlan(); }} style={styles.createEventButton}>
+          <Text style={styles.createEventIcon}>+</Text>
+        </Pressable>
+      ) : null}
+
       <SpreadsheetToolbar visible={Boolean(inlineSelection)} format={selectedFormat}
         canUndo={spreadsheetState.canUndo} canRedo={spreadsheetState.canRedo}
         busy={toolBusy || spreadsheetState.busy}
@@ -1430,6 +1439,9 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
   const railWidth = layout.railWidth;
   return StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.paper },
+    createEventButton: { position: 'absolute', right: 16, bottom: 16, width: 56, height: 56, borderRadius: 16,
+      justifyContent: 'center', alignItems: 'center', backgroundColor: colors.accent },
+    createEventIcon: { color: colors.onAccent, fontSize: 34, fontWeight: '400', lineHeight: 40 },
     gridViewport: { flex: 1 },
     horizontalViewport: { flex: 1, backgroundColor: grid },
     horizontalContent: { height: '100%' },
