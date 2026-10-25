@@ -1,0 +1,59 @@
+{
+  "expo": {
+    "name": "Context",
+    "slug": "context-minute-ledger",
+    "scheme": "context",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/context-app-logo.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/context-app-logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#111315"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "buildNumber": "1",
+      "bundleIdentifier": "com.context.minuteledger",
+      "infoPlist": {
+        "NSCalendarsUsageDescription": "Context reads your selected calendars to place planned events on your minute ledger and writes only the actual activity blocks you choose to synchronize.",
+        "NSCalendarsFullAccessUsageDescription": "Context needs full calendar access to show your existing plans and synchronize your confirmed actual activity blocks."
+      }
+    },
+    "android": {
+      "package": "com.context.minuteledger",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/context-app-logo.png",
+        "backgroundColor": "#111315"
+      },
+      "permissions": [
+        "android.permission.READ_CALENDAR",
+        "android.permission.WRITE_CALENDAR"
+      ]
+    },
+    "plugins": [
+      "expo-dev-client",
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "Context uses your selected calendars to show plans and synchronize confirmed actual activity blocks."
+        }
+      ],
+      "expo-sqlite",
+      "expo-status-bar",
+      "expo-web-browser",
+      "expo-secure-store",
+      "@react-native-google-signin/google-signin"
+    ],
+    "extra": {
+      "distribution": "store",
+      "eas": {
+        "projectId": "30b7b0ae-043e-46fa-b355-1f7c552f431f"
+      }
+    },
+    "owner": "ky3"
+  }
+}

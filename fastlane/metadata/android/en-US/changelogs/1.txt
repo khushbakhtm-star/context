@@ -1,0 +1,1 @@
+Initial source release: minute-by-minute activity entry, custom categories, day/week/month/year reports, Android calendar connection, and optional encrypted ledger synchronization through HTTPS WebDAV. The F-Droid edition excludes Google's native sign-in SDK. Native release verification and F-Droid review are pending.

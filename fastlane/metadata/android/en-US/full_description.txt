@@ -1,0 +1,16 @@
+Context is a minute-by-minute ledger and calendar companion. Capture activities, thoughts, and decisions directly in the day's timeline, then review how you spend your time.
+
+• Tap a minute to write, or fill an activity across a range of minutes.
+• Create, rename, recolor, and archive your own activity categories.
+• Review category totals for a day, week, month, or year.
+• Display calendars made available through Android and choose which confirmed activities to synchronize.
+• Keep recording offline in the phone's local ledger.
+• Optionally synchronize the private ledger between phones through a dedicated HTTPS WebDAV folder. Ledger batches are encrypted on the phone before upload. Both phones must use the same folder and passphrase.
+
+Calendar access and writing require your permission. Calendar event descriptions may be visible to anyone with access to that calendar. The local ledger uses the phone's device protection; cloud ledger batches use separate encryption.
+
+The F-Droid source edition excludes Google's native sign-in SDK and the Expo development client. It does not offer direct Google account sign-in. Google and other calendars can be available through Android when another installed application provides them to the device calendar database.
+
+Optional Microsoft calendar and OneDrive connections use Microsoft's proprietary services and require a Microsoft app registration configured by the publisher. Without that configuration, Microsoft sign-in is unavailable. The local ledger, Android calendar connection, and WebDAV storage do not require a Microsoft account.
+
+Synchronization runs while Context is open, after edits, and when returning to the foreground. Delivery while the app is terminated is not promised. The day grid uses 1,440 civil minute labels; ambiguous repeated-hour calendar times need review.

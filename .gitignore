@@ -1,0 +1,29 @@
+# Generated and local-only files
+node_modules/
+.expo/
+dist-android/
+dist-ios/
+dist-fdroid/
+/apps/mobile/android/
+/apps/mobile/ios/
+*.log
+.env
+.env.*
+!.env.example
+credentials.json
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+service-account*.json
+google-services.json
+
+# Workspace review artifacts
+tmp/
+output/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

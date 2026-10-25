@@ -1,0 +1,66 @@
+# Disabled source-build candidate, not a submitted F-Droid listing.
+# Generate a release-specific candidate with prepare-submission.cjs after publishing the source.
+# Keep this build disabled until the unsigned native build and F-Droid scanner are verified.
+AntiFeatures:
+  NonFreeNet:
+    en-US: Optional Microsoft calendar and OneDrive connections use Microsoft's proprietary services. The local ledger, Android calendars, and user-selected WebDAV storage work without them.
+Categories:
+  - Calendar & Agenda
+  - Time Tracker
+License: MIT
+SourceCode: OWNER_PUBLIC_SOURCE_REPOSITORY_URL
+IssueTracker: OWNER_PUBLIC_ISSUE_TRACKER_URL
+Changelog: OWNER_PUBLIC_RELEASES_URL
+
+AutoName: Context
+Summary: Capture your day minute by minute alongside your calendars
+Description: |-
+  Record activities, thoughts, and decisions in a minute-by-minute ledger. Use
+  custom activity categories and review time totals by day, week, month, or year.
+
+  Connect calendars available through Android and choose which confirmed
+  activities to synchronize. Calendar and storage permissions are optional.
+  Private ledger synchronization is available through a user-selected HTTPS
+  WebDAV folder. Optional Microsoft calendar and OneDrive support requires the
+  publisher's configured Microsoft app registration and uses proprietary services.
+
+  This edition omits Google's native sign-in SDK and the Expo development client.
+  It does not provide direct Google account sign-in. Android calendar access can
+  include calendars that another installed application makes available to Android.
+
+RepoType: git
+Repo: OWNER_PUBLIC_SOURCE_REPOSITORY_URL
+
+Builds:
+  - versionName: 0.1.0
+    versionCode: 1
+    disable: Public source URL, release commit, pinned build-server toolchain, dependency scan, and native verification are pending
+    commit: OWNER_IMMUTABLE_RELEASE_COMMIT
+    subdir: apps/mobile
+    init:
+      - EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid CONTEXT_FDROID_SOURCE_BUILD=1 node scripts/prepare-fdroid.cjs --apply
+      - corepack pnpm install --frozen-lockfile --ignore-scripts
+      - EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid corepack pnpm exec expo prebuild --platform android --no-install
+      - EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid node scripts/prepare-fdroid.cjs --unsigned-android
+    build:
+      - cd android && EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid ./gradlew --no-daemon assembleRelease
+    output: android/app/build/outputs/apk/release/app-release-unsigned.apk
+
+MaintainerNotes: |-
+  The upstream fastlane listing is at repository-root fastlane/metadata/android/en-US.
+  This is an unverified source-build candidate, not a completed native build recipe.
+  Node 24.19.0 and pnpm 11.25.0 are the upstream development versions. The clean
+  F-Droid Linux environment still needs a verified Node/pnpm provision mechanism
+  and pinned Android SDK/NDK/JDK configuration. Do not silently depend on tools
+  already installed on the developer's workstation.
+  Dependency pruning runs before installation and leaves unreachable packages in
+  the source lock graph. Check the installed native graph and scanner findings;
+  no blanket scanignore or scandelete bypass is supplied.
+  Native phone validation, public maintenance history or an applicable inclusion
+  exception, and release-tag verification are pending. No screenshots are supplied
+  until genuine captures of the native app are available.
+
+AutoUpdateMode: None
+UpdateCheckMode: None
+CurrentVersion: 0.1.0
+CurrentVersionCode: 1

@@ -1,0 +1,205 @@
+name: Context coordinated release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: context-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+      native_android: ${{ steps.release.outputs.native_android }}
+      native_ios: ${{ steps.release.outputs.native_ios }}
+      native_fdroid: ${{ steps.release.outputs.native_fdroid }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.19.0
+      - name: Verify the tag and immutable release plan
+        id: release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: node .github/scripts/release-tools.cjs verify
+      - name: Test release input and redaction guards
+        run: node --test .github/scripts/release-tools.test.cjs
+      - name: Install pinned package manager
+        run: npm install --global pnpm@11.25.0
+      - name: Install locked dependencies without lifecycle scripts
+        working-directory: apps/mobile
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Typecheck and test
+        working-directory: apps/mobile
+        run: |
+          pnpm run typecheck
+          pnpm test
+      - name: Validate upstream F-Droid listing
+        run: node apps/mobile/fdroid/prepare-submission.cjs --check
+      - name: Generate immutable F-Droid candidate and draft request
+        env:
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          node apps/mobile/fdroid/prepare-submission.cjs --repo "$repo" --issues "$repo/issues" --releases "$repo/releases" --commit "$RELEASE_COMMIT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-release-material
+          path: |
+            tmp/release/
+            tmp/fdroid-submission/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Report readiness
+        run: |
+          echo 'Source checks passed. Native builds run only for explicitly configured channels on protected tags.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Source release artifacts contain a disabled F-Droid candidate; they do not establish public store availability.' >> "$GITHUB_STEP_SUMMARY"
+
+  source-prerelease:
+    needs: verify
+    if: github.ref_protected && vars.CONTEXT_SOURCE_RELEASES_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: source-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.verify.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.19.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: source-release-material
+          path: tmp/source-artifacts
+      - name: Recheck the remote tag before publication
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: node .github/scripts/release-tools.cjs verify
+      - name: Publish source as a prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          if gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease' > tmp/release/existing-state.txt 2>/dev/null; then
+            test "$(cat tmp/release/existing-state.txt)" = true || { echo 'Refusing to modify an existing stable release.'; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --prerelease --title "Context $RELEASE_VERSION source prerelease" --notes-file tmp/release/source-release-notes.md
+          fi
+          find tmp/source-artifacts -type f \( -name '*.json' -o -name '*.md' -o -name '*.yml' \) -print0 | while IFS= read -r -d '' asset; do
+            gh release upload "$RELEASE_TAG" "$asset" --clobber
+          done
+
+  channel-build:
+    needs: verify
+    if: github.ref_protected && vars.CONTEXT_EAS_BUILDS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: google-play
+            profile: google-play
+            platform: android
+            environment: google-play
+            readyVariable: CONTEXT_GOOGLE_PLAY_BUILD_READY
+            submitVariable: CONTEXT_GOOGLE_PLAY_SUBMIT_READY
+            nativeOutput: native_android
+          - channel: apple-app-store
+            profile: apple-app-store
+            platform: ios
+            environment: apple-app-store
+            readyVariable: CONTEXT_APPLE_BUILD_READY
+            submitVariable: CONTEXT_APPLE_SUBMIT_READY
+            nativeOutput: native_ios
+          - channel: fdroid
+            profile: fdroid-preview
+            platform: android
+            environment: fdroid
+            readyVariable: CONTEXT_FDROID_BUILD_READY
+            submitVariable: CONTEXT_FDROID_HAS_NO_EAS_SUBMIT
+            nativeOutput: native_fdroid
+    environment: ${{ matrix.environment }}
+    steps:
+      - name: Report an unconfigured channel
+        if: vars[matrix.readyVariable] != 'true'
+        env:
+          CHANNEL: ${{ matrix.channel }}
+        run: echo "$CHANNEL is pending account/signing configuration; no build or submission was started." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: vars[matrix.readyVariable] == 'true'
+        with:
+          ref: ${{ needs.verify.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: vars[matrix.readyVariable] == 'true'
+        with:
+          node-version: 24.19.0
+      - name: Recheck the source tag
+        if: vars[matrix.readyVariable] == 'true'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: node .github/scripts/release-tools.cjs verify
+      - name: Install pinned package manager
+        if: vars[matrix.readyVariable] == 'true'
+        run: npm install --global pnpm@11.25.0
+      - name: Install locked project dependencies without lifecycle scripts
+        if: vars[matrix.readyVariable] == 'true'
+        working-directory: apps/mobile
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build the exact release commit
+        id: build
+        if: vars[matrix.readyVariable] == 'true'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          RELEASE_PROFILE: ${{ matrix.profile }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          RELEASE_COMMIT: ${{ needs.verify.outputs.commit }}
+        run: |
+          test -n "$EXPO_TOKEN" || { echo 'The environment needs EXPO_TOKEN.'; exit 1; }
+          mkdir -p ../../tmp/release
+          pnpm --package=eas-cli@25.3.0 dlx eas build --platform "$RELEASE_PLATFORM" --profile "$RELEASE_PROFILE" --freeze-credentials --non-interactive --wait --json > ../../tmp/release/eas-private-result.json
+          node ../../.github/scripts/release-tools.cjs build-summary ../../tmp/release/eas-private-result.json "$RELEASE_PROFILE" "../../tmp/release/$RELEASE_PROFILE-build.json"
+      - name: Stage the exact completed store build
+        if: vars[matrix.readyVariable] == 'true' && matrix.channel != 'fdroid' && vars[matrix.submitVariable] == 'true' && needs.verify.outputs[matrix.nativeOutput] == 'true'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          RELEASE_PROFILE: ${{ matrix.profile }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          build_id="$(node ../../.github/scripts/release-tools.cjs build-id "../../tmp/release/$RELEASE_PROFILE-build.json")"
+          pnpm --package=eas-cli@25.3.0 dlx eas submit --platform "$RELEASE_PLATFORM" --profile "$RELEASE_PROFILE" --id "$build_id" --non-interactive --wait
+          echo "$RELEASE_PROFILE upload completed. Public review/release and verified update-feed publication remain separate." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.build.outcome == 'success'
+        with:
+          name: build-${{ matrix.profile }}
+          path: tmp/release/${{ matrix.profile }}-build.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Explain F-Droid preview status
+        if: success() && matrix.channel == 'fdroid' && vars[matrix.readyVariable] == 'true'
+        run: echo 'The FOSS APK is an owner-signed preview. F-Droid independently builds, reviews, signs, and publishes accepted recipes; this workflow does not submit or publish an official F-Droid update.' >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "version": "0.1.0",
+  "sourceAndroidVersionCode": 1,
+  "sourceIosBuildNumber": "1",
+  "nativeVerification": {
+    "android": false,
+    "ios": false,
+    "fdroid": false
+  },
+  "notes": "Initial source prerelease. Native phone verification, public store release, and F-Droid review remain pending."
+}
