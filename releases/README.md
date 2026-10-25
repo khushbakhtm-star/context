@@ -1,7 +1,7 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Android standalone
-preview 0.1.3 (build 4), published on 2026-10-25 at 15:29:28 UTC. Official store entries remain absent
+preview 0.1.4 (build 5), published on 2026-10-25 at 15:58:12 UTC. Official store entries remain absent
 pending actual availability. A source tag alone, unpublished upload, review submission, or queued
 release must not add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
@@ -10,10 +10,14 @@ When a rollout is limited, keep the entry out until availability matches the fee
 
 ## Install the Android preview update
 
-Open the [0.1.3 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.3), expand
-**Assets**, and download `context-0.1.3-foss-preview.apk`. Open the downloaded APK and choose
+Open the [0.1.4 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.4), expand
+**Assets**, and download `context-0.1.4-foss-preview.apk`. Open the downloaded APK and choose
 **Update** over the existing Context installation. Keep Context installed to preserve its ledger.
-The new preview uses the same application ID and signing certificate as 0.1.2, with version code 4.
+The new preview uses the same application ID and signing certificate as the verified 0.1.3 preview,
+with version code 5.
+
+This release lets several minute cells share one activity title and color while each cell keeps its
+own editable note. Group a range through **+ → Group**; the final selected minute is included.
 
 For an ongoing **Update** button, follow the one-time [Obtainium setup](ANDROID_UPDATES.md).
 Official F-Droid inclusion remains pending at [request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667);

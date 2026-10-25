@@ -5,17 +5,17 @@
 - Source: https://github.com/khushbakhtm-star/context
 - Issue tracker: https://github.com/khushbakhtm-star/context/issues
 - Releases: https://github.com/khushbakhtm-star/context/releases
-- Candidate: 0.1.3 (Android version code 4)
-- Immutable source: 761264dab4880b91843d6a500591de9c73a9f9f5
-- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.3
-- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.3/context-0.1.3-foss-preview.apk
-- Preview APK SHA-256: `5d008da29fe0921b4a99bb6039f1a68c607bcef5d7ab0a0501572b6a445e009d`
-- Publication: 2026-10-25 at 15:29:28 UTC; signed APK size 77,549,160 bytes
+- Candidate: 0.1.4 (Android version code 5)
+- Immutable source: 95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9
+- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.4
+- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.4/context-0.1.4-foss-preview.apk
+- Preview APK SHA-256: `41e7110867ff3bb02358fafb17cd3389ce598b89b43e37acb48a5cff4e4e1144`
+- Publication: 2026-10-25 at 15:58:12 UTC; signed APK size 77,565,928 bytes
 - License: MIT
 - Summary: Capture your day minute by minute alongside your calendars
 
 This is a new public project requesting packaging review and an inclusion-policy
-assessment. It is not an accepted F-Droid app. The 0.1.3 source tag and signed
+assessment. It is not an accepted F-Droid app. The 0.1.4 source tag and signed
 Android preview are public. Both cold-build verification jobs passed; the older
 0.1.0 release is not the remediated source candidate.
 
@@ -26,7 +26,9 @@ colors, reports for day/week/month/year, Android device-calendar access, and
 optional encrypted ledger synchronization through a dedicated HTTPS WebDAV folder.
 The current source also includes day/three-day/week minute views, light/dark
 appearance, inline text entry, cell formatting, session undo/redo, same-day range
-fill/clear, and zoom. Calendar and storage access require user consent. Undo restores
+fill/clear, and zoom. Multiple minute cells can share one activity title and
+color while each keeps its own independently editable note; blank grouped minutes
+count toward that activity. Calendar and storage access require user consent. Undo restores
 Context entries and formatting; effects already sent to calendars or invitations
 can need separate review.
 
@@ -59,9 +61,28 @@ The recipe provisions hash-verified Node 24.19.0 and Gradle 9.4.1, with
 Corepack 0.36.0/pnpm 11.25.0 and OpenJDK 17. It uses system Gradle after F-Droid
 removes wrappers. Required Android SDK packages are recorded in the metadata.
 
+## Latest 0.1.4 verification
+
+- TypeScript, all 169 app tests, five release guards, and upstream listing validation passed.
+- [Cold Linux verification](https://github.com/khushbakhtm-star/context/actions/runs/40208555966) passed both jobs for source `95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9`, version 0.1.4, code 5.
+- All 17 metadata checks passed. Metadata lint: exit 0. Structured source scanner: 0 errors, 0 warnings, 7 informational entries.
+- Integrated `fdroid build --test --stop --scan-binary com.context.minuteledger:5`: Exit 0; built the exact 0.1.4 source commit, including the source rescan and APK scan.
+- Independent unsigned assembly/identity/signature/binary checks: All 15 checks passed; assembly `BUILD SUCCESSFUL in 8m 22s`, package `com.context.minuteledger` / 0.1.4 / code 5, expected unsigned signature exit 1, binary scan exit 0.
+- Linux input audit: 100 exact removals and 5 narrow source patches.
+- Unsigned diagnostic APK: 77,553,624 bytes, SHA-256 `602b872210275e8d7912cbeee53e1b21d59432cfbced6d1f43d8d83a3a36150a`.
+- Tested recipe controller: `309142bbb2e4e8f806cee4f05a10f43144d90bd5`; [concrete recipe](https://github.com/khushbakhtm-star/context/blob/309142bbb2e4e8f806cee4f05a10f43144d90bd5/fdroid/metadata/com.context.minuteledger.yml).
+- [Metadata artifact 12604437989](https://github.com/khushbakhtm-star/context/actions/runs/40208555966/artifacts/12604437989) and [native artifact 12605201922](https://github.com/khushbakhtm-star/context/actions/runs/40208555966/artifacts/12605201922); full hashes and scope are in [verification diagnostics](../apps/mobile/docs/FDROID_VERIFICATION.md).
+- Signed preview ZIP integrity, embedded `com.context.minuteledger` / 0.1.4 / code 5, configured FOSS distribution, and forbidden native-marker checks passed. The v2 signing certificate matches the published 0.1.3 preview. This continuity check is not full cryptographic signature validation. Physical-phone QA remains pending.
+
+These are independent Ubuntu-toolchain diagnostics. Official F-Droid provisioning,
+recipe enablement, signing, inclusion-policy assessment, and publication remain
+maintainer decisions. The candidate remains disabled.
+
+## Historical 0.1.3 verification
+
 - TypeScript, all 161 app tests, five release guards, and upstream listing validation pass.
 - The hardlink regression test passes outside Windows's restricted filesystem sandbox.
-- [Cold Linux verification](https://github.com/khushbakhtm-star/context/actions/runs/40206078084) passed both jobs against the immutable 0.1.3 source above.
+- [Cold Linux verification](https://github.com/khushbakhtm-star/context/actions/runs/40206078084) passed both jobs against source `761264dab4880b91843d6a500591de9c73a9f9f5`.
 - Metadata lint passed. The real source scanner reported zero errors, zero warnings, and seven normal informational entries.
 - The integrated `fdroid build --test --stop --scan-binary com.context.minuteledger:4` completed successfully, including its source rescan and APK scan.
 - Independent unsigned Android assembly, package/version identity, unsigned-signature check, and APK binary scan also passed.
@@ -102,4 +123,7 @@ were independently verified after publication. The later 0.1.3 source tag and AP
 were also verified, and its tagged-source
 [workflow](https://github.com/khushbakhtm-star/context/actions/runs/40207178435)
 passed. Store publication jobs were readiness-gated and skipped; no store availability
-is claimed. Updates belong on the existing request rather than a duplicate inclusion issue.
+is claimed. Updates belong on the existing request rather than a duplicate inclusion issue. The 0.1.4
+source tag and public signed APK were also independently verified, and its
+[tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40209430440)
+passed. Store publication jobs remained skipped.

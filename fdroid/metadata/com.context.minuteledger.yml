@@ -1,6 +1,6 @@
-# Disabled source-build candidate, not a submitted F-Droid listing.
+# Disabled source-build candidate for F-Droid request #4667; not an official listing.
 # Generate a release-specific candidate with prepare-submission.cjs after publishing the source.
-# Keep this build disabled until the unsigned native build and F-Droid scanner are verified.
+# Independent source/native checks passed; keep disabled pending maintainer review.
 AntiFeatures:
   NonFreeNet:
     en-US: Optional Microsoft calendar and OneDrive connections use Microsoft's proprietary services. The local ledger, Android calendars, and user-selected WebDAV storage work without them.
@@ -34,7 +34,7 @@ Repo: "https://github.com/khushbakhtm-star/context"
 Builds:
   - versionName: 0.1.4
     versionCode: 5
-    disable: Pinned build-server toolchain, dependency scan, and native verification are pending
+    disable: Official maintainer review, inclusion assessment, and native phone validation are pending
     commit: 95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9
     subdir: apps/mobile
     sudo:
@@ -68,7 +68,10 @@ Builds:
 
 MaintainerNotes: |-
   The upstream fastlane listing is at repository-root fastlane/metadata/android/en-US.
-  This is an unverified source-build candidate, not a completed native build recipe.
+  Independent verification passed for source 95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9:
+  https://github.com/khushbakhtm-star/context/actions/runs/40208555966
+  Lint and source scan passed with zero errors and warnings; the normal integrated
+  F-Droid build and APK scans passed. This is not an official build-server result.
   The recipe provisions Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, and Gradle
   9.4.1 with official archive hashes. Android platform 37.0, Build Tools 37.0.0,
   NDK 27.1.12297006, and CMake 3.22.1 must be available in the approved server SDK.
@@ -79,7 +82,8 @@ MaintainerNotes: |-
   out of the transitive expo-application module; identity constants remain available.
   The sole scanignore is the policy-permitted official Linux Hermes compiler.
   Native phone validation, public maintenance history or an applicable inclusion
-  exception, and release-tag verification are pending. No screenshots are supplied
+  exception, and official maintainer review are pending. Tag v0.1.4 resolves to the
+  pinned source and its release workflow passed. No screenshots are supplied
   until genuine captures of the native app are available.
 
 AutoUpdateMode: None
