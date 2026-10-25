@@ -45,9 +45,9 @@ calendar connection uses Android's calendar provider. Encrypted ledger sync rema
 WebDAV and optional Microsoft account access. Native Google account connection explains the
 edition's supported alternatives instead of loading an unavailable SDK.
 
-The F-Droid directory includes a **disabled metadata template**, not an accepted recipe. Public
-source, a real release commit, and a verified build-server toolchain must be supplied before
-submission. The owner selected MIT for the source and the root `LICENSE` records that choice. See
+The F-Droid directory includes a **disabled metadata template**, not an accepted recipe. The next
+public source pin must pass its source scan and integrated native build before enabling it.
+The owner selected MIT for the source and the root `LICENSE` records that choice. See
 [`../fdroid/LICENSE_DECISION.md`](../fdroid/LICENSE_DECISION.md).
 
 To exercise the unsigned source build, use a separate clean Linux checkout with Android SDK/JDK,
@@ -60,11 +60,11 @@ unused packages. Run every preparation/build command with the distribution varia
 export EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid
 export CONTEXT_FDROID_SOURCE_BUILD=1
 node scripts/prepare-fdroid.cjs --apply
-corepack pnpm install --frozen-lockfile --ignore-scripts
+corepack pnpm install --prod --frozen-lockfile --ignore-scripts
 corepack pnpm exec expo prebuild --platform android --no-install
 node scripts/prepare-fdroid.cjs --unsigned-android
 cd android
-./gradlew --no-daemon assembleRelease
+gradle --no-daemon assembleRelease
 ```
 
 The APK output is `android/app/build/outputs/apk/release/app-release-unsigned.apk`. Signing is
@@ -74,6 +74,11 @@ scanner, review any bundled build tools and native binaries against its policies
 findings rather than hiding them with broad scanner exclusions. Exact APK reproducibility has not
 yet been demonstrated; pin the Android SDK/NDK, JDK, Gradle repositories, and accepted server
 environment when the first native source build is verified.
+
+The F-Droid-only prebuild plugin forces Expo modules/core source compilation, applies exact
+hash-reviewed sanitation and narrow dependency patches, and retains EAS signing. See
+[`FDROID_SOURCE_PREPARATION.md`](FDROID_SOURCE_PREPARATION.md) for lifecycle, path/cache guards,
+input audit, and the single policy-backed official Hermes compiler exception.
 
 For a privately signed preview of the FOSS variant, EAS also provides `fdroid-preview`. That profile
 uses the same dependency pruning through the guarded `eas-build-pre-install` hook in EAS's clean

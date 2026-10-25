@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { getEntriesBetween } from '../data/database';
-import { CATEGORIES, colors } from '../theme';
+import { useAppTheme } from '../appearance';
+import { CATEGORIES } from '../theme';
+import type { AppColors } from '../theme';
 import type { MinuteEntry } from '../types';
 import { addDays, dateKey, formatCompactDate, startOfWeek } from '../utils/time';
 
@@ -47,6 +49,8 @@ function buildDayTimeline(dayEntries: MinuteEntry[]): TimelineSegment[] {
 }
 
 export function WeekScreen({ dataVersion }: Props) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const weekStart = useMemo(() => startOfWeek(new Date()), []);
   const days = useMemo(
     () => Array.from({ length: 7 }, (_, index) => dateKey(addDays(weekStart, index))),
@@ -177,7 +181,7 @@ export function WeekScreen({ dataVersion }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.paper },
   content: { padding: 20, paddingBottom: 40 },
   eyebrow: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1.1 },
@@ -189,7 +193,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.hairline,
     borderRadius: 16,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
   },
   timelineHint: { marginBottom: 10, color: colors.muted, fontSize: 11, lineHeight: 16 },
   axisRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 1 },
@@ -215,7 +219,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.hairline,
     borderRadius: 16,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
   },
   categoryRow: {
     minHeight: 49,

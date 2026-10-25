@@ -1,4 +1,4 @@
-export const colors = {
+export const lightColors = {
   ink: '#171817',
   graphite: '#2B2C2A',
   muted: '#6E706C',
@@ -10,7 +10,62 @@ export const colors = {
   success: '#5E7464',
   warning: '#9A7653',
   danger: '#8C554F',
+  surface: '#FFFFFF',
+  accent: '#171817',
+  onAccent: '#FFFFFF',
+  onAccentMuted: '#D2D0CA',
+  switchTrackOff: '#D5D2CB',
+  switchTrackOn: '#7A8079',
+  switchThumb: '#FFFFFF',
+  scrim: 'rgba(0,0,0,0.45)',
+  swatchBorder: '#00000033',
+  calendarCell: '#F1EEE8',
+  currentTime: '#77707F',
+  selectedDay: '#D4CCE6',
+  onSelectedDay: '#211B2E',
 };
+
+export type AppColors = typeof lightColors;
+
+export const darkColors: AppColors = {
+  ink: '#F0EDF2',
+  graphite: '#E1DEE5',
+  muted: '#B0ADB7',
+  hairline: '#3B3941',
+  panel: '#29292E',
+  paper: '#202024',
+  white: '#FFFFFF',
+  silver: '#65626D',
+  success: '#96B59F',
+  warning: '#C5A47C',
+  danger: '#D7A2A2',
+  surface: '#141418',
+  accent: '#DFDCE4',
+  onAccent: '#202024',
+  onAccentMuted: '#46434C',
+  switchTrackOff: '#54515B',
+  switchTrackOn: '#A8A1B3',
+  switchThumb: '#F3EFF7',
+  scrim: 'rgba(0,0,0,0.65)',
+  swatchBorder: '#FFFFFF55',
+  calendarCell: '#141418',
+  currentTime: '#E5E0ED',
+  selectedDay: '#C4B8E7',
+  onSelectedDay: '#211B2E',
+};
+
+// Non-visual services and older integrations use the stable light palette. Screens use useAppTheme.
+export const colors = lightColors;
+
+export type AppearanceMode = 'system' | 'light' | 'dark';
+
+export function normalizeAppearanceMode(value: unknown): AppearanceMode {
+  return value === 'light' || value === 'dark' ? value : 'system';
+}
+
+export function resolveAppearanceMode(mode: AppearanceMode, system: string | null | undefined): 'light' | 'dark' {
+  return mode === 'system' ? system === 'dark' ? 'dark' : 'light' : mode;
+}
 
 export type ActivityCategory = {
   id: string;

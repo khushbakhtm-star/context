@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -13,8 +13,11 @@ import {
   View,
 } from 'react-native';
 
-import { CATEGORIES, colors } from '../theme';
-import type { ActivityCategory } from '../theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { useAppTheme } from '../appearance';
+import { CATEGORIES } from '../theme';
+import type { ActivityCategory, AppColors } from '../theme';
 import { listCategories } from '../services/categories';
 import type { MinuteEntry, PlannedEvent } from '../types';
 import { formatDayHeading, minuteLabel } from '../utils/time';
@@ -55,6 +58,9 @@ export function MinuteEditor({
   onDelete,
   onOpenPlan,
 }: Props) {
+  const { colors, resolvedMode } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const insets = useSafeAreaInsets();
   const [text, setText] = useState('');
   const [categoryId, setCategoryId] = useState('unaccounted');
   const [durationMinutes, setDurationMinutes] = useState(1);
@@ -155,17 +161,19 @@ export function MinuteEditor({
   }
 
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={requestClose}>
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={requestClose}
+      statusBarTranslucent navigationBarTranslucent>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.backdrop}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={[styles.backdrop, { paddingTop: Math.max(insets.top, 12),
+          paddingLeft: insets.left, paddingRight: insets.right }]}
       >
         <Pressable disabled={busy} style={StyleSheet.absoluteFill} onPress={requestClose} />
         <ScrollView
           keyboardShouldPersistTaps="handled"
           stickyHeaderIndices={[1]}
           style={styles.sheet}
-          contentContainerStyle={styles.sheetContent}
+          contentContainerStyle={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 12) + 20 }]}
         >
           <View style={styles.handle} />
           <View style={styles.toolbar}>
@@ -277,18 +285,19 @@ export function MinuteEditor({
                 <Text style={styles.hint}>Uses your account permission to update this activity’s actual times.</Text>
               </View>
               <Switch value={replacePlan} disabled={busy} onValueChange={setReplacePlan}
-                trackColor={{ false: '#D5D2CB', true: '#7A8079' }} thumbColor={colors.white} />
+                trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }} thumbColor={colors.switchThumb} />
             </View>
           ) : null}
 
           <TextInput
+            keyboardAppearance={resolvedMode}
             autoFocus
             editable={!busy}
             multiline
             value={text}
             onChangeText={setText}
             placeholder="What is happening right now?"
-            placeholderTextColor="#96938C"
+            placeholderTextColor={colors.muted}
             style={styles.input}
             selectionColor={colors.graphite}
             textAlignVertical="top"
@@ -352,10 +361,10 @@ export function MinuteEditor({
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: '#00000066' },
+const createStyles = (colors: AppColors) => StyleSheet.create({
+  backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: colors.scrim },
   sheet: {
-    maxHeight: '88%',
+    maxHeight: '100%',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     backgroundColor: colors.paper,
@@ -379,15 +388,15 @@ const styles = StyleSheet.create({
   close: { color: colors.muted, fontSize: 30, lineHeight: 34, fontWeight: '400' },
   colorToggle: { width: 72, minHeight: 56, alignItems: 'center', justifyContent: 'center' },
   currentColor: { width: 32, height: 32, borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth, borderColor: '#00000033' },
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
   colorPanel: { maxHeight: 184, marginTop: 12, borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.hairline, borderRadius: 14, backgroundColor: colors.white },
+    borderColor: colors.hairline, borderRadius: 14, backgroundColor: colors.surface },
   colorGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: 12 },
   colorChoice: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center',
     borderWidth: 2, borderColor: 'transparent', borderRadius: 22 },
   colorChoiceSelected: { borderColor: colors.graphite },
   colorSwatch: { width: 30, height: 30, borderRadius: 15,
-    borderWidth: StyleSheet.hairlineWidth, borderColor: '#00000033' },
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
   planCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -412,7 +421,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.hairline,
     borderRadius: 10,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
   },
   openPlanText: { color: colors.graphite, fontSize: 12, fontWeight: '700' },
   input: {
@@ -424,7 +433,7 @@ const styles = StyleSheet.create({
     borderColor: colors.silver,
     borderRadius: 14,
     color: colors.ink,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
     fontSize: 17,
     lineHeight: 24,
   },
@@ -445,12 +454,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.hairline,
     borderRadius: 18,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
   },
-  durationSelected: { borderColor: colors.graphite, backgroundColor: colors.graphite },
+  durationSelected: { borderColor: colors.graphite, backgroundColor: colors.accent },
   planDuration: { borderColor: colors.silver },
   durationText: { color: colors.muted, fontSize: 13 },
-  durationTextSelected: { color: colors.white, fontWeight: '700' },
+  durationTextSelected: { color: colors.onAccent, fontWeight: '700' },
   error: { marginTop: 14, color: colors.danger, fontSize: 13 },
   deleteButton: { alignSelf: 'flex-start', marginTop: 24, paddingVertical: 12, paddingRight: 18 },
   deleteText: { color: colors.danger, fontSize: 15, fontWeight: '600' },
@@ -462,8 +471,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 12,
-    backgroundColor: colors.ink,
+    backgroundColor: colors.accent,
   },
-  saveText: { color: colors.white, fontSize: 15, fontWeight: '700' },
+  saveText: { color: colors.onAccent, fontSize: 15, fontWeight: '700' },
   disabled: { opacity: 0.4 },
 });

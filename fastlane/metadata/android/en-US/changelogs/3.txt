@@ -1,0 +1,1 @@
+Minute calendar with day, three-day and week views; a live time line; and a navigation menu. Added system, light and dark appearance. Updated screen insets and minute entry controls. F-Droid source preparation removes reviewed unused binaries and Install Referrer while selecting native source compilation. Native phone testing and official F-Droid review remain pending.

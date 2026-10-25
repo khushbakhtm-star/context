@@ -54,7 +54,9 @@ function validateListing(readFile) {
   if (!readFile('LICENSE').toString('utf8').includes('MIT License')) throw new Error('MIT source license is missing.');
   for (const source of ['apps/mobile/App.tsx', 'apps/mobile/index.ts', 'apps/mobile/package.json',
     'apps/mobile/pnpm-lock.yaml', 'apps/mobile/src/data/database.ts', 'apps/mobile/src/sync/webdav.ts',
-    'apps/mobile/scripts/prepare-fdroid.cjs']) {
+    'apps/mobile/scripts/prepare-fdroid.cjs', 'apps/mobile/scripts/fdroid-source-inputs.cjs',
+    'apps/mobile/fdroid/source-inputs.json', 'apps/mobile/plugins/with-fdroid-source.cjs',
+    'apps/mobile/fdroid/HERMES_COMPILER.md']) {
     if (readFile(source).length === 0) throw new Error(`Required release source is empty: ${source}`);
   }
   const template = readFile(TEMPLATE).toString('utf8');
@@ -115,6 +117,13 @@ account sign-in. Optional Microsoft calendar and OneDrive features need the
 publisher's Microsoft app registration; that configuration is not included in this
 source release. NonFreeNet is disclosed for those optional proprietary services.
 Local ledger, Android calendars, and WebDAV do not need a Microsoft account.
+
+Android Expo modules and core are selected for source compilation. Reviewed unused
+prebuilt publications and non-Android inputs are removed by exact path and SHA-256;
+the audit is generated in the build checkout. Transitive Play Install Referrer is
+removed by narrow hash-checked source patches. The only scanner exception is the
+official Linux Hermes compiler, checked against its fixed hash and documented in
+apps/mobile/fdroid/HERMES_COMPILER.md under F-Droid's explicit Hermes policy.
 
 ## Packaging status and help requested
 

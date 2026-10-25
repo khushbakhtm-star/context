@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.1",
-  "sourceAndroidVersionCode": 2,
-  "sourceIosBuildNumber": "2",
+  "version": "0.1.2",
+  "sourceAndroidVersionCode": 3,
+  "sourceIosBuildNumber": "3",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Minute entry now has a top Save button, close icon, and an unlabeled color panel. Native phone verification, public store release, and F-Droid review remain pending."
+  "notes": "Minute calendar with day/3-day/week views, safe-area layout, dark/light appearance, streamlined entry, and reviewed F-Droid source preparation. Native phone verification, successful source-build verification, public store release, and official F-Droid acceptance remain pending."
 }
