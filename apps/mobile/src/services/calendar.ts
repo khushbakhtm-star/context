@@ -134,6 +134,7 @@ export async function openPlannedEvent(event: PlannedEvent) {
 }
 
 function segmentTitle(segment: ActivitySegment) {
+  if (segment.activityTitle) return segment.activityTitle;
   const first = segment.entries[0]?.text.trim();
   if (!first) return categoryById(segment.categoryId).name;
   if (first.length <= 64) return first;

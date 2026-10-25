@@ -1,0 +1,1 @@
+Group several minutes in one day into a titled activity with a shared color. Keep separate, directly editable notes in every minute. Existing inline entry, formatting, undo/redo, range fill/clear, zoom, and calendar permission controls remain available. Official F-Droid inclusion and physical-phone validation are pending.

@@ -213,3 +213,117 @@ test('a failed pending text save blocks a range command until the draft can be s
   await sheet.applyCellFormat(range(500), { textColor: '#123456' });
   assert.equal((await api.getMinuteEntry(day, 500)).text, 'Pending actual');
 });
+
+test('an activity groups distinct minute notes and blank members, retaining identity during inline typing and note clearing', async (t) => {
+  const { api, sheet, inline } = harness(t); await api.initializeDatabase();
+  await save(api, 600, 'Prepare kettle', 'work'); await save(api, 602, 'Drink tea', 'family');
+  await sheet.groupMinuteRange(range(600, 602), { title: 'Breakfast', categoryId: 'physiological' });
+  let entries = await api.getDayEntries(day);
+  assert.deepEqual(entries.map((entry) => entry.text), ['Prepare kettle', '', 'Drink tea']);
+  assert.ok(entries.every((entry) => entry.categoryId === 'physiological'));
+  const blockId = entries[0].blockId;
+  assert.ok(blockId.startsWith('activity_'));
+  assert.ok(entries.every((entry) => entry.blockId === blockId));
+  activate(inline, 601, '', 'physiological'); sheet.editInlineMinute(day, 601, { text: 'Pour water' });
+  await inline.flushInlineMinutes();
+  assert.equal((await api.getMinuteEntry(day, 601)).blockId, blockId);
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 601)).text, '');
+  assert.equal((await api.getMinuteEntry(day, 601)).blockId, blockId);
+  await sheet.redoSpreadsheetEdit();
+  sheet.editInlineMinute(day, 601, { text: '' }); await inline.flushInlineMinutes();
+  assert.equal((await api.getMinuteEntry(day, 601)).text, '');
+  assert.equal((await api.getMinuteEntry(day, 601)).blockId, blockId);
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 601)).text, 'Pour water');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 601)).text, '');
+  assert.equal((await api.getMinuteEntry(day, 601)).blockId, blockId);
+  assert.deepEqual(plain(await sheet.getDayActivityGroups(day)), [{ blockId, dateKey: day,
+    startMinute: 600, endMinute: 602, title: 'Breakfast', categoryId: 'physiological' }]);
+  assert.equal((await api.getCategoryTimeTotals(day, day)).find((item) => item.categoryId === 'physiological').minutes, 3);
+});
+
+test('grouping is undoable, preserves formatting and travels through the released encrypted ledger without becoming a category', async (t) => {
+  const a = harness(t); const b = harness(t); await a.api.initializeDatabase(); await b.api.initializeDatabase();
+  await save(a.api, 650, 'A thought'); await a.sheet.applyCellFormat(range(650), { italic: true });
+  await a.sheet.groupMinuteRange(range(650, 652), { title: 'Reflect', categoryId: 'study' });
+  const documents = plain(await a.api.getSyncDocuments(''));
+  const codec = a.load(a.source('sync/codec.ts')); codec.validateBatch({ version: 1, id: 'group_batch', documents });
+  await b.api.mergeSyncDocuments(documents);
+  assert.equal((await b.sheet.getDayActivityGroups(day))[0].title, 'Reflect');
+  assert.deepEqual((await b.api.getDayEntries(day)).map((entry) => entry.text), ['A thought', '', '']);
+  const categories = b.load(b.source('services/categories.ts'));
+  assert.ok((await categories.listCategories()).every((item) => !item.activityGroup));
+  await a.sheet.undoSpreadsheetEdit();
+  assert.equal((await a.sheet.getDayActivityGroups(day)).length, 0);
+  assert.equal((await a.api.getDayEntries(day)).length, 1);
+  assert.deepEqual(plain((await a.sheet.getDayCellFormats(day)).get(650)), { italic: true });
+  await a.sheet.redoSpreadsheetEdit();
+  assert.equal((await a.sheet.getDayActivityGroups(day))[0].title, 'Reflect');
+});
+
+test('same-color neighbors stay separate, partial regrouping splits activities, and title-only rename retains identity and queues calendar work', async (t) => {
+  const { api, sheet, inline, linkCalls } = harness(t); await api.initializeDatabase();
+  await sheet.groupMinuteRange(range(700, 704), { title: 'Study', categoryId: 'study' });
+  const originalId = (await api.getMinuteEntry(day, 700)).blockId;
+  await save(api, 699, 'Outside before'); await save(api, 705, 'Outside after');
+  assert.notEqual((await api.getMinuteEntry(day, 699)).blockId, originalId);
+  assert.notEqual((await api.getMinuteEntry(day, 705)).blockId, originalId);
+  await sheet.groupMinuteRange(range(701, 703), { title: 'Read paper', categoryId: 'study' });
+  let groups = await sheet.getDayActivityGroups(day);
+  assert.deepEqual(plain(groups.map((group) => [group.startMinute, group.endMinute, group.title])),
+    [[700, 700, 'Study'], [701, 703, 'Read paper'], [704, 704, 'Study']]);
+  const middleId = groups[1].blockId;
+  await inline.flushInlineMinutes(); const beforeCalls = linkCalls.length;
+  await sheet.groupMinuteRange(range(701, 703), { title: 'Read revised paper', categoryId: 'study' });
+  await inline.flushInlineMinutes();
+  groups = await sheet.getDayActivityGroups(day);
+  assert.equal(groups[1].blockId, middleId); assert.equal(groups[1].title, 'Read revised paper');
+  assert.ok(linkCalls.length > beforeCalls, 'renaming only the activity must update its calendar event');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await sheet.getDayActivityGroups(day))[1].title, 'Read paper');
+  assert.equal((await sheet.getDayActivityGroups(day))[1].blockId, middleId);
+});
+
+test('recoloring one grouped minute preserves its note and activity identity while producing separate color segments', async (t) => {
+  const { api, sheet, inline } = harness(t); await api.initializeDatabase();
+  await sheet.groupMinuteRange(range(800, 804), { title: 'Sleep', categoryId: 'sleep' });
+  const blockId = (await api.getMinuteEntry(day, 800)).blockId;
+  activate(inline, 802, '', 'sleep');
+  sheet.editInlineMinute(day, 802, { text: 'Bathroom break', categoryId: 'physiological', keepColor: true });
+  await inline.flushInlineMinutes();
+  assert.equal((await api.getMinuteEntry(day, 802)).blockId, blockId);
+  assert.deepEqual(plain((await sheet.getDayActivityGroups(day)).map((group) => [group.startMinute, group.endMinute, group.categoryId])),
+    [[800, 801, 'sleep'], [802, 802, 'physiological'], [803, 804, 'sleep']]);
+  assert.equal((await api.getMinuteEntry(day, 802)).text, 'Bathroom break');
+});
+
+test('group metadata and entries commit atomically and group operations reject stale note ownership', async (t) => {
+  const device = harness(t); const { api, sheet, sqlite } = device; await api.initializeDatabase();
+  await save(api, 850, 'Keep this');
+  sqlite.exec(`CREATE TRIGGER reject_group_label BEFORE INSERT ON ledger_documents
+    WHEN NEW.key = 'category:minuteFormat:2026-10-25:851' BEGIN SELECT RAISE(ABORT, 'group label unavailable'); END;`);
+  const before = plain(await api.getSyncDocuments(''));
+  await assert.rejects(sheet.groupMinuteRange(range(850, 852), { title: 'Group', categoryId: 'work' }), /group label unavailable/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before);
+  assert.equal((await api.getDayEntries(day)).length, 1);
+  assert.equal((await api.getMinuteEntry(day, 850)).text, 'Keep this');
+  assert.equal((await api.getPendingInlineMinuteLinks()).length, 0);
+});
+
+test('clearing a grouped note then immediately recoloring it preserves its blank membership through both Undo steps', async (t) => {
+  const { api, sheet, inline } = harness(t); await api.initializeDatabase();
+  await save(api, 880, 'Initial note', 'study');
+  await sheet.groupMinuteRange(range(880, 882), { title: 'Reading', categoryId: 'study' });
+  const blockId = (await api.getMinuteEntry(day, 880)).blockId;
+  activate(inline, 880, 'Initial note');
+  sheet.editInlineMinute(day, 880, { text: '' });
+  sheet.editInlineMinute(day, 880, { categoryId: 'family' });
+  await sheet.undoSpreadsheetEdit();
+  const blank = await api.getMinuteEntry(day, 880);
+  assert.equal(blank.text, ''); assert.equal(blank.categoryId, 'study'); assert.equal(blank.blockId, blockId);
+  await sheet.undoSpreadsheetEdit();
+  const restored = await api.getMinuteEntry(day, 880);
+  assert.equal(restored.text, 'Initial note'); assert.equal(restored.categoryId, 'study'); assert.equal(restored.blockId, blockId);
+});

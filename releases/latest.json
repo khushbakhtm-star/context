@@ -5,6 +5,16 @@
       "platform": "android",
       "channel": "standalone",
       "applicationId": "com.context.minuteledger",
+      "version": "0.1.3",
+      "buildNumber": "4",
+      "released": true,
+      "publishedAt": "2026-10-25T15:29:28Z",
+      "url": "https://github.com/khushbakhtm-star/context/releases"
+    },
+    {
+      "platform": "android",
+      "channel": "standalone",
+      "applicationId": "com.context.minuteledger",
       "version": "0.1.2",
       "buildNumber": "3",
       "released": true,

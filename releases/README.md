@@ -1,11 +1,25 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Android standalone
-preview 0.1.2 (build 3). Official store entries remain absent pending actual availability. A source
-tag alone, unpublished upload, review submission, or queued release must not add a released entry.
+preview 0.1.3 (build 4), published on 2026-10-25 at 15:29:28 UTC. Official store entries remain absent
+pending actual availability. A source tag alone, unpublished upload, review submission, or queued
+release must not add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Install the Android preview update
+
+Open the [0.1.3 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.3), expand
+**Assets**, and download `context-0.1.3-foss-preview.apk`. Open the downloaded APK and choose
+**Update** over the existing Context installation. Keep Context installed to preserve its ledger.
+The new preview uses the same application ID and signing certificate as 0.1.2, with version code 4.
+
+For an ongoing **Update** button, follow the one-time [Obtainium setup](ANDROID_UPDATES.md).
+Official F-Droid inclusion remains pending at [request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667);
+this GitHub preview does not create an official F-Droid catalog entry. Apple distribution also remains pending.
+
+## Update notices
 
 The app checks only when the user enables **Settings → Check for released updates**, while it is
 open. It checks on launch/return to the foreground and periodically while active, at most once every

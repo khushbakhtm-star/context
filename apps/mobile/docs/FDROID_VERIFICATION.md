@@ -6,7 +6,55 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
-## Verified 0.1.2 outcome
+## Verified 0.1.3 outcome
+
+[Run 40206078084](https://github.com/khushbakhtm-star/context/actions/runs/40206078084), completed on
+2026-10-25, passed both jobs for **Context 0.1.3, Android version code 4**:
+
+- Application source: `761264dab4880b91843d6a500591de9c73a9f9f5`.
+- Verification controller: `646bb446a8af688a21057490e67ae1875b45094b`.
+- Public tagged source and signed preview: [v0.1.3](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.3), published at 15:29:28 UTC on 2026-10-25.
+
+| Check | Observed result |
+| --- | --- |
+| Metadata lint | Exit 0 |
+| Structured source scanner | **0 errors, 0 warnings**, 7 normal informational entries |
+| Normal integrated `fdroid build --test --stop --scan-binary` | Exit 0; built the exact 0.1.3 source commit |
+| Integrated APK scan | Exit 0 |
+| Independent unsigned Gradle assembly | Exit 0; `BUILD SUCCESSFUL in 10m 55s` |
+| Independent APK identity | `com.context.minuteledger`, version `0.1.3`, code `4` |
+| Independent signature check | Expected unsigned result, exit 1 |
+| Independent APK binary scan | Exit 0 |
+
+The Linux input audit records **100 removed files and five narrow source patches**. The seven
+informational source findings are the exact hash-checked official Linux Hermes compiler exception
+and six normal Gradle-wrapper removals. No broad scanner exclusion or skipped scan was added.
+
+- [Metadata/integrated-build artifact 12603884752](https://github.com/khushbakhtm-star/context/actions/runs/40206078084/artifacts/12603884752): 47,499 bytes; ZIP SHA-256 `7937d6ffb4aa8f67263c86407e8c4d130417eb9dd00bee4843cd34442691455f`.
+- [Independent native artifact 12604640234](https://github.com/khushbakhtm-star/context/actions/runs/40206078084/artifacts/12604640234): 32,542,104 bytes; ZIP SHA-256 `522ca01dba4690cb338446d4f4178d87353d9a6d0faaad39f6cfb307f3081d2e`.
+- Unsigned diagnostic APK: 77,536,856 bytes; SHA-256 `d2c873e8f2e70fc481b837e391bc2c90725bc88fc681639aa5df1983f19783fe`.
+
+The separately signed [standalone preview APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.3/context-0.1.3-foss-preview.apk)
+is 77,549,160 bytes, SHA-256 `5d008da29fe0921b4a99bb6039f1a68c607bcef5d7ab0a0501572b6a445e009d`.
+Its ZIP integrity, embedded version/application identity and configured FOSS distribution were checked,
+with no forbidden native class markers found by the preview inspection. Its v2 signing certificate
+matches the published 0.1.2 preview; this continuity check is not full cryptographic signature validation.
+The signed preview is separate from the unsigned diagnostic artifact and official F-Droid builds.
+
+TypeScript, all **161 app tests**, five release guards, and upstream listing validation passed.
+The [v0.1.3 tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40207178435)
+also passed at that immutable source. Store channel jobs were readiness-gated and skipped.
+This update adds inline entry, the square spreadsheet grid, formatting, same-day range fill/clear,
+undo/redo, and zoom. Physical-phone validation is pending. Undo restores Context entries and
+formatting within the current editing session; calendar or invitation effects can need separate review.
+
+These are independent Ubuntu-toolchain build and scan results. They do not establish byte-for-byte
+reproducibility, physical-phone QA, use of F-Droid's official server/VM, official signing, acceptance,
+or catalog publication. The existing [packaging request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667)
+is pending; no second inclusion request was created for this update. Diagnostic artifacts expire after
+30 days; their hashes, source pins, and observed results remain recorded here.
+
+## Historical verified 0.1.2 outcome
 
 [Run 40176383213](https://github.com/khushbakhtm-star/context/actions/runs/40176383213), completed on
 2026-10-25, passed both jobs for **Context 0.1.2, Android version code 3**:
@@ -52,7 +100,7 @@ fdroiddata configuration tree. It runs:
 
 ```sh
 fdroid lint com.context.minuteledger
-fdroid scanner --force --exit-code --json com.context.minuteledger:3
+fdroid scanner --force --exit-code --json com.context.minuteledger:4
 ```
 
 Scanner `--force` includes disabled builds. It does not suppress scanner findings. The scanner
@@ -67,7 +115,7 @@ A second scratch repository removes only the recipe's `disable` value, verifies 
 command resolves to hash-verified Gradle 9.4.1, and runs a normal integrated attempt:
 
 ```sh
-fdroid build --test --stop --scan-binary com.context.minuteledger:3
+fdroid build --test --stop --scan-binary com.context.minuteledger:4
 ```
 
 The candidate and template stay disabled. The ephemeral copy and its full diff are artifacts.
@@ -164,7 +212,8 @@ tests after each justified packaging change.
 
 | Tool or input | Pinned source |
 | --- | --- |
-| Verified app source | Public commit `49cb65def8d6f951f5709e8ee5bd581d352b1693` (0.1.2/code 3) |
+| Latest verified app source | Public commit `761264dab4880b91843d6a500591de9c73a9f9f5` (0.1.3/code 4) |
+| Prior verified app source | Public commit `49cb65def8d6f951f5709e8ee5bd581d352b1693` (0.1.2/code 3) |
 | fdroidserver | Official 2.4.5 sdist, SHA-256 `f9b52646264c732678e32e37e23a995db20cc61d45622dda5830ce23255547f4`; release source commit `92229a9152a31d005503bac64d773551f0655494` |
 | fdroiddata definitions and icons | Commit `dbd57558e5e687a018116b4242c42dd52d00124a` |
 | Java | Eclipse Temurin `17.0.21+9` |

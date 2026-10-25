@@ -18,6 +18,8 @@ export type ActivitySegment = {
   endMinute: number;
   categoryId: string;
   entries: MinuteEntry[];
+  /** Explicit activity title, separate from every minute's own note. */
+  activityTitle?: string;
 };
 
 export type SyncBinding = {

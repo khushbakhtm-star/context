@@ -1,12 +1,22 @@
-import { applySpreadsheetCells, getDayEntries, getSyncDocuments, type SpreadsheetCellState } from '../data/database';
+import { applySpreadsheetCells, getDayEntries, getDaySegments, getEntriesBetween, getSyncDocuments, type SpreadsheetCellState } from '../data/database';
 import { inlineMinuteDrafts, retryInlineMinuteLinks } from './inline-minutes';
-import { CELL_FORMAT_PREFIX, cellFormatKey, formatFromDocument, normalizeCellFormat, validateMinuteCellRange,
+import { CELL_FORMAT_PREFIX, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, validateMinuteCellRange,
   type CellFormat, type MinuteCellRange } from '../utils/cell-format';
 import { inlineMinuteKey, type InlineMinuteValue } from '../utils/inline-minute-drafts';
+import { addDays, dateKey } from '../utils/time';
 
 export type { CellFormat, MinuteCellRange } from '../utils/cell-format';
 export type CellFormatPatch = { bold?: boolean; italic?: boolean; textColor?: string | null };
 export type SpreadsheetCommit = { affectedDates: string[]; textChanged: boolean };
+export type ActivityGroup = { blockId: string; dateKey: string; startMinute: number; endMinute: number;
+  title: string; categoryId: string };
+
+export async function getDayActivityGroups(day: string): Promise<ActivityGroup[]> {
+  return (await getDaySegments(day)).flatMap((segment) => segment.activityTitle ? [{
+    blockId: segment.blockId, dateKey: day, startMinute: segment.startMinute, endMinute: segment.endMinute,
+    title: segment.activityTitle, categoryId: segment.categoryId,
+  }] : []);
+}
 type CellState = SpreadsheetCellState & { display?: InlineMinuteValue };
 type Command = { day: string; before: Promise<CellState[]>; after: CellState[];
   textChanged: boolean; formatChanged: boolean; draftKey?: string; draftRevision?: number };
@@ -106,13 +116,27 @@ class SpreadsheetEditor {
       const before = inlineMinuteDrafts.runExclusive(async () => {
         const cells = await readCells({ dateKey: day, startMinute: minute, endMinute: minute });
         const cell = cells[0]!;
-        if (priorEdited) cell.entry = entryOf(raw) ? { ...cell.entry, ...entryOf(raw)! } : null;
+        if (priorEdited) cell.entry = entryOf(raw) ? { ...cell.entry, ...entryOf(raw)! } :
+          isActivityGroupId(cell.entry?.blockId) ? { ...cell.entry!, text: '', categoryId: raw.categoryId } : null;
         cell.display = raw;
         return cells;
       });
       // Attach a handler immediately so a database read failure stays reviewable.
       void before.catch(() => {});
-      this.typing = { key, command: { day, before, after: [], textChanged: true, formatChanged: false }, lastAt: Date.now() };
+      const command: Command = { day, before, after: [], textChanged: true, formatChanged: false };
+      command.before = before.then((cells) => {
+        const member = cells[0]?.entry;
+        if (isActivityGroupId(member?.blockId)) {
+          const after = command.after[0];
+          if (after) after.entry = { ...member, ...after.entry,
+            text: after.display?.text.trim() ?? after.entry?.text ?? '',
+            categoryId: after.display?.categoryId ?? after.entry?.categoryId ?? member!.categoryId,
+            blockId: member!.blockId };
+        }
+        return cells;
+      });
+      void command.before.catch(() => {});
+      this.typing = { key, command, lastAt: Date.now() };
     }
     inlineMinuteDrafts.edit(day, minute, changes);
     const next = inlineMinuteDrafts.get(day, minute)!;
@@ -200,6 +224,27 @@ class SpreadsheetEditor {
         textChanged: Boolean(source.entry), formatChanged: true });
     });
   }
+  group(range: MinuteCellRange, input: { title: string; categoryId: string }) {
+    validateMinuteCellRange(range);
+    const title = input.title.trim();
+    if (!title || title.length > 200 || !/^[A-Za-z0-9_-]{1,160}$/.test(input.categoryId)) {
+      return Promise.reject(new Error('Enter an activity title of up to 200 characters and choose a color.'));
+    }
+    return this.enqueue(async () => {
+      const before = await readCells(range);
+      const candidate = before[0]?.entry?.blockId;
+      const allEntries = await getEntriesBetween(dateKey(addDays(range.dateKey, -1)), dateKey(addDays(range.dateKey, 1)));
+      const wholeExisting = isActivityGroupId(candidate) && before.every((cell) => cell.entry?.blockId === candidate) &&
+        !allEntries.some((entry) => entry.blockId === candidate &&
+          (entry.dateKey !== range.dateKey || entry.minuteIndex < range.startMinute || entry.minuteIndex > range.endMinute));
+      const blockId = wholeExisting ? candidate : `activity_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+      const after = before.map((cell) => ({ minuteIndex: cell.minuteIndex,
+        // The title belongs to the activity; every minute keeps its own note.
+        entry: { ...cell.entry, text: cell.entry?.text ?? '', categoryId: input.categoryId, blockId },
+        format: normalizeCellFormat({ ...cell.format, activityGroup: { id: blockId, title } }) }));
+      await this.perform({ day: range.dateKey, before: Promise.resolve(before), after, textChanged: true, formatChanged: true });
+    });
+  }
   clear(range: MinuteCellRange) {
     validateMinuteCellRange(range);
     return this.enqueue(async () => {
@@ -225,6 +270,7 @@ export const editInlineMinute = (day: string, minute: number,
 export const applyCellFormat = (range: MinuteCellRange, patch: CellFormatPatch) => spreadsheetEditor.format(range, patch);
 export const fillMinuteRange = (range: MinuteCellRange, sourceMinute: number) => spreadsheetEditor.fill(range, sourceMinute);
 export const clearMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.clear(range);
+export const groupMinuteRange = (range: MinuteCellRange, input: { title: string; categoryId: string }) => spreadsheetEditor.group(range, input);
 export const undoSpreadsheetEdit = () => spreadsheetEditor.undo();
 export const redoSpreadsheetEdit = () => spreadsheetEditor.redo();
 export const subscribeSpreadsheetCommits = (listener: (event: SpreadsheetCommit) => void) => spreadsheetEditor.subscribeCommits(listener);

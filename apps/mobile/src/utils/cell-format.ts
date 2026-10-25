@@ -2,8 +2,21 @@
  * without rejecting the whole encrypted batch. It is not an activity category: the
  * value deliberately has no category id/name/color, and new category queries exclude it. */
 export const CELL_FORMAT_PREFIX = 'category:minuteFormat:';
-export type CellFormat = { bold?: boolean; italic?: boolean; textColor?: string };
+export type ActivityGroupLabel = { id: string; title: string };
+export type CellFormat = { bold?: boolean; italic?: boolean; textColor?: string; activityGroup?: ActivityGroupLabel };
 export type MinuteCellRange = { dateKey: string; startMinute: number; endMinute: number };
+
+export function isActivityGroupId(value: unknown): value is string {
+  return typeof value === 'string' && /^activity_[A-Za-z0-9_-]{1,150}$/.test(value);
+}
+
+export function normalizeActivityGroup(value: unknown): ActivityGroupLabel | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const group = value as Record<string, unknown>;
+  if (!isActivityGroupId(group.id) || typeof group.title !== 'string' ||
+      !group.title.trim() || group.title.trim().length > 200) return undefined;
+  return { id: group.id, title: group.title.trim() };
+}
 
 export function normalizeCellFormat(value: unknown): CellFormat {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -14,6 +27,8 @@ export function normalizeCellFormat(value: unknown): CellFormat {
   if (typeof source.textColor === 'string' && /^#[0-9a-f]{6}$/i.test(source.textColor)) {
     result.textColor = source.textColor.toUpperCase();
   }
+  const activityGroup = normalizeActivityGroup(source.activityGroup);
+  if (activityGroup) result.activityGroup = activityGroup;
   return result;
 }
 

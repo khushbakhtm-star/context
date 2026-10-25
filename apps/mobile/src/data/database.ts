@@ -4,7 +4,7 @@ import { CATEGORIES, categoryById } from '../theme';
 import type { ActivitySegment, MinuteEntry, SearchResult, SyncBinding } from '../types';
 import { addDays, dateKey } from '../utils/time';
 import type { SyncDocument } from '../sync/types';
-import { cellFormatDocument, cellFormatKey, formatFromDocument, normalizeCellFormat, type CellFormat } from '../utils/cell-format';
+import { CELL_FORMAT_PREFIX, cellFormatDocument, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, type CellFormat } from '../utils/cell-format';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -336,12 +336,17 @@ export async function saveMinuteRange(input: {
       .filter(
         (row): row is MinuteRow => Boolean(row && row.category_id === input.categoryId),
       );
-    const matchingRows = [
+    const candidates = [
       existingStart?.category_id === input.categoryId ? existingStart : null,
       previous?.category_id === input.categoryId ? previous : null,
       next?.category_id === input.categoryId ? next : null,
       ...internalMatches,
     ].filter((row): row is MinuteRow => Boolean(row));
+    // Explicit activities remain separate even when their colors match. Editing
+    // a member retains its activity identity; ordinary neighbors never absorb it.
+    const matchingRows = isActivityGroupId(existingStart?.block_id)
+      ? [existingStart!]
+      : candidates.filter((row) => !isActivityGroupId(row.block_id));
     const blockId = matchingRows[0]?.block_id ?? makeId('block');
     const blocksToMerge = [
       ...new Set(
@@ -470,6 +475,10 @@ export async function acknowledgeInlineMinuteLink(item: Pick<PendingInlineMinute
 
 export async function getDaySegments(value: string): Promise<ActivitySegment[]> {
   const entries = await getDayEntries(value);
+  const formats = await getSyncDocuments(`${CELL_FORMAT_PREFIX}${value}:`);
+  const labels = new Map(formats.map((document) => [
+    Number(document.key.slice(`${CELL_FORMAT_PREFIX}${value}:`.length)), formatFromDocument(document.value).activityGroup,
+  ]));
   const segments: ActivitySegment[] = [];
   for (const entry of entries) {
     const previous = segments.at(-1);
@@ -494,7 +503,29 @@ export async function getDaySegments(value: string): Promise<ActivitySegment[]> 
       entries: [entry],
     });
   }
+  for (const segment of segments) {
+    const member = segment.entries.find((entry) => labels.get(entry.minuteIndex)?.id === entry.blockId);
+    if (member) segment.activityTitle = labels.get(member.minuteIndex)!.title;
+  }
   return segments;
+}
+
+/** Resolve labels only on their actual member coordinates, never from stale styling. */
+export async function getActivityTitleForEntries(entries: MinuteEntry[]) {
+  const db = await database();
+  return activityTitleInside(db, entries);
+}
+
+async function activityTitleInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync'>,
+  entries: Pick<MinuteEntry, 'dateKey' | 'minuteIndex' | 'blockId'>[]) {
+  for (const entry of entries) {
+    if (!isActivityGroupId(entry.blockId)) continue;
+    const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
+      cellFormatKey(entry.dateKey, entry.minuteIndex));
+    const label = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null).activityGroup;
+    if (label?.id === entry.blockId) return label.title;
+  }
+  return undefined;
 }
 
 export async function searchEntries(query: string, limit = 100): Promise<SearchResult[]> {
@@ -805,7 +836,16 @@ export async function applySpreadsheetCells(day: string, target: SpreadsheetCell
         }
         await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
       }
-      if (options.formatChanged) await putSyncDocumentInside(txn, cellFormatKey(day, cell.minuteIndex), cellFormatDocument(cell.format));
+      if (options.formatChanged) {
+        const before = expected.find((candidate) => candidate.minuteIndex === cell.minuteIndex)!;
+        if (cell.entry && isActivityGroupId(cell.entry.blockId) &&
+            canonicalValue(before.format.activityGroup ?? null) !== canonicalValue(cell.format.activityGroup ?? null)) {
+          // A title-only edit still changes the calendar event even when no note or color changed.
+          textChanged = true;
+          await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
+        }
+        await putSyncDocumentInside(txn, cellFormatKey(day, cell.minuteIndex), cellFormatDocument(cell.format));
+      }
     }
     if (textChanged) await txn.runAsync(`INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at)
       VALUES (?, 0, NULL, ?) ON CONFLICT(date_key) DO UPDATE SET attempts = 0, last_error = NULL, updated_at = excluded.updated_at`, day, now);
@@ -956,6 +996,8 @@ export async function replaceProjectedMinutes(input: {
   previousStart: number;
   previousEnd: number;
   expectedEntries?: MinuteEntry[];
+  expectedActivityTitle?: string;
+  activityTitle?: string;
   entries: { dateKey: string; minuteIndex: number; text: string; categoryId: string }[];
 }) {
   const db = await database();
@@ -971,6 +1013,27 @@ export async function replaceProjectedMinutes(input: {
         input.previousDate, input.previousStart, endDate, endDate, input.previousEnd);
       if (canonicalValue(current.map(mapMinuteRow)) !== canonicalValue(input.expectedEntries)) {
         throw new Error('The local activity changed during calendar import. Review both versions.');
+      }
+      if (isActivityGroupId(input.blockId) &&
+          await activityTitleInside(txn, current.map(mapMinuteRow)) !== input.expectedActivityTitle) {
+        throw new Error('The local activity title changed during calendar import. Review both versions.');
+      }
+    }
+    // Moving an activity carries only its group label. Ordinary minute styling
+    // stays at its coordinate, and stale labels cannot attach to unrelated notes.
+    if (isActivityGroupId(input.blockId)) {
+      const previousMembers = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE block_id = ?
+        AND (date_key > ? OR (date_key = ? AND minute_index >= ?))
+        AND (date_key < ? OR (date_key = ? AND minute_index <= ?))`,
+        input.blockId, input.previousDate, input.previousDate, input.previousStart, endDate, endDate, input.previousEnd);
+      for (const row of previousMembers) {
+        const key = cellFormatKey(row.date_key, row.minute_index);
+        const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
+        const format = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
+        if (format.activityGroup?.id === input.blockId) {
+          delete format.activityGroup;
+          await putSyncDocumentInside(txn, key, cellFormatDocument(format));
+        }
       }
     }
     await txn.runAsync(`DELETE FROM minute_entries WHERE block_id = ?
@@ -993,6 +1056,13 @@ export async function replaceProjectedMinutes(input: {
           source = 'imported', updated_at = excluded.updated_at`,
         makeId('minute'), entry.dateKey, entry.minuteIndex, entry.text, entry.categoryId,
         input.blockId, now, now);
+      if (isActivityGroupId(input.blockId) && input.activityTitle?.trim()) {
+        const key = cellFormatKey(entry.dateKey, entry.minuteIndex);
+        const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
+        const format = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
+        format.activityGroup = { id: input.blockId, title: input.activityTitle.trim().slice(0, 200) };
+        await putSyncDocumentInside(txn, key, cellFormatDocument(format));
+      }
     }
   });
 }
