@@ -428,6 +428,15 @@ export function TodayScreen({
   useEffect(() => { void reload(); }, [dataVersion, reload]);
 
   useEffect(() => {
+    if (!preferences.selectedCalendarIds.length) return;
+    // Phone calendar sync may finish after the return-to-app refresh burst.
+    const timer = setInterval(() => {
+      if (AppState.currentState === 'active') void reload();
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [reload, preferences.selectedCalendarIds]);
+
+  useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const updateAtMinuteBoundary = () => {
       const current = new Date();

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.5",
-  "sourceAndroidVersionCode": 6,
-  "sourceIosBuildNumber": "6",
+  "version": "0.1.6",
+  "sourceAndroidVersionCode": 7,
+  "sourceIosBuildNumber": "7",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Google Calendar activity colors, solid fills, minute-range Auto fill/Group popups, date-to-current-minute jump, and second-tap details. With no selected cells, + opens the phone calendar event form; selected cells retain range actions. Compact time labels support saved 12h/24h display. Native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
+  "notes": "Fix plans remaining blank after creating an event through +. Native event creation requires calendar read access and an explicitly selected available phone calendar, with Settings guidance when missing. Plans refresh after the native editor closes, when returning to Context, and while Today is visible. Existing calendar selections remain under user control. New native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
 }

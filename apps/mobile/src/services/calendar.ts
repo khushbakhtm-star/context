@@ -110,26 +110,51 @@ export async function loadPlannedEvents(
   );
 }
 
-export async function createPlanInSystemCalendar(value: string, minuteIndex: number) {
-  if (isWeb()) return null;
+export class CalendarPlanConnectionError extends Error {
+  constructor(readonly reason: 'permission' | 'selection' | 'unavailable') {
+    const messages = {
+      permission: 'Allow calendar access before creating a connected plan.',
+      selection: 'Select the phone calendar whose plans should appear in Context.',
+      unavailable: 'No readable phone calendar is available.',
+    };
+    super(messages[reason]);
+    this.name = 'CalendarPlanConnectionError';
+  }
+}
+
+export async function createPlanInSystemCalendar(
+  value: string,
+  minuteIndex: number,
+  selectedCalendarIds: readonly string[],
+) {
+  if (isWeb()) throw new CalendarPlanConnectionError('unavailable');
+  if (await getCalendarPermissionStatus() !== 'granted') {
+    throw new CalendarPlanConnectionError('permission');
+  }
+  const calendars = await listDeviceCalendars();
+  if (calendars.length === 0) throw new CalendarPlanConnectionError('unavailable');
+  const selectedIds = new Set(selectedCalendarIds);
+  if (!calendars.some((calendar) => selectedIds.has(calendar.id))) {
+    throw new CalendarPlanConnectionError('selection');
+  }
   const safeMinute = Math.max(0, Math.min(1439, Math.trunc(minuteIndex)));
   const startDate = localDateAtMinute(value, safeMinute);
   const endDate = new Date(startDate);
   endDate.setMinutes(endDate.getMinutes() + 30);
 
-  return Calendar.createEventInCalendarAsync({
+  return await Calendar.createEventInCalendarAsync({
     title: 'New plan',
     startDate,
     endDate,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  });
+  }, { startNewActivityTask: false });
 }
 
 export async function openPlannedEvent(event: PlannedEvent) {
   if (isWeb()) return null;
   return Calendar.openEventInCalendarAsync(
     { id: event.id, instanceStartDate: event.startDate },
-    { allowsEditing: true },
+    { allowsEditing: true, startNewActivityTask: false },
   );
 }
 

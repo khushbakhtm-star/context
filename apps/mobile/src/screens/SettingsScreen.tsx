@@ -98,7 +98,10 @@ export function SettingsScreen({
       {hasAccess ? (
         <>
           <Text style={styles.sectionTitle}>Calendars used for plans</Text>
-          <Text style={styles.sectionHelp}>Select every calendar you want to appear in Today.</Text>
+          <Text style={styles.sectionHelp}>
+            Check the calendars you want to appear in Today. When creating an event in Google Calendar,
+            save it in one of these checked calendars. Events refresh when you return to Context.
+          </Text>
           <View style={styles.calendarCard}>
             {calendars.map((calendar, index) => {
               const selected = preferences.selectedCalendarIds.includes(calendar.id);

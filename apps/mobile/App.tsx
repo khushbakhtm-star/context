@@ -26,6 +26,7 @@ import {
 } from './src/data/database';
 import {
   configureCalendarProjection,
+  CalendarPlanConnectionError,
   createPlanInSystemCalendar,
   flushPendingActuals,
   getCalendarPermissionStatus,
@@ -43,6 +44,7 @@ import type { AppColors } from './src/theme';
 import type { CalendarPreferences, DeviceCalendar, SearchResult } from './src/types';
 import { dateKey, minuteIndexForDate } from './src/utils/time';
 import { normalizeCalendarZoom } from './src/utils/calendar-layout';
+import { createCalendarRefreshBurst } from './src/utils/calendar-refresh';
 import { getAccounts } from './src/sync/accounts';
 import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
@@ -98,6 +100,7 @@ function AppController() {
   const [preferences, setPreferences] = useState<CalendarPreferences>(DEFAULT_PREFERENCES);
   const [accountCalendarWrites, setAccountCalendarWrites] = useState(false);
   const inlineProjectionChain = useRef<Promise<void>>(Promise.resolve());
+  const planOpenRef = useRef(false);
   const calendarProjectionConfigRef = useRef({ ready, syncActuals: preferences.syncActuals,
     writeCalendarId: preferences.writeCalendarId, accountCalendarWrites });
   calendarProjectionConfigRef.current = { ready, syncActuals: preferences.syncActuals,
@@ -122,6 +125,12 @@ function AppController() {
       setCalendars([]);
     }
   }, []);
+
+  const calendarReturnRefresh = useMemo(() => createCalendarRefreshBurst(() => {
+    void refreshCalendars().then(() => setDataVersion((version) => version + 1));
+  }, () => AppState.currentState === 'active'), [refreshCalendars]);
+
+  useEffect(() => () => calendarReturnRefresh.cancel(), [calendarReturnRefresh]);
 
   useEffect(() => {
     let mounted = true;
@@ -165,21 +174,22 @@ function AppController() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
+        calendarReturnRefresh.cancel();
         // Commit the current cell before the app leaves the foreground. Pending drafts
         // remain in the inline controller if the local database cannot accept a write.
         if (ready) void flushInlineMinutes().catch(() => {});
         return;
       }
-      void refreshCalendars();
+      // Some calendar providers publish a saved event shortly after their editor closes.
+      calendarReturnRefresh.start();
       if (ready) void flushInlineMinutes().catch(() => {});
       void synchronizeAccounts();
       if (preferences.syncActuals && preferences.writeCalendarId && !accountCalendarWrites) {
         void flushPendingActuals(preferences.writeCalendarId);
       }
-      setDataVersion((version) => version + 1);
     });
     return () => subscription.remove();
-  }, [accountCalendarWrites, preferences.syncActuals, preferences.writeCalendarId, ready, refreshCalendars]);
+  }, [accountCalendarWrites, preferences.syncActuals, preferences.writeCalendarId, ready, calendarReturnRefresh]);
 
   useEffect(() => {
     if (!ready || accountCalendarWrites || !preferences.syncActuals || !preferences.writeCalendarId) return;
@@ -318,15 +328,38 @@ function AppController() {
       .then(() => setSetting('calendar.clock-format', value)).catch(() => undefined);
   }
 
+  async function createConnectedPlan() {
+    if (planOpenRef.current) return;
+    planOpenRef.current = true;
+    const current = new Date();
+    const minute = activeDate === dateKey(current) ? minuteIndexForDate(current) : 9 * 60;
+    try {
+      await createPlanInSystemCalendar(activeDate, minute, preferences.selectedCalendarIds);
+      dataChanged();
+      calendarReturnRefresh.start();
+    } catch (error) {
+      if (error instanceof CalendarPlanConnectionError) {
+        await refreshCalendars();
+        Alert.alert('Connect a calendar to Context',
+          error.reason === 'permission'
+            ? 'Allow calendar access in Settings, then check the Google calendar you use for events under Calendars used for plans. Return here and tap + again.'
+            : error.reason === 'selection'
+              ? 'Check the calendar you use for events under Settings → Calendars used for plans. Save your event in that same calendar so it appears in Context.'
+              : 'Enable calendar synchronization for your account in your phone’s settings, then select its calendar in Context Settings.',
+          [{ text: 'Cancel', style: 'cancel' }, { text: 'Open Settings', onPress: () => setTab('settings') }]);
+      } else {
+        Alert.alert('Could not open a calendar', 'Enable a calendar on this phone, then try again.');
+      }
+    } finally {
+      planOpenRef.current = false;
+    }
+  }
+
   function navigate(action: NavigationAction) {
     setMenuOpen(false);
     if (action === 'plan') {
       setTab('today');
-      const current = new Date();
-      const minute = activeDate === dateKey(current) ? minuteIndexForDate(current) : 9 * 60;
-      void createPlanInSystemCalendar(activeDate, minute).then(dataChanged).catch(() => {
-        Alert.alert('Could not open a calendar', 'Enable a calendar on this phone, then try again.');
-      });
+      void createConnectedPlan();
       return;
     }
     if (action === 'today' || action === 'week') {

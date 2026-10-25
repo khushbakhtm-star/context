@@ -16,8 +16,13 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   an activity or add time to reports. Activity color and text color remain separate controls.
 - Hold an inactive cell, then tap the last cell in the same day to select a range and open its
   **Auto fill / Group** popup. The **+** control also opens that popup with editable range times.
-- With no minute selected, **+** opens the phone calendar's new-event form. Its date fields use
-  that calendar app's date picker. With a minute selected, the editing bar's **+** opens range actions.
+- With no minute selected, **+** requires calendar read access and at least one available calendar
+  checked under **Settings → Calendar connection → Calendars used for plans**. If either is missing,
+  Context guides you to Settings; it does not choose calendars for you. The phone calendar's new-event
+  form then opens with its own date picker. Save the event in one of those checked calendars so it
+  appears in Context. Plans refresh after the editor closes, when returning to Context, and while Today
+  remains visible; the phone calendar provider may take time to synchronize. With a minute selected,
+  the editing bar's **+** opens range actions.
 - To make one activity from several cells, tap a minute, choose **+**, set the first and last minute,
   enter an activity title, choose its color, and tap **Group**. The last minute is included. Every
   cell keeps its own note and remains editable directly in the grid. Blank grouped minutes also
