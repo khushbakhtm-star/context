@@ -33,7 +33,11 @@ created in App Store Connect. Standalone builds trust the publisher's GitHub rel
 `EXPO_PUBLIC_CONTEXT_STANDALONE_RELEASE_URL` overrides that exact trusted HTTPS release-page URL.
 A fork must supply its own feed and signing-channel release page. The Apple store ID remains unset
 until that destination exists. Missing required configuration disables checking.
-Native application ID, version, and build number come from `expo-application`; Expo Go is excluded.
+Release identity comes from the embedded Expo configuration; iOS also uses its installed
+Info.plist build number. These builds use source-controlled local version numbers and do not
+enable remote JavaScript updates. Release checks validate the native build identity against the
+source configuration. Expo Go and development bundles are excluded. `expo-application` is omitted
+because its Android dependency graph includes the F-Droid-flagged Install Referrer library.
 
 ## Schema version 1
 

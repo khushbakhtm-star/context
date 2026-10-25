@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Linking, Platform, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
-import * as Application from 'expo-application';
+import Constants from 'expo-constants';
 
 import { getSetting, setSetting } from '../data/database';
 import { colors } from '../theme';
+import { installedReleaseFromEmbeddedConfig } from '../services/installed-release';
 import {
   fetchReleaseManifest, httpsReleaseUrl, releaseNoticeKey, selectAvailableRelease, shouldCheckForUpdate,
-  type InstalledRelease, type ReleaseChannel, type ReleasedUpdate,
+  type ReleaseChannel, type ReleasedUpdate,
 } from '../services/updates';
 
 const SETTINGS_KEY = 'release-updates.enabled';
@@ -23,12 +24,14 @@ const trust = {
   standaloneReleaseUrl: process.env.EXPO_PUBLIC_CONTEXT_STANDALONE_RELEASE_URL ??
     'https://github.com/khushbakhtm-star/context/releases',
 };
-const applicationId = Application.applicationId;
-const platform = Platform.OS;
-const installed: InstalledRelease | null = (platform === 'android' || platform === 'ios') &&
-  applicationId === 'com.context.minuteledger' && Application.nativeApplicationVersion && Application.nativeBuildVersion
-  ? { platform, channel, applicationId, version: Application.nativeApplicationVersion,
-    buildNumber: Application.nativeBuildVersion } : null;
+const installed = installedReleaseFromEmbeddedConfig({
+  platform: Platform.OS,
+  channel,
+  config: Constants.expoConfig,
+  executionEnvironment: Constants.executionEnvironment,
+  development: __DEV__,
+  iosNativeBuildNumber: Constants.platform?.ios?.buildNumber,
+});
 const configured = Boolean(installed && httpsReleaseUrl(manifestUrl) &&
   (channel !== 'standalone' || httpsReleaseUrl(trust.standaloneReleaseUrl)) &&
   (channel !== 'apple-app-store' || /^\d+$/.test(trust.appleAppStoreId ?? '')));

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.0",
-  "sourceAndroidVersionCode": 1,
-  "sourceIosBuildNumber": "1",
+  "version": "0.1.1",
+  "sourceAndroidVersionCode": 2,
+  "sourceIosBuildNumber": "2",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Initial source prerelease. Native phone verification, public store release, and F-Droid review remain pending."
+  "notes": "Minute entry now has a top Save button, close icon, and an unlabeled color panel. Native phone verification, public store release, and F-Droid review remain pending."
 }
