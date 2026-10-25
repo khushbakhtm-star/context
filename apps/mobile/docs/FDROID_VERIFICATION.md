@@ -6,7 +6,67 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
-## Verified 0.1.5 outcome
+## Verified 0.1.6 outcome
+
+[Run 40236099682](https://github.com/khushbakhtm-star/context/actions/runs/40236099682), completed on
+2026-10-25, passed both jobs for **Context 0.1.6, Android version code 7**:
+
+- Application source: `36d94201013d51e41dc0ad4b3814c5ff6d736b7f`.
+- Verification controller: `d89828858dedf3c311f54ed3473431a19b217685`.
+- Public tagged source and signed preview: [v0.1.6](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.6), published on 2026-10-25 at 21:45:41 UTC.
+
+| Check | Observed result |
+| --- | --- |
+| Metadata lint | Exit 0 |
+| Structured source scanner | 0 errors, 0 warnings, 7 informational entries |
+| Normal integrated `fdroid build --test --stop --scan-binary` | Exit 0; built the exact final 0.1.6 source commit (783.05 seconds) |
+| Integrated APK scan | Exit 0 |
+| Independent unsigned Gradle assembly | Exit 0; `BUILD SUCCESSFUL in 12m 16s` |
+| Independent APK identity | `com.context.minuteledger`, version `0.1.6`, code `7` |
+| Independent signature check | Expected unsigned result, exit 1 |
+| Independent APK binary scan | Exit 0 |
+
+All **17 metadata checks and 15 independent native checks** passed.
+The Linux input audit records **100 removed files and 5 narrow source patches**.
+Both actual input audits confirm those counts. The sole hash-checked official Linux Hermes compiler exception and six normal Gradle-wrapper removals account for the seven source informational entries. Its retained compiler SHA-256 is `44d76b1e385b6584380e95e5c63d9f98a4f812cd3cc7aa0500bacd3c39fe0987`. The wrapper script, batch file, and JAR were absent before the successful normal integrated build. No broad scanner exclusion or skipped scan was added.
+
+- [Metadata/integrated-build artifact 12615252744](https://github.com/khushbakhtm-star/context/actions/runs/40236099682/artifacts/12615252744): 47,502 bytes; ZIP SHA-256 `ae7a5341b4761b85ea083143d55b5b83f7ea65f7fb5857473b56a07799f1ff83`.
+- [Independent native artifact 12615337394](https://github.com/khushbakhtm-star/context/actions/runs/40236099682/artifacts/12615337394): 32,567,398 bytes; ZIP SHA-256 `7672c5ff695d63513dea103d8176fdeee6cc5247c988576826ed924224a37194`.
+- Unsigned diagnostic APK: 77,591,624 bytes; SHA-256 `49146a6356ee900dbab163baccf4562d7d0ec8b62234920a7778c1ff74380e48`.
+
+The separately signed [standalone preview APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.6/context-0.1.6-foss-preview.apk)
+is 77,603,928 bytes, SHA-256 `6e238e0eb9e4cf294c452f75194470c23650b5c5762b9524d5eb036d0aad2f8a`.
+Signed preview ZIP integrity, embedded com.context.minuteledger / 0.1.6 / code 7, configured FOSS distribution, and forbidden native-marker checks passed. Its v2 signing certificate matches the public 0.1.5 preview. A certificate continuity check is not full cryptographic signature
+validation. This signed preview is distinct from the unsigned diagnostic artifact and any official
+F-Droid build.
+
+The signed APK's `assets/index.android.bundle` is 2,042,476 bytes, SHA-256
+`ec13b315be35ede6b62252b2956aff67c8a268510931dc3757b53159d32c3b55`.
+Three expected drag-selection/calendar-connection markers were found using ASCII/UTF-8 and
+UTF-16LE checks. The unsigned diagnostic APK also passes all three markers. These checks confirm bundle contents,
+not successful use on a physical phone.
+
+TypeScript, all **201 app tests**, five release guards, and upstream listing validation passed.
+The [v0.1.6 tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40236999059) passed at final source `36d94201013d51e41dc0ad4b3814c5ff6d736b7f`. Store publication jobs were readiness-gated and skipped.
+The calendar fix requires read access and an explicitly selected, available phone calendar before
+opening the native editor, provides Settings guidance, waits for the editor return, and refreshes
+plans afterward. Refresh retries are bounded at one/four seconds; foreground return and a 15-second
+visible-Today poll also reload device plans. No calendar is automatically selected.
+
+The original cell's corner handle selects a same-day range upward or downward with edge scrolling;
+release opens Auto fill / Group. Auto fill copies exact recorded source text to inclusive endpoints
+without requiring a color. Source activity color and formatting are retained unless another Google
+activity color is chosen. Copied minutes remain independently editable and support session Undo.
+An untouched calendar plan title is not recorded source text; enter or record the source minute
+first. A blank source with an explicit color preserves existing target notes. Group retains notes.
+Physical-phone validation remains pending.
+
+These are independent Ubuntu-toolchain build and scan results. They do not establish byte-for-byte
+reproducibility, physical-phone QA, use of F-Droid's official server/VM, official signing, acceptance,
+or catalog publication. Updates belong on existing [packaging request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667).
+Diagnostic artifacts expire after 30 days; source pins, hashes, and observed results remain recorded here.
+
+## Historical verified 0.1.5 outcome
 
 [Run 40217570243](https://github.com/khushbakhtm-star/context/actions/runs/40217570243), completed on
 2026-10-25, passed both jobs for **Context 0.1.5, Android version code 6**:
@@ -208,7 +268,7 @@ fdroiddata configuration tree. It runs:
 
 ```sh
 fdroid lint com.context.minuteledger
-fdroid scanner --force --exit-code --json com.context.minuteledger:6
+fdroid scanner --force --exit-code --json com.context.minuteledger:7
 ```
 
 Scanner `--force` includes disabled builds. It does not suppress scanner findings. The scanner
@@ -223,7 +283,7 @@ A second scratch repository removes only the recipe's `disable` value, verifies 
 command resolves to hash-verified Gradle 9.4.1, and runs a normal integrated attempt:
 
 ```sh
-fdroid build --test --stop --scan-binary com.context.minuteledger:6
+fdroid build --test --stop --scan-binary com.context.minuteledger:7
 ```
 
 The candidate and template stay disabled. The ephemeral copy and its full diff are artifacts.
@@ -320,7 +380,8 @@ tests after each justified packaging change.
 
 | Tool or input | Pinned source |
 | --- | --- |
-| Latest verified app source | Public commit `87cc9df388e4350a51e5e6fc07bcf7a19447c600` (0.1.5/code 6) |
+| Latest verified app source | Public commit `36d94201013d51e41dc0ad4b3814c5ff6d736b7f` (0.1.6/code 7) |
+| Prior verified app source | Public commit `87cc9df388e4350a51e5e6fc07bcf7a19447c600` (0.1.5/code 6) |
 | Prior verified app source | Public commit `95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9` (0.1.4/code 5) |
 | Prior verified app source | Public commit `761264dab4880b91843d6a500591de9c73a9f9f5` (0.1.3/code 4) |
 | Prior verified app source | Public commit `49cb65def8d6f951f5709e8ee5bd581d352b1693` (0.1.2/code 3) |

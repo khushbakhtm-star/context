@@ -5,17 +5,17 @@
 - Source: https://github.com/khushbakhtm-star/context
 - Issue tracker: https://github.com/khushbakhtm-star/context/issues
 - Releases: https://github.com/khushbakhtm-star/context/releases
-- Candidate: 0.1.5 (Android version code 6)
-- Immutable source: 87cc9df388e4350a51e5e6fc07bcf7a19447c600
-- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.5
-- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.5/context-0.1.5-foss-preview.apk
-- Preview APK SHA-256: `2b112699c91a657d15fb0c15d7a30781b46dd962282487fecb9b6369c98fe176`
-- Publication: 2026-10-25 at 17:54:11 UTC; signed APK size 77,590,552 bytes
+- Candidate: 0.1.6 (Android version code 7)
+- Immutable source: 36d94201013d51e41dc0ad4b3814c5ff6d736b7f
+- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.6
+- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.6/context-0.1.6-foss-preview.apk
+- Preview APK SHA-256: `6e238e0eb9e4cf294c452f75194470c23650b5c5762b9524d5eb036d0aad2f8a`
+- Publication: 2026-10-25 at 21:45:41 UTC; signed APK size 77,603,928 bytes
 - License: MIT
 - Summary: Capture your day minute by minute alongside your calendars
 
 This is a new public project requesting packaging review and an inclusion-policy
-assessment. It is not an accepted F-Droid app. The 0.1.5 source tag and signed
+assessment. It is not an accepted F-Droid app. The 0.1.6 source tag and signed
 Android preview are public. Both cold-build verification jobs passed; the older
 0.1.0 release is not the remediated source candidate.
 
@@ -40,8 +40,20 @@ use a solid color fill with a readable foreground. First tap types inline, a sec
 tap opens color/details, and holding an inactive cell then choosing an endpoint
 opens Auto fill / Group. Today's date jumps to the current minute. A measured time
 column supports a saved 12-hour/24-hour preference. With no minute selected, **+**
-opens the phone calendar's new-event form and its date picker. With a minute
-selected, the editing bar's **+** opens Auto fill / Group.
+requires calendar read access and an available phone calendar explicitly checked in
+Settings; missing setup opens connection guidance without selecting calendars for
+the user. The native event editor is awaited on return, then Context refreshes plans
+with bounded retries after one and four seconds. Foreground return also refreshes;
+Today polls device plans every 15 seconds while visible. The event must be saved in
+a checked calendar, and provider synchronization can still take time.
+
+A selected cell's corner handle drags up/down in the same day with edge scrolling;
+release opens Auto fill / Group. Auto fill copies the original recorded text to the
+inclusive range without requiring a color, retaining the source activity/formatting
+unless another Google activity color is chosen. Each copied minute remains editable;
+Undo restores target contents within the editing session. A calendar plan's untouched
+title is not recorded source text and must be entered or recorded first. With a blank
+source, an explicit color-only fill preserves target notes. Group retains each note.
 
 The F-Droid edition omits Google's native sign-in SDK and the Expo development
 client. It has no direct Google account sign-in. Calendars supplied to Android by
@@ -72,7 +84,24 @@ The recipe provisions hash-verified Node 24.19.0 and Gradle 9.4.1, with
 Corepack 0.36.0/pnpm 11.25.0 and OpenJDK 17. It uses system Gradle after F-Droid
 removes wrappers. Required Android SDK packages are recorded in the metadata.
 
-## Latest 0.1.5 verification
+## Latest 0.1.6 verification
+
+- TypeScript, all 201 app tests, five release guards, and upstream listing validation passed.
+- [Cold Linux verification](https://github.com/khushbakhtm-star/context/actions/runs/40236099682) passed both jobs for source `36d94201013d51e41dc0ad4b3814c5ff6d736b7f`, version 0.1.6, code 7.
+- All 17 metadata checks passed. Metadata lint: Exit 0. Structured source scanner: 0 errors, 0 warnings, 7 informational entries.
+- Integrated `fdroid build --test --stop --scan-binary com.context.minuteledger:7`: Exit 0; built the exact final 0.1.6 source commit (783.05 seconds), including its source rescan and APK scan.
+- Independent unsigned assembly/identity/signature/binary checks: All 15 checks passed; assembly `BUILD SUCCESSFUL in 12m 16s`, package `com.context.minuteledger` / 0.1.6 / code 7, expected unsigned signature exit 1, binary scan exit 0.
+- Linux input audit: 100 exact removals and 5 narrow source patches.
+- Unsigned diagnostic APK: 77,591,624 bytes, SHA-256 `49146a6356ee900dbab163baccf4562d7d0ec8b62234920a7778c1ff74380e48`.
+- Tested recipe controller: `d89828858dedf3c311f54ed3473431a19b217685`; [concrete recipe](https://github.com/khushbakhtm-star/context/blob/d89828858dedf3c311f54ed3473431a19b217685/fdroid/metadata/com.context.minuteledger.yml).
+- [Metadata artifact 12615252744](https://github.com/khushbakhtm-star/context/actions/runs/40236099682/artifacts/12615252744) and [native artifact 12615337394](https://github.com/khushbakhtm-star/context/actions/runs/40236099682/artifacts/12615337394); full hashes and scope are in [verification diagnostics](../apps/mobile/docs/FDROID_VERIFICATION.md).
+- Signed preview ZIP integrity, embedded com.context.minuteledger / 0.1.6 / code 7, configured FOSS distribution, and forbidden native-marker checks passed. Its v2 signing certificate matches the public 0.1.5 preview. Certificate continuity is not full cryptographic signature validation. Physical-phone QA remains pending.
+
+These are independent Ubuntu-toolchain diagnostics. Official F-Droid provisioning,
+recipe enablement, signing, inclusion-policy assessment, and publication remain
+maintainer decisions. The candidate remains disabled.
+
+## Historical 0.1.5 verification
 
 - TypeScript, all 183 app tests, five release guards, and upstream listing validation passed.
 - [Cold Linux verification](https://github.com/khushbakhtm-star/context/actions/runs/40217570243) passed both jobs for source `87cc9df388e4350a51e5e6fc07bcf7a19447c600`, version 0.1.5, code 6.
@@ -159,3 +188,5 @@ passed. Store publication jobs remained skipped.
 The [v0.1.5 tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40218692984)
 passed at final source `87cc9df388e4350a51e5e6fc07bcf7a19447c600`. Store publication jobs were
 readiness-gated and skipped.
+
+The [v0.1.6 tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40236999059) passed at final source `36d94201013d51e41dc0ad4b3814c5ff6d736b7f`. Store publication jobs were readiness-gated and skipped.
