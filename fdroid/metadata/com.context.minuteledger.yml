@@ -1,6 +1,6 @@
-# Independently verified source-build candidate; official F-Droid inclusion is pending.
-# Exact tested recipe: controller d89828858dedf3c311f54ed3473431a19b217685.
-# Keep this build disabled for F-Droid maintainer review and server-toolchain approval.
+# Disabled source-build candidate, not a submitted F-Droid listing.
+# Generate a release-specific candidate with prepare-submission.cjs after publishing the source.
+# Keep this build disabled until the unsigned native build and F-Droid scanner are verified.
 AntiFeatures:
   NonFreeNet:
     en-US: Optional Microsoft calendar and OneDrive connections use Microsoft's proprietary services. The local ledger, Android calendars, and user-selected WebDAV storage work without them.
@@ -32,10 +32,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.6
-    versionCode: 7
-    disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: 36d94201013d51e41dc0ad4b3814c5ff6d736b7f
+  - versionName: 0.1.7
+    versionCode: 8
+    disable: Pinned build-server toolchain, dependency scan, and native verification are pending
+    commit: d7cf4d61b7b7e175c18d91693027bde33fef8490
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -68,13 +68,7 @@ Builds:
 
 MaintainerNotes: |-
   The upstream fastlane listing is at repository-root fastlane/metadata/android/en-US.
-  Independent GitHub Ubuntu verification passed against the exact source below.
-  Run https://github.com/khushbakhtm-star/context/actions/runs/40236099682
-  passed metadata lint, source scan (0 errors, 0 warnings), the normal integrated
-  F-Droid build with source and APK scans, and independent unsigned native assembly.
-  The tested recipe is pinned to controller d89828858dedf3c311f54ed3473431a19b217685;
-  this receipt changes comments and review status only. Official server acceptance
-  and inclusion are not claimed. See apps/mobile/docs/FDROID_VERIFICATION.md.
+  This is an unverified source-build candidate, not a completed native build recipe.
   The recipe provisions Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, and Gradle
   9.4.1 with official archive hashes. Android platform 37.0, Build Tools 37.0.0,
   NDK 27.1.12297006, and CMake 3.22.1 must be available in the approved server SDK.
@@ -84,13 +78,11 @@ MaintainerNotes: |-
   All Expo Android modules and core compile from source. Install Referrer is patched
   out of the transitive expo-application module; identity constants remain available.
   The sole scanignore is the policy-permitted official Linux Hermes compiler.
-  Public tag v0.1.6 resolves to 36d94201013d51e41dc0ad4b3814c5ff6d736b7f;
-  tagged-source workflow 40236999059 passed. Native phone validation, public
-  maintenance history or an applicable inclusion exception remain pending.
-  No screenshots are supplied
+  Native phone validation, public maintenance history or an applicable inclusion
+  exception, and release-tag verification are pending. No screenshots are supplied
   until genuine captures of the native app are available.
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.6
-CurrentVersionCode: 7
+CurrentVersion: 0.1.7
+CurrentVersionCode: 8
