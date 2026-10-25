@@ -232,6 +232,7 @@ def metadata_checks(diag, candidate):
     audit = scratch / "build" / APP_ID / "apps/mobile/.context-fdroid-input-audit.json"
     if audit.exists():
         shutil.copyfile(audit, diag.reports / "source-input-audit.json")
+    record_wear_pruning(diag, scratch / "build" / APP_ID / "apps/mobile", "source-wear-pruning.json")
     # Run the real recipe, with only disable removed in an ephemeral copy. The sole
     # compiler exception was strictly validated above; source errors still stop this build.
     original = json.loads(json.dumps(app))
@@ -259,6 +260,19 @@ def metadata_checks(diag, candidate):
                  timeout=3600)
 
 
+def record_wear_pruning(diag, mobile, report_name):
+    inventory = json.loads((mobile / "fdroid/wear-source-inputs.json").read_text())
+    prepared = json.loads((mobile / ".context-fdroid-prepared.json").read_text())
+    expected = {item["path"]: item["sha256"] for item in inventory["files"]}
+    removed = prepared.get("wearRemoved", [])
+    actual = {item["path"]: item["sha256"] for item in removed}
+    if not expected or len(actual) != len(removed) or actual != expected:
+        raise ValueError("Optional Wear source pruning differs from its reviewed inventory")
+    if any((mobile / relative).exists() for relative in expected):
+        raise ValueError("An optional Wear source survived F-Droid preparation")
+    (diag.reports / report_name).write_text(json.dumps({"count": len(removed), "removed": removed}, indent=2) + "\n")
+
+
 def native_checks(diag, source):
     mobile = source / "apps/mobile"
     env = os.environ
@@ -278,6 +292,7 @@ def native_checks(diag, source):
         return
     if not diag.run("unsigned-prepare", ["node", "scripts/prepare-fdroid.cjs", "--unsigned-android"], mobile):
         return
+    record_wear_pruning(diag, mobile, "native-wear-pruning.json")
     shutil.copyfile(mobile / ".context-fdroid-input-audit.json", diag.reports / "native-input-audit.json")
     shutil.copyfile(mobile / "android/gradle.properties", diag.reports / "source-gradle.properties")
     android = mobile / "android"

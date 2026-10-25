@@ -18,7 +18,7 @@ const manifestUrl = process.env.EXPO_PUBLIC_CONTEXT_RELEASE_MANIFEST_URL ??
   'https://raw.githubusercontent.com/khushbakhtm-star/context/main/releases/latest.json';
 const channelSetting = process.env.EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL;
 const channel: ReleaseChannel = channelSetting === 'google-play' || channelSetting === 'apple-app-store' ||
-  channelSetting === 'fdroid' || channelSetting === 'standalone' ? channelSetting :
+  channelSetting === 'fdroid' || channelSetting === 'standalone' || channelSetting === 'standalone-wear' ? channelSetting :
   process.env.EXPO_PUBLIC_CONTEXT_DISTRIBUTION === 'fdroid' ? 'fdroid' : 'standalone';
 const trust = {
   appleAppStoreId: process.env.EXPO_PUBLIC_CONTEXT_APP_STORE_ID,
@@ -34,7 +34,8 @@ const installed = installedReleaseFromEmbeddedConfig({
   iosNativeBuildNumber: Constants.platform?.ios?.buildNumber,
 });
 const configured = Boolean(installed && httpsReleaseUrl(manifestUrl) &&
-  (channel !== 'standalone' || httpsReleaseUrl(trust.standaloneReleaseUrl)) &&
+  (channel !== 'standalone-wear' || Platform.OS === 'android') &&
+  (channel !== 'standalone' && channel !== 'standalone-wear' || httpsReleaseUrl(trust.standaloneReleaseUrl)) &&
   (channel !== 'apple-app-store' || /^\d+$/.test(trust.appleAppStoreId ?? '')));
 
 export type ReleaseUpdatesState = {

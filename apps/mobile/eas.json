@@ -26,6 +26,21 @@
         "buildType": "apk"
       }
     },
+    "wear-preview": {
+      "extends": "base",
+      "distribution": "internal",
+      "credentialsSource": "remote",
+      "autoIncrement": false,
+      "env": {
+        "EXPO_PUBLIC_CONTEXT_DISTRIBUTION": "store",
+        "EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL": "standalone",
+        "CONTEXT_WEAR_BUILD": "1"
+      },
+      "android": {
+        "gradleCommand": ":wear:testReleaseUnitTest :wear:assembleRelease",
+        "applicationArchivePath": "android/wear/build/outputs/apk/release/*.apk"
+      }
+    },
     "production": {
       "extends": "base",
       "distribution": "store",
@@ -63,15 +78,34 @@
       "android": {
         "buildType": "apk"
       }
+    },
+    "wear-phone-preview": {
+      "extends": "base",
+      "distribution": "internal",
+      "credentialsSource": "remote",
+      "autoIncrement": false,
+      "env": {
+        "EXPO_PUBLIC_CONTEXT_DISTRIBUTION": "store",
+        "EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL": "standalone-wear"
+      },
+      "android": {
+        "buildType": "apk"
+      }
     }
   },
   "submit": {
     "production": {
-      "android": { "track": "internal", "releaseStatus": "draft" },
+      "android": {
+        "track": "internal",
+        "releaseStatus": "draft"
+      },
       "ios": {}
     },
     "google-play": {
-      "android": { "track": "internal", "releaseStatus": "draft" }
+      "android": {
+        "track": "internal",
+        "releaseStatus": "draft"
+      }
     },
     "apple-app-store": {
       "ios": {}

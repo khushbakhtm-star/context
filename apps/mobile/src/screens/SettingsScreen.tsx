@@ -7,6 +7,7 @@ import type { CalendarPreferences, DeviceCalendar } from '../types';
 import { ReleaseUpdateSettings, type ReleaseUpdatesState } from '../components/ReleaseUpdates';
 import { checkCalendarConnection, getCalendarReadDiagnostics, type CalendarReadDiagnostics } from '../services/calendar';
 import { dateKey, formatDayHeading } from '../utils/time';
+import { WatchSettings } from '../wear/WatchSettings';
 
 type Props = {
   permissionStatus: string;
@@ -243,6 +244,7 @@ export function SettingsScreen({
           Account calendar writes take over from device writeback to avoid duplicate events.
         </Text>
       </View>
+      <WatchSettings />
       <ReleaseUpdateSettings updates={updates} />
     </ScrollView>
   );

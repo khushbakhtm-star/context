@@ -83,6 +83,34 @@ test('iOS dotted build numbers are supported while incompatible platform/channel
   assert.equal(manifest([{ ...next, platform: 'ios' }, { ...apple, platform: 'android' }]).releases.length, 0);
 });
 
+test('Wear-enabled standalone updates stay isolated from FOSS standalone builds in both directions', () => {
+  const url = 'https://github.com/example/context/releases';
+  const trust = { standaloneReleaseUrl: url };
+  const foss: ReleasedUpdate = { ...next, channel: 'standalone', buildNumber: '10', url };
+  const wear: ReleasedUpdate = { ...next, channel: 'standalone-wear', buildNumber: '11', url };
+  const currentFoss: InstalledRelease = { ...installed, channel: 'standalone' };
+  const currentWear: InstalledRelease = { ...installed, channel: 'standalone-wear' };
+  assert.equal(selectAvailableRelease(manifest([wear]), currentFoss, trust), null);
+  assert.equal(selectAvailableRelease(manifest([foss]), currentWear, trust), null);
+  assert.equal(selectAvailableRelease(manifest([foss, wear]), currentFoss, trust)?.buildNumber, '10');
+  assert.equal(selectAvailableRelease(manifest([foss, wear]), currentWear, trust)?.buildNumber, '11');
+  assert.notEqual(releaseNoticeKey(foss), releaseNoticeKey({ ...foss, channel: 'standalone-wear' }));
+});
+
+test('Wear-enabled releases are Android-only and require the exact configured standalone URL', () => {
+  const wear: ReleasedUpdate = { ...next, channel: 'standalone-wear',
+    url: 'https://github.com/example/context/releases' };
+  const data = manifest([wear, { ...wear, platform: 'ios' }]);
+  assert.equal(data.releases.length, 1);
+  assert.equal(data.releases[0]?.platform, 'android');
+  assert.equal(trustedReleaseLink(wear, {}), false);
+  assert.equal(trustedReleaseLink(wear, { standaloneReleaseUrl: wear.url }), true);
+  assert.equal(trustedReleaseLink({ ...wear, url: wear.url + '/untrusted' }, { standaloneReleaseUrl: wear.url }), false);
+  assert.equal(trustedReleaseLink({ ...wear, platform: 'ios' }, { standaloneReleaseUrl: wear.url }), false);
+  assert.equal(selectAvailableRelease({ schemaVersion: 1, releases: [{ ...wear, platform: 'ios' }] },
+    { ...installed, platform: 'ios', channel: 'standalone-wear' }, { standaloneReleaseUrl: wear.url }), null);
+});
+
 test('the manifest request sends no user payload or credentials and fails silently on network or response errors', async () => {
   const url = 'https://releases.example.org/context/latest.json';
   let requests = 0;

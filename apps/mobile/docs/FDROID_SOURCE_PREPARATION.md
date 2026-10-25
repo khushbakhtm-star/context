@@ -25,6 +25,18 @@ scan before the disabled recipe is enabled.
 6. F-Droid scans the prepared tree, removes wrappers normally, and uses the pinned system Gradle
    9.4.1 command. The recipe no longer depends on deleted `./gradlew` files.
 
+## Optional Wear source removal
+
+The Wear-enabled phone and watch use Google Play services. Before dependency installation,
+preparation verifies and removes all 21 files in `fdroid/wear-source-inputs.json`, including
+the native phone module, watch Gradle/Kotlin sources, and generation plugin. Changed or unknown
+files stop preparation before any removal. The local protocol/UI handles an absent bridge;
+no Wear SDK is installed or linked in this edition. The manifest also excludes `context-wear`
+from autolinking. CI compares the full removal receipt with the committed inventory and checks
+that every listed source is absent, retaining `source-wear-pruning.json` and
+`native-wear-pruning.json` alongside the existing dependency audits. The F-Droid edition does
+not offer this Google-dependent watch transport. No broad scanner exclusion is added.
+
 ## Reviewed inputs
 
 `fdroid/source-inputs.json` records 25 package identities, npm integrity, 101 exact unused file

@@ -176,6 +176,9 @@ test('F-Droid EAS hook prunes only the temporary build checkout and preserves it
   const script = path.join(staging, 'scripts/prepare-fdroid.cjs');
   fs.copyFileSync(path.join(root, 'scripts/prepare-fdroid.cjs'), script);
   fs.copyFileSync(path.join(root, 'scripts/fdroid-source-inputs.cjs'), path.join(staging, 'scripts/fdroid-source-inputs.cjs'));
+  fs.copyFileSync(path.join(root, 'scripts/prune-wear-sources.cjs'), path.join(staging, 'scripts/prune-wear-sources.cjs'));
+  fs.mkdirSync(path.join(staging, 'fdroid'));
+  fs.writeFileSync(path.join(staging, 'fdroid/wear-source-inputs.json'), JSON.stringify({ schemaVersion: 1, files: [] }));
   fs.copyFileSync(path.join(root, 'package.json'), path.join(staging, 'package.json'));
   fs.copyFileSync(path.join(root, 'pnpm-lock.yaml'), path.join(staging, 'pnpm-lock.yaml'));
   const result = spawnSync(process.execPath, [script, '--eas-pre-install'], {

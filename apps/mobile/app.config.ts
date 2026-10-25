@@ -8,12 +8,14 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     : undefined;
   const plugins = (config.plugins ?? []).filter((plugin) => {
     const name = typeof plugin === 'string' ? plugin : plugin[0];
-    return name !== './plugins/with-fdroid-source.cjs' && name !== '@react-native-google-signin/google-signin' &&
+    return name !== './plugins/with-fdroid-source.cjs' && name !== './plugins/with-context-wear.cjs' &&
+      name !== '@react-native-google-signin/google-signin' &&
       (!fdroid || name !== 'expo-dev-client');
   });
   // A source checkout can bundle before credentials are supplied. Real iOS sign-in requires the
   // registered reversed client scheme, injected into the native project at build time.
   if (!fdroid) {
+    plugins.push('./plugins/with-context-wear.cjs');
     if (scheme) plugins.push(['@react-native-google-signin/google-signin', { iosUrlScheme: scheme }]);
     else plugins.push('@react-native-google-signin/google-signin');
   } else {

@@ -592,6 +592,20 @@ export async function setSetting<T>(key: string, value: T) {
   );
 }
 
+/** Device-local transport receipts never enter the encrypted ledger upload stream. */
+export async function listWearReceiptSettings(kind: 'pending' | 'conflict', limit = 100) {
+  const db = await database();
+  const condition = kind === 'pending' ?
+    "CASE WHEN json_valid(value) THEN json_extract(value, '$.pendingAck') ELSE 0 END = 1" :
+    "CASE WHEN json_valid(value) THEN json_extract(value, '$.status') ELSE NULL END = 'conflict'";
+  const rows = await db.getAllAsync<{ key: string; value: string }>(
+    `SELECT key, value FROM settings WHERE key LIKE 'wear.receipt.%' AND ${condition} ORDER BY updated_at LIMIT ?`,
+    Math.max(1, Math.min(100, Math.trunc(limit))));
+  return rows.flatMap((row) => {
+    try { return [{ key: row.key, value: JSON.parse(row.value) as Record<string, unknown> }]; } catch { return []; }
+  });
+}
+
 export async function getSyncBindings(value: string): Promise<SyncBinding[]> {
   const db = await database();
   const rows = await db.getAllAsync<{
@@ -822,7 +836,10 @@ export async function applySpreadsheetCells(day: string, target: SpreadsheetCell
 /** Every coordinate is checked before either date is changed. Cut/Paste and its Undo
  * therefore share one SQLite transaction, including ledger and calendar outboxes. */
 export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[],
-  options: { textChanged: boolean; formatChanged: boolean; canApply?: () => boolean }, guards: SpreadsheetGuard[] = []) {
+  options: { textChanged: boolean; formatChanged: boolean; canApply?: () => boolean;
+    localReceipt?: { key: string; value: Record<string, unknown> } }, guards: SpreadsheetGuard[] = []) {
+  if (options.localReceipt && (!/^wear\.receipt\.[0-9a-f-]{36}$/i.test(options.localReceipt.key) ||
+      JSON.stringify(options.localReceipt.value).length > 4096)) throw new Error('Invalid local watch receipt.');
   const validate = (day: string, cells: SpreadsheetCellState[]) => {
     validateMinuteCellRange({ dateKey: day, startMinute: 0, endMinute: 1439 });
     if (!cells.length || cells.length > 1440 || new Set(cells.map((cell) => cell.minuteIndex)).size !== cells.length ||
@@ -917,6 +934,9 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
       if (dayTextChanged) await txn.runAsync(`INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at)
         VALUES (?, 0, NULL, ?) ON CONFLICT(date_key) DO UPDATE SET attempts = 0, last_error = NULL, updated_at = excluded.updated_at`, day, now);
     }
+    if (options.localReceipt) await txn.runAsync(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      options.localReceipt.key, JSON.stringify(options.localReceipt.value), now);
     requireCurrent();
   });
   return { affectedDates: changes.map((change) => change.day), textChanged };

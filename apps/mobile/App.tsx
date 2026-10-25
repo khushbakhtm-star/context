@@ -51,6 +51,7 @@ import { listCategories } from './src/services/categories';
 import { flushInlineMinutes, retryInlineMinuteLinks, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
 import { subscribeSpreadsheetCommits } from './src/services/spreadsheet';
 import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/ReleaseUpdates';
+import { useWearBridge } from './src/wear/useWearBridge';
 
 type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
 type DayCount = 1 | 3 | 7;
@@ -238,6 +239,15 @@ function AppController() {
     }).catch(() => { /* Keep the current projection settings; account refresh can retry. */ });
     void synchronizeAccounts();
   }, []);
+
+  const watchDataChanged = useCallback((days: string[]) => {
+    dataChanged();
+    const current = calendarProjectionConfigRef.current;
+    if (current.ready && current.syncActuals && current.writeCalendarId && !current.accountCalendarWrites) {
+      void flushPendingActuals(current.writeCalendarId, days);
+    }
+  }, [dataChanged]);
+  useWearBridge(ready, watchDataChanged);
 
   useEffect(() => {
     if (!ready) return;

@@ -1,0 +1,56 @@
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+// EAS writes credentials at its build working directory, which is above the mobile
+// project in a monorepo. Follow its own signing-injection template, not cwd guesses.
+def contextCloudDirectory = System.getenv('EAS_BUILD_WORKINGDIR')
+def contextSigningFile = contextCloudDirectory ? new File(contextCloudDirectory, 'credentials.json') : rootProject.file('../credentials.json')
+
+android {
+    namespace 'com.context.minuteledger.wear'
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId 'com.context.minuteledger'
+        minSdk 30
+        targetSdk rootProject.ext.targetSdkVersion
+        versionCode CONTEXT_VERSION_CODE as int
+        versionName CONTEXT_VERSION_NAME
+    }
+    signingConfigs {
+        release {
+            if (contextSigningFile.exists()) {
+                def credentials = new groovy.json.JsonSlurper().parse(contextSigningFile).android.keystore
+                def keyFile = new File(credentials.keystorePath)
+                storeFile keyFile.isAbsolute() ? keyFile : rootProject.file('../' + credentials.keystorePath)
+                storePassword credentials.keystorePassword
+                keyAlias credentials.keyAlias
+                keyPassword credentials.containsKey('keyPassword') ? credentials.keyPassword : credentials.keystorePassword
+            }
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+    testOptions { unitTests.returnDefaultValues = true }
+}
+
+tasks.matching { it.name == 'validateSigningRelease' }.configureEach {
+    doFirst {
+        if (!contextSigningFile.exists()) {
+            throw new GradleException('Release watch builds require EAS remote signing credentials. Do not generate another key.')
+        }
+    }
+}
+
+dependencies {
+    implementation 'com.google.android.gms:play-services-wearable:20.0.1'
+    testImplementation 'junit:junit:4.13.2'
+}

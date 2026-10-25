@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.7",
-  "sourceAndroidVersionCode": 8,
-  "sourceIosBuildNumber": "8",
+  "version": "0.1.8",
+  "sourceAndroidVersionCode": 9,
+  "sourceIosBuildNumber": "9",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Floating cell actions keep the grid visible. Cut/copy and paste recorded cells across dates with destination replacement confirmation, atomic cut moves, a private in-app clipboard, and session Undo. Correct drag grip offsets and reset Today/Day to one full day. Restore Android calendar task navigation, modernize Android event reading, isolate per-calendar read failures, and add local connection diagnostics. The reported S23 calendar visibility issue is not confirmed resolved. New native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
+  "notes": "Adds an optional Wear OS companion to the Wear-enabled Android edition: scroll each day’s minutes, change dates, and type or dictate current or remembered activities. Watch notes are journaled offline and applied through guarded phone-ledger transactions after explicit Watch consent, with conflict review and durable acknowledgments. The F-Droid source preparation removes the optional Google Wear transport and native watch sources by exact reviewed hashes. Native builds and physical Galaxy Watch7 validation remain pending; store publication and official F-Droid acceptance remain pending."
 }

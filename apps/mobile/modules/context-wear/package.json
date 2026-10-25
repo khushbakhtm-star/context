@@ -1,0 +1,7 @@
+{
+  "name": "context-wear",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optional Android phone bridge for Context Wear OS",
+  "license": "MIT"
+}

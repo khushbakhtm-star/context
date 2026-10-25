@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "modules/context-wear/README.md",
+      "sha256": "7dc7fc311c42f683410ce7f9f9b09a4439def0416f8f384c38adc4f3482dc4d8"
+    },
+    {
+      "path": "modules/context-wear/android/build.gradle",
+      "sha256": "c14d6baa5669864527acc713b1c34a199588798344f160c32ced0d4f1e6f017d"
+    },
+    {
+      "path": "modules/context-wear/android/src/main/AndroidManifest.xml",
+      "sha256": "eb434049977a5e4946b5bd5d943e47ea458e1f38e32bd5e71ca90873eeaa2021"
+    },
+    {
+      "path": "modules/context-wear/android/src/main/java/expo/modules/contextwear/ContextWearListenerService.kt",
+      "sha256": "55deaf288c742aeaaaa2d92464175000580880eb4d45feb44ba0dd06ef531025"
+    },
+    {
+      "path": "modules/context-wear/android/src/main/java/expo/modules/contextwear/ContextWearModule.kt",
+      "sha256": "8f8ff30844a7e702840c77ed3de9f27432ef35057d60737985d6f386f8c67f8a"
+    },
+    {
+      "path": "modules/context-wear/android/src/main/java/expo/modules/contextwear/WearBridge.kt",
+      "sha256": "b42a810a4ffbfb26f3a4b249d4c50d740d796a5a0e3cdaa5453597f054c2a874"
+    },
+    {
+      "path": "modules/context-wear/android/src/main/java/expo/modules/contextwear/WearInbox.kt",
+      "sha256": "3792ea88ee4f90bf75116cc49c50036e8feffd5989914b93c73aa832a59d6e06"
+    },
+    {
+      "path": "modules/context-wear/expo-module.config.json",
+      "sha256": "1821d5766d36996030742645f26fd7af6016ff45cd60040b53507b0bc2959865"
+    },
+    {
+      "path": "modules/context-wear/package.json",
+      "sha256": "dd313c60e2d52802aaaeef00917a3c398d458f6d9721808c07e8853ddfaf2092"
+    },
+    {
+      "path": "plugins/with-context-wear.cjs",
+      "sha256": "3e3adbe76eae37ea39747d2740012f4e2687bd8ca88623eda8a06f01071279b4"
+    },
+    {
+      "path": "wear-support/PROTOCOL.md",
+      "sha256": "7de91a37e08916eeae713a483ac897cf93cebe184278578769fe227545414434"
+    },
+    {
+      "path": "wear-support/README.md",
+      "sha256": "e3eb618edf14b7731e7cf3083b20ff073751e9e54ec62d5bef20bb3641b54ae5"
+    },
+    {
+      "path": "wear-support/watch/build.gradle",
+      "sha256": "476a43f41cdbf067ed2caaa04e2287dfa6e02cdc1247130dd8bedda5bec1b15e"
+    },
+    {
+      "path": "wear-support/watch/src/main/AndroidManifest.xml",
+      "sha256": "0007e689a7358192121128c82b061070448be3317562fd4d73460ded163a0908"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/LedgerRules.kt",
+      "sha256": "187203679ab57145b49d17a4f2535f79e0c4736e72422126b524d649598ad855"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/MinuteActivity.kt",
+      "sha256": "cb0baa92e7b0280ebb463abdad7dd85689d0e18d0f797b7c97479addf3ac214c"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchLayout.kt",
+      "sha256": "472a61f38ff9a521c225e00d0fd9f6a676aa5f318b297e1ea375c30286d0a2aa"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchStore.kt",
+      "sha256": "02559637b6a0f8279e44571148194192e76b63c075be1c0a3f3626e978475633"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchTransport.kt",
+      "sha256": "c419e3d650e93878c8029aad5034c5be8cf37e584a6b50d72930920a80cc01d2"
+    },
+    {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/LedgerRulesTest.kt",
+      "sha256": "120448be685c6d92d9def8c53b5da60dce385d29639a336bd86342e5d83a2a42"
+    },
+    {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/WatchLayoutTest.kt",
+      "sha256": "a02794ee0552124965136afce91feb14862085711bced0199846850bde03bb45"
+    }
+  ]
+}

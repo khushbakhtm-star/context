@@ -1,4 +1,4 @@
-export type ReleaseChannel = 'google-play' | 'apple-app-store' | 'fdroid' | 'standalone';
+export type ReleaseChannel = 'google-play' | 'apple-app-store' | 'fdroid' | 'standalone' | 'standalone-wear';
 export type ReleasePlatform = 'android' | 'ios';
 
 export type InstalledRelease = {
@@ -18,7 +18,7 @@ export type ReleasedUpdate = InstalledRelease & {
 export type ReleaseManifest = { schemaVersion: 1; releases: ReleasedUpdate[] };
 export type ReleaseLinkTrust = { appleAppStoreId?: string; standaloneReleaseUrl?: string };
 
-const CHANNELS: ReleaseChannel[] = ['google-play', 'apple-app-store', 'fdroid', 'standalone'];
+const CHANNELS: ReleaseChannel[] = ['google-play', 'apple-app-store', 'fdroid', 'standalone', 'standalone-wear'];
 const MAX_MANIFEST_BYTES = 128 * 1024;
 export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -72,6 +72,7 @@ export function parseReleaseManifest(value: unknown, now = Date.now()): ReleaseM
           `${entry.publishedAt.slice(0, -1)}.000Z` : entry.publishedAt) ||
         !httpsReleaseUrl(entry.url)) continue;
     if (entry.platform === 'android' && (!/^\d+$/.test(buildNumber) || Number(buildNumber) > 2100000000)) continue;
+    if (entry.channel === 'standalone-wear' && entry.platform !== 'android') continue;
     if ((entry.channel === 'apple-app-store') !== (entry.platform === 'ios') && entry.channel !== 'standalone') continue;
     releases.push({ platform: entry.platform, channel: entry.channel as ReleaseChannel,
       applicationId: entry.applicationId, version: entry.version, buildNumber,
@@ -81,6 +82,7 @@ export function parseReleaseManifest(value: unknown, now = Date.now()): ReleaseM
 }
 
 export function trustedReleaseLink(release: ReleasedUpdate, trust: ReleaseLinkTrust): boolean {
+  if (release.channel === 'standalone-wear' && release.platform !== 'android') return false;
   const url = httpsReleaseUrl(release.url);
   if (!url) return false;
   if (release.channel === 'google-play') {
@@ -105,6 +107,7 @@ export function selectAvailableRelease(
   installed: InstalledRelease,
   trust: ReleaseLinkTrust = {},
 ): ReleasedUpdate | null {
+  if (installed.channel === 'standalone-wear' && installed.platform !== 'android') return null;
   if (!numericParts(installed.version, true) || !numericParts(installed.buildNumber, false)) return null;
   const available = manifest.releases.filter((release) =>
     release.platform === installed.platform && release.channel === installed.channel &&

@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { STATE, digest, writeDetached, assertPrepared, prepareInstalledSources, sourceGradleProperties } = require('./fdroid-source-inputs.cjs');
+const { pruneWearSources } = require('./prune-wear-sources.cjs');
 
 const REMOVED_PACKAGES = ['@react-native-google-signin/google-signin', 'expo-dev-client'];
 
@@ -18,7 +19,7 @@ function createFossManifest(manifest) {
   output.expo.autolinking ??= {};
   output.expo.autolinking.exclude = [...new Set([
     ...(output.expo.autolinking.exclude ?? []), ...REMOVED_PACKAGES,
-    'expo-dev-launcher', 'expo-dev-menu', 'expo-dev-menu-interface',
+    'expo-dev-launcher', 'expo-dev-menu', 'expo-dev-menu-interface', 'context-wear',
   ])];
   output.expo.autolinking.android ??= {};
   output.expo.autolinking.android.buildFromSource = ['.*'];
@@ -66,6 +67,7 @@ function main() {
     const statePath = path.join(root, STATE);
     if (fs.existsSync(statePath)) {
       assertPrepared(root);
+      pruneWearSources(root);
       process.stdout.write('This locked F-Droid build checkout is already prepared.\n');
       return;
     }
@@ -80,10 +82,11 @@ function main() {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     if (manifest.name !== 'context-mobile') throw new Error('This is not the Context mobile package.');
     const lock = createFossLock(fs.readFileSync(lockPath, 'utf8'));
+    const wearRemoved = pruneWearSources(root);
     writeDetached(root, manifestPath, `${JSON.stringify(createFossManifest(manifest), null, 2)}\n`);
     writeDetached(root, lockPath, lock);
     writeDetached(root, statePath, `${JSON.stringify({ schemaVersion: 1, root,
-      mode: ephemeralEasBuild ? 'eas' : 'source', lockSha256: digest(Buffer.from(lock)) }, null, 2)}\n`);
+      mode: ephemeralEasBuild ? 'eas' : 'source', lockSha256: digest(Buffer.from(lock)), wearRemoved }, null, 2)}\n`);
     process.stdout.write('Prepared the F-Droid dependency manifest. Install with the frozen lockfile in this checkout.\n');
   } else if (mode === '--unsigned-android') {
     assertPrepared(root);
