@@ -56,6 +56,17 @@ test('zoom scales both axes and exposes adjacent dates in Day mode without chang
     'buffered adjacent dates remain available when zooming into an edited date');
 });
 
+test('an explicit Day reset clears the zoomed date buffer and restores one full-width day', () => {
+  for (const width of [360, 412, 768]) {
+    const previous = calendarGridLayout(width, 1, 0.5, 1, 65);
+    assert.ok(previous.dayCount > 1);
+    const reset = calendarGridLayout(width, 1, 1, 1, 65);
+    assert.equal(reset.dayCount, 1);
+    assert.equal(reset.dayWidth, width - reset.railWidth);
+    assert.equal(reset.maxOffset, 0);
+  }
+});
+
 test('zoom anchors retain the minute and day under the focal point, and clamp at day boundaries', () => {
   const anchor = { minute: 600, day: 4, viewportX: 220, viewportY: 150 };
   for (const zoom of [0.5, 1, 2.5]) {

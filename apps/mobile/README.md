@@ -15,10 +15,19 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   The **+** control selects a range for grouping, filling, or clearing. Formatting an empty cell does not record
   an activity or add time to reports. Activity color and text color remain separate controls.
 - Tap a cell, then drag its small corner handle up or down within the same day. The grid scrolls
-  when the handle reaches its top or bottom edge. Releasing opens **Auto fill / Group** for the
-  inclusive range; the original cell remains the source even when dragging upward.
-- Hold an inactive cell, then tap the last cell in the same day to select a range and open its
-  **Auto fill / Group** popup. The **+** control also opens that popup with editable range times.
+  when the handle reaches its top or bottom edge. Releasing opens a compact floating
+  **Cut / Copy / Auto fill / Clear** menu while the grid stays visible. The selected range includes
+  both endpoints, and the original cell remains the source even when dragging upward. Choose
+  **Group** in that menu for the activity title/color and editable range times.
+- Hold a cell for the floating actions. Choose **Cut** or **Copy**, navigate to another day or minute,
+  tap the destination, then choose **Paste**. Context asks for **Replace** confirmation if the
+  destination contains entries or formatting. Cut leaves the source intact until Paste moves the
+  cells together in one transaction; **Undo** restores both source and destination within the session.
+  This clipboard stays inside Context and is cleared when the app process ends. Each pasted minute
+  remains independently editable. Record a minute before moving it; an untouched calendar plan is
+  edited through its calendar details.
+- To choose a range without dragging, hold an inactive cell and tap its last minute in the same day.
+  The editing bar's **+** also opens range actions with editable times.
 - With no minute selected, **+** requires calendar read access and at least one available calendar
   checked under **Settings → Calendar connection → Calendars used for plans**. If either is missing,
   Context guides you to Settings; it does not choose calendars for you. The phone calendar's new-event
@@ -26,6 +35,11 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   appears in Context. Plans refresh after the editor closes, when returning to Context, and while Today
   remains visible; the phone calendar provider may take time to synchronize. With a minute selected,
   the editing bar's **+** opens range actions.
+- If plans are missing, use **Settings → Calendar connection → Check connection** for the selected
+  date. It shows per-calendar event counts or error codes; the calendar list also shows available
+  visibility and synchronization flags. Results stay local and omit event titles and descriptions.
+  The Android reader handles calendar failures separately so one failed calendar does not discard
+  other readable plans. The reported S23 visibility problem still needs physical-phone verification.
 - To make one activity from several cells, tap a minute, choose **+**, set the first and last minute,
   enter an activity title, choose its color, and tap **Group**. The last minute is included. Every
   cell keeps its own note and remains editable directly in the grid. Blank grouped minutes also
@@ -44,6 +58,8 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   does not claim to enumerate the current 24-color event picker. Arbitrary new activity hex values are unavailable.
   Historical activity colors remain intact, and text formatting retains its separate palette.
 - Tap today's date number in the header to return to the current minute in today's column.
+- Choose **Today** or **Day** to return to one full day across the screen, resetting the previous
+  zoomed column layout. You can zoom again afterward.
 - Choose **12-hour** or **24-hour** in the calendar header's view menu. The preference is saved
   on this phone. The minute column measures the selected time label and uses minimal padding;
   for example, the 24-hour display shows `13:11` without an AM/PM suffix.

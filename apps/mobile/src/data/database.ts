@@ -4,7 +4,7 @@ import { CATEGORIES, categoryById } from '../theme';
 import type { ActivitySegment, MinuteEntry, SearchResult, SyncBinding } from '../types';
 import { addDays, dateKey } from '../utils/time';
 import type { SyncDocument } from '../sync/types';
-import { CELL_FORMAT_PREFIX, cellFormatDocument, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, type CellFormat } from '../utils/cell-format';
+import { CELL_FORMAT_PREFIX, cellFormatDocument, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, validateMinuteCellRange, type CellFormat } from '../utils/cell-format';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -783,74 +783,143 @@ async function putSyncDocumentInside(txn: Pick<SQLite.SQLiteDatabase, 'runAsync'
 
 export type SpreadsheetCellContent = Pick<MinuteEntry, 'text' | 'categoryId'> &
   Partial<Pick<MinuteEntry, 'id' | 'blockId' | 'createdAt' | 'updatedAt' | 'source'>>;
-export type SpreadsheetCellState = { minuteIndex: number; entry: SpreadsheetCellContent | null; format: CellFormat };
+export type SpreadsheetCellState = { minuteIndex: number; entry: SpreadsheetCellContent | null; format: CellFormat;
+  version?: { minuteRevision: string | null; formatRevision: string | null } };
+export type SpreadsheetDayChange = { day: string; target: SpreadsheetCellState[]; expected: SpreadsheetCellState[] };
+export type SpreadsheetGuard = { day: string; cells: SpreadsheetCellState[] };
+
+/** Read content, formatting, and their ledger revisions from one database snapshot. */
+export async function getSpreadsheetCells(range: { dateKey: string; startMinute: number; endMinute: number }) {
+  validateMinuteCellRange(range);
+  const db = await database();
+  let cells: SpreadsheetCellState[] = [];
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    const rows = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ?`, range.dateKey);
+    const entries = new Map(rows.map((row) => [row.minute_index, row]));
+    const documents = await txn.getAllAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key LIKE ? OR key LIKE ?`,
+      `minute:${range.dateKey}:%`, `${CELL_FORMAT_PREFIX}${range.dateKey}:%`);
+    const byKey = new Map(documents.map((document) => [document.key, document]));
+    cells = Array.from({ length: range.endMinute - range.startMinute + 1 }, (_, offset) => {
+      const minuteIndex = range.startMinute + offset;
+      const row = entries.get(minuteIndex);
+      const minute = byKey.get(`minute:${range.dateKey}:${minuteIndex}`);
+      const format = byKey.get(cellFormatKey(range.dateKey, minuteIndex));
+      return { minuteIndex, entry: row ? mapMinuteRow(row) : null,
+        format: formatFromDocument(format?.value_json ? JSON.parse(format.value_json) : null),
+        version: { minuteRevision: minute?.revision ?? null, formatRevision: format?.revision ?? null } };
+    });
+  });
+  return cells;
+}
 
 /** Atomic sheet commands use normal minute triggers and the exact inline-calendar outbox.
  * Formatting is independent metadata, so a formatted empty cell remains unrecorded time. */
 export async function applySpreadsheetCells(day: string, target: SpreadsheetCellState[],
   expected: SpreadsheetCellState[], options: { textChanged: boolean; formatChanged: boolean }) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !target.length || target.length > 1440 ||
-      target.length !== expected.length || new Set(target.map((cell) => cell.minuteIndex)).size !== target.length ||
-      target.some((cell, index) => !Number.isInteger(cell.minuteIndex) || cell.minuteIndex < 0 || cell.minuteIndex > 1439 ||
-        cell.minuteIndex !== expected[index]?.minuteIndex)) throw new Error('Invalid spreadsheet cell range.');
+  return applySpreadsheetTransaction([{ day, target, expected }], options);
+}
+
+/** Every coordinate is checked before either date is changed. Cut/Paste and its Undo
+ * therefore share one SQLite transaction, including ledger and calendar outboxes. */
+export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[],
+  options: { textChanged: boolean; formatChanged: boolean; canApply?: () => boolean }, guards: SpreadsheetGuard[] = []) {
+  const validate = (day: string, cells: SpreadsheetCellState[]) => {
+    validateMinuteCellRange({ dateKey: day, startMinute: 0, endMinute: 1439 });
+    if (!cells.length || cells.length > 1440 || new Set(cells.map((cell) => cell.minuteIndex)).size !== cells.length ||
+        cells.some((cell) => !Number.isInteger(cell.minuteIndex) || cell.minuteIndex < 0 || cell.minuteIndex > 1439)) {
+      throw new Error('Invalid spreadsheet cell range.');
+    }
+  };
+  if (!changes.length || changes.length > 2 || new Set(changes.map((change) => change.day)).size !== changes.length) {
+    throw new Error('Invalid spreadsheet transaction.');
+  }
+  for (const change of changes) {
+    validate(change.day, change.target); validate(change.day, change.expected);
+    if (change.target.length !== change.expected.length || change.target.some((cell, index) =>
+      cell.minuteIndex !== change.expected[index]?.minuteIndex)) throw new Error('Invalid spreadsheet cell range.');
+  }
+  for (const guard of guards) validate(guard.day, guard.cells);
   const db = await database();
   const now = new Date().toISOString();
   let textChanged = false;
   await db.withExclusiveTransactionAsync(async (txn) => {
-    const liveRows = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ?`, day);
-    const byMinute = new Map(liveRows.map((row) => [row.minute_index, row]));
+    const byDay = new Map<string, Map<number, MinuteRow>>();
+    for (const day of new Set([...changes.map((change) => change.day), ...guards.map((guard) => guard.day)])) {
+      const rows = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ?`, day);
+      byDay.set(day, new Map(rows.map((row) => [row.minute_index, row])));
+    }
     const semantic = (entry: SpreadsheetCellContent | null) => entry ?
       canonicalValue({ text: entry.text.trim(), categoryId: entry.categoryId }) : 'null';
-    for (let index = 0; index < target.length; index += 1) {
-      const cell = target[index]!;
-      const before = expected[index]!;
-      const row = byMinute.get(cell.minuteIndex);
+    const check = async (day: string, before: SpreadsheetCellState, strict: boolean) => {
+      const row = byDay.get(day)!.get(before.minuteIndex);
       if (options.textChanged && (semantic(row ? mapMinuteRow(row) : null) !== semantic(before.entry) ||
           Boolean(before.entry?.blockId && row?.block_id !== before.entry.blockId))) {
         throw new Error('A selected minute changed. Refresh it before applying this edit.');
       }
       if (options.formatChanged) {
         const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
-          cellFormatKey(day, cell.minuteIndex));
+          cellFormatKey(day, before.minuteIndex));
         const format = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
         if (canonicalValue(format) !== canonicalValue(normalizeCellFormat(before.format))) {
           throw new Error('A selected cell format changed. Refresh it before applying this edit.');
         }
       }
-    }
-    for (const cell of target) {
-      const row = byMinute.get(cell.minuteIndex);
-      if (options.textChanged && (semantic(row ? mapMinuteRow(row) : null) !== semantic(cell.entry) ||
-          Boolean(row && cell.entry?.blockId && row.block_id !== cell.entry.blockId))) {
-        textChanged = true;
-        if (!cell.entry) {
-          await txn.runAsync(`DELETE FROM minute_entries WHERE date_key = ? AND minute_index = ?`, day, cell.minuteIndex);
-        } else {
-          await txn.runAsync(`INSERT INTO minute_entries
-            (id, date_key, minute_index, text, category_id, block_id, source, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?)
-            ON CONFLICT(date_key, minute_index) DO UPDATE SET text = excluded.text,
-              category_id = excluded.category_id, block_id = excluded.block_id, source = 'manual', updated_at = excluded.updated_at`,
-            row?.id ?? cell.entry.id ?? makeId('minute'), day, cell.minuteIndex, cell.entry.text.trim(), cell.entry.categoryId,
-            cell.entry.blockId ?? row?.block_id ?? makeId('block'), cell.entry.createdAt ?? row?.created_at ?? now, now);
+      if (strict) {
+        const minute = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
+          `minute:${day}:${before.minuteIndex}`);
+        const format = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
+          cellFormatKey(day, before.minuteIndex));
+        if (!before.version || (minute?.revision ?? null) !== before.version.minuteRevision ||
+            (format?.revision ?? null) !== before.version.formatRevision) {
+          throw new Error('A copied or destination cell changed. Select it again before pasting.');
         }
-        await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
       }
-      if (options.formatChanged) {
-        const before = expected.find((candidate) => candidate.minuteIndex === cell.minuteIndex)!;
-        if (cell.entry && isActivityGroupId(cell.entry.blockId) &&
-            canonicalValue(before.format.activityGroup ?? null) !== canonicalValue(cell.format.activityGroup ?? null)) {
-          // A title-only edit still changes the calendar event even when no note or color changed.
-          textChanged = true;
+    };
+    for (const { day, expected } of changes) for (const before of expected) await check(day, before, false);
+    for (const { day, cells } of guards) for (const before of cells) await check(day, before, true);
+    const requireCurrent = () => {
+      if (options.canApply && !options.canApply()) throw new Error('Paste was canceled. Select Paste again.');
+    };
+    for (const { day, target, expected } of changes) {
+      const byMinute = byDay.get(day)!;
+      const expectedByMinute = new Map(expected.map((cell) => [cell.minuteIndex, cell]));
+      let dayTextChanged = false;
+      for (const cell of target) {
+        requireCurrent();
+        const row = byMinute.get(cell.minuteIndex);
+        if (options.textChanged && (semantic(row ? mapMinuteRow(row) : null) !== semantic(cell.entry) ||
+            Boolean(row && cell.entry?.blockId && row.block_id !== cell.entry.blockId))) {
+          textChanged = true; dayTextChanged = true;
+          if (!cell.entry) {
+            await txn.runAsync(`DELETE FROM minute_entries WHERE date_key = ? AND minute_index = ?`, day, cell.minuteIndex);
+          } else {
+            await txn.runAsync(`INSERT INTO minute_entries
+              (id, date_key, minute_index, text, category_id, block_id, source, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?)
+              ON CONFLICT(date_key, minute_index) DO UPDATE SET text = excluded.text,
+                category_id = excluded.category_id, block_id = excluded.block_id, source = 'manual', updated_at = excluded.updated_at`,
+              row?.id ?? cell.entry.id ?? makeId('minute'), day, cell.minuteIndex, cell.entry.text.trim(), cell.entry.categoryId,
+              cell.entry.blockId ?? row?.block_id ?? makeId('block'), cell.entry.createdAt ?? row?.created_at ?? now, now);
+          }
           await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
         }
-        await putSyncDocumentInside(txn, cellFormatKey(day, cell.minuteIndex), cellFormatDocument(cell.format));
+        if (options.formatChanged) {
+          const before = expectedByMinute.get(cell.minuteIndex)!;
+          if (cell.entry && isActivityGroupId(cell.entry.blockId) &&
+              canonicalValue(before.format.activityGroup ?? null) !== canonicalValue(cell.format.activityGroup ?? null)) {
+            // A title-only edit still changes the calendar event even when no note or color changed.
+            textChanged = true; dayTextChanged = true;
+            await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
+          }
+          await putSyncDocumentInside(txn, cellFormatKey(day, cell.minuteIndex), cellFormatDocument(cell.format));
+        }
       }
+      if (dayTextChanged) await txn.runAsync(`INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at)
+        VALUES (?, 0, NULL, ?) ON CONFLICT(date_key) DO UPDATE SET attempts = 0, last_error = NULL, updated_at = excluded.updated_at`, day, now);
     }
-    if (textChanged) await txn.runAsync(`INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at)
-      VALUES (?, 0, NULL, ?) ON CONFLICT(date_key) DO UPDATE SET attempts = 0, last_error = NULL, updated_at = excluded.updated_at`, day, now);
+    requireCurrent();
   });
-  return { affectedDates: [day], textChanged };
+  return { affectedDates: changes.map((change) => change.day), textChanged };
 }
 
 export async function getDocumentsForUpload(storageKey: string, limit = 200) {

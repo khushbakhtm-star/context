@@ -1,4 +1,5 @@
-import { applySpreadsheetCells, getDayEntries, getDaySegments, getEntriesBetween, getSyncDocuments, type SpreadsheetCellState } from '../data/database';
+import { applySpreadsheetTransaction, getSpreadsheetCells, getDaySegments, getEntriesBetween, getSyncDocuments,
+  type SpreadsheetCellState, type SpreadsheetGuard } from '../data/database';
 import { inlineMinuteDrafts, retryInlineMinuteLinks } from './inline-minutes';
 import { CELL_FORMAT_PREFIX, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, validateMinuteCellRange,
   type CellFormat, type MinuteCellRange } from '../utils/cell-format';
@@ -20,7 +21,15 @@ export async function getDayActivityGroups(day: string): Promise<ActivityGroup[]
 }
 type CellState = SpreadsheetCellState & { display?: InlineMinuteValue };
 type Command = { day: string; before: Promise<CellState[]>; after: CellState[];
-  textChanged: boolean; formatChanged: boolean; draftKey?: string; draftRevision?: number };
+  textChanged: boolean; formatChanged: boolean; draftKey?: string; draftRevision?: number;
+  patches?: { day: string; before: CellState[]; after: CellState[] }[]; guards?: SpreadsheetGuard[];
+  canApply?: () => boolean; applied?: boolean };
+
+export type SpreadsheetClipboard = { mode: 'copy' | 'cut'; range: MinuteCellRange; count: number; token: string };
+export type MinutePasteDestination = { dateKey: string; startMinute: number };
+export type MinutePastePreview = { token: string; range: MinuteCellRange; occupiedCount: number; mode: 'copy' | 'cut' };
+type ClipboardRecord = SpreadsheetClipboard & { cells: CellState[] };
+type PasteRecord = MinutePastePreview & { clipboardToken: string; before: CellState[] };
 type Typing = { key: string; command: Command; lastAt: number };
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -37,12 +46,9 @@ export async function getDayCellFormats(day: string): Promise<Map<number, CellFo
 }
 
 async function readCells(range: MinuteCellRange): Promise<CellState[]> {
-  const [entries, formats] = await Promise.all([getDayEntries(range.dateKey), getDayCellFormats(range.dateKey)]);
-  const entryByMinute = new Map(entries.map((entry) => [entry.minuteIndex, entry]));
-  return Array.from({ length: range.endMinute - range.startMinute + 1 }, (_, offset) => {
-    const minuteIndex = range.startMinute + offset;
-    const display = inlineMinuteDrafts.get(range.dateKey, minuteIndex);
-    return { minuteIndex, entry: entryByMinute.get(minuteIndex) ?? null, format: formats.get(minuteIndex) ?? {},
+  return (await getSpreadsheetCells(range)).map((cell) => {
+    const display = inlineMinuteDrafts.get(range.dateKey, cell.minuteIndex);
+    return { ...cell,
       ...(display ? { display: valueOf(display) } : {}) };
   });
 }
@@ -67,6 +73,8 @@ class SpreadsheetEditor {
   private commits = new Set<(event: SpreadsheetCommit) => void>();
   private operations: Promise<unknown> = Promise.resolve();
   private deferredEdits = new Map<string, { day: string; minute: number; changes: Partial<InlineMinuteValue> }>();
+  private clipboard: ClipboardRecord | null = null;
+  private pastePreview: PasteRecord | null = null;
 
   constructor() {
     inlineMinuteDrafts.subscribeCommits((value, result) => {
@@ -86,7 +94,13 @@ class SpreadsheetEditor {
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   subscribeCommits(listener: (event: SpreadsheetCommit) => void) { this.commits.add(listener); return () => { this.commits.delete(listener); }; }
   snapshot() { return { canUndo: Boolean(this.typing || this.undoStack.length), canRedo: this.redoStack.length > 0,
-    busy: this.busy, formatVersion: this.formatVersion }; }
+    busy: this.busy, formatVersion: this.formatVersion, clipboard: this.getClipboard() }; }
+  getClipboard(): SpreadsheetClipboard | null {
+    if (!this.clipboard) return null;
+    const { mode, range, count, token } = this.clipboard;
+    return { mode, range: { ...range }, count, token };
+  }
+  clearClipboard() { this.clipboard = null; this.pastePreview = null; this.notify(); }
   private notify() { for (const listener of this.listeners) { try { listener(); } catch { /* stale observers are isolated */ } } }
   private boundary() {
     if (!this.typing) return;
@@ -176,13 +190,17 @@ class SpreadsheetEditor {
   }
   private async apply(command: Command, undo: boolean) {
     const before = await command.before;
-    const target = undo ? before : command.after;
-    const expected = undo ? command.after : before;
-    const result = await inlineMinuteDrafts.runExclusive(() => applySpreadsheetCells(command.day, target, expected,
-      { textChanged: command.textChanged, formatChanged: command.formatChanged }));
+    const patches = command.patches ?? [{ day: command.day, before, after: command.after }];
+    const changes = patches.map((patch) => ({ day: patch.day,
+      target: undo ? patch.before : patch.after, expected: undo ? patch.after : patch.before }));
+    const result = await inlineMinuteDrafts.runExclusive(() => applySpreadsheetTransaction(changes,
+      { textChanged: command.textChanged, formatChanged: command.formatChanged,
+        canApply: !undo && !command.applied ? command.canApply : undefined },
+      !undo && !command.applied ? command.guards : undefined));
+    command.applied = true;
     if (command.textChanged) {
-      inlineMinuteDrafts.rebaseCommitted(target.map((cell) => cell.display ?? {
-        dateKey: command.day, minuteIndex: cell.minuteIndex, text: cell.entry?.text ?? '',
+      for (const { day, target } of changes) inlineMinuteDrafts.rebaseCommitted(target.map((cell) => cell.display ?? {
+        dateKey: day, minuteIndex: cell.minuteIndex, text: cell.entry?.text ?? '',
         categoryId: cell.entry?.categoryId ?? 'unaccounted', keepColor: Boolean(cell.entry && !cell.entry.text.trim()),
       }));
     }
@@ -266,6 +284,92 @@ class SpreadsheetEditor {
         textChanged: true, formatChanged: true });
     });
   }
+  copy(range: MinuteCellRange, mode: 'copy' | 'cut') {
+    validateMinuteCellRange(range);
+    return this.enqueue(async () => {
+      const cells = clone(await readCells(range));
+      if (cells.every((cell) => !cell.entry && Object.keys(cell.format).length === 0)) {
+        throw new Error('There is no recorded minute or formatting to copy. Record the source minute first.');
+      }
+      this.clipboard = { mode, range: { ...range }, count: cells.length,
+        token: this.newToken('clipboard'), cells };
+      this.pastePreview = null; this.notify();
+      return this.getClipboard()!;
+    });
+  }
+  private newToken(prefix: string) { return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`; }
+  private destinationRange(destination: MinutePasteDestination, clipboard: ClipboardRecord) {
+    return validateMinuteCellRange({ dateKey: destination.dateKey, startMinute: destination.startMinute,
+      endMinute: destination.startMinute + clipboard.count - 1 });
+  }
+  private async preparePasteInside(destination: MinutePasteDestination) {
+    const clipboard = this.clipboard;
+    if (!clipboard) throw new Error('Copy or cut some cells before pasting.');
+    const range = this.destinationRange(destination, clipboard);
+    const before = clone(await readCells(range));
+    const preview: PasteRecord = { token: this.newToken('paste'), range, mode: clipboard.mode,
+      clipboardToken: clipboard.token, before,
+      occupiedCount: before.filter((cell) => Boolean(cell.entry) || Object.keys(cell.format).length > 0).length };
+    this.pastePreview = preview;
+    return { token: preview.token, range: { ...range }, occupiedCount: preview.occupiedCount, mode: preview.mode };
+  }
+  preparePaste(destination: MinutePasteDestination) { return this.enqueue(() => this.preparePasteInside(destination)); }
+  paste(destination: MinutePasteDestination, options: { previewToken?: string } = {}) {
+    return this.enqueue(async () => {
+      const clipboard = this.clipboard;
+      if (!clipboard) throw new Error('Copy or cut some cells before pasting.');
+      const range = this.destinationRange(destination, clipboard);
+      if (!options.previewToken) {
+        const preview = await this.preparePasteInside(destination);
+        if (preview.occupiedCount) throw new Error('The destination contains entries or formatting. Review the destination before replacing it.');
+      }
+      const preview = this.pastePreview;
+      if (!preview || (options.previewToken && options.previewToken !== preview.token) ||
+          preview.clipboardToken !== clipboard.token || preview.range.dateKey !== range.dateKey ||
+          preview.range.startMinute !== range.startMinute || preview.range.endMinute !== range.endMinute) {
+        throw new Error('The clipboard or destination changed. Select Paste again.');
+      }
+      const changes = new Map<string, { before: Map<number, CellState>; after: Map<number, CellState> }>();
+      const changeFor = (day: string) => {
+        if (!changes.has(day)) changes.set(day, { before: new Map(), after: new Map() });
+        return changes.get(day)!;
+      };
+      if (clipboard.mode === 'cut') {
+        const source = changeFor(clipboard.range.dateKey);
+        for (const cell of clipboard.cells) {
+          source.before.set(cell.minuteIndex, clone(cell));
+          source.after.set(cell.minuteIndex, { minuteIndex: cell.minuteIndex, entry: null, format: {} });
+        }
+      }
+      const target = changeFor(range.dateKey);
+      const blocks = new Map<string, string>();
+      for (let offset = 0; offset < clipboard.count; offset += 1) {
+        const minuteIndex = range.startMinute + offset;
+        if (!target.before.has(minuteIndex)) target.before.set(minuteIndex, clone(preview.before[offset]!));
+        const cell = clipboard.cells[offset]!;
+        const format = clone(cell.format); delete format.activityGroup;
+        let entry = null;
+        if (cell.entry) {
+          const original = cell.entry.blockId ?? `minute_${offset}`;
+          if (!blocks.has(original)) blocks.set(original, this.newToken('sheet'));
+          // Pasted cells have a new local identity. A partial group is not a move
+          // of the original whole calendar activity or its other minute members.
+          entry = { text: cell.entry.text, categoryId: cell.entry.categoryId, blockId: blocks.get(original)! };
+        }
+        target.after.set(minuteIndex, { minuteIndex, entry, format });
+      }
+      const patches = [...changes].map(([day, values]) => ({ day,
+        before: [...values.before.values()].sort((a, b) => a.minuteIndex - b.minuteIndex),
+        after: [...values.after.values()].sort((a, b) => a.minuteIndex - b.minuteIndex) }));
+      const guards: SpreadsheetGuard[] = [{ day: range.dateKey, cells: preview.before }];
+      if (clipboard.mode === 'cut') guards.push({ day: clipboard.range.dateKey, cells: clipboard.cells });
+      await this.perform({ day: range.dateKey, before: Promise.resolve([]), after: [], patches, guards,
+        textChanged: true, formatChanged: true, canApply: () => this.clipboard?.token === clipboard.token });
+      this.pastePreview = null;
+      if (clipboard.mode === 'cut' && this.clipboard?.token === clipboard.token) this.clipboard = null;
+      this.notify();
+    });
+  }
   undo() { return this.enqueue(async () => {
     const command = this.undoStack.at(-1); if (!command) return;
     await this.apply(command, true); this.undoStack.pop(); this.redoStack.push(command); this.notify();
@@ -286,4 +390,10 @@ export const clearMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.cl
 export const groupMinuteRange = (range: MinuteCellRange, input: { title: string; categoryId: string }) => spreadsheetEditor.group(range, input);
 export const undoSpreadsheetEdit = () => spreadsheetEditor.undo();
 export const redoSpreadsheetEdit = () => spreadsheetEditor.redo();
+export const copyMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.copy(range, 'copy');
+export const cutMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.copy(range, 'cut');
+export const prepareMinutePaste = (destination: MinutePasteDestination) => spreadsheetEditor.preparePaste(destination);
+export const pasteMinuteRange = (destination: MinutePasteDestination, options?: { previewToken?: string }) => spreadsheetEditor.paste(destination, options);
+export const getSpreadsheetClipboard = () => spreadsheetEditor.getClipboard();
+export const clearSpreadsheetClipboard = () => spreadsheetEditor.clearClipboard();
 export const subscribeSpreadsheetCommits = (listener: (event: SpreadsheetCommit) => void) => spreadsheetEditor.subscribeCommits(listener);

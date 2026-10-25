@@ -38,6 +38,8 @@ export type DeviceCalendar = {
   allowsModifications: boolean;
   sourceName: string;
   isPrimary: boolean;
+  isVisible?: boolean;
+  isSynced?: boolean;
 };
 
 export type PlannedEvent = {

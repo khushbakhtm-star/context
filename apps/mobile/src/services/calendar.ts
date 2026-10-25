@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import * as Calendar from 'expo-calendar/legacy';
+import * as CalendarRead from 'expo-calendar';
 
 import {
   deleteSyncBinding,
@@ -46,7 +47,6 @@ export async function listDeviceCalendars(): Promise<DeviceCalendar[]> {
   if (isWeb()) return [];
   const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
   return calendars
-    .filter((calendar) => calendar.isVisible !== false && calendar.isSynced !== false)
     .map((calendar) => ({
       id: calendar.id,
       title: calendar.title,
@@ -54,6 +54,8 @@ export async function listDeviceCalendars(): Promise<DeviceCalendar[]> {
       allowsModifications: calendar.allowsModifications,
       sourceName: calendar.source?.name || calendar.ownerAccount || 'On this device',
       isPrimary: calendar.isPrimary ?? false,
+      isVisible: calendar.isVisible,
+      isSynced: calendar.isSynced,
     }))
     .sort((left, right) => {
       if (left.isPrimary !== right.isPrimary) return left.isPrimary ? -1 : 1;
@@ -61,54 +63,185 @@ export async function listDeviceCalendars(): Promise<DeviceCalendar[]> {
     });
 }
 
-export async function loadPlannedEvents(
+export type CalendarReadFailure = { calendarId: string; code: string };
+export type CalendarReadSource = 'readmodern' | 'legacy';
+export type CalendarReadStatus = {
+  calendarId: string;
+  source: CalendarReadSource;
+  status: 'ok' | 'failed' | 'invalid-events';
+  queriedEvents: number;
+  acceptedEvents: number;
+  timedEvents: number;
+  allDayEvents: number;
+  discardedInvalidTimes: number;
+  discardedInvalidIdentities: number;
+  outsideDayEvents: number;
+  isVisible?: boolean;
+  isSynced?: boolean;
+  errorCode?: string;
+};
+export type CalendarReadDiagnostics = {
+  dateKey: string;
+  checkedAt: string;
+  selectedCalendarIds: string[];
+  calendars: CalendarReadStatus[];
+  totalPlans: number;
+  failedCalendarCount: number;
+};
+export type PlannedEventsResult = { plans: PlannedEvent[]; failures: CalendarReadFailure[] };
+
+export class CalendarReadError extends Error {
+  constructor(readonly partialPlans: PlannedEvent[], readonly failures: CalendarReadFailure[]) {
+    super('Some selected calendar plans could not be read. Check the calendar connection details.');
+    this.name = 'CalendarReadError';
+  }
+}
+
+let calendarReadChain: Promise<void> = Promise.resolve();
+let calendarReadDiagnostics: CalendarReadDiagnostics | null = null;
+
+/** Metadata only: no event titles, descriptions, attendees, or account labels are retained. */
+export function getCalendarReadDiagnostics(): CalendarReadDiagnostics | null {
+  return calendarReadDiagnostics ? { ...calendarReadDiagnostics,
+    selectedCalendarIds: [...calendarReadDiagnostics.selectedCalendarIds],
+    calendars: calendarReadDiagnostics.calendars.map((calendar) => ({ ...calendar })) } : null;
+}
+
+function calendarReadErrorCode(error: unknown) {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : null;
+  return typeof code === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(code)
+    ? code : 'ERR_CALENDAR_READ_FAILED';
+}
+
+function modernReadUnavailable(error: unknown) {
+  if (typeof error !== 'object' || error === null || !('code' in error) || !('message' in error)) return false;
+  // Only Expo's method-unavailability error permits fallback. A permission or
+  // provider error must remain visible rather than becoming a second, empty read.
+  return error.code === 'ERR_UNAVAILABLE' && typeof error.message === 'string' &&
+    error.message.startsWith('The method or property Calendar.listEvents is not available on ');
+}
+
+type ReadEvent = {
+  readonly id?: unknown;
+  readonly calendarId?: unknown;
+  readonly title?: unknown;
+  readonly notes?: unknown;
+  readonly startDate?: unknown;
+  readonly endDate?: unknown;
+  readonly allDay?: unknown;
+};
+
+function readEventDate(value: unknown) {
+  if (value instanceof Date) return new Date(value.getTime());
+  return typeof value === 'string' || typeof value === 'number' ? new Date(value) : new Date(NaN);
+}
+
+/**
+ * Read each selected calendar independently. The modern Android mapper ignores
+ * empty RRULE strings and lets the provider return overlapping instances, unlike
+ * the legacy mapper/query. Serialize native reads and property extraction because
+ * both installed Android APIs use a shared, non-thread-safe date formatter.
+ */
+export function loadPlannedEventsResult(
   calendarIds: string[],
   value: string,
   calendars: DeviceCalendar[],
-): Promise<PlannedEvent[]> {
-  if (isWeb() || calendarIds.length === 0) return [];
-  const dayStart = parseDateKey(value);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = addDays(dayStart, 1);
-  dayEnd.setHours(0, 0, 0, 0);
-  // Android's legacy Calendar Provider query returns only events fully contained in the
-  // requested range. Expand the query so ordinary overnight events (for example 23:00-06:00
-  // sleep) are present, then apply the correct overlap filter ourselves.
-  const queryStart = addDays(dayStart, -1);
-  queryStart.setHours(0, 0, 0, 0);
-  const queryEnd = addDays(dayEnd, 1);
-  queryEnd.setHours(0, 0, 0, 0);
-  const colorByCalendar = new Map(calendars.map((calendar) => [calendar.id, calendar.color]));
-  const events = await Calendar.getEventsAsync(calendarIds, queryStart, queryEnd);
-  const uniqueEvents = new Map<string, PlannedEvent>();
-  for (const event of events) {
-    const plannedEvent = {
-      id: event.id,
-      calendarId: event.calendarId,
-      title: event.title || 'Untitled event',
-      notes: event.notes || undefined,
-      color: colorByCalendar.get(event.calendarId) ?? '#8E8C86',
-      startDate: new Date(event.startDate),
-      endDate: new Date(event.endDate),
-      allDay: event.allDay,
-    } satisfies PlannedEvent;
-    if (plannedEvent.startDate >= dayEnd || plannedEvent.endDate <= dayStart) continue;
+): Promise<PlannedEventsResult> {
+  const selectedIds = [...new Set(calendarIds)];
+  const work = async (): Promise<PlannedEventsResult> => {
+    const dayStart = parseDateKey(value);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = addDays(dayStart, 1);
+    dayEnd.setHours(0, 0, 0, 0);
+    const legacyStart = addDays(dayStart, -1);
+    const legacyEnd = addDays(dayEnd, 1);
+    const byCalendar = new Map(calendars.map((calendar) => [calendar.id, calendar]));
+    const uniqueEvents = new Map<string, PlannedEvent>();
+    const statuses: CalendarReadStatus[] = [];
+    const failures: CalendarReadFailure[] = [];
 
-    // A padded Android query is required for overnight events, but some providers can
-    // return the same occurrence more than once. Keep recurring occurrences distinct by
-    // including their concrete start/end times in the key.
-    const occurrenceKey = [
-      plannedEvent.calendarId,
-      plannedEvent.id,
-      plannedEvent.startDate.getTime(),
-      plannedEvent.endDate.getTime(),
-    ].join(':');
-    uniqueEvents.set(occurrenceKey, plannedEvent);
-  }
-  return [...uniqueEvents.values()].sort(
-    (left, right) => left.startDate.getTime() - right.startDate.getTime(),
-  );
+    for (const calendarId of selectedIds) {
+      const calendar = byCalendar.get(calendarId);
+      const flags = calendar as (DeviceCalendar & { isVisible?: boolean; isSynced?: boolean }) | undefined;
+      const status: CalendarReadStatus = { calendarId,
+        source: Platform.OS === 'android' && typeof CalendarRead.listEvents === 'function' ? 'readmodern' : 'legacy',
+        status: 'ok', queriedEvents: 0, acceptedEvents: 0, timedEvents: 0, allDayEvents: 0,
+        discardedInvalidTimes: 0, discardedInvalidIdentities: 0, outsideDayEvents: 0,
+        ...(typeof flags?.isVisible === 'boolean' ? { isVisible: flags.isVisible } : {}),
+        ...(typeof flags?.isSynced === 'boolean' ? { isSynced: flags.isSynced } : {}) };
+      statuses.push(status);
+      try {
+        if (isWeb()) throw { code: 'ERR_CALENDAR_UNAVAILABLE' };
+        if (typeof calendarId !== 'string' || !calendarId.trim()) throw { code: 'ERR_INVALID_CALENDAR_ID' };
+        let events: ReadEvent[];
+        if (status.source === 'readmodern') {
+          try {
+            events = await CalendarRead.listEvents([calendarId], dayStart, dayEnd);
+          } catch (error) {
+            if (!modernReadUnavailable(error)) throw error;
+            status.source = 'legacy';
+            events = await Calendar.getEventsAsync([calendarId], legacyStart, legacyEnd);
+          }
+        } else {
+          events = await Calendar.getEventsAsync([calendarId], legacyStart, legacyEnd);
+        }
+        if (!Array.isArray(events)) throw { code: 'ERR_INVALID_CALENDAR_RESPONSE' };
+        status.queriedEvents = events.length;
+        for (const event of events) {
+          if (!event || typeof event.id !== 'string' || !event.id || event.calendarId !== calendarId) {
+            status.discardedInvalidIdentities += 1;
+            continue;
+          }
+          const startDate = readEventDate(event.startDate);
+          const endDate = readEventDate(event.endDate);
+          if (!Number.isFinite(startDate.getTime()) || !Number.isFinite(endDate.getTime()) || endDate <= startDate) {
+            status.discardedInvalidTimes += 1;
+            continue;
+          }
+          if (startDate >= dayEnd || endDate <= dayStart) {
+            status.outsideDayEvents += 1;
+            continue;
+          }
+          const plannedEvent: PlannedEvent = { id: event.id, calendarId,
+            title: typeof event.title === 'string' && event.title ? event.title : 'Untitled event',
+            notes: typeof event.notes === 'string' && event.notes ? event.notes : undefined,
+            color: calendar?.color ?? '#8E8C86', startDate, endDate, allDay: event.allDay === true };
+          const occurrenceKey = [calendarId, event.id, startDate.getTime(), endDate.getTime()].join(':');
+          if (uniqueEvents.has(occurrenceKey)) continue;
+          uniqueEvents.set(occurrenceKey, plannedEvent);
+          status.acceptedEvents += 1;
+          if (plannedEvent.allDay) status.allDayEvents += 1;
+          else status.timedEvents += 1;
+        }
+        if (status.discardedInvalidTimes || status.discardedInvalidIdentities) {
+          status.status = 'invalid-events';
+          status.errorCode = status.discardedInvalidTimes ? 'ERR_INVALID_EVENT_TIMES' : 'ERR_INVALID_EVENT_IDENTITIES';
+          failures.push({ calendarId, code: status.errorCode });
+        }
+      } catch (error) {
+        status.status = 'failed';
+        status.errorCode = calendarReadErrorCode(error);
+        failures.push({ calendarId, code: status.errorCode });
+      }
+    }
+    const plans = [...uniqueEvents.values()].sort((left, right) => left.startDate.getTime() - right.startDate.getTime());
+    calendarReadDiagnostics = { dateKey: value, checkedAt: new Date().toISOString(),
+      selectedCalendarIds: selectedIds, calendars: statuses, totalPlans: plans.length,
+      failedCalendarCount: failures.length };
+    return { plans, failures };
+  };
+  const job = calendarReadChain.then(work, work);
+  calendarReadChain = job.then(() => undefined, () => undefined);
+  return job;
 }
+
+export async function loadPlannedEvents(calendarIds: string[], value: string, calendars: DeviceCalendar[]): Promise<PlannedEvent[]> {
+  const result = await loadPlannedEventsResult(calendarIds, value, calendars);
+  if (result.failures.length) throw new CalendarReadError(result.plans, result.failures);
+  return result.plans;
+}
+
+export const checkCalendarConnection = loadPlannedEventsResult;
 
 export class CalendarPlanConnectionError extends Error {
   constructor(readonly reason: 'permission' | 'selection' | 'unavailable') {
@@ -131,7 +264,8 @@ export async function createPlanInSystemCalendar(
   if (await getCalendarPermissionStatus() !== 'granted') {
     throw new CalendarPlanConnectionError('permission');
   }
-  const calendars = await listDeviceCalendars();
+  const calendars = (await listDeviceCalendars())
+    .filter((calendar) => calendar.isVisible !== false && calendar.isSynced !== false);
   if (calendars.length === 0) throw new CalendarPlanConnectionError('unavailable');
   const selectedIds = new Set(selectedCalendarIds);
   if (!calendars.some((calendar) => selectedIds.has(calendar.id))) {
@@ -147,14 +281,14 @@ export async function createPlanInSystemCalendar(
     startDate,
     endDate,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  }, { startNewActivityTask: false });
+  }, { startNewActivityTask: Platform.OS === 'android' });
 }
 
 export async function openPlannedEvent(event: PlannedEvent) {
   if (isWeb()) return null;
   return Calendar.openEventInCalendarAsync(
     { id: event.id, instanceStartDate: event.startDate },
-    { allowsEditing: true, startNewActivityTask: false },
+    { allowsEditing: true, startNewActivityTask: Platform.OS === 'android' },
   );
 }
 

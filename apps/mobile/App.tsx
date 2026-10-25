@@ -90,6 +90,7 @@ function AppController() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [dayCount, setDayCount] = useState<DayCount>(1);
   const [calendarZoom, setCalendarZoom] = useState(1);
+  const [calendarViewResetToken, setCalendarViewResetToken] = useState(0);
   const [clockFormat, setClockFormat] = useState<'12h' | '24h'>('12h');
   const viewWrites = useRef<Promise<unknown>>(Promise.resolve());
   const focusSequence = useRef(0);
@@ -310,6 +311,8 @@ function AppController() {
 
   function changeDayCount(next: DayCount) {
     setDayCount(next);
+    setCalendarViewResetToken((token) => token + 1);
+    if (next === 1) changeCalendarZoom(1);
     viewWrites.current = viewWrites.current.catch(() => undefined)
       .then(() => setSetting('calendar.day-count', next)).catch(() => undefined);
   }
@@ -409,6 +412,7 @@ function AppController() {
                   dayCount={dayCount}
                   onDayCountChange={changeDayCount}
                   zoom={calendarZoom}
+                  viewResetToken={calendarViewResetToken}
                   onZoomChange={changeCalendarZoom}
                   clockFormat={clockFormat}
                   onClockFormatChange={changeClockFormat}
@@ -422,6 +426,7 @@ function AppController() {
               ) : null}
               {tab === 'settings' ? (
                 <SettingsScreen
+                  activeDate={activeDate}
                   permissionStatus={permissionStatus}
                   calendars={calendars}
                   preferences={preferences}

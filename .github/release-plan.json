@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.6",
-  "sourceAndroidVersionCode": 7,
-  "sourceIosBuildNumber": "7",
+  "version": "0.1.7",
+  "sourceAndroidVersionCode": 8,
+  "sourceIosBuildNumber": "8",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Fix plans remaining blank after creating an event through +. Native event creation requires calendar read access and an explicitly selected available phone calendar, with Settings guidance when missing. Plans refresh after the native editor closes, when returning to Context, and while Today is visible. Existing calendar selections remain under user control. New native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
+  "notes": "Floating cell actions keep the grid visible. Cut/copy and paste recorded cells across dates with destination replacement confirmation, atomic cut moves, a private in-app clipboard, and session Undo. Correct drag grip offsets and reset Today/Day to one full day. Restore Android calendar task navigation, modernize Android event reading, isolate per-calendar read failures, and add local connection diagnostics. The reported S23 calendar visibility issue is not confirmed resolved. New native build verification, physical phone validation, store publication, and official F-Droid acceptance remain pending."
 }

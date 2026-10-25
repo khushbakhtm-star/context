@@ -51,6 +51,7 @@ function calendarRuntime(overrides = {}) {
     require(name) {
       if (name === 'react-native') return { Platform: { OS: state.platform } };
       if (name === 'expo-calendar/legacy') return nativeCalendar;
+      if (name === 'expo-calendar') return {};
       if (name === '../data/database') return {};
       if (name === '../theme') return { categoryById: () => ({ name: 'Activity' }) };
       if (name === '../utils/time') return timeModule.exports;
@@ -99,7 +100,7 @@ test('a plan saved in the selected phone calendar is loaded at its exact minute 
   assert.deepEqual(calls.queries[0].ids, selection);
 });
 
-test('creating a native plan awaits return without assuming Android done/null means saved', async () => {
+test('Android plan creation opens a separate calendar task and does not classify done/null as saved', async () => {
   let finish;
   const pending = new Promise((resolve) => { finish = resolve; });
   const { api, calls } = calendarRuntime({ create: () => pending });
@@ -108,7 +109,7 @@ test('creating a native plan awaits return without assuming Android done/null me
     .then((result) => { completed = true; return result; });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls.create.length, 1);
-  assert.equal(calls.create[0].options.startNewActivityTask, false);
+  assert.equal(calls.create[0].options.startNewActivityTask, true);
   assert.equal(completed, false);
   finish({ action: 'done', id: null });
   const result = await operation;
@@ -117,7 +118,7 @@ test('creating a native plan awaits return without assuming Android done/null me
   assert.equal(result.id, null);
 });
 
-test('opening an existing native plan also awaits the calendar editor return', async () => {
+test('opening an existing Android plan uses a separate calendar task', async () => {
   let finish;
   const pending = new Promise((resolve) => { finish = resolve; });
   const { api, calls } = calendarRuntime({ open: () => pending });
@@ -127,12 +128,20 @@ test('opening an existing native plan also awaits the calendar editor return', a
     .then(() => { completed = true; });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls.open[0].details.id, 'existing');
-  assert.equal(calls.open[0].options.startNewActivityTask, false);
+  assert.equal(calls.open[0].options.startNewActivityTask, true);
   assert.equal(calls.open[0].options.allowsEditing, true);
   assert.equal(completed, false);
   finish({ action: 'done' });
   await operation;
   assert.equal(completed, true);
+});
+
+test('iOS calendar forms retain modal presentation', async () => {
+  const { api, calls } = calendarRuntime({ platform: 'ios' });
+  await api.createPlanInSystemCalendar('2026-10-25', 790, ['google-personal']);
+  await api.openPlannedEvent({ id: 'existing', startDate: new Date(2026, 9, 25, 13, 10) });
+  assert.equal(calls.create[0].options.startNewActivityTask, false);
+  assert.equal(calls.open[0].options.startNewActivityTask, false);
 });
 
 test('selected-calendar refresh retains overlapping overnight plans and filters adjacent-only plans', async () => {

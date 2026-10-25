@@ -1,10 +1,12 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { useAppTheme } from '../appearance';
 import type { AppColors, AppearanceMode } from '../theme';
 import type { CalendarPreferences, DeviceCalendar } from '../types';
 import { ReleaseUpdateSettings, type ReleaseUpdatesState } from '../components/ReleaseUpdates';
+import { checkCalendarConnection, getCalendarReadDiagnostics, type CalendarReadDiagnostics } from '../services/calendar';
+import { dateKey, formatDayHeading } from '../utils/time';
 
 type Props = {
   permissionStatus: string;
@@ -16,6 +18,7 @@ type Props = {
   onOpenAccounts: () => void;
   onOpenCategories: () => void;
   updates: ReleaseUpdatesState;
+  activeDate?: string;
 };
 
 export function SettingsScreen({
@@ -28,10 +31,34 @@ export function SettingsScreen({
   onOpenAccounts,
   onOpenCategories,
   updates,
+  activeDate = dateKey(new Date()),
 }: Props) {
   const { colors, mode, setMode, persistenceError } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const hasAccess = permissionStatus === 'granted';
+  const [checking, setChecking] = useState(false);
+  const [calendarCheck, setCalendarCheck] = useState<CalendarReadDiagnostics | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const checkToken = useRef(0);
+  const selectedCalendarKey = preferences.selectedCalendarIds.join('|');
+  useEffect(() => {
+    checkToken.current += 1; setCalendarCheck(null); setCheckError(null); setChecking(false);
+    return () => { checkToken.current += 1; };
+  }, [selectedCalendarKey, activeDate]);
+
+  async function checkConnection() {
+    const token = ++checkToken.current;
+    setChecking(true); setCheckError(null);
+    try {
+      await checkCalendarConnection(preferences.selectedCalendarIds, activeDate, calendars);
+      if (token !== checkToken.current) return;
+      const result = getCalendarReadDiagnostics();
+      if (!result || result.dateKey !== activeDate) throw new Error('The phone calendar check could not finish.');
+      setCalendarCheck(result);
+    } catch (error) {
+      if (token === checkToken.current) setCheckError(error instanceof Error ? error.message : 'The phone calendar check could not finish.');
+    } finally { if (token === checkToken.current) setChecking(false); }
+  }
 
   function toggleImported(id: string) {
     const selected = new Set(preferences.selectedCalendarIds);
@@ -125,6 +152,8 @@ export function SettingsScreen({
                       <Text style={styles.calendarSource}>
                         {calendar.sourceName}{calendar.allowsModifications ? '' : ' · read only'}
                       </Text>
+                      {calendar.isVisible === false ? <Text style={styles.appearanceError}>Hidden in the phone calendar</Text> : null}
+                      {calendar.isSynced === false ? <Text style={styles.appearanceError}>Phone calendar synchronization is off</Text> : null}
                     </View>
                   </Pressable>
                   {calendar.allowsModifications ? (
@@ -145,6 +174,29 @@ export function SettingsScreen({
             {calendars.length === 0 ? (
               <Text style={styles.noCalendars}>No synced calendars are currently visible to the phone.</Text>
             ) : null}
+          </View>
+
+          <View style={styles.notice}>
+            <Text style={styles.noticeTitle}>Check calendar connection</Text>
+            <Text style={styles.noticeBody}>{formatDayHeading(activeDate)} · Check what your phone is providing to Context.</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Check selected phone calendars"
+              disabled={checking || preferences.selectedCalendarIds.length === 0}
+              onPress={() => void checkConnection()} style={styles.checkConnectionButton}>
+              <Text style={styles.checkConnectionButtonText}>{checking ? 'Checking…' : 'Check connection'}</Text>
+            </Pressable>
+            {calendarCheck?.calendars.map((status) => <View key={status.calendarId} style={styles.calendarCheckRow}>
+              <Text style={styles.noticeTitle}>{calendars.find((calendar) => calendar.id === status.calendarId)?.title ?? 'Selected calendar'}</Text>
+              <Text style={styles.noticeBody}>{status.status === 'failed'
+                ? 'Could not read this calendar · ' + status.errorCode
+                : `${status.acceptedEvents} events for this date · ${status.timedEvents} timed · ${status.allDayEvents} all-day`}</Text>
+              {status.status === 'invalid-events' ? <Text style={styles.appearanceError}>Some returned events could not be displayed · {status.errorCode}</Text> : null}
+              {status.queriedEvents > 0 && status.acceptedEvents === 0 && status.status === 'ok'
+                ? <Text style={styles.noticeBody}>The returned events fall outside this date.</Text> : null}
+            </View>)}
+            {calendarCheck && calendarCheck.totalPlans === 0 ? <Text style={styles.noticeBody}>
+              If your calendar app shows events for this date, check that calendar’s visibility and synchronization in the calendar app, then refresh Context’s calendar list.
+            </Text> : null}
+            {checkError ? <Text accessibilityRole="alert" style={styles.appearanceError}>{checkError}</Text> : null}
           </View>
 
           <View style={styles.syncRow}>
@@ -235,6 +287,10 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth, borderColor: colors.onAccentMuted, borderRadius: 9 },
   smallButtonText: { color: colors.onAccent, fontSize: 12, fontWeight: '700' },
   sectionTitle: { marginTop: 26, color: colors.ink, fontSize: 16, fontWeight: '700' },
+  checkConnectionButton: { minHeight: 44, marginTop: 12, paddingHorizontal: 14, alignSelf: 'flex-start',
+    justifyContent: 'center', borderRadius: 8, backgroundColor: colors.accent },
+  checkConnectionButtonText: { color: colors.onAccent, fontSize: 13, fontWeight: '600' },
+  calendarCheckRow: { marginTop: 14 },
   sectionHelp: { marginTop: 4, marginBottom: 10, color: colors.muted, fontSize: 12 },
   calendarCard: {
     paddingHorizontal: 14,
