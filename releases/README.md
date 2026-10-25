@@ -1,8 +1,9 @@
 # Installed-app update notices
 
-`latest.json` is the public availability feed. It starts empty because no store release has been
-verified. A source tag, uploaded build, review submission, or queued release must not add a released
-entry. The release plan is separate from this feed. Commit an availability entry only after checking
+`latest.json` is the public availability feed. It announces the verified public Android standalone
+preview 0.1.2 (build 3). Official store entries remain absent pending actual availability. A source
+tag alone, unpublished upload, review submission, or queued release must not add a released entry.
+The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
 
@@ -36,8 +37,9 @@ until that destination exists. Missing required configuration disables checking.
 Release identity comes from the embedded Expo configuration; iOS also uses its installed
 Info.plist build number. These builds use source-controlled local version numbers and do not
 enable remote JavaScript updates. Release checks validate the native build identity against the
-source configuration. Expo Go and development bundles are excluded. `expo-application` is omitted
-because its Android dependency graph includes the F-Droid-flagged Install Referrer library.
+source configuration. Expo Go and development bundles are excluded. Context has no direct
+`expo-application` dependency for release identity. AuthSession still reaches it transitively;
+the F-Droid preparation patches out its Android Install Referrer source and dependency.
 
 ## Schema version 1
 

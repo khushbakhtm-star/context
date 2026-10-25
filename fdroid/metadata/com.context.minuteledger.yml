@@ -34,7 +34,7 @@ Repo: "https://github.com/khushbakhtm-star/context"
 Builds:
   - versionName: 0.1.2
     versionCode: 3
-    disable: Official F-Droid maintainer review and release publication are pending
+    disable: Official F-Droid maintainer review and native phone validation are pending
     commit: 49cb65def8d6f951f5709e8ee5bd581d352b1693
     subdir: apps/mobile
     sudo:
@@ -82,8 +82,10 @@ MaintainerNotes: |-
   All Expo Android modules and core compile from source. Install Referrer is patched
   out of the transitive expo-application module; identity constants remain available.
   The sole scanignore is the policy-permitted official Linux Hermes compiler.
-  Native phone validation, public maintenance history or an applicable inclusion
-  exception, and release-tag verification are pending. No screenshots are supplied
+  Public source tag v0.1.2 matches the pinned commit. Packaging request:
+  https://gitlab.com/fdroid/rfp/-/work_items/4667
+  Native phone validation and public maintenance history or an applicable inclusion
+  exception remain pending. No screenshots are supplied
   until genuine captures of the native app are available.
 
 AutoUpdateMode: None

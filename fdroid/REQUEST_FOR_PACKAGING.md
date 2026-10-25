@@ -7,13 +7,16 @@
 - Releases: https://github.com/khushbakhtm-star/context/releases
 - Candidate: 0.1.2 (Android version code 3)
 - Immutable source: 49cb65def8d6f951f5709e8ee5bd581d352b1693
+- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.2
+- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.2/context-0.1.2-foss-preview.apk
+- Preview APK SHA-256: `141bcd8be1371bbb1068718b64629c533b8d2b2d6065b1b419072b93415afba3`
 - License: MIT
 - Summary: Capture your day minute by minute alongside your calendars
 
 This is a new public project requesting packaging review and an inclusion-policy
-assessment. It is not an accepted F-Droid app. The 0.1.2 tag and public signed
-release are pending. Both cold-build verification jobs passed; the older 0.1.0
-release is not the remediated source candidate.
+assessment. It is not an accepted F-Droid app. The 0.1.2 source tag and signed
+Android preview are public. Both cold-build verification jobs passed; the older
+0.1.0 release is not the remediated source candidate.
 
 ## Application and edition
 
@@ -62,6 +65,7 @@ removes wrappers. Required Android SDK packages are recorded in the metadata.
 - The workflow checks metadata lint, structured source-scanner findings, the full enabled recipe in an ephemeral copy, independent unsigned assembly, package/version identity, and APK binary scanning.
 - Scanner JSON errors are checked explicitly because fdroidserver 2.4.5 can exit zero despite source errors.
 - The committed candidate remains disabled. No result is represented as an official F-Droid build-server acceptance.
+- Exact tested recipe: https://github.com/khushbakhtm-star/context/blob/f5d18682e91a309d4098539b2362f2b91b3d9b15/fdroid/metadata/com.context.minuteledger.yml. The integrated test removed only the disable field in an ephemeral copy; maintainers retain control over enabling official builds.
 - Metadata artifact: https://github.com/khushbakhtm-star/context/actions/runs/40176383213/artifacts/12593026611. Native artifact: https://github.com/khushbakhtm-star/context/actions/runs/40176383213/artifacts/12592717530. These diagnostic artifacts expire after 30 days; the logs and source documentation record the results.
 - Native phone verification and genuine app screenshots are pending for this candidate.
 
@@ -78,5 +82,10 @@ The author explicitly requested public MIT source publication and official
 F-Droid inclusion. A search for the application ID found no existing request or
 listing before this draft was prepared. No donation is claimed.
 
-This file is review material. A posted GitLab request URL must be recorded here
-after submission; the presence of this draft does not establish submission.
+## Submission receipt
+
+Submitted on 2026-10-25 as [F-Droid packaging request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667).
+The issue is open for maintainer review. Submission does not establish acceptance
+or catalog publication. The public source tag, APK digest, and tagged-source
+[workflow](https://github.com/khushbakhtm-star/context/actions/runs/40199617523)
+were independently verified after publication.
