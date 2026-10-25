@@ -5,17 +5,17 @@
 - Source: https://github.com/khushbakhtm-star/context
 - Issue tracker: https://github.com/khushbakhtm-star/context/issues
 - Releases: https://github.com/khushbakhtm-star/context/releases
-- Candidate: 0.1.6 (Android version code 7)
-- Immutable source: 36d94201013d51e41dc0ad4b3814c5ff6d736b7f
-- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.6
-- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.6/context-0.1.6-foss-preview.apk
-- Preview APK SHA-256: `6e238e0eb9e4cf294c452f75194470c23650b5c5762b9524d5eb036d0aad2f8a`
-- Publication: 2026-10-25 at 21:45:41 UTC; signed APK size 77,603,928 bytes
+- Candidate: 0.1.7 (Android version code 8)
+- Immutable source: d7cf4d61b7b7e175c18d91693027bde33fef8490
+- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.7
+- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.7/context-0.1.7-foss-preview.apk
+- Preview APK SHA-256: `67e36f7b84ed0366a36e9c25e3baf8c57b44cfc8e690290061ad771551dd131c`
+- Publication: 2026-10-25 at 22:46:20 UTC; signed APK size 77,672,804 bytes
 - License: MIT
 - Summary: Capture your day minute by minute alongside your calendars
 
 This is a new public project requesting packaging review and an inclusion-policy
-assessment. It is not an accepted F-Droid app. The 0.1.6 source tag and signed
+assessment. It is not an accepted F-Droid app. The 0.1.7 source tag and signed
 Android preview are public. Both cold-build verification jobs passed; the older
 0.1.0 release is not the remediated source candidate.
 
@@ -37,23 +37,35 @@ offline fallback plus exact imported Google API palette and label colors. This i
 not a claim to enumerate the current 24-color event picker. Historical activity
 colors remain intact; text formatting keeps its separate palette. Activity cells
 use a solid color fill with a readable foreground. First tap types inline, a second
-tap opens color/details, and holding an inactive cell then choosing an endpoint
-opens Auto fill / Group. Today's date jumps to the current minute. A measured time
+tap opens color/details. Holding a cell or releasing a dragged range opens compact
+floating Cut / Copy / Auto fill / Clear actions while the grid remains visible. Today's date jumps to the current minute. A measured time
 column supports a saved 12-hour/24-hour preference. With no minute selected, **+**
 requires calendar read access and an available phone calendar explicitly checked in
 Settings; missing setup opens connection guidance without selecting calendars for
-the user. The native event editor is awaited on return, then Context refreshes plans
-with bounded retries after one and four seconds. Foreground return also refreshes;
-Today polls device plans every 15 seconds while visible. The event must be saved in
+the user. Android opens its calendar event editor in a separate app task. Returning
+to Context refreshes plans, with bounded retries after one and four seconds; Today
+also polls device plans every 15 seconds while visible. The event must be saved in
 a checked calendar, and provider synchronization can still take time.
 
 A selected cell's corner handle drags up/down in the same day with edge scrolling;
-release opens Auto fill / Group. Auto fill copies the original recorded text to the
+release opens the floating cell actions. Auto fill copies the original recorded text to the
 inclusive range without requiring a color, retaining the source activity/formatting
 unless another Google activity color is chosen. Each copied minute remains editable;
 Undo restores target contents within the editing session. A calendar plan's untouched
 title is not recorded source text and must be entered or recorded first. With a blank
 source, an explicit color-only fill preserves target notes. Group retains each note.
+Cut or Copy uses a private in-app clipboard; after navigating to another date/minute,
+Paste asks for Replace confirmation if the reviewed destination is occupied. Cut
+moves both dates atomically, guards the original source and reviewed destination,
+and supports session Undo. Today/Day resets the view to one full day despite prior
+zoom. Drag endpoint mapping accounts for the captured grip offset.
+
+The Android reader uses current overlap semantics, serializes per-calendar reads,
+and preserves readable calendars when another fails. Settings' local Check connection
+results show counts/error codes and available visibility/synchronization flags,
+without event titles or descriptions. The user reported 0.1.6 still blank on an S23
+with the same calendar checked; successful physical visibility on 0.1.7 is not yet
+confirmed. These diagnostics and build checks do not establish that the problem is fixed.
 
 The F-Droid edition omits Google's native sign-in SDK and the Expo development
 client. It has no direct Google account sign-in. Calendars supplied to Android by
@@ -84,7 +96,26 @@ The recipe provisions hash-verified Node 24.19.0 and Gradle 9.4.1, with
 Corepack 0.36.0/pnpm 11.25.0 and OpenJDK 17. It uses system Gradle after F-Droid
 removes wrappers. Required Android SDK packages are recorded in the metadata.
 
-## Latest 0.1.6 verification
+## Latest 0.1.7 verification
+
+- TypeScript, all 226 app tests, five release guards, and upstream listing validation passed.
+- [Cold Linux verification](https://github.com/khushbakhtm-star/context/actions/runs/40240522368) passed both jobs for source `d7cf4d61b7b7e175c18d91693027bde33fef8490`, version 0.1.7, code 8.
+- All 17 metadata checks passed. Metadata lint: exit 0. Structured source scanner: 0 errors, 0 warnings, 7 informational entries.
+- Integrated `fdroid build --test --stop --scan-binary com.context.minuteledger:8`: exit 0; built the exact 0.1.7 source commit in 795.53 seconds, including its source rescan and APK scan.
+- All 15 independent native checks passed: `BUILD SUCCESSFUL in 12m 50s`, package `com.context.minuteledger` / 0.1.7 / code 8, expected unsigned signature exit 1, binary scan exit 0.
+- Both actual Linux input audits recorded 100 exact removals and five narrow source patches, with the sole hash-pinned official Hermes compiler exception.
+- Unsigned diagnostic APK: 77,660,500 bytes, SHA-256 `5f89e6c444b888468532676f8dd9c5c4ba6e96a90e2762164a3d9babc9ec3583`.
+- Tested recipe controller: `5bfca0eb2f4fb505673ccc7ef5db91f3a1be0588`; [concrete recipe](https://github.com/khushbakhtm-star/context/blob/5bfca0eb2f4fb505673ccc7ef5db91f3a1be0588/fdroid/metadata/com.context.minuteledger.yml).
+- [Metadata artifact 12617008779](https://github.com/khushbakhtm-star/context/actions/runs/40240522368/artifacts/12617008779) and [native artifact 12617023909](https://github.com/khushbakhtm-star/context/actions/runs/40240522368/artifacts/12617023909); ZIP sizes/hashes and scope are in [verification diagnostics](../apps/mobile/docs/FDROID_VERIFICATION.md).
+- The signed preview's application/configuration and native-marker checks passed; its v2 signing certificate matches public 0.1.6. Certificate continuity is not full cryptographic signature validation.
+- The signed and unsigned bundles contain the expected four cell-action markers and five modern calendar-reader/diagnostic strings. Physical S23 calendar visibility remains unconfirmed.
+
+These are independent Ubuntu-toolchain diagnostics. Official F-Droid provisioning,
+recipe enablement, signing, inclusion-policy assessment, and publication remain
+maintainer decisions. The candidate remains disabled. This is the phone 0.1.7 release;
+separate watch-companion development is not included.
+
+## Historical 0.1.6 verification
 
 - TypeScript, all 201 app tests, five release guards, and upstream listing validation passed.
 - [Cold Linux verification](https://github.com/khushbakhtm-star/context/actions/runs/40236099682) passed both jobs for source `36d94201013d51e41dc0ad4b3814c5ff6d736b7f`, version 0.1.6, code 7.
@@ -190,3 +221,7 @@ passed at final source `87cc9df388e4350a51e5e6fc07bcf7a19447c600`. Store publica
 readiness-gated and skipped.
 
 The [v0.1.6 tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40236999059) passed at final source `36d94201013d51e41dc0ad4b3814c5ff6d736b7f`. Store publication jobs were readiness-gated and skipped.
+
+The [v0.1.7 tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40241739878)
+passed at phone source `d7cf4d61b7b7e175c18d91693027bde33fef8490`. This receipt does not claim
+an official store/F-Droid publication or a successful physical S23 calendar-import test.

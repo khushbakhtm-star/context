@@ -1,7 +1,7 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Android standalone
-preview 0.1.6 (build 7), published on 2026-10-25 at 21:45:41 UTC. Official store entries remain absent
+preview 0.1.7 (build 8), published on 2026-10-25 at 22:46:20 UTC. Official store entries remain absent
 pending actual availability. A source tag alone, unpublished upload, review submission, or queued
 release must not add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
@@ -10,24 +10,27 @@ When a rollout is limited, keep the entry out until availability matches the fee
 
 ## Install the Android preview update
 
-Open the [0.1.6 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.6), expand
-**Assets**, and download `context-0.1.6-foss-preview.apk`. Open the downloaded APK and choose
+Open the [0.1.7 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.7), expand
+**Assets**, and download `context-0.1.7-foss-preview.apk`. Open the downloaded APK and choose
 **Update** over the existing Context installation. Keep Context installed to preserve its ledger.
-The new preview uses the same application ID and signing certificate as the verified 0.1.5 preview,
-with version code 7.
+The new preview uses the same application ID and signing certificate as the verified 0.1.6 preview,
+with version code 8.
 
-With no minute selected, **+** now requires calendar read access and a checked, available phone
-calendar. Missing setup opens connection guidance in Settings. Save the event in a checked calendar;
-Context waits for the editor to return and refreshes plans afterward, on foreground return, and while
-Today is visible. It preserves your calendar choices.
+Cell actions now float over the grid: **Cut / Copy / Auto fill / Clear**, with **Paste** available
+after copying or cutting. Hold a cell, choose Cut or Copy, navigate to another day/minute, then tap
+the destination and Paste. Occupied destinations require Replace confirmation. Cut moves source and
+destination together, and session Undo restores both. The clipboard stays inside Context.
 
-Tap a cell and drag its corner handle up or down in the same day; the grid scrolls at its edges.
-Release to open **Auto fill / Group**. Auto fill copies the original recorded source text to the
-inclusive range without requiring a color choice, retaining its activity color and formatting unless
-you choose another Google activity color. Copied minutes remain editable, and Undo restores target
-contents. An untouched calendar-plan title is not recorded source text: enter or record the minute
-first. With a blank source, explicitly choosing a color preserves existing target notes. Group keeps
-each minute's note.
+Drag a cell's corner handle up or down in the same date column; release opens the floating actions.
+Auto fill retains the original recorded source text, activity color and formatting unless you choose
+another Google activity color. Each copied minute remains editable. **Today / Day** restores one
+full day across the screen even after zooming.
+
+Android calendar reading now isolates failures per calendar and includes local **Settings → Calendar
+connection → Check connection** counts/errors and available visibility/synchronization flags.
+Android opens the event editor as a separate calendar-app task; return to Context to refresh plans.
+The reported S23 problem—checked calendar events still missing—has not been confirmed resolved on
+the phone. Physical verification is pending; build and scan success do not establish that result.
 
 For an ongoing **Update** button, follow the one-time [Obtainium setup](ANDROID_UPDATES.md).
 Official F-Droid inclusion remains pending at [request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667);
