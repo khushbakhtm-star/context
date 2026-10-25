@@ -1,0 +1,1 @@
+Type directly in a minute cell on Today while neighboring entries remain visible. Edits save automatically. Tap the minute timestamp for an inline color strip; advanced duration and calendar-source controls remain available through Details. Public store publication and native phone validation remain separate from this preview release.

@@ -101,6 +101,14 @@ export async function initializeDatabase() {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS inline_minute_link_outbox (
+      date_key TEXT NOT NULL,
+      minute_index INTEGER NOT NULL CHECK (minute_index >= 0 AND minute_index < 1440),
+      affected_dates_json TEXT NOT NULL,
+      token TEXT NOT NULL,
+      PRIMARY KEY(date_key, minute_index)
+    );
+
     CREATE TABLE IF NOT EXISTS ledger_clock (
       id INTEGER PRIMARY KEY CHECK(id = 1),
       wall INTEGER NOT NULL,
@@ -264,12 +272,16 @@ export async function saveMinuteRange(input: {
   durationMinutes: number;
   text: string;
   categoryId: string;
+  /** Explicit color-only recording; ordinary blank text keeps existing caller semantics. */
+  allowEmptyText?: boolean;
+  /** Queue this explicit inline edit for account linking in the same local transaction. */
+  queueInlineLink?: boolean;
 }) {
   const db = await database();
   const text = input.text.trim();
   const duration = Math.max(1, Math.min(Math.trunc(input.durationMinutes), 24 * 60));
   const startMinute = Math.max(0, Math.min(Math.trunc(input.startMinute), 1439));
-  if (!text) return [] as string[];
+  if (!text && !input.allowEmptyText) return [] as string[];
 
   const now = new Date().toISOString();
   const affectedDates = new Set<string>();
@@ -383,12 +395,16 @@ export async function saveMinuteRange(input: {
         now,
       );
     }
+    if (input.queueInlineLink) {
+      await queueInlineMinuteLink(txn, input.dateKey, startMinute, [...affectedDates]);
+    }
   });
 
   return [...affectedDates];
 }
 
-export async function deleteMinuteEntry(value: string, minuteIndex: number) {
+export async function deleteMinuteEntry(value: string, minuteIndex: number,
+  options: { queueInlineLink?: boolean } = {}) {
   const db = await database();
   const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async (txn) => {
@@ -405,7 +421,50 @@ export async function deleteMinuteEntry(value: string, minuteIndex: number) {
       value,
       now,
     );
+    if (options.queueInlineLink) await queueInlineMinuteLink(txn, value, minuteIndex, [value]);
   });
+}
+
+export type PendingInlineMinuteLink = {
+  dateKey: string;
+  minuteIndex: number;
+  affectedDates: string[];
+  token: string;
+};
+
+async function queueInlineMinuteLink(txn: Pick<SQLite.SQLiteDatabase, 'runAsync' | 'getFirstAsync'>,
+  value: string, minuteIndex: number, affectedDates: string[]) {
+  const pending = await txn.getFirstAsync<{ affected_dates_json: string }>(
+    `SELECT affected_dates_json FROM inline_minute_link_outbox WHERE date_key = ? AND minute_index = ?`,
+    value, minuteIndex,
+  );
+  // A second edit must retain every date touched by the earlier unacknowledged block merge.
+  const dates = [...new Set<string>([...(pending ? JSON.parse(pending.affected_dates_json) as string[] : []),
+    ...affectedDates])];
+  await txn.runAsync(`INSERT INTO inline_minute_link_outbox
+    (date_key, minute_index, affected_dates_json, token) VALUES (?, ?, ?, ?)
+    ON CONFLICT(date_key, minute_index) DO UPDATE SET
+      affected_dates_json = excluded.affected_dates_json, token = excluded.token`,
+    value, minuteIndex, JSON.stringify(dates), makeId('inline_link'));
+}
+
+/** Only explicit inline edits enter this queue; historical device-calendar outbox rows are not replayed. */
+export async function getPendingInlineMinuteLinks(limit = 100): Promise<PendingInlineMinuteLink[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<{
+    date_key: string; minute_index: number; affected_dates_json: string; token: string;
+  }>(`SELECT date_key, minute_index, affected_dates_json, token FROM inline_minute_link_outbox
+    ORDER BY rowid LIMIT ?`, Math.max(1, Math.min(500, Math.trunc(limit) || 100)));
+  return rows.map((row) => ({ dateKey: row.date_key, minuteIndex: row.minute_index,
+    affectedDates: JSON.parse(row.affected_dates_json) as string[], token: row.token }));
+}
+
+/** Acknowledging an older attempt cannot remove a newer edit queued at the same minute. */
+export async function acknowledgeInlineMinuteLink(item: Pick<PendingInlineMinuteLink, 'dateKey' | 'minuteIndex' | 'token'>) {
+  const db = await database();
+  const result = await db.runAsync(`DELETE FROM inline_minute_link_outbox
+    WHERE date_key = ? AND minute_index = ? AND token = ?`, item.dateKey, item.minuteIndex, item.token);
+  return result.changes > 0;
 }
 
 export async function getDaySegments(value: string): Promise<ActivitySegment[]> {
@@ -813,8 +872,8 @@ export async function restoreLedgerConflict(document: SyncDocument) {
   if (document.key.startsWith('minute:')) {
     const coordinate = requireMinuteDocument(document);
     if (document.value === null) await deleteMinuteEntry(coordinate.date, coordinate.minute);
-    else await saveMinuteEntry({ dateKey: coordinate.date, minuteIndex: coordinate.minute,
-      text: document.value.text as string, categoryId: document.value.categoryId as string });
+    else await saveMinuteRange({ dateKey: coordinate.date, startMinute: coordinate.minute, durationMinutes: 1,
+      text: document.value.text as string, categoryId: document.value.categoryId as string, allowEmptyText: true });
   } else await putSyncDocument(document.key, document.value);
   await dismissLedgerConflict(document.key, document.revision);
 }

@@ -45,6 +45,7 @@ import { dateKey, minuteIndexForDate } from './src/utils/time';
 import { getAccounts } from './src/sync/accounts';
 import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
+import { flushInlineMinutes, retryInlineMinuteLinks, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
 import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/ReleaseUpdates';
 
 type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
@@ -92,6 +93,11 @@ function AppController() {
   const [calendars, setCalendars] = useState<DeviceCalendar[]>([]);
   const [preferences, setPreferences] = useState<CalendarPreferences>(DEFAULT_PREFERENCES);
   const [accountCalendarWrites, setAccountCalendarWrites] = useState(false);
+  const inlineProjectionChain = useRef<Promise<void>>(Promise.resolve());
+  const calendarProjectionConfigRef = useRef({ ready, syncActuals: preferences.syncActuals,
+    writeCalendarId: preferences.writeCalendarId, accountCalendarWrites });
+  calendarProjectionConfigRef.current = { ready, syncActuals: preferences.syncActuals,
+    writeCalendarId: preferences.writeCalendarId, accountCalendarWrites };
   const [focusRequest, setFocusRequest] = useState<{
     dateKey: string;
     minuteIndex: number;
@@ -150,8 +156,14 @@ function AppController() {
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') return;
+      if (state !== 'active') {
+        // Commit the current cell before the app leaves the foreground. Pending drafts
+        // remain in the inline controller if the local database cannot accept a write.
+        if (ready) void flushInlineMinutes().catch(() => {});
+        return;
+      }
       void refreshCalendars();
+      if (ready) void flushInlineMinutes().catch(() => {});
       void synchronizeAccounts();
       if (preferences.syncActuals && preferences.writeCalendarId && !accountCalendarWrites) {
         void flushPendingActuals(preferences.writeCalendarId);
@@ -159,7 +171,7 @@ function AppController() {
       setDataVersion((version) => version + 1);
     });
     return () => subscription.remove();
-  }, [accountCalendarWrites, preferences.syncActuals, preferences.writeCalendarId, refreshCalendars]);
+  }, [accountCalendarWrites, preferences.syncActuals, preferences.writeCalendarId, ready, refreshCalendars]);
 
   useEffect(() => {
     if (!ready || accountCalendarWrites || !preferences.syncActuals || !preferences.writeCalendarId) return;
@@ -200,12 +212,35 @@ function AppController() {
     void getAccounts().then((accounts) => {
       const directWrites = accounts.some((account) => account.consent.calendarWrite);
       setAccountCalendarWrites(directWrites);
+      const current = calendarProjectionConfigRef.current;
       configureCalendarProjection(
-        preferences.syncActuals && !directWrites ? preferences.writeCalendarId : null,
+        current.syncActuals && !directWrites ? current.writeCalendarId : null,
       );
-    });
+    }).catch(() => { /* Keep the current projection settings; account refresh can retry. */ });
     void synchronizeAccounts();
-  }, [preferences.syncActuals, preferences.writeCalendarId]);
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    void retryInlineMinuteLinks().catch(() => {});
+    // This listener lives above Today so a write that finishes after opening Reports
+    // still refreshes the app and queues the affected dates for the chosen calendar.
+    const unsubscribe = subscribeInlineMinuteCommits(({ affectedDates }) => {
+      dataChanged();
+      const project = async () => {
+        const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
+        const current = calendarProjectionConfigRef.current;
+        if (!current.ready || directWrites || current.accountCalendarWrites || !current.syncActuals || !current.writeCalendarId) return;
+        await flushPendingActuals(current.writeCalendarId, affectedDates);
+      };
+      inlineProjectionChain.current = inlineProjectionChain.current.then(project, project)
+        .catch(() => { /* SQLite's durable calendar outbox keeps this work for retry. */ });
+    });
+    return () => {
+      unsubscribe();
+      void flushInlineMinutes().catch(() => {});
+    };
+  }, [dataChanged, ready]);
 
   async function askForCalendarAccess() {
     const granted = await requestCalendarAccess();
@@ -226,6 +261,8 @@ function AppController() {
       sanitized.syncActuals &&
       sanitized.writeCalendarId !== null &&
       (!preferences.syncActuals || sanitized.writeCalendarId !== preferences.writeCalendarId);
+    calendarProjectionConfigRef.current = { ...calendarProjectionConfigRef.current,
+      syncActuals: sanitized.syncActuals, writeCalendarId: sanitized.writeCalendarId };
     configureCalendarProjection(
       sanitized.syncActuals && !accountCalendarWrites ? sanitized.writeCalendarId : null,
     );

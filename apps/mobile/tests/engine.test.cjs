@@ -227,6 +227,23 @@ test('confirming a recurring plan updates only its concrete occurrence and prese
   assert.equal(projection.state, 'synced');
 });
 
+test('a color-only minute projects its activity name without inventing ledger text', async (t) => {
+  const remote = cloud();
+  const device = phone(t, remote);
+  await prepare(device);
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1,
+    text: '', categoryId: 'sleep', allowEmptyText: true });
+  await device.engine.linkActualsToAccounts([day], null, { dateKey: day, minuteIndex: 600 });
+  await device.engine.synchronizeAccounts();
+  const created = remote.calls.find((call) => call.type === 'create');
+  assert.ok(created);
+  assert.equal(created.write.title, 'Sleep');
+  assert.equal(created.write.start, iso(600));
+  assert.equal(created.write.end, iso(601));
+  assert.match(created.write.description, /10:00 AM  \n/);
+  assert.equal((await device.db.getMinuteEntry(day, 600)).text, '');
+});
+
 test('an explicitly selected recurring-series change delegates to the series adapter then updates the selected instance', async (t) => {
   const remote = cloud();
   const device = phone(t, remote, account({ editSeries: true }));

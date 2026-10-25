@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
 import {
-  AppState, FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, TextInput, View,
+  AppState, FlatList, Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl,
+  ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAppTheme } from '../appearance';
 import { MinuteEditor } from '../components/MinuteEditor';
 import { deleteMinuteEntry, getDayEntries, getMinuteEntry, saveMinuteRange } from '../data/database';
 import { flushPendingActuals, loadPlannedEvents, openPlannedEvent } from '../services/calendar';
-import { categoryById, type AppColors } from '../theme';
+import { listCategories } from '../services/categories';
+import { flushInlineMinutes, inlineMinuteDrafts, subscribeInlineMinuteCommits,
+  subscribeInlineMinuteLinkWarnings } from '../services/inline-minutes';
+import { CATEGORIES, categoryById, type ActivityCategory, type AppColors } from '../theme';
+import { inlineMinuteKey } from '../utils/inline-minute-drafts';
 import { getAccounts } from '../sync/accounts';
 import { linkActualsToAccounts, loadAccountPlans, synchronizeAccounts } from '../sync/engine';
 import type { CalendarPreferences, DeviceCalendar, MinuteEntry, PlannedEvent } from '../types';
@@ -47,6 +53,7 @@ export function TodayScreen({
   onFocusConsumed, onDataChanged, onOpenSettings, dayCount = 1, onDayCountChange, onOpenMenu,
 }: Props) {
   const { colors } = useAppTheme();
+  const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const days = useMemo(() => visibleCalendarDates(activeDate, dayCount), [activeDate, dayCount]);
   const dayLabels = useMemo(() => new Map(days.map((day) => [day, formatDayHeading(day)])), [days]);
@@ -67,11 +74,18 @@ export function TodayScreen({
   const appStateRef = useRef(AppState.currentState);
   const [dayData, setDayData] = useState<Record<string, DayData>>({});
   const [editor, setEditor] = useState<CalendarMinuteSelection | null>(null);
+  const [inlineSelection, setInlineSelection] = useState<CalendarMinuteSelection | null>(null);
+  const inlineSelectionRef = useRef(inlineSelection);
+  const inlineInputRef = useRef<ComponentRef<typeof TextInput>>(null);
+  const [inlineVersion, setInlineVersion] = useState(0);
+  const [colorPanelOpen, setColorPanelOpen] = useState(false);
+  const [availableColors, setAvailableColors] = useState<ActivityCategory[]>(() => CATEGORIES.filter((item) => !item.archived));
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [projectionWarning, setProjectionWarning] = useState<string | null>(null);
   const [accountWarning, setAccountWarning] = useState<string | null>(null);
+  const [inlineLinkWarning, setInlineLinkWarning] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [dateInputOpen, setDateInputOpen] = useState(false);
@@ -85,6 +99,7 @@ export function TodayScreen({
   visibleDaysRef.current = days;
   dayDataRef.current = dayData;
   editorRef.current = editor;
+  inlineSelectionRef.current = inlineSelection;
   currentFocusRef.current = focusRequest;
 
   const projectionConfigRef = useRef({ enabled: preferences.syncActuals, calendarId: preferences.writeCalendarId });
@@ -129,9 +144,27 @@ export function TodayScreen({
   useEffect(() => {
     loadTokenRef.current += 1;
     selectionTokenRef.current += 1;
+    const previous = inlineSelectionRef.current;
+    if (previous) inlineMinuteDrafts.close(inlineMinuteKey(previous.dateKey, previous.minuteIndex));
+    setInlineSelection(null);
+    setColorPanelOpen(false);
+    Keyboard.dismiss();
     setLoadError(false);
     setRefreshing(false);
   }, [rangeKey]);
+
+  useEffect(() => inlineMinuteDrafts.subscribe(() => setInlineVersion((value) => value + 1)), []);
+  useEffect(() => subscribeInlineMinuteLinkWarnings(setInlineLinkWarning), []);
+
+  useEffect(() => {
+    let current = true;
+    void listCategories(false).then((values) => { if (current) setAvailableColors(values); }).catch(() => {});
+    return () => { current = false; };
+  }, [dataVersion, colorPanelOpen]);
+
+  const inlineDrafts = useMemo(() => inlineMinuteDrafts.snapshot(), [inlineVersion]);
+  const draftsByKey = useMemo(() => new Map(inlineDrafts.map((draft) => [draft.key, draft])), [inlineDrafts]);
+  const inlineError = inlineDrafts.some((draft) => draft.error);
 
   useEffect(() => { void reload(); }, [dataVersion, reload]);
 
@@ -151,6 +184,12 @@ export function TodayScreen({
     const subscription = AppState.addEventListener('change', (state) => {
       const wasAway = appStateRef.current !== 'active';
       appStateRef.current = state;
+      if (state !== 'active') {
+        const selected = inlineSelectionRef.current;
+        if (selected) inlineMinuteDrafts.close(inlineMinuteKey(selected.dateKey, selected.minuteIndex));
+        setInlineSelection(null);
+        setColorPanelOpen(false);
+      }
       if (state === 'active' && wasAway) { setNow(new Date()); void reload(); }
     });
     return () => subscription.remove();
@@ -195,11 +234,11 @@ export function TodayScreen({
     if (!pending) return;
     if (activeDate !== pending.from) { pendingRolloverRef.current = null; return; }
     // Follow the current day after midnight, but finish any dated draft or date selection first.
-    if (!editor && !dateInputOpen) {
+    if (!editor && !inlineSelection && !dateInputOpen) {
       pendingRolloverRef.current = null;
       onDateChange(pending.to);
     }
-  }, [activeDate, today, editor, dateInputOpen, onDateChange]);
+  }, [activeDate, today, editor, inlineSelection, dateInputOpen, onDateChange]);
 
   const jumpToMinute = useCallback((minute: number) => {
     requestAnimationFrame(() => {
@@ -227,7 +266,7 @@ export function TodayScreen({
         readPlans: (value) => dayDataRef.current[value]?.plans ?? [],
         currentState: currentSelectionState,
       });
-      if (!selection) return;
+      if (!selection || !calendarSelectionIsCurrent(request, currentSelectionState())) return;
       setActionError(null);
       setEditor((previous) => calendarSelectionIsCurrent(request, currentSelectionState()) ? selection : previous);
     } catch {
@@ -237,16 +276,85 @@ export function TodayScreen({
     }
   }, []);
 
+  const revealInlineMinute = useCallback((minute: number) => {
+    requestAnimationFrame(() => listRef.current?.scrollToIndex({ index: minute, viewPosition: 0.3, animated: false }));
+  }, []);
+
+  const openInlineMinute = useCallback(async (day: string, minute: number, showColors = false) => {
+    const token = ++selectionTokenRef.current;
+    const request = { dateKey: day, minuteIndex: minute, rangeKey: rangeRef.current, token };
+    const currentState = () => ({ mounted: mountedRef.current, rangeKey: rangeRef.current,
+      token: selectionTokenRef.current, visibleDays: visibleDaysRef.current });
+    try {
+      const selection = await loadCalendarMinuteSelection(request, { readEntry: getMinuteEntry,
+        readPlans: (value) => dayDataRef.current[value]?.plans ?? [], currentState });
+      if (!selection || !calendarSelectionIsCurrent(request, currentState())) return;
+      inlineMinuteDrafts.activate({ dateKey: day, minuteIndex: minute,
+        text: selection.entry?.text ?? selection.plan?.title ?? '',
+        categoryId: selection.entry?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted',
+        keepColor: Boolean(selection.entry && !selection.entry.text.trim()) });
+      setActionError(null);
+      setEditor(null);
+      setInlineSelection(selection);
+      setColorPanelOpen(showColors);
+      if (showColors) Keyboard.dismiss();
+      revealInlineMinute(minute);
+    } catch {
+      if (mountedRef.current && token === selectionTokenRef.current) setActionError('This minute could not be opened. Please try again.');
+    }
+  }, [revealInlineMinute]);
+
+  useEffect(() => {
+    if (inlineSelection && !colorPanelOpen) requestAnimationFrame(() => inlineInputRef.current?.focus());
+  }, [inlineSelection?.dateKey, inlineSelection?.minuteIndex, colorPanelOpen]);
+
+  useEffect(() => {
+    const keyboard = Keyboard.addListener('keyboardDidShow', () => {
+      const selected = inlineSelectionRef.current;
+      if (selected) revealInlineMinute(selected.minuteIndex);
+    });
+    return () => keyboard.remove();
+  }, [revealInlineMinute]);
+
+  useEffect(() => subscribeInlineMinuteCommits((commit) => {
+    markLocalChange(commit.affectedDates);
+    setDayData((previous) => {
+      const data = previous[commit.dateKey];
+      if (!data || commit.readBackFailed) return previous;
+      const entries = data.entries.filter((entry) => entry.minuteIndex !== commit.minuteIndex);
+      if (commit.entry) entries.push(commit.entry);
+      return { ...previous, [commit.dateKey]: { ...data, entries } };
+    });
+    for (const day of commit.affectedDates) refreshLocalEntries(day);
+  }), []);
+
+  useEffect(() => () => {
+    const selection = inlineSelectionRef.current;
+    if (selection) inlineMinuteDrafts.close(inlineMinuteKey(selection.dateKey, selection.minuteIndex));
+    void flushInlineMinutes();
+  }, []);
+
+  async function showMinuteDetails(day: string, minute: number) {
+    const token = ++selectionTokenRef.current;
+    await inlineMinuteDrafts.flushAll();
+    if (inlineMinuteDrafts.get(day, minute)?.error || token !== selectionTokenRef.current) return;
+    inlineMinuteDrafts.close(inlineMinuteKey(day, minute));
+    Keyboard.dismiss();
+    setInlineSelection(null);
+    setColorPanelOpen(false);
+    await openMinute(day, minute);
+  }
+
   useEffect(() => {
     if (!focusRequest || !days.includes(focusRequest.dateKey) || focusTokenRef.current === focusRequest.token) return;
     focusTokenRef.current = focusRequest.token;
     jumpToMinute(focusRequest.minuteIndex);
     const focusToken = focusRequest.token;
     if (focusRequest.openEditor === false) { onFocusConsumed(focusToken); return; }
-    void openMinute(focusRequest.dateKey, focusRequest.minuteIndex).finally(() => {
+    void openInlineMinute(focusRequest.dateKey, focusRequest.minuteIndex).finally(() => {
       if (currentFocusRef.current?.token === focusToken) onFocusConsumed(focusToken);
     });
-  }, [days, focusRequest, jumpToMinute, openMinute, onFocusConsumed]);
+  }, [days, focusRequest, jumpToMinute, openInlineMinute, onFocusConsumed]);
 
   const queueCalendarProjection = useCallback((values: string[]) => {
     const config = projectionConfigRef.current;
@@ -381,12 +489,19 @@ export function TodayScreen({
   const monthFormat = new Intl.DateTimeFormat(undefined, { month: 'long' });
   const monthTitle = firstDay.getMonth() === lastDay.getMonth() && firstDay.getFullYear() === lastDay.getFullYear()
     ? monthFormat.format(firstDay) : monthFormat.format(firstDay) + ' – ' + monthFormat.format(lastDay);
-  const notice = actionError ?? accountWarning ?? projectionWarning ??
+  const notice = (inlineError ? 'A minute could not be saved. Tap to retry; your draft is kept.' : null) ?? actionError ??
+    (inlineLinkWarning ? 'Account synchronization needs a retry. Your minute is saved.' : null) ?? accountWarning ?? projectionWarning ??
     (loadError ? 'Some ledger rows could not refresh. Pull down to retry.' :
       calendarReadError ? 'Some calendar plans could not load. Pull down to retry.' : null);
+  const selectedDraft = inlineSelection
+    ? draftsByKey.get(inlineMinuteKey(inlineSelection.dateKey, inlineSelection.minuteIndex)) : undefined;
+  const selectedColor = selectedDraft ? categoryById(selectedDraft.categoryId) : undefined;
+  const pickerColors = selectedColor && !availableColors.some((item) => item.id === selectedColor.id)
+    ? [...availableColors, selectedColor] : availableColors;
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={insets.top}>
       <View style={styles.monthToolbar}>
         <Pressable accessibilityRole="button" accessibilityLabel="Choose date" accessibilityState={{ expanded: dateInputOpen }}
           onPress={() => { setDateInput(activeDate); setDateInputError(false); setDateInputOpen((open) => !open); }}
@@ -455,8 +570,39 @@ export function TodayScreen({
         ))}
       </View>
 
+      {colorPanelOpen && inlineSelection ? (
+        <View style={styles.colorPanel}>
+          <View style={styles.colorPanelHeading}>
+            <Text numberOfLines={1} style={styles.colorPanelTime}>
+              {formatDayHeading(inlineSelection.dateKey)} · {minuteLabel(inlineSelection.minuteIndex, true)}
+            </Text>
+            <Pressable accessibilityRole="button" onPress={() => void showMinuteDetails(inlineSelection.dateKey, inlineSelection.minuteIndex)}
+              style={styles.colorPanelAction}><Text style={styles.colorPanelActionText}>Details</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close colors" onPress={() => setColorPanelOpen(false)}
+              style={styles.colorPanelAction}><Text style={styles.colorPanelActionText}>×</Text></Pressable>
+          </View>
+          <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator
+            contentContainerStyle={styles.colorChoices}>
+            {pickerColors.map((item) => (
+              <Pressable key={item.id} accessibilityRole="radio" accessibilityLabel={item.name + ', ' + item.color}
+                accessibilityState={{ checked: selectedDraft?.categoryId === item.id }}
+                onPress={() => {
+                  const current = inlineMinuteDrafts.get(inlineSelection.dateKey, inlineSelection.minuteIndex);
+                  if (!current) return;
+                  markLocalChange([current.dateKey]);
+                  inlineMinuteDrafts.edit(current.dateKey, current.minuteIndex,
+                    { categoryId: item.id, keepColor: !current.text.trim() });
+                }} style={[styles.colorChoice, selectedDraft?.categoryId === item.id && styles.selectedColorChoice]}>
+                <View style={[styles.colorCircle, { backgroundColor: item.color }]} />
+              </Pressable>
+            ))}
+          </ScrollView>
+          {selectedColor ? <Text style={styles.colorName}>{selectedColor.name}</Text> : null}
+        </View>
+      ) : null}
+
       {notice ? (
-        <Pressable onPress={calendarReadError ? onOpenSettings : () => void refresh()} style={styles.notice}>
+        <Pressable onPress={inlineError || inlineLinkWarning ? () => void flushInlineMinutes() : calendarReadError ? onOpenSettings : () => void refresh()} style={styles.notice}>
           <Text style={styles.noticeText}>{notice}</Text>
         </Pressable>
       ) : null}
@@ -477,37 +623,66 @@ export function TodayScreen({
       <FlatList ref={listRef} data={MINUTE_ITEMS} keyExtractor={(minute) => minute.toString()}
         style={styles.minuteList} contentContainerStyle={styles.minuteListContent}
         getItemLayout={(_, index) => ({ length: ROW_HEIGHT, offset: ROW_HEIGHT * index, index })}
-        initialNumToRender={24} maxToRenderPerBatch={24} windowSize={9} keyboardShouldPersistTaps="handled"
+        initialNumToRender={24} maxToRenderPerBatch={24} windowSize={9} keyboardShouldPersistTaps="always"
+        keyboardDismissMode="on-drag" removeClippedSubviews={false}
+        onLayout={() => {
+          const selected = inlineSelectionRef.current;
+          if (selected) revealInlineMinute(selected.minuteIndex);
+        }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.ink}
           colors={[colors.currentTime]} progressBackgroundColor={colors.surface} />}
         onScrollToIndexFailed={({ index }) => listRef.current?.scrollToOffset({ offset: index * ROW_HEIGHT, animated: false })}
         renderItem={({ item: minute }) => (
           <View style={styles.minuteRow}>
-            <View style={styles.timeRail}>
+            <Pressable accessibilityRole="button" accessibilityLabel={minuteLabel(minute, true) + ', choose minute color'}
+              accessibilityState={{ expanded: colorPanelOpen && inlineSelection?.minuteIndex === minute }}
+              onPress={() => void openInlineMinute(inlineSelectionRef.current?.dateKey ?? activeDate, minute, true)}
+              style={styles.timeRail}>
               <Text maxFontSizeMultiplier={1.4} style={[styles.minuteTime,
                 minute === currentMinute && days.includes(today) && styles.currentMinuteText]}>{minuteLabel(minute)}</Text>
-            </View>
+            </Pressable>
             {days.map((day) => {
               const index = indexedDays.get(day);
               const entry = index?.entriesByMinute.get(minute);
+              const draft = draftsByKey.get(inlineMinuteKey(day, minute));
               const plans = index?.plansByMinute.get(minute) ?? [];
               const plan = plans[0];
-              const color = entry ? categoryById(entry.categoryId).color : plan?.color;
+              const color = draft ? categoryById(draft.categoryId).color : entry ? categoryById(entry.categoryId).color : plan?.color;
+              const inline = inlineSelection?.dateKey === day && inlineSelection.minuteIndex === minute;
+              const displayedText = draft?.text ?? entry?.text ?? plan?.title;
               const isCurrent = day === today && minute === currentMinute;
               return (
-                <Pressable key={day} accessibilityRole="button"
-                  accessibilityLabel={dayLabels.get(day) + ', ' + minuteLabel(minute, true) +
-                    (entry ? ', ' + entry.text : plan ? ', planned: ' + plan.title : ', empty minute')}
-                  accessibilityHint="Opens this minute for text entry"
-                  onPress={() => void openMinute(day, minute)} style={styles.dayCell}>
+                <Pressable key={day} accessibilityRole={inline ? undefined : 'button'}
+                  accessibilityLabel={inline ? undefined : dayLabels.get(day) + ', ' + minuteLabel(minute, true) +
+                    (displayedText ? ', ' + displayedText : ', tap to record')}
+                  accessibilityHint={inline ? undefined : 'Type in this cell. Hold for minute details.'}
+                  onPress={() => { if (!inline || colorPanelOpen) void openInlineMinute(day, minute); }}
+                  onLongPress={inline ? undefined : () => { void showMinuteDetails(day, minute); }}
+                  style={[styles.dayCell, inline && styles.editingCell]}>
                   <View pointerEvents="none" style={[styles.cellBackground,
                     color && /^#[0-9a-f]{6}$/i.test(color) ? { backgroundColor: color + '30' } : null]} />
                   {color ? <View pointerEvents="none" style={[styles.activityBar, { backgroundColor: color,
                     opacity: entry ? 1 : 0.65 }]} /> : null}
-                  {entry || plan ? <Text numberOfLines={1} maxFontSizeMultiplier={1.4}
-                    style={[styles.cellText, !entry && styles.planText, dayCount === 7 && styles.narrowText]}>
-                    {entry?.text ?? plan?.title}
-                  </Text> : null}
+                  {inline && draft ? <TextInput ref={inlineInputRef} value={draft.text}
+                    multiline scrollEnabled returnKeyType="done" submitBehavior="blurAndSubmit"
+                    accessibilityLabel={dayLabels.get(day) + ', ' + minuteLabel(minute, true) + ', minute text'}
+                    placeholder="Tap to record" placeholderTextColor={colors.muted} selectionColor={colors.currentTime}
+                    onChangeText={(text) => {
+                      markLocalChange([day]);
+                      const current = inlineMinuteDrafts.get(day, minute);
+                      inlineMinuteDrafts.edit(day, minute, { text, keepColor: text.trim() ? false : current?.keepColor ?? false });
+                    }}
+                    onBlur={() => { void inlineMinuteDrafts.flush(inlineMinuteKey(day, minute)); }}
+                    onFocus={() => revealInlineMinute(minute)}
+                    onSubmitEditing={() => {
+                      inlineMinuteDrafts.close(inlineMinuteKey(day, minute));
+                      setInlineSelection(null); setColorPanelOpen(false); Keyboard.dismiss();
+                    }} style={[styles.cellText, styles.inlineInput, dayCount === 7 && styles.narrowText]} />
+                    : <Text numberOfLines={1} maxFontSizeMultiplier={1.4}
+                      style={[styles.cellText, !entry && !draft && styles.planText,
+                        !displayedText && styles.placeholder, dayCount === 7 && styles.narrowText]}>
+                      {displayedText || 'Tap to record'}
+                    </Text>}
                   {isCurrent ? <View pointerEvents="none" style={styles.currentLine}>
                     <View style={styles.currentDot} />
                   </View> : null}
@@ -522,7 +697,7 @@ export function TodayScreen({
         minuteIndex={editor?.minuteIndex ?? 0} entry={editor?.entry ?? null} plan={editor?.plan ?? null}
         planDurationMinutes={editor?.planDuration} onClose={() => setEditor(null)} onSave={save} onDelete={remove}
         onOpenPlan={editor?.plan ? () => openPlan(editor.plan!) : undefined} />
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -571,11 +746,27 @@ function createStyles(colors: AppColors) {
     timeRail: { width: 50, justifyContent: 'center', alignItems: 'flex-end', paddingRight: 7 },
     minuteTime: { color: colors.muted, fontSize: 10, fontVariant: ['tabular-nums'] },
     currentMinuteText: { color: colors.currentTime, fontWeight: '700' },
+    colorPanel: { paddingHorizontal: 12, paddingBottom: 7, borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.hairline, backgroundColor: colors.panel },
+    colorPanelHeading: { flexDirection: 'row', alignItems: 'center', minHeight: 36 },
+    colorPanelTime: { flex: 1, color: colors.graphite, fontSize: 11 },
+    colorPanelAction: { minHeight: 40, minWidth: 44, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center' },
+    colorPanelActionText: { color: colors.graphite, fontSize: 12, fontWeight: '600' },
+    colorChoices: { gap: 5, alignItems: 'center', paddingHorizontal: 2, paddingBottom: 3 },
+    colorChoice: { width: 42, height: 42, borderRadius: 21, borderWidth: 2, borderColor: 'transparent',
+      alignItems: 'center', justifyContent: 'center' },
+    selectedColorChoice: { borderColor: colors.ink },
+    colorCircle: { width: 28, height: 28, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
+    colorName: { color: colors.muted, fontSize: 10, paddingLeft: 5, paddingTop: 2 },
     dayCell: { flex: 1, height: ROW_HEIGHT, justifyContent: 'center', paddingLeft: 9, paddingRight: 5 },
     cellBackground: { position: 'absolute', left: 2, right: 2, top: 2, bottom: 2,
       borderRadius: 7, backgroundColor: colors.calendarCell },
     activityBar: { position: 'absolute', left: 2, width: 3, top: 5, bottom: 5, borderRadius: 2 },
     cellText: { color: colors.ink, fontSize: 13, fontWeight: '500' },
+    editingCell: { borderWidth: 1, borderColor: colors.currentTime, borderRadius: 7 },
+    inlineInput: { flex: 1, paddingVertical: 5, paddingHorizontal: 0, margin: 0, maxHeight: ROW_HEIGHT - 2,
+      textAlignVertical: 'center', backgroundColor: 'transparent' },
+    placeholder: { color: colors.muted, fontWeight: '400', fontSize: 11 },
     planText: { color: colors.graphite, fontWeight: '400' },
     narrowText: { fontSize: 10 },
     currentLine: { position: 'absolute', left: 2, right: 2, top: ROW_HEIGHT / 2,
