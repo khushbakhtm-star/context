@@ -244,6 +244,123 @@ test('a color-only minute projects its activity name without inventing ledger te
   assert.equal((await device.db.getMinuteEntry(day, 600)).text, '');
 });
 
+async function separateActualBeforeReplacement(t, grants = {}, sourceChanges = {}) {
+  const remote = cloud();
+  const device = phone(t, remote, account(grants));
+  await prepare(device);
+  const original = { ...originalPrayer(), ...sourceChanges };
+  remote.seed(original);
+  await saveRange(device, 1135, 1);
+  await device.engine.linkActualsToAccounts([day], null, { dateKey: day, minuteIndex: 1135 });
+  await device.engine.synchronizeAccounts();
+  const copy = (await device.engine.listProjections()).find((item) => !item.sourceEventId && item.state === 'synced');
+  assert.ok(copy);
+  return { device, remote, original, copy };
+}
+
+test('explicit plan replacement after inline autosave updates the original and retires its generated copy', async (t) => {
+  const { device, remote, original, copy } = await separateActualBeforeReplacement(t);
+  await device.engine.linkActualsToAccounts([day], planned(original), { dateKey: day, minuteIndex: 1135 });
+  await device.engine.synchronizeAccounts();
+  const updated = remote.events.get(`personal:${original.id}`);
+  assert.equal(updated.start, iso(1135));
+  assert.equal(updated.end, iso(1136));
+  assert.match(updated.description, /Original prayer notes/);
+  assert.match(updated.description, /6:55 PM  Pray fardh/);
+  assert.equal(remote.events.has(`personal:${copy.eventId}`), false);
+  assert.ok(remote.calls.some((call) => call.type === 'delete' && call.id === copy.eventId));
+  assert.ok(remote.calls.some((call) => call.type === 'update' && call.id === original.id));
+  assert.equal(remote.calls.some((call) => call.type === 'updateSeries'), false);
+  const projections = await device.engine.listProjections();
+  assert.equal(projections.find((item) => item.id === copy.id).state, 'deleted');
+  const active = projections.filter((item) => item.state !== 'deleted');
+  assert.equal(active.length, 1);
+  assert.equal(active[0].sourceEventId, original.id);
+  assert.equal(active[0].sourceSeriesId, original.seriesId);
+});
+
+test('denied replacement permissions retain the existing inline copy and leave the source untouched', async (t) => {
+  const cases = [
+    { grants: { replaceOccurrences: false }, source: {}, scope: 'occurrence' },
+    { grants: { editInvitations: false }, source: { isInvitation: true }, scope: 'occurrence' },
+    { grants: { editSeries: false }, source: {}, scope: 'series' },
+    { grants: {}, source: { canEdit: false }, scope: 'occurrence' },
+  ];
+  for (const item of cases) {
+    const { device, remote, original, copy } = await separateActualBeforeReplacement(t, item.grants, item.source);
+    const mutationsBefore = remote.calls.filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length;
+    await device.engine.linkActualsToAccounts([day], planned(original),
+      { dateKey: day, minuteIndex: 1135 }, item.scope);
+    await device.engine.synchronizeAccounts();
+    assert.equal(remote.calls.filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length,
+      mutationsBefore);
+    assert.equal(remote.events.get(`personal:${original.id}`).version, 'v1');
+    assert.ok(remote.events.has(`personal:${copy.eventId}`));
+    const active = (await device.engine.listProjections()).filter((projection) => projection.state !== 'deleted');
+    assert.equal(active.length, 1);
+    assert.equal(active[0].sourceEventId, null);
+    assert.equal(active[0].eventId, copy.eventId);
+  }
+});
+
+test('explicit selection cannot take a block already owned by a different source occurrence', async (t) => {
+  const { device, remote, original } = await linkedPrayer(t);
+  const another = { ...original, id: 'different-prayer-instance', description: 'Another original', version: 'other-v1' };
+  remote.seed(another);
+  const mutationsBefore = remote.calls.filter((call) => ['create', 'update', 'delete'].includes(call.type)).length;
+  await device.engine.linkActualsToAccounts([day], planned(another), { dateKey: day, minuteIndex: 1135 });
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.calls.filter((call) => ['create', 'update', 'delete'].includes(call.type)).length, mutationsBefore);
+  const active = (await device.engine.listProjections()).filter((item) => item.state !== 'deleted');
+  assert.equal(active.length, 1);
+  assert.equal(active[0].sourceEventId, original.id);
+  assert.equal(remote.events.get(`personal:${another.id}`).description, 'Another original');
+});
+
+test('replacing a plan preserves an externally edited generated copy as a review conflict', async (t) => {
+  const { device, remote, original, copy } = await separateActualBeforeReplacement(t);
+  remote.edit('personal', copy.eventId, { title: 'Changed directly in calendar', description: 'Keep this external note' });
+  await device.engine.linkActualsToAccounts([day], planned(original), { dateKey: day, minuteIndex: 1135 });
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.get(`personal:${copy.eventId}`).description, 'Keep this external note');
+  assert.equal(remote.calls.some((call) => call.type === 'delete' && call.id === copy.eventId), false);
+  const retired = (await device.engine.listProjections()).find((item) => item.id === copy.id);
+  assert.equal(retired.state, 'conflict');
+  assert.equal(remote.events.get(`personal:${original.id}`).start, iso(1135));
+});
+
+test('a failed replacement-owner save cannot retire the existing generated copy', async (t) => {
+  const { device, remote, original, copy } = await separateActualBeforeReplacement(t);
+  const writeDocument = device.db.putSyncDocument;
+  device.db.putSyncDocument = async (key, value) => {
+    if (key.startsWith('projection:') && value?.sourceEventId === original.id) throw new Error('Replacement database write failed');
+    return writeDocument(key, value);
+  };
+  await assert.rejects(device.engine.linkActualsToAccounts([day], planned(original),
+    { dateKey: day, minuteIndex: 1135 }), /Replacement database write failed/);
+  device.db.putSyncDocument = writeDocument;
+  await device.engine.synchronizeAccounts();
+  const remaining = (await device.engine.listProjections()).find((item) => item.id === copy.id);
+  assert.equal(remaining.state, 'synced');
+  assert.equal(remaining.blockId, copy.blockId);
+  assert.ok(remote.events.has(`personal:${copy.eventId}`));
+  assert.equal(remote.events.get(`personal:${original.id}`).version, 'v1');
+  assert.equal(remote.calls.some((call) => call.type === 'delete'), false);
+});
+
+test('selecting the generated copy itself cannot retire or claim it as an original plan', async (t) => {
+  const { device, remote, copy } = await separateActualBeforeReplacement(t);
+  const copiedEvent = remote.events.get(`personal:${copy.eventId}`);
+  await device.engine.linkActualsToAccounts([day], planned(copiedEvent), { dateKey: day, minuteIndex: 1135 });
+  await device.engine.synchronizeAccounts();
+  const active = (await device.engine.listProjections()).filter((item) => item.state !== 'deleted');
+  assert.equal(active.length, 1);
+  assert.equal(active[0].id, copy.id);
+  assert.equal(active[0].sourceEventId, null);
+  assert.ok(remote.events.has(`personal:${copy.eventId}`));
+  assert.equal(remote.calls.some((call) => call.type === 'delete'), false);
+});
+
 test('an explicitly selected recurring-series change delegates to the series adapter then updates the selected instance', async (t) => {
   const remote = cloud();
   const device = phone(t, remote, account({ editSeries: true }));

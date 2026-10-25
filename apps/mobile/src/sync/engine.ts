@@ -209,10 +209,6 @@ export async function linkActualsToAccounts(
     for (const segment of await getDaySegments(value)) {
       if (edited && !linkedBlocks.has(segment.blockId)) continue;
       if (projections.some((p) => p.state === 'conflict' && p.blockId === segment.blockId)) continue;
-      if (projections.some((p) => p.state !== 'deleted' && p.blockId === segment.blockId &&
-        p.dateKey <= value && (p.endDateKey ?? p.dateKey) >= value &&
-        (p.dateKey !== value || p.startMinute <= segment.endMinute) &&
-        ((p.endDateKey ?? p.dateKey) !== value || p.endMinute >= segment.startMinute))) continue;
       const intersectsSource = sourcePlan &&
         localDateAtMinute(value, segment.startMinute) < sourcePlan.endDate &&
         localDateAtMinute(value, segment.endMinute + 1) > sourcePlan.startDate &&
@@ -228,6 +224,29 @@ export async function linkActualsToAccounts(
           p.sourceEventId === reference.event.id);
         if (owner && owner.blockId !== segment.blockId && await getProjectionSegment(owner)) {
           sourceAccount = undefined;
+        }
+      }
+      const existing = projections.filter((p) => p.state !== 'deleted' && p.blockId === segment.blockId &&
+        p.dateKey <= value && (p.endDateKey ?? p.dateKey) >= value &&
+        (p.dateKey !== value || p.startMinute <= segment.endMinute) &&
+        ((p.endDateKey ?? p.dateKey) !== value || p.endMinute >= segment.startMinute));
+      const copiesToRetire: Projection[] = [];
+      if (existing.length) {
+        // Inline autosave may already have created a separate actual. A later explicit
+        // replacement must attach this block to the chosen original instead of silently
+        // ignoring that choice. Retire only our unbound copies in the same authorized
+        // account; normal reconciliation preserves changed copies as conflicts.
+        const canReplaceCopy = sourceAccount && reference && !reference.event.allDay &&
+          !reference.event.isSeriesMaster && !reference.event.projectionId && reference.event.canEdit !== false &&
+          (!reference.event.isInvitation || sourceAccount.consent.editInvitations) &&
+          (sourceScope !== 'series' || sourceAccount.consent.editSeries) &&
+          existing.every((p) => !p.sourceEventId && p.state !== 'conflict' &&
+            p.accountId === sourceAccount.id && p.eventId !== reference.event.id);
+        if (!canReplaceCopy) continue;
+        for (const copy of existing) {
+          copy.blockId = `retired:${copy.id}`;
+          copy.state = 'pending';
+          copiesToRetire.push(copy);
         }
       }
       let owner = sourceAccount;
@@ -273,6 +292,9 @@ export async function linkActualsToAccounts(
         projection.endMinute = contiguous.entries.at(-1)!.minuteIndex;
       }
       await saveProjection(projection);
+      // Establish the replacement owner durably before permitting deletion of its copies.
+      // If a later retirement write fails, the normal duplicate-group pass can retry it.
+      for (const copy of copiesToRetire) await saveProjection(copy);
       projections.push(projection);
       if (sourceAccount) sourceUsed = true;
     }

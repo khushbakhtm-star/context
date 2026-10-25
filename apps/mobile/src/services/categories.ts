@@ -8,6 +8,7 @@ import type { AccountProvider, ConnectedAccount } from '../sync/types';
 import { CATEGORIES, DEFAULT_CATEGORIES, setCategoryCache } from '../theme';
 import type { ActivityCategory } from '../theme';
 import type { DeviceCalendar } from '../types';
+import { CELL_FORMAT_PREFIX } from '../utils/cell-format';
 
 const SETTING = 'activity.categories.v2';
 const COLOR = /^#[0-9a-f]{6}$/i;
@@ -35,12 +36,12 @@ async function writeCategory(category: ActivityCategory) {
 
 /** Defaults are starting suggestions, not a limit. All metadata travels with the private ledger. */
 export async function listCategories(includeArchived = true): Promise<ActivityCategory[]> {
-  let documents = await getSyncDocuments('category:');
+  let documents = await getSyncDocuments('category:', CELL_FORMAT_PREFIX);
   if (!documents.length) {
     const previous = await getSetting<ActivityCategory[] | null>(SETTING, null);
     const initial = previous?.filter(validCategory) ?? DEFAULT_CATEGORIES;
     for (const category of initial) await writeCategory(category);
-    documents = await getSyncDocuments('category:');
+    documents = await getSyncDocuments('category:', CELL_FORMAT_PREFIX);
   }
   const values = documents.flatMap((document) =>
     validCategory(document.value) ? [document.value] : []);

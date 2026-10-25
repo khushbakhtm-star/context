@@ -5,7 +5,19 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
 
 ## Everyday use
 
-- Tap any minute to type or dictate, or fill a range spanning midnight.
+- Tap a minute cell on Today to type or dictate directly in the grid. Text saves after a short pause,
+  when leaving the cell, and when the app leaves the foreground. Neighboring entries stay visible.
+- Tap the minute timestamp to open the inline color radio strip. It shows the selected date and time.
+  An explicitly colored minute can stay blank and still count toward its activity's time totals.
+- Choose **Details** in that strip, or hold an inactive cell, for ranges spanning midnight and advanced
+  calendar-source controls. Holding text inside the active input retains normal text selection.
+- The bottom editing bar applies bold, italic, and text color to a cell or selected minute range.
+  The **+** control selects a range for filling or clearing. Formatting an empty cell does not record
+  an activity or add time to reports. Activity color and text color remain separate controls.
+- Pinch to zoom both axes, or use the zoom controls in the header's view menu. Wider day columns
+  scroll horizontally while minute labels remain fixed. Zoom is remembered separately on each phone.
+- Undo and redo restore Context entries and cell formatting within the running editing session.
+  Changes already sent to calendars, especially invitation cancellations, may need separate review.
 - Connect accounts under **Settings → Accounts & phone synchronization**.
 - Grant ledger storage, calendar reading, calendar writing, original-occurrence replacement, and
   calendar-edit import separately. Each can be disabled later.
