@@ -63,7 +63,7 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/MinuteActivity.kt",
-      "sha256": "cb0baa92e7b0280ebb463abdad7dd85689d0e18d0f797b7c97479addf3ac214c"
+      "sha256": "f4779b9c9802ed2cb63100b493f1eca2a679ac42117e2155c2f1f89f8a751b8b"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchLayout.kt",

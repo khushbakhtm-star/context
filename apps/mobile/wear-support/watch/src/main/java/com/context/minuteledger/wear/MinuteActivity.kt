@@ -103,7 +103,7 @@ class MinuteActivity : Activity() {
                     } else if (state == AbsListView.OnScrollListener.SCROLL_STATE_IDLE && touchBrowsing) {
                         val middle = list.pointToPosition(list.width / 2, list.height / 2)
                         if (middle in 0..1439) selected = Coordinate(selected.dateKey, middle)
-                        touchBrowsing = false; adapter.notifyDataSetChanged()
+                        touchBrowsing = false; this@MinuteActivity.adapter.notifyDataSetChanged()
                     }
                 }
                 override fun onScroll(view: AbsListView?, first: Int, visible: Int, total: Int) = Unit
