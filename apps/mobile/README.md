@@ -14,6 +14,9 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
 - The bottom editing bar applies bold, italic, and text color to a cell or selected minute range.
   The **+** control selects a range for grouping, filling, or clearing. Formatting an empty cell does not record
   an activity or add time to reports. Activity color and text color remain separate controls.
+- Tap a cell, then drag its small corner handle up or down within the same day. The grid scrolls
+  when the handle reaches its top or bottom edge. Releasing opens **Auto fill / Group** for the
+  inclusive range; the original cell remains the source even when dragging upward.
 - Hold an inactive cell, then tap the last cell in the same day to select a range and open its
   **Auto fill / Group** popup. The **+** control also opens that popup with editable range times.
 - With no minute selected, **+** requires calendar read access and at least one available calendar
@@ -28,8 +31,13 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   cell keeps its own note and remains editable directly in the grid. Blank grouped minutes also
   count toward the activity's time. Group members use a solid activity-color fill and a title badge;
   open **+** from a member to edit the group. Tapping the title area follows the same inline-entry
-  behavior as the rest of the cell. **Auto fill** copies a nonblank active
-  minute's text with the chosen activity color. An empty source preserves occupied target notes.
+  behavior as the rest of the cell.
+- **Auto fill** copies the original source cell's exact text to every selected minute, including both
+  endpoints, without requiring a color choice. It uses that source's activity color and formatting;
+  choosing another Google color changes the activity color. Each copied minute remains independently
+  editable, and **Undo** restores the target cells' previous contents within the editing session.
+  With a blank source, enter text or explicitly choose a color. A color-only fill preserves existing
+  target notes. **Group** gives the range one activity title and color while retaining each note.
 - Activity/group color choices use [documented Google Calendar hex colors](https://developers.google.com/apps-script/reference/calendar/color)
   plus exact colors imported from connected [Google palettes](https://developers.google.com/workspace/calendar/api/v3/reference/colors)
   and [calendar labels](https://developers.google.com/workspace/calendar/api/guides/labels). This offline fallback

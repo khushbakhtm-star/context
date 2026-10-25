@@ -148,6 +148,48 @@ test('a format write failure rolls back the entire fill, journal and calendar-li
   assert.equal((await api.getPendingInlineMinuteLinks()).length, 0);
 });
 
+test('drag Auto fill copies the current 17:19 anchor downward and upward without changing its activity color', async (t) => {
+  for (const selection of [
+    { direction: 'downward', start: 1039, end: 1042, occupied: 1040 },
+    { direction: 'upward', start: 1036, end: 1039, occupied: 1037 },
+  ]) {
+    const { api, sheet, inline } = harness(t);
+    await api.initializeDatabase();
+    await save(api, 1039, 'Previous anchor text', 'work');
+    await save(api, selection.occupied, 'Keep this separate thought', 'family');
+    await save(api, 1043, 'Outside the selection', 'study');
+    activate(inline, 1039, 'Previous anchor text', 'work');
+    sheet.editInlineMinute(day, 1039, { text: 'Read Codex' });
+    assert.equal((await api.getMinuteEntry(day, 1039)).text, 'Previous anchor text',
+      `${selection.direction}: the newest anchor text starts as an uncommitted draft`);
+
+    // The original 17:19 source remains fixed even when the selected range is
+    // normalized to 17:16–17:19 after dragging upward. No color choice is supplied.
+    await sheet.fillMinuteRange(range(selection.start, selection.end), 1039);
+    const filled = (await api.getDayEntries(day)).filter((entry) =>
+      entry.minuteIndex >= selection.start && entry.minuteIndex <= selection.end);
+    assert.equal(filled.length, 4, selection.direction);
+    assert.ok(filled.every((entry) => entry.text === 'Read Codex'), selection.direction);
+    assert.ok(filled.every((entry) => entry.categoryId === 'work'),
+      `${selection.direction}: Auto fill keeps the anchor activity without requesting a new color`);
+    assert.equal((await api.getMinuteEntry(day, 1043)).text, 'Outside the selection');
+
+    await sheet.undoSpreadsheetEdit();
+    for (let minute = selection.start; minute <= selection.end; minute += 1) {
+      const restored = await api.getMinuteEntry(day, minute);
+      if (minute === 1039) {
+        assert.equal(restored.text, 'Read Codex', 'Undoing the fill retains the separately committed anchor edit');
+        assert.equal(restored.categoryId, 'work');
+      } else if (minute === selection.occupied) {
+        assert.equal(restored.text, 'Keep this separate thought');
+        assert.equal(restored.categoryId, 'family');
+      } else {
+        assert.equal(restored, null, `${selection.direction}: minute ${minute} is blank again`);
+      }
+    }
+  }
+});
+
 test('an explicit Google color fills source notes and formats, preserving legacy two-argument behavior and Undo', async (t) => {
   const device = harness(t); const { api, sheet } = device;
   await api.initializeDatabase();
