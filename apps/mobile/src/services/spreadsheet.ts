@@ -4,6 +4,7 @@ import { CELL_FORMAT_PREFIX, cellFormatKey, formatFromDocument, isActivityGroupI
   type CellFormat, type MinuteCellRange } from '../utils/cell-format';
 import { inlineMinuteKey, type InlineMinuteValue } from '../utils/inline-minute-drafts';
 import { addDays, dateKey } from '../utils/time';
+import { listSelectableActivityCategories } from './categories';
 
 export type { CellFormat, MinuteCellRange } from '../utils/cell-format';
 export type CellFormatPatch = { bold?: boolean; italic?: boolean; textColor?: string | null };
@@ -209,19 +210,27 @@ class SpreadsheetEditor {
       await this.perform({ day: range.dateKey, before: Promise.resolve(before), after, textChanged: false, formatChanged: true });
     });
   }
-  fill(range: MinuteCellRange, sourceMinute: number) {
+  fill(range: MinuteCellRange, sourceMinute: number, categoryId?: string) {
     validateMinuteCellRange(range);
     if (!Number.isInteger(sourceMinute) || sourceMinute < 0 || sourceMinute > 1439) return Promise.reject(new Error('Choose a valid source minute.'));
     return this.enqueue(async () => {
+      if (categoryId !== undefined &&
+          !(await listSelectableActivityCategories()).some((category) => category.id === categoryId)) {
+        throw new Error('Choose a Google Calendar color before filling these minutes.');
+      }
       const before = await readCells(range);
       const source = (await readCells({ dateKey: range.dateKey, startMinute: sourceMinute, endMinute: sourceMinute }))[0]!;
       const blockId = source.entry?.blockId ?? `sheet_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+      const copySourceText = source.entry && (categoryId === undefined || Boolean(source.entry.text.trim()));
       const after = before.map((cell) => ({ minuteIndex: cell.minuteIndex,
-        // A format-only empty source fills formatting without silently clearing notes.
-        entry: source.entry ? { text: source.entry.text, categoryId: source.entry.categoryId, blockId } : cell.entry,
+        // The two-argument fill retains its historical source-color behavior. An
+        // explicit Google choice overrides that color. A blank source never clears
+        // existing notes; explicit color-only members still record the selected time.
+        entry: copySourceText ? { text: source.entry!.text, categoryId: categoryId ?? source.entry!.categoryId, blockId }
+          : categoryId !== undefined ? { ...cell.entry, text: cell.entry?.text ?? '', categoryId, blockId } : cell.entry,
         format: clone(source.format) }));
       await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
-        textChanged: Boolean(source.entry), formatChanged: true });
+        textChanged: Boolean(source.entry) || categoryId !== undefined, formatChanged: true });
     });
   }
   group(range: MinuteCellRange, input: { title: string; categoryId: string }) {
@@ -231,6 +240,9 @@ class SpreadsheetEditor {
       return Promise.reject(new Error('Enter an activity title of up to 200 characters and choose a color.'));
     }
     return this.enqueue(async () => {
+      if (!(await listSelectableActivityCategories()).some((category) => category.id === input.categoryId)) {
+        throw new Error('Choose a Google Calendar color before grouping these minutes.');
+      }
       const before = await readCells(range);
       const candidate = before[0]?.entry?.blockId;
       const allEntries = await getEntriesBetween(dateKey(addDays(range.dateKey, -1)), dateKey(addDays(range.dateKey, 1)));
@@ -268,7 +280,8 @@ export const spreadsheetEditor = new SpreadsheetEditor();
 export const editInlineMinute = (day: string, minute: number,
   changes: Partial<Pick<InlineMinuteValue, 'text' | 'categoryId' | 'keepColor'>>) => spreadsheetEditor.edit(day, minute, changes);
 export const applyCellFormat = (range: MinuteCellRange, patch: CellFormatPatch) => spreadsheetEditor.format(range, patch);
-export const fillMinuteRange = (range: MinuteCellRange, sourceMinute: number) => spreadsheetEditor.fill(range, sourceMinute);
+export const fillMinuteRange = (range: MinuteCellRange, sourceMinute: number, categoryId?: string) =>
+  spreadsheetEditor.fill(range, sourceMinute, categoryId);
 export const clearMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.clear(range);
 export const groupMinuteRange = (range: MinuteCellRange, input: { title: string; categoryId: string }) => spreadsheetEditor.group(range, input);
 export const undoSpreadsheetEdit = () => spreadsheetEditor.undo();

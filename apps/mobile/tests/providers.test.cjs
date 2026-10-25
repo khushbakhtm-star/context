@@ -43,6 +43,19 @@ const write = {
 const seriesWrite = { ...write, sourceOperationId: 'source-operation-1' };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
+test('Google calendar display fallback is separate from the exact provider color provenance', async () => {
+  const { createCalendarAdapter } = loadProviders(async () => json({ items: [
+    { id: 'actual', summary: 'Actual', backgroundColor: '#112233', accessRole: 'owner' },
+    { id: 'missing', summary: 'Missing', accessRole: 'reader' },
+    { id: 'invalid', summary: 'Invalid', backgroundColor: 'not-a-color', accessRole: 'writer' },
+  ] }));
+  const calendars = await createCalendarAdapter(account('google')).listCalendars();
+  assert.equal(calendars[0].color, '#112233'); assert.equal(calendars[0].providedColor, '#112233');
+  for (const calendar of calendars.slice(1)) {
+    assert.equal(calendar.color, '#8E8C86'); assert.equal(calendar.providedColor, undefined);
+  }
+});
+
 test('Google reads expanded occurrences and follows every page', async () => {
   const requests = [];
   const { createCalendarAdapter } = loadProviders(async (_account, url) => {

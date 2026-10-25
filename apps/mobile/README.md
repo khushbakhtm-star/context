@@ -7,18 +7,30 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
 
 - Tap a minute cell on Today to type or dictate directly in the grid. Text saves after a short pause,
   when leaving the cell, and when the app leaves the foreground. Neighboring entries stay visible.
-- Tap the minute timestamp to open the inline color radio strip. It shows the selected date and time.
-  An explicitly colored minute can stay blank and still count toward its activity's time totals.
-- Choose **Details** in that strip, or hold an inactive cell, for ranges spanning midnight and advanced
-  calendar-source controls. Holding text inside the active input retains normal text selection.
+- Tap the active minute cell again to open its color/details popup. An explicitly colored minute
+  can stay blank and still count toward its activity's time totals. Choose **Details** in the popup
+  for ranges spanning midnight and advanced calendar-source controls. Holding or dragging text
+  inside the active input retains normal text selection.
 - The bottom editing bar applies bold, italic, and text color to a cell or selected minute range.
   The **+** control selects a range for grouping, filling, or clearing. Formatting an empty cell does not record
   an activity or add time to reports. Activity color and text color remain separate controls.
+- Hold an inactive cell, then tap the last cell in the same day to select a range and open its
+  **Auto fill / Group** popup. The **+** control also opens that popup with editable range times.
 - To make one activity from several cells, tap a minute, choose **+**, set the first and last minute,
   enter an activity title, choose its color, and tap **Group**. The last minute is included. Every
   cell keeps its own note and remains editable directly in the grid. Blank grouped minutes also
-  count toward the activity's time. The group has one outline and a title badge; tap its badge or
-  open **+** from a member to edit the group. **Fill** instead copies the active minute's text.
+  count toward the activity's time. Group members use a solid activity-color fill and a title badge;
+  tap the badge or open **+** from a member to edit the group. **Auto fill** copies a nonblank active
+  minute's text with the chosen activity color. An empty source preserves occupied target notes.
+- Activity/group color choices use [documented Google Calendar hex colors](https://developers.google.com/apps-script/reference/calendar/color)
+  plus exact colors imported from connected [Google palettes](https://developers.google.com/workspace/calendar/api/v3/reference/colors)
+  and [calendar labels](https://developers.google.com/workspace/calendar/api/guides/labels). This offline fallback
+  does not claim to enumerate the current 24-color event picker. Arbitrary new activity hex values are unavailable.
+  Historical activity colors remain intact, and text formatting retains its separate palette.
+- Tap today's date number in the header to return to the current minute in today's column.
+- Choose **12-hour** or **24-hour** in the calendar header's view menu. The preference is saved
+  on this phone. The minute column measures the selected time label and uses minimal padding;
+  for example, the 24-hour display shows `13:11` without an AM/PM suffix.
 - Pinch to zoom both axes, or use the zoom controls in the header's view menu. Wider day columns
   scroll horizontally while minute labels remain fixed. Zoom is remembered separately on each phone.
 - Undo and redo restore Context entries and cell formatting within the running editing session.

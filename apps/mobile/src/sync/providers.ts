@@ -257,9 +257,11 @@ function googleAdapter(account: ConnectedAccount): AccountCalendarAdapter {
         })));
         for (const item of page.items ?? []) {
           if (item.deleted) continue;
+          const providedColor = typeof item.backgroundColor === 'string' && /^#[0-9a-f]{6}$/i.test(item.backgroundColor)
+            ? item.backgroundColor : undefined;
           calendars.push({
             id: String(item.id), title: String(item.summaryOverride || item.summary || 'Calendar'),
-            color: item.backgroundColor || '#8E8C86',
+            color: providedColor ?? '#8E8C86', providedColor,
             writable: item.accessRole === 'owner' || item.accessRole === 'writer',
           });
         }
