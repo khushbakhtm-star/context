@@ -121,8 +121,11 @@ internal object WearInbox {
   }
 
   private fun syncDirectory(directory: File) {
-    val fd = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY, 0)
-    try { Os.fsync(fd) } finally { Os.close(fd) }
+    val fd = Os.open(directory.absolutePath, OsConstants.O_RDONLY, 0)
+    try {
+      if (!OsConstants.S_ISDIR(Os.fstat(fd).st_mode)) throw WearBridgeFailure("ERR_WEAR_IO")
+      Os.fsync(fd)
+    } finally { Os.close(fd) }
   }
 
   fun strictUtf8(bytes: ByteArray): String = StandardCharsets.UTF_8.newDecoder()

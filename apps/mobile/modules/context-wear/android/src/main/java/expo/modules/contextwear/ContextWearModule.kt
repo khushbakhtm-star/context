@@ -39,15 +39,15 @@ class ContextWearModule : Module() {
     AsyncFunction("setEnabledAsync") Coroutine { enabled: Boolean ->
       guarded { WearBridge.setEnabled(context(), enabled) }
     }
-    AsyncFunction("scanPendingAsync") Coroutine { guarded { WearBridge.scanPending(context()) } }
-    AsyncFunction("drainInboxAsync") Coroutine { guarded {
+    AsyncFunction("scanPendingAsync") Coroutine { -> guarded { WearBridge.scanPending(context()) } }
+    AsyncFunction("drainInboxAsync") Coroutine { -> guarded {
       val application = context()
       if (WearInbox.enabled(application)) WearInbox.drain(application).map { it.publicValue() } else emptyList()
     } }
     AsyncFunction("acknowledgeInboxAsync") Coroutine { id: String -> guarded { WearBridge.acknowledge(context(), id) } }
     AsyncFunction("publishDayAsync") Coroutine { json: String -> guarded { WearBridge.publishDay(context(), json) } }
     AsyncFunction("publishAckAsync") Coroutine { json: String -> guarded { WearBridge.publishAck(context(), json) } }
-    AsyncFunction("getStatusAsync") Coroutine {
+    AsyncFunction("getStatusAsync") Coroutine { ->
       withContext(Dispatchers.IO) {
         try { WearBridge.status(context()) }
         catch (_: Throwable) { mapOf("enabled" to false, "connectedNodeCount" to 0,

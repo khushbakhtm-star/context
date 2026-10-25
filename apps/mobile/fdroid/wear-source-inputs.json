@@ -19,7 +19,7 @@
     },
     {
       "path": "modules/context-wear/android/src/main/java/expo/modules/contextwear/ContextWearModule.kt",
-      "sha256": "8f8ff30844a7e702840c77ed3de9f27432ef35057d60737985d6f386f8c67f8a"
+      "sha256": "e9cb5015a650450dfe20f87cbc6f25e3901292e23f6ac8e177ef56bbcc157328"
     },
     {
       "path": "modules/context-wear/android/src/main/java/expo/modules/contextwear/WearBridge.kt",
@@ -27,7 +27,7 @@
     },
     {
       "path": "modules/context-wear/android/src/main/java/expo/modules/contextwear/WearInbox.kt",
-      "sha256": "3792ea88ee4f90bf75116cc49c50036e8feffd5989914b93c73aa832a59d6e06"
+      "sha256": "db366e237abd8540b59b127f341c373058b8423f00a8a2cccfb42ce2580cda35"
     },
     {
       "path": "modules/context-wear/expo-module.config.json",
