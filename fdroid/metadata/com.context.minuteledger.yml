@@ -1,6 +1,6 @@
 # Disabled source-build candidate, not a submitted F-Droid listing.
 # Generate a release-specific candidate with prepare-submission.cjs after publishing the source.
-# Keep this build disabled until the unsigned native build and F-Droid scanner are verified.
+# Source scan and native verification passed; official maintainer review remains pending.
 AntiFeatures:
   NonFreeNet:
     en-US: Optional Microsoft calendar and OneDrive connections use Microsoft's proprietary services. The local ledger, Android calendars, and user-selected WebDAV storage work without them.
@@ -34,7 +34,7 @@ Repo: "https://github.com/khushbakhtm-star/context"
 Builds:
   - versionName: 0.1.2
     versionCode: 3
-    disable: Pinned build-server toolchain, dependency scan, and native verification are pending
+    disable: Official F-Droid maintainer review and release publication are pending
     commit: 49cb65def8d6f951f5709e8ee5bd581d352b1693
     subdir: apps/mobile
     sudo:
@@ -68,7 +68,11 @@ Builds:
 
 MaintainerNotes: |-
   The upstream fastlane listing is at repository-root fastlane/metadata/android/en-US.
-  This is an unverified source-build candidate, not a completed native build recipe.
+  This recipe passed independent source and native verification for the pinned commit.
+  Run https://github.com/khushbakhtm-star/context/actions/runs/40176383213 passed
+  metadata lint, source scanning (zero errors/warnings), the integrated fdroid build
+  with APK scanning, and independent unsigned Android assembly and APK scanning.
+  The recorded Ubuntu toolchain is not F-Droid's official build-server image.
   The recipe provisions Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, and Gradle
   9.4.1 with official archive hashes. Android platform 37.0, Build Tools 37.0.0,
   NDK 27.1.12297006, and CMake 3.22.1 must be available in the approved server SDK.
