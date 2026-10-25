@@ -6,13 +6,15 @@ import type { ConnectedAccount } from '../sync/types';
 import {
   createCategory, importAccountCategories, importDeviceCategories, listCategories, updateCategory,
 } from '../services/categories';
-import { colors } from '../theme';
-import type { ActivityCategory } from '../theme';
+import { useAppTheme } from '../appearance';
+import type { ActivityCategory, AppColors } from '../theme';
 import type { DeviceCalendar } from '../types';
 
 type Props = { onDataChanged: () => void; calendars?: DeviceCalendar[] };
 
 export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
+  const { colors, resolvedMode } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [categories, setCategories] = useState<ActivityCategory[]>([]);
   const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
@@ -72,11 +74,12 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>{editing ? 'Edit category' : 'Create a category'}</Text>
-        <TextInput value={name} onChangeText={setName} placeholder="Category name" editable={!busy}
+        <TextInput keyboardAppearance={resolvedMode} value={name} onChangeText={setName} placeholder="Category name" editable={!busy}
           placeholderTextColor={colors.muted} style={styles.input} maxLength={200} />
         <View style={styles.colorInputRow}>
           <View style={[styles.largeDot, { backgroundColor: /^#[0-9a-f]{6}$/i.test(color) ? color : colors.silver }]} />
-          <TextInput value={color} onChangeText={setColor} placeholder="#667B69" editable={!busy}
+          <TextInput keyboardAppearance={resolvedMode} value={color} onChangeText={setColor} placeholder="#667B69" editable={!busy}
+            placeholderTextColor={colors.muted}
             autoCapitalize="characters" autoCorrect={false} maxLength={7}
             accessibilityLabel="Category color in hexadecimal" style={[styles.input, styles.colorInput]} />
         </View>
@@ -124,9 +127,9 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
         <Text style={styles.cardTitle}>{categories.filter((category) => !category.archived).length} active categories</Text>
         <View style={styles.archiveToggle}><Text style={styles.help}>Archived</Text>
           <Switch value={showArchived} onValueChange={setShowArchived}
-            trackColor={{ false: '#D5D2CB', true: '#7A8079' }} thumbColor={colors.white} /></View>
+            trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }} thumbColor={colors.switchThumb} /></View>
       </View>
-      <TextInput value={search} onChangeText={setSearch} placeholder="Find a category"
+      <TextInput keyboardAppearance={resolvedMode} value={search} onChangeText={setSearch} placeholder="Find a category"
         placeholderTextColor={colors.muted} style={styles.input} />
       <View style={styles.card}>
         {visible.map((category) => <View key={category.id} style={styles.categoryRow}>
@@ -151,24 +154,24 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.paper }, content: { padding: 20, paddingBottom: 40 },
   eyebrow: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1.1 },
   title: { marginTop: 6, color: colors.ink, fontSize: 28, lineHeight: 34, fontWeight: '700' },
   intro: { marginTop: 9, color: colors.muted, fontSize: 14, lineHeight: 21 },
   card: { marginTop: 18, padding: 16, borderRadius: 15, borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.hairline, backgroundColor: colors.white },
+    borderColor: colors.hairline, backgroundColor: colors.surface },
   cardTitle: { color: colors.ink, fontSize: 16, fontWeight: '700' },
   help: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },
   input: { marginTop: 12, padding: 12, borderWidth: 1, borderColor: colors.hairline, borderRadius: 10,
-    color: colors.ink, fontSize: 14, backgroundColor: colors.white },
+    color: colors.ink, fontSize: 14, backgroundColor: colors.surface },
   colorInputRow: { flexDirection: 'row', alignItems: 'center', gap: 12 }, colorInput: { flex: 1 },
   largeDot: { width: 28, height: 28, borderRadius: 14, marginTop: 12 },
   palette: { gap: 11, paddingVertical: 14 }, swatch: { width: 24, height: 24, borderRadius: 12 },
   selectedSwatch: { borderWidth: 2, borderColor: colors.ink },
   actions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 },
-  button: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10, backgroundColor: colors.ink },
-  buttonText: { color: colors.white, fontSize: 13, fontWeight: '700' }, link: { color: colors.graphite, fontSize: 12, fontWeight: '700' },
+  button: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10, backgroundColor: colors.accent },
+  buttonText: { color: colors.onAccent, fontSize: 13, fontWeight: '700' }, link: { color: colors.graphite, fontSize: 12, fontWeight: '700' },
   importRow: { flexDirection: 'row', alignItems: 'center', paddingTop: 15, gap: 10 },
   importName: { flex: 1, color: colors.graphite, fontSize: 13 },
   message: { marginTop: 14, color: colors.success, fontSize: 13, lineHeight: 19 },

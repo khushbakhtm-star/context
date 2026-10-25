@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Linking, Platform, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
-import * as Application from 'expo-application';
+import Constants from 'expo-constants';
 
 import { getSetting, setSetting } from '../data/database';
-import { colors } from '../theme';
+import { useAppTheme } from '../appearance';
+import type { AppColors } from '../theme';
+import { installedReleaseFromEmbeddedConfig } from '../services/installed-release';
 import {
   fetchReleaseManifest, httpsReleaseUrl, releaseNoticeKey, selectAvailableRelease, shouldCheckForUpdate,
-  type InstalledRelease, type ReleaseChannel, type ReleasedUpdate,
+  type ReleaseChannel, type ReleasedUpdate,
 } from '../services/updates';
 
 const SETTINGS_KEY = 'release-updates.enabled';
@@ -23,12 +25,14 @@ const trust = {
   standaloneReleaseUrl: process.env.EXPO_PUBLIC_CONTEXT_STANDALONE_RELEASE_URL ??
     'https://github.com/khushbakhtm-star/context/releases',
 };
-const applicationId = Application.applicationId;
-const platform = Platform.OS;
-const installed: InstalledRelease | null = (platform === 'android' || platform === 'ios') &&
-  applicationId === 'com.context.minuteledger' && Application.nativeApplicationVersion && Application.nativeBuildVersion
-  ? { platform, channel, applicationId, version: Application.nativeApplicationVersion,
-    buildNumber: Application.nativeBuildVersion } : null;
+const installed = installedReleaseFromEmbeddedConfig({
+  platform: Platform.OS,
+  channel,
+  config: Constants.expoConfig,
+  executionEnvironment: Constants.executionEnvironment,
+  development: __DEV__,
+  iosNativeBuildNumber: Constants.platform?.ios?.buildNumber,
+});
 const configured = Boolean(installed && httpsReleaseUrl(manifestUrl) &&
   (channel !== 'standalone' || httpsReleaseUrl(trust.standaloneReleaseUrl)) &&
   (channel !== 'apple-app-store' || /^\d+$/.test(trust.appleAppStoreId ?? '')));
@@ -148,6 +152,8 @@ function releaseButton(channel: ReleaseChannel) {
 }
 
 export function ReleaseUpdateNotice({ updates }: { updates: ReleaseUpdatesState }) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   if (!updates.notice) return null;
   return (
     <View style={styles.notice} accessibilityLiveRegion="polite">
@@ -168,6 +174,8 @@ export function ReleaseUpdateNotice({ updates }: { updates: ReleaseUpdatesState 
 }
 
 export function ReleaseUpdateSettings({ updates }: { updates: ReleaseUpdatesState }) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   return (
     <View style={styles.settings}>
       <View style={styles.settingRow}>
@@ -180,7 +188,7 @@ export function ReleaseUpdateSettings({ updates }: { updates: ReleaseUpdatesStat
         </View>
         <Switch accessibilityLabel="Check for released Context updates" value={updates.enabled}
           disabled={!updates.configured || updates.loading} onValueChange={(value) => { void updates.setEnabled(value); }}
-          trackColor={{ false: '#D5D2CB', true: '#7A8079' }} thumbColor={colors.white} />
+          trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }} thumbColor={colors.switchThumb} />
       </View>
       {updates.configured && updates.enabled ? (
         <View style={styles.settingsActions}>
@@ -200,19 +208,19 @@ export function ReleaseUpdateSettings({ updates }: { updates: ReleaseUpdatesStat
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   notice: { paddingHorizontal: 16, paddingVertical: 12, backgroundColor: colors.panel,
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.hairline },
   copy: { flex: 1, paddingRight: 12 },
   title: { color: colors.graphite, fontSize: 13, fontWeight: '700' },
   body: { marginTop: 4, color: colors.muted, fontSize: 12, lineHeight: 18 },
   actions: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
-  button: { minHeight: 42, paddingHorizontal: 12, paddingVertical: 11, borderRadius: 9, backgroundColor: colors.graphite },
-  buttonText: { color: colors.white, fontSize: 12, fontWeight: '700' },
+  button: { minHeight: 42, paddingHorizontal: 12, paddingVertical: 11, borderRadius: 9, backgroundColor: colors.accent },
+  buttonText: { color: colors.onAccent, fontSize: 12, fontWeight: '700' },
   dismiss: { minHeight: 42, paddingHorizontal: 14, justifyContent: 'center' },
   dismissText: { color: colors.muted, fontSize: 12 },
   settings: { marginTop: 12, padding: 16, borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.hairline, borderRadius: 14, backgroundColor: colors.white },
+    borderColor: colors.hairline, borderRadius: 14, backgroundColor: colors.surface },
   settingRow: { flexDirection: 'row', alignItems: 'center' },
   settingsActions: { marginTop: 12, flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
   status: { marginTop: 10, color: colors.muted, fontSize: 12, lineHeight: 18 },

@@ -1,6 +1,8 @@
+import { useMemo } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
-import { colors } from '../theme';
+import { useAppTheme } from '../appearance';
+import type { AppColors, AppearanceMode } from '../theme';
 import type { CalendarPreferences, DeviceCalendar } from '../types';
 import { ReleaseUpdateSettings, type ReleaseUpdatesState } from '../components/ReleaseUpdates';
 
@@ -27,6 +29,8 @@ export function SettingsScreen({
   onOpenCategories,
   updates,
 }: Props) {
+  const { colors, mode, setMode, persistenceError } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const hasAccess = permissionStatus === 'granted';
 
   function toggleImported(id: string) {
@@ -39,7 +43,26 @@ export function SettingsScreen({
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.eyebrow}>SETTINGS</Text>
-      <Text style={styles.title}>Calendar connection</Text>
+      <Text style={styles.title}>Appearance</Text>
+      <View accessibilityRole="radiogroup" style={styles.appearanceOptions}>
+        {(['system', 'light', 'dark'] as AppearanceMode[]).map((option) => (
+          <Pressable
+            key={option}
+            accessibilityRole="radio"
+            accessibilityState={{ checked: mode === option }}
+            onPress={() => setMode(option)}
+            style={[styles.appearanceOption, mode === option && styles.appearanceOptionSelected]}
+          >
+            <Text style={[styles.appearanceText, mode === option && styles.appearanceTextSelected]}>
+              {option === 'system' ? 'System' : option === 'light' ? 'Light' : 'Dark'}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      <Text style={styles.appearanceHelp}>Match your phone or choose a light or dark screen.</Text>
+      {persistenceError ? <Text style={styles.appearanceError}>{persistenceError}</Text> : null}
+
+      <Text style={styles.calendarHeading}>Calendar connection</Text>
       <Text style={styles.intro}>
         Context reads plans from calendars already connected to this phone. Your complete minute
         ledger stays in Context.
@@ -132,8 +155,8 @@ export function SettingsScreen({
               value={preferences.syncActuals}
               disabled={!preferences.writeCalendarId}
               onValueChange={(value) => onChange({ ...preferences, syncActuals: value })}
-              trackColor={{ false: '#D5D2CB', true: '#7A8079' }}
-              thumbColor={colors.white}
+              trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }}
+              thumbColor={colors.switchThumb}
             />
           </View>
         </>
@@ -170,15 +193,24 @@ export function SettingsScreen({
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.paper },
   content: { padding: 20, paddingBottom: 40 },
   eyebrow: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1.1 },
   title: { marginTop: 5, color: colors.ink, fontSize: 28, fontWeight: '700' },
+  appearanceOptions: { flexDirection: 'row', gap: 8, marginTop: 16 },
+  appearanceOption: { flex: 1, minHeight: 46, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: colors.hairline, borderRadius: 12, backgroundColor: colors.surface },
+  appearanceOptionSelected: { backgroundColor: colors.accent, borderColor: colors.accent },
+  appearanceText: { color: colors.graphite, fontSize: 14, fontWeight: '600' },
+  appearanceTextSelected: { color: colors.onAccent },
+  appearanceHelp: { marginTop: 9, color: colors.muted, fontSize: 12, lineHeight: 18 },
+  appearanceError: { marginTop: 8, color: colors.danger, fontSize: 12, lineHeight: 18 },
+  calendarHeading: { marginTop: 30, color: colors.ink, fontSize: 21, fontWeight: '600' },
   intro: { marginTop: 8, color: colors.muted, fontSize: 14, lineHeight: 21 },
-  accountButton: { marginTop: 18, padding: 16, backgroundColor: colors.graphite, borderRadius: 14 },
-  accountTitle: { color: colors.white, fontSize: 15, fontWeight: '700' },
-  accountBody: { marginTop: 5, color: '#D2D0CA', fontSize: 12, lineHeight: 18 },
+  accountButton: { marginTop: 18, padding: 16, backgroundColor: colors.accent, borderRadius: 14 },
+  accountTitle: { color: colors.onAccent, fontSize: 15, fontWeight: '700' },
+  accountBody: { marginTop: 5, color: colors.onAccentMuted, fontSize: 12, lineHeight: 18 },
   categoriesButton: { marginTop: 10, padding: 16, backgroundColor: colors.panel, borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
   categoriesTitle: { color: colors.graphite, fontSize: 14, fontWeight: '700' },
@@ -189,15 +221,16 @@ const styles = StyleSheet.create({
     marginTop: 22,
     padding: 15,
     borderRadius: 15,
-    backgroundColor: colors.graphite,
+    backgroundColor: colors.accent,
   },
   statusDot: { width: 10, height: 10, marginRight: 12, borderRadius: 5, backgroundColor: '#9A7653' },
   statusDotGranted: { backgroundColor: '#92A697' },
   permissionCopy: { flex: 1 },
-  permissionTitle: { color: colors.white, fontSize: 14, fontWeight: '700' },
-  permissionBody: { marginTop: 3, color: '#D2D0CA', fontSize: 11, lineHeight: 16 },
-  smallButton: { marginLeft: 12, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 9, backgroundColor: '#454643' },
-  smallButtonText: { color: colors.white, fontSize: 12, fontWeight: '700' },
+  permissionTitle: { color: colors.onAccent, fontSize: 14, fontWeight: '700' },
+  permissionBody: { marginTop: 3, color: colors.onAccentMuted, fontSize: 11, lineHeight: 16 },
+  smallButton: { marginLeft: 12, minHeight: 44, paddingHorizontal: 12, paddingVertical: 9, justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.onAccentMuted, borderRadius: 9 },
+  smallButtonText: { color: colors.onAccent, fontSize: 12, fontWeight: '700' },
   sectionTitle: { marginTop: 26, color: colors.ink, fontSize: 16, fontWeight: '700' },
   sectionHelp: { marginTop: 4, marginBottom: 10, color: colors.muted, fontSize: 12 },
   calendarCard: {
@@ -205,7 +238,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.hairline,
     borderRadius: 15,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
   },
   calendarRow: {
     minHeight: 64,
@@ -222,9 +255,9 @@ const styles = StyleSheet.create({
   calendarTitle: { color: colors.ink, fontSize: 14, fontWeight: '600' },
   calendarSource: { marginTop: 2, color: colors.muted, fontSize: 11 },
   writeChoice: { marginLeft: 8, paddingHorizontal: 11, paddingVertical: 7, borderWidth: 1, borderColor: colors.hairline, borderRadius: 12 },
-  writeChoiceSelected: { borderColor: colors.graphite, backgroundColor: colors.graphite },
+  writeChoiceSelected: { borderColor: colors.accent, backgroundColor: colors.accent },
   writeChoiceText: { color: colors.muted, fontSize: 11, fontWeight: '700' },
-  writeChoiceTextSelected: { color: colors.white },
+  writeChoiceTextSelected: { color: colors.onAccent },
   noCalendars: { paddingVertical: 18, color: colors.muted, fontSize: 13, lineHeight: 19 },
   syncRow: {
     flexDirection: 'row',
@@ -240,7 +273,7 @@ const styles = StyleSheet.create({
   notice: { marginTop: 24, padding: 16, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 14 },
   noticeTitle: { color: colors.graphite, fontSize: 13, fontWeight: '700' },
   noticeBody: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },
-  privacyCard: { marginTop: 12, padding: 16, borderRadius: 14, backgroundColor: '#EAE7E0' },
+  privacyCard: { marginTop: 12, padding: 16, borderRadius: 14, backgroundColor: colors.panel },
   privacyTitle: { color: colors.graphite, fontSize: 13, fontWeight: '700' },
   privacyBody: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },
   releaseCard: {
@@ -249,7 +282,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.hairline,
     borderRadius: 14,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
   },
   releaseTitle: { color: colors.graphite, fontSize: 13, fontWeight: '700' },
   releaseBody: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },

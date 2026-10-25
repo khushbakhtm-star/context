@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -13,8 +13,11 @@ import {
   View,
 } from 'react-native';
 
-import { CATEGORIES, colors } from '../theme';
-import type { ActivityCategory } from '../theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { useAppTheme } from '../appearance';
+import { CATEGORIES } from '../theme';
+import type { ActivityCategory, AppColors } from '../theme';
 import { listCategories } from '../services/categories';
 import type { MinuteEntry, PlannedEvent } from '../types';
 import { formatDayHeading, minuteLabel } from '../utils/time';
@@ -55,6 +58,9 @@ export function MinuteEditor({
   onDelete,
   onOpenPlan,
 }: Props) {
+  const { colors, resolvedMode } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const insets = useSafeAreaInsets();
   const [text, setText] = useState('');
   const [categoryId, setCategoryId] = useState('unaccounted');
   const [durationMinutes, setDurationMinutes] = useState(1);
@@ -63,7 +69,10 @@ export function MinuteEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [availableCategories, setAvailableCategories] = useState<ActivityCategory[]>(CATEGORIES);
-  const [categorySearch, setCategorySearch] = useState('');
+  const [colorPanelOpen, setColorPanelOpen] = useState(false);
+
+  const selectedColor = availableCategories.find((category) => category.id === categoryId)?.color ??
+    CATEGORIES.find((category) => category.id === categoryId)?.color ?? '#96938C';
 
   const initialText = entry?.text ?? plan?.title ?? '';
   const initialCategoryId = entry?.categoryId ?? plan?.categoryId ?? 'unaccounted';
@@ -81,7 +90,7 @@ export function MinuteEditor({
     setDurationMinutes(initialDurationMinutes);
     setReplacePlan(Boolean(plan?.accountEvent && !entry && !plan.accountEvent.event.projectionId));
     setSourceScope('occurrence');
-    setCategorySearch('');
+    setColorPanelOpen(false);
     setError(null);
     // Do not reset an open draft when calendar or database data refreshes in the background.
     // Opening the editor, or moving it to another minute, creates a fresh draft.
@@ -152,27 +161,90 @@ export function MinuteEditor({
   }
 
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={requestClose}>
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={requestClose}
+      statusBarTranslucent navigationBarTranslucent>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.backdrop}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={[styles.backdrop, { paddingTop: Math.max(insets.top, 12),
+          paddingLeft: insets.left, paddingRight: insets.right }]}
       >
         <Pressable disabled={busy} style={StyleSheet.absoluteFill} onPress={requestClose} />
         <ScrollView
           keyboardShouldPersistTaps="handled"
+          stickyHeaderIndices={[1]}
           style={styles.sheet}
-          contentContainerStyle={styles.sheetContent}
+          contentContainerStyle={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 12) + 20 }]}
         >
           <View style={styles.handle} />
+          <View style={styles.toolbar}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={busy ? 'Saving entry' : 'Save entry'}
+              accessibilityState={{ disabled: busy || !text.trim(), busy }}
+              disabled={busy || !text.trim()}
+              onPress={save}
+              style={[styles.saveButton, (!text.trim() || busy) && styles.disabled]}
+            >
+              <Text style={styles.saveText}>Save</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close entry"
+              disabled={busy}
+              onPress={requestClose}
+              style={[styles.closeButton, busy && styles.disabled]}
+            >
+              <Text style={styles.close}>×</Text>
+            </Pressable>
+          </View>
           <View style={styles.headingRow}>
-            <View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Choose color"
+              accessibilityHint="Opens the color panel"
+              accessibilityState={{ expanded: colorPanelOpen, disabled: busy }}
+              disabled={busy}
+              onPress={() => setColorPanelOpen((open) => !open)}
+              style={[styles.colorToggle, busy && styles.disabled]}
+            >
+              <View style={[styles.currentColor, { backgroundColor: selectedColor }]} />
+            </Pressable>
+            <View style={styles.timestamp}>
               <Text style={styles.eyebrow}>{formatDayHeading(dateKey)}</Text>
               <Text style={styles.time}>{minuteLabel(minuteIndex, true)}</Text>
             </View>
-            <Pressable disabled={busy} hitSlop={12} onPress={requestClose}>
-              <Text style={[styles.close, busy && styles.disabled]}>Close</Text>
-            </Pressable>
           </View>
+
+          {colorPanelOpen ? (
+            <ScrollView
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              style={styles.colorPanel}
+              contentContainerStyle={styles.colorGrid}
+              accessibilityLabel="Activity colors"
+            >
+              {availableCategories.filter((category) => !category.archived || category.id === categoryId)
+                .map((category) => {
+                  const selected = category.id === categoryId;
+                  return (
+                    <Pressable
+                      key={category.id}
+                      accessibilityRole="radio"
+                      accessibilityLabel={category.name}
+                      accessibilityState={{ checked: selected, disabled: busy }}
+                      disabled={busy}
+                      onPress={() => {
+                        setCategoryId(category.id);
+                        setColorPanelOpen(false);
+                      }}
+                      style={[styles.colorChoice, selected && styles.colorChoiceSelected]}
+                    >
+                      <View style={[styles.colorSwatch, { backgroundColor: category.color }]} />
+                    </Pressable>
+                  );
+                })}
+            </ScrollView>
+          ) : null}
 
           {plan && !entry ? (
             <View style={styles.planCard}>
@@ -213,24 +285,23 @@ export function MinuteEditor({
                 <Text style={styles.hint}>Uses your account permission to update this activity’s actual times.</Text>
               </View>
               <Switch value={replacePlan} disabled={busy} onValueChange={setReplacePlan}
-                trackColor={{ false: '#D5D2CB', true: '#7A8079' }} thumbColor={colors.white} />
+                trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }} thumbColor={colors.switchThumb} />
             </View>
           ) : null}
 
           <TextInput
+            keyboardAppearance={resolvedMode}
             autoFocus
             editable={!busy}
             multiline
             value={text}
             onChangeText={setText}
             placeholder="What is happening right now?"
-            placeholderTextColor="#96938C"
+            placeholderTextColor={colors.muted}
             style={styles.input}
             selectionColor={colors.graphite}
             textAlignVertical="top"
           />
-          <Text style={styles.hint}>Type or use the microphone on your phone keyboard.</Text>
-
           <Text style={styles.sectionLabel}>Duration</Text>
           <ScrollView
             horizontal
@@ -277,73 +348,23 @@ export function MinuteEditor({
             Fills consecutive minute rows and can continue into the next day.
           </Text>
 
-          <Text style={styles.sectionLabel}>Category</Text>
-          {availableCategories.length > 12 ? (
-            <TextInput value={categorySearch} onChangeText={setCategorySearch} editable={!busy}
-              placeholder="Find a category" placeholderTextColor={colors.muted}
-              accessibilityLabel="Find an activity category" style={styles.categorySearch} />
-          ) : null}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.categories}
-          >
-            {availableCategories.filter((category) => (!category.archived || category.id === categoryId) &&
-              category.name.toLowerCase().includes(categorySearch.toLowerCase())).map((category) => {
-              const selected = category.id === categoryId;
-              return (
-                <Pressable
-                  disabled={busy}
-                  key={category.id}
-                  onPress={() => setCategoryId(category.id)}
-                  style={[
-                    styles.category,
-                    selected && { borderColor: category.color, backgroundColor: `${category.color}18` },
-                  ]}
-                >
-                  <View style={[styles.categoryDot, { backgroundColor: category.color }]} />
-                  <Text style={[styles.categoryText, selected && styles.categoryTextSelected]}>
-                    {category.name}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-
           {error ? <Text style={styles.error}>{error}</Text> : null}
 
-          <View style={styles.actions}>
-            {entry ? (
-              <Pressable disabled={busy} onPress={remove} style={styles.deleteButton}>
-                <Text style={styles.deleteText}>Delete</Text>
-              </Pressable>
-            ) : (
-              <View />
-            )}
-            <Pressable
-              disabled={busy || !text.trim()}
-              onPress={save}
-              style={[styles.saveButton, (!text.trim() || busy) && styles.disabled]}
-            >
-              <Text style={styles.saveText}>
-                {busy
-                  ? 'Saving…'
-                  : durationMinutes === 1
-                    ? 'Save minute'
-                    : `Save ${durationMinutes} minutes`}
-              </Text>
+          {entry ? (
+            <Pressable disabled={busy} onPress={remove} style={styles.deleteButton}>
+              <Text style={styles.deleteText}>Delete</Text>
             </Pressable>
-          </View>
+          ) : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </Modal>
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: '#00000066' },
+const createStyles = (colors: AppColors) => StyleSheet.create({
+  backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: colors.scrim },
   sheet: {
-    maxHeight: '88%',
+    maxHeight: '100%',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     backgroundColor: colors.paper,
@@ -353,14 +374,29 @@ const styles = StyleSheet.create({
     width: 42,
     height: 4,
     alignSelf: 'center',
-    marginBottom: 20,
+    marginBottom: 10,
     borderRadius: 2,
     backgroundColor: colors.silver,
   },
-  headingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  toolbar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: colors.paper },
+  headingRow: { flexDirection: 'row', alignItems: 'center', marginTop: 14 },
+  timestamp: { flex: 1, marginLeft: 12 },
   eyebrow: { color: colors.muted, fontSize: 12, letterSpacing: 0.5, textTransform: 'uppercase' },
   time: { marginTop: 3, color: colors.ink, fontSize: 28, fontWeight: '600' },
-  close: { color: colors.muted, fontSize: 14, fontWeight: '600' },
+  closeButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  close: { color: colors.muted, fontSize: 30, lineHeight: 34, fontWeight: '400' },
+  colorToggle: { width: 72, minHeight: 56, alignItems: 'center', justifyContent: 'center' },
+  currentColor: { width: 32, height: 32, borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
+  colorPanel: { maxHeight: 184, marginTop: 12, borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.hairline, borderRadius: 14, backgroundColor: colors.surface },
+  colorGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: 12 },
+  colorChoice: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: 'transparent', borderRadius: 22 },
+  colorChoiceSelected: { borderColor: colors.graphite },
+  colorSwatch: { width: 30, height: 30, borderRadius: 15,
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
   planCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -385,7 +421,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.hairline,
     borderRadius: 10,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
   },
   openPlanText: { color: colors.graphite, fontSize: 12, fontWeight: '700' },
   input: {
@@ -397,7 +433,7 @@ const styles = StyleSheet.create({
     borderColor: colors.silver,
     borderRadius: 14,
     color: colors.ink,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
     fontSize: 17,
     lineHeight: 24,
   },
@@ -411,9 +447,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
     textTransform: 'uppercase',
   },
-  categories: { gap: 8, paddingRight: 20 },
-  categorySearch: { padding: 11, marginBottom: 10, borderWidth: 1, borderColor: colors.hairline,
-    borderRadius: 10, backgroundColor: colors.white, color: colors.ink, fontSize: 13 },
   durations: { gap: 8, paddingRight: 20 },
   duration: {
     paddingHorizontal: 13,
@@ -421,40 +454,25 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.hairline,
     borderRadius: 18,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
   },
-  durationSelected: { borderColor: colors.graphite, backgroundColor: colors.graphite },
+  durationSelected: { borderColor: colors.graphite, backgroundColor: colors.accent },
   planDuration: { borderColor: colors.silver },
   durationText: { color: colors.muted, fontSize: 13 },
-  durationTextSelected: { color: colors.white, fontWeight: '700' },
-  category: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderWidth: 1,
-    borderColor: colors.hairline,
-    borderRadius: 18,
-    backgroundColor: colors.white,
-  },
-  categoryDot: { width: 8, height: 8, borderRadius: 4, marginRight: 7 },
-  categoryText: { color: colors.muted, fontSize: 13 },
-  categoryTextSelected: { color: colors.ink, fontWeight: '600' },
+  durationTextSelected: { color: colors.onAccent, fontWeight: '700' },
   error: { marginTop: 14, color: colors.danger, fontSize: 13 },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 24,
-  },
-  deleteButton: { paddingVertical: 12, paddingRight: 18 },
+  deleteButton: { alignSelf: 'flex-start', marginTop: 24, paddingVertical: 12, paddingRight: 18 },
   deleteText: { color: colors.danger, fontSize: 15, fontWeight: '600' },
   saveButton: {
-    paddingHorizontal: 22,
-    paddingVertical: 14,
+    minWidth: 72,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderRadius: 12,
-    backgroundColor: colors.ink,
+    backgroundColor: colors.accent,
   },
-  saveText: { color: colors.white, fontSize: 15, fontWeight: '700' },
+  saveText: { color: colors.onAccent, fontSize: 15, fontWeight: '700' },
   disabled: { opacity: 0.4 },
 });

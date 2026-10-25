@@ -32,35 +32,57 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.0
-    versionCode: 1
+  - versionName: 0.1.2
+    versionCode: 3
     disable: Pinned build-server toolchain, dependency scan, and native verification are pending
-    commit: eae2abdb22afb092c273acef4e60cbdb17c2743f
+    commit: 49cb65def8d6f951f5709e8ee5bd581d352b1693
     subdir: apps/mobile
+    sudo:
+      - apt-get update
+      - apt-get install -y curl unzip xz-utils openjdk-17-jdk-headless
+      - mkdir -p /opt/context-fdroid/node24
+      - curl --fail --location https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz -o /tmp/context-node.tar.xz
+      - echo '14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647 /tmp/context-node.tar.xz' | sha256sum --check -
+      - tar -xJf /tmp/context-node.tar.xz --strip-components=1 -C /opt/context-fdroid/node24
+      - PATH=/opt/context-fdroid/node24/bin:$PATH /opt/context-fdroid/node24/bin/npm install --global --prefix /opt/context-fdroid/node24 corepack@0.36.0
+      - PATH=/opt/context-fdroid/node24/bin:$PATH /opt/context-fdroid/node24/bin/corepack enable --install-directory /opt/context-fdroid/node24/bin
+      - PATH=/opt/context-fdroid/node24/bin:$PATH /opt/context-fdroid/node24/bin/corepack prepare pnpm@11.25.0 --activate
+      - for tool in node npm npx corepack pnpm pnpx; do ln -sf /opt/context-fdroid/node24/bin/$tool /usr/local/bin/$tool; done
+      - curl --fail --location https://services.gradle.org/distributions/gradle-9.4.1-bin.zip -o /tmp/context-gradle.zip
+      - echo '2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb /tmp/context-gradle.zip' | sha256sum --check -
+      - unzip -qo /tmp/context-gradle.zip -d /opt/context-fdroid
+      - ln -sf /opt/context-fdroid/gradle-9.4.1/bin/gradle /usr/local/bin/gradle
+    ndk: 27.1.12297006
     init:
       - EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid CONTEXT_FDROID_SOURCE_BUILD=1 node scripts/prepare-fdroid.cjs --apply
-      - corepack pnpm install --frozen-lockfile --ignore-scripts
-      - EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid corepack pnpm exec expo prebuild --platform android --no-install
-      - EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid node scripts/prepare-fdroid.cjs --unsigned-android
+      - corepack pnpm install --prod --frozen-lockfile --ignore-scripts
+      - EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid CONTEXT_FDROID_SOURCE_BUILD=1 corepack pnpm exec expo prebuild --platform android --no-install
+      - EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid CONTEXT_FDROID_SOURCE_BUILD=1 node scripts/prepare-fdroid.cjs --unsigned-android
+    # Official Hermes compiler exception only; input hash and source are checked by preparation.
+    # See apps/mobile/fdroid/HERMES_COMPILER.md. No directory-wide scanner exclusion.
+    scanignore:
+      - apps/mobile/node_modules/.pnpm/hermes-compiler@260318099.0.4/node_modules/hermes-compiler/hermesc/linux64-bin/hermesc
     build:
-      - cd android && EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid ./gradlew --no-daemon assembleRelease
+      - cd android && EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid gradle --no-daemon assembleRelease
     output: android/app/build/outputs/apk/release/app-release-unsigned.apk
 
 MaintainerNotes: |-
   The upstream fastlane listing is at repository-root fastlane/metadata/android/en-US.
   This is an unverified source-build candidate, not a completed native build recipe.
-  Node 24.19.0 and pnpm 11.25.0 are the upstream development versions. The clean
-  F-Droid Linux environment still needs a verified Node/pnpm provision mechanism
-  and pinned Android SDK/NDK/JDK configuration. Do not silently depend on tools
-  already installed on the developer's workstation.
+  The recipe provisions Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, and Gradle
+  9.4.1 with official archive hashes. Android platform 37.0, Build Tools 37.0.0,
+  NDK 27.1.12297006, and CMake 3.22.1 must be available in the approved server SDK.
   Dependency pruning runs before installation and leaves unreachable packages in
   the source lock graph. Check the installed native graph and scanner findings;
-  no blanket scanignore or scandelete bypass is supplied.
+  Exact reviewed unused files are removed after prebuild with a per-file hash audit.
+  All Expo Android modules and core compile from source. Install Referrer is patched
+  out of the transitive expo-application module; identity constants remain available.
+  The sole scanignore is the policy-permitted official Linux Hermes compiler.
   Native phone validation, public maintenance history or an applicable inclusion
   exception, and release-tag verification are pending. No screenshots are supplied
   until genuine captures of the native app are available.
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.0
-CurrentVersionCode: 1
+CurrentVersion: 0.1.2
+CurrentVersionCode: 3

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { dismissLedgerConflict, getLedgerConflicts, restoreLedgerConflict } from '../data/database';
@@ -14,7 +14,8 @@ import type {
   AccountCalendar, AccountConsent, AccountProvider, AccountSyncStatus, ConnectedAccount,
   Projection, SyncDocument,
 } from '../sync/types';
-import { colors } from '../theme';
+import { useAppTheme } from '../appearance';
+import type { AppColors } from '../theme';
 
 type Props = { onDataChanged: () => void };
 type CalendarSelection = { selectedCalendarIds: string[]; writeCalendarId: string | null };
@@ -73,6 +74,8 @@ function PermissionRows({ value, disabled, onChange, storageOnly = false }: {
   onChange: (consent: AccountConsent) => void;
   storageOnly?: boolean;
 }) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   return (
     <View>
       {PERMISSIONS.filter((permission) => !storageOnly || permission.id === 'ledgerStorage').map((permission) => (
@@ -86,8 +89,8 @@ function PermissionRows({ value, disabled, onChange, storageOnly = false }: {
             value={value[permission.id]}
             disabled={disabled || permissionDisabled(value, permission.id)}
             onValueChange={(enabled) => onChange(changedConsent(value, permission.id, enabled))}
-            trackColor={{ false: '#D5D2CB', true: '#7A8079' }}
-            thumbColor={colors.white}
+            trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }}
+            thumbColor={colors.switchThumb}
           />
         </View>
       ))}
@@ -96,6 +99,8 @@ function PermissionRows({ value, disabled, onChange, storageOnly = false }: {
 }
 
 export function AccountsScreen({ onDataChanged }: Props) {
+  const { colors, resolvedMode } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [views, setViews] = useState<AccountView[]>([]);
   const [newConsent, setNewConsent] = useState(INITIAL_CONSENT);
   const [hasKey, setHasKey] = useState(false);
@@ -257,13 +262,13 @@ export function AccountsScreen({ onDataChanged }: Props) {
               your ledger on another phone. Your provider stores encrypted ledger updates. Calendar
               event notes remain readable in that calendar.
             </Text>
-            <TextInput
+            <TextInput keyboardAppearance={resolvedMode}
               secureTextEntry autoCapitalize="none" autoCorrect={false}
               accessibilityLabel="Ledger passphrase" placeholder="Ledger passphrase · at least 12 characters"
               placeholderTextColor={colors.muted} value={passphrase} onChangeText={setPassphrase}
               editable={!busy} style={styles.input}
             />
-            <TextInput
+            <TextInput keyboardAppearance={resolvedMode}
               secureTextEntry autoCapitalize="none" autoCorrect={false}
               accessibilityLabel="Confirm ledger passphrase" placeholder="Confirm the same passphrase"
               placeholderTextColor={colors.muted} value={passphraseConfirmation} onChangeText={setPassphraseConfirmation}
@@ -376,19 +381,19 @@ export function AccountsScreen({ onDataChanged }: Props) {
           exact HTTPS folder URL, your username, and a provider app password. This connection stores
           your encrypted ledger and does not access calendars.
         </Text>
-        <TextInput
+        <TextInput keyboardAppearance={resolvedMode}
           autoCapitalize="none" autoCorrect={false} keyboardType="url"
           accessibilityLabel="WebDAV Context folder URL" placeholder="https://cloud.example.com/…/Context/"
           placeholderTextColor={colors.muted} value={webDavUrl} onChangeText={setWebDavUrl}
           editable={!busy} style={styles.input}
         />
-        <TextInput
+        <TextInput keyboardAppearance={resolvedMode}
           autoCapitalize="none" autoCorrect={false}
           accessibilityLabel="WebDAV username" placeholder="WebDAV username"
           placeholderTextColor={colors.muted} value={webDavUser} onChangeText={setWebDavUser}
           editable={!busy} style={styles.input}
         />
-        <TextInput
+        <TextInput keyboardAppearance={resolvedMode}
           secureTextEntry autoCapitalize="none" autoCorrect={false}
           accessibilityLabel="WebDAV app password" placeholder="Provider app password"
           placeholderTextColor={colors.muted} value={webDavPassword} onChangeText={setWebDavPassword}
@@ -468,18 +473,18 @@ export function AccountsScreen({ onDataChanged }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.paper },
   content: { padding: 20, paddingBottom: 44 },
   eyebrow: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1.1 },
   title: { marginTop: 6, color: colors.ink, fontSize: 27, lineHeight: 33, fontWeight: '700' },
   intro: { marginTop: 9, color: colors.muted, fontSize: 14, lineHeight: 21 },
   syncCard: { marginTop: 21, padding: 17, borderRadius: 15, backgroundColor: colors.panel },
-  card: { marginTop: 17, padding: 16, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 15, backgroundColor: colors.white },
+  card: { marginTop: 17, padding: 16, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 15, backgroundColor: colors.surface },
   cardTitle: { color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '700' },
   help: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },
-  primaryButton: { alignSelf: 'flex-start', marginTop: 14, paddingHorizontal: 19, paddingVertical: 12, borderRadius: 11, backgroundColor: colors.ink },
-  primaryButtonText: { color: colors.white, fontSize: 13, fontWeight: '700' },
+  primaryButton: { alignSelf: 'flex-start', marginTop: 14, paddingHorizontal: 19, paddingVertical: 12, borderRadius: 11, backgroundColor: colors.accent },
+  primaryButtonText: { color: colors.onAccent, fontSize: 13, fontWeight: '700' },
   secondaryButton: { alignSelf: 'flex-start', marginTop: 14, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: colors.hairline, borderRadius: 10, backgroundColor: colors.panel },
   secondaryButtonText: { color: colors.graphite, fontSize: 12, fontWeight: '700' },
   error: { marginTop: 14, color: colors.danger, fontSize: 12, lineHeight: 18 },
@@ -497,14 +502,14 @@ const styles = StyleSheet.create({
   calendarRow: { minHeight: 53, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.hairline },
   calendarChoice: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
   checkbox: { width: 19, height: 19, borderWidth: 1.5, borderColor: colors.silver, borderRadius: 5, alignItems: 'center', justifyContent: 'center' },
-  checkboxSelected: { borderColor: colors.graphite, backgroundColor: colors.graphite },
-  checkmark: { color: colors.white, fontSize: 12, fontWeight: '800' },
+  checkboxSelected: { borderColor: colors.graphite, backgroundColor: colors.accent },
+  checkmark: { color: colors.onAccent, fontSize: 12, fontWeight: '800' },
   calendarDot: { width: 7, height: 7, marginLeft: 9, marginRight: 7, borderRadius: 4 },
   calendarName: { flex: 1, color: colors.graphite, fontSize: 12, lineHeight: 17 },
   destination: { marginLeft: 9, paddingVertical: 7, paddingHorizontal: 10, borderWidth: 1, borderColor: colors.hairline, borderRadius: 11 },
-  destinationSelected: { backgroundColor: colors.graphite, borderColor: colors.graphite },
+  destinationSelected: { backgroundColor: colors.accent, borderColor: colors.graphite },
   destinationText: { color: colors.muted, fontSize: 11, fontWeight: '700' },
-  destinationTextSelected: { color: colors.white },
+  destinationTextSelected: { color: colors.onAccent },
   connectButtons: { marginTop: 15, gap: 10 },
   connectButton: { paddingHorizontal: 15, paddingVertical: 13, borderWidth: 1, borderColor: colors.silver, borderRadius: 11, alignItems: 'center', backgroundColor: colors.paper },
   connectText: { color: colors.ink, fontSize: 13, fontWeight: '700' },

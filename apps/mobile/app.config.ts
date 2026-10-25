@@ -8,7 +8,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     : undefined;
   const plugins = (config.plugins ?? []).filter((plugin) => {
     const name = typeof plugin === 'string' ? plugin : plugin[0];
-    return name !== '@react-native-google-signin/google-signin' &&
+    return name !== './plugins/with-fdroid-source.cjs' && name !== '@react-native-google-signin/google-signin' &&
       (!fdroid || name !== 'expo-dev-client');
   });
   // A source checkout can bundle before credentials are supplied. Real iOS sign-in requires the
@@ -16,6 +16,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   if (!fdroid) {
     if (scheme) plugins.push(['@react-native-google-signin/google-signin', { iosUrlScheme: scheme }]);
     else plugins.push('@react-native-google-signin/google-signin');
+  } else {
+    plugins.push('./plugins/with-fdroid-source.cjs');
   }
   return { ...config, name: config.name ?? 'Context', slug: config.slug ?? 'context-minute-ledger',
     plugins, extra: { ...config.extra, distribution: fdroid ? 'fdroid' : 'store' } };

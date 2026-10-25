@@ -6,6 +6,7 @@ import difflib
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -16,10 +17,25 @@ import time
 import zipfile
 
 APP_ID = "com.context.minuteledger"
-SOURCE = "eae2abdb22afb092c273acef4e60cbdb17c2743f"
 REPO = "https://github.com/khushbakhtm-star/context"
 CATALOG = "dbd57558e5e687a018116b4242c42dd52d00124a"
 EXPO_TEMPLATE_SHA = "fd958ca9b434d114ccc70c010d5404b537d49cd6ff09e239c917793ef4872991"
+HERMES_EXCEPTION = "apps/mobile/node_modules/.pnpm/hermes-compiler@260318099.0.4/node_modules/hermes-compiler/hermesc/linux64-bin/hermesc"
+
+
+def source_pin():
+    value = os.environ.get("CONTEXT_SOURCE_COMMIT", "")
+    if not re.fullmatch(r"[a-f0-9]{40}", value):
+        raise ValueError("CONTEXT_SOURCE_COMMIT must be a reviewed full immutable public commit hash")
+    return value
+
+
+def release_identity(source):
+    config = json.loads((source / "apps/mobile/app.json").read_text())["expo"]
+    version, code = config.get("version"), config.get("android", {}).get("versionCode")
+    if config.get("android", {}).get("package") != APP_ID or not re.fullmatch(r"\d+\.\d+\.\d+", version or "") or type(code) is not int or code < 1:
+        raise ValueError("Pinned source has invalid Context native release identity")
+    return {"version": version, "versionCode": code}
 
 
 class Diagnostics:
@@ -89,8 +105,9 @@ class Diagnostics:
 
     def provenance(self, source):
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-        if commit != SOURCE or os.environ.get("CONTEXT_SOURCE_COMMIT") != SOURCE:
+        if commit != source_pin():
             raise ValueError("Refusing to verify a different or mutable source commit")
+        self.release = release_identity(source)
         for name, command in [("python-version", [sys.executable, "--version"]),
                               ("fdroid-version", ["fdroid", "--version"]),
                               ("node-version", ["node", "--version"]),
@@ -104,6 +121,7 @@ class Diagnostics:
                 "fdroidserverSdistSha256": os.environ["FDROID_SERVER_SHA256"], "fdroiddataConfigCommit": CATALOG,
                 "gradleDistributionSha256": os.environ["GRADLE_SHA256"],
                 "runnerImage": os.environ.get("ImageVersion"),
+                "release": self.release,
                 "notice": "GitHub Ubuntu diagnostics, not F-Droid's official build-server image or acceptance."}
         (self.reports / "provenance.json").write_text(json.dumps(data, indent=2) + "\n")
 
@@ -121,23 +139,23 @@ class Diagnostics:
         (self.reports / "scanner-cache-sha256.json").write_text(json.dumps(hashes, indent=2) + "\n")
 
 
-def checked_candidate(path):
+def checked_candidate(path, identity):
     import yaml
     raw = path.read_text()
     app = yaml.safe_load(raw)
     builds = app.get("Builds", [])
     if (app.get("Repo") != REPO or app.get("RepoType") != "git" or len(builds) != 1 or
-        builds[0].get("commit") != SOURCE or builds[0].get("versionCode") != 1 or
-        builds[0].get("versionName") != "0.1.0" or not builds[0].get("disable")):
-        raise ValueError("Candidate must remain disabled and point at the exact public 0.1.0 source release")
-    if any(builds[0].get(key) for key in ("scanignore", "scandelete")):
-        raise ValueError("This diagnostic does not allow scanner exclusions")
+        builds[0].get("commit") != source_pin() or builds[0].get("versionCode") != identity["versionCode"] or
+        builds[0].get("versionName") != identity["version"] or not builds[0].get("disable")):
+        raise ValueError("Disabled candidate must exactly match the immutable source commit and native version/code")
+    if builds[0].get("scandelete") or builds[0].get("scanignore") != [HERMES_EXCEPTION]:
+        raise ValueError("Only the exact documented, hash-verified official Hermes compiler exception is allowed")
     return raw, app
 
 
-def source_scanner_summary(report):
+def source_scanner_summary(report, version_code):
     """2.4.5 forgets its source-mode nonzero exit; preserve and validate the actual JSON."""
-    build = report.get(APP_ID, {}).get("1")
+    build = report.get(APP_ID, {}).get(str(version_code))
     if not isinstance(build, dict) or any(not isinstance(build.get(key), list) for key in ("errors", "warnings", "infos")):
         raise ValueError("Source scanner did not emit the expected structured findings")
     categories = {}
@@ -163,7 +181,7 @@ def bootstrap_build_checkout():
     common.get_config()
     app = metadata.parse_metadata(Path(f"metadata/{APP_ID}.yml"))
     build = app.Builds[0]
-    if app.Repo != REPO or build.commit != SOURCE:
+    if app.Repo != REPO or build.commit != source_pin():
         raise ValueError("Bootstrap candidate identity differs from the immutable source release")
     Path("build").mkdir(exist_ok=True)
     directory = common.get_build_dir(app)
@@ -171,14 +189,15 @@ def bootstrap_build_checkout():
     vcs.gotorevision(build.commit)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=directory, text=True).strip()
     epoch = common.get_source_date_epoch(directory)
-    if commit != SOURCE or not isinstance(epoch, str) or not epoch.isdigit():
+    if commit != source_pin() or not isinstance(epoch, str) or not epoch.isdigit():
         raise ValueError("F-Droid's own checkout bootstrap did not establish the expected source epoch")
     print(f"Official F-Droid VCS checkout prepared: {commit}, SOURCE_DATE_EPOCH={epoch}")
 
 
 def metadata_checks(diag, candidate):
     import yaml
-    raw, app = checked_candidate(candidate)
+    raw, app = checked_candidate(candidate, diag.release)
+    target = f"{APP_ID}:{diag.release['versionCode']}"
     (diag.reports / "original-disabled-candidate.yml").write_text(raw)
     catalog = diag.root / "catalog"
     catalog.mkdir()
@@ -198,9 +217,9 @@ def metadata_checks(diag, candidate):
         (directory / "metadata" / f"{APP_ID}.yml").write_text(raw)
     scratch = diag.root / "metadata-check"
     diag.run("metadata-lint", ["fdroid", "lint", APP_ID], scratch)
-    diag.run("source-scanner", ["fdroid", "scanner", "--force", "--exit-code", "--json", f"{APP_ID}:1"], scratch,
+    diag.run("source-scanner", ["fdroid", "scanner", "--force", "--exit-code", "--json", target], scratch,
              timeout=1800)
-    summary = source_scanner_summary(json.loads((diag.reports / "source-scanner.stdout.txt").read_text()))
+    summary = source_scanner_summary(json.loads((diag.reports / "source-scanner.stdout.txt").read_text()), diag.release["versionCode"])
     (diag.reports / "source-scanner-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     diag.results.append({"name": "source-scanner-structured-findings", "type": "report-validation", **summary})
     diag.save()
@@ -210,25 +229,21 @@ def metadata_checks(diag, candidate):
     wrappers = {name: (android / name).exists() for name in
                 ("gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar")}
     (diag.reports / "post-scanner-wrapper-state.json").write_text(json.dumps(wrappers, indent=2) + "\n")
-    (diag.reports / "recipe-wrapper-issue.txt").write_text(
-        "Original candidate manually invokes ./gradlew. fdroidserver removes wrappers during source scanning.\n"
-        "Consequently that build command needs an approved pinned system Gradle command before the recipe can work.\n"
-        "Independent native assembly below uses Gradle 9.4.1 directly and does not prove this original recipe.\n")
-    # Proposed normal F-Droid build: remove disable and replace the deleted wrapper
-    # with the hash-verified Gradle binary already provisioned on this diagnostic runner.
-    # No --force, --skip-scan, scanignore, or scandelete; scanner findings stop this build normally.
+    audit = scratch / "build" / APP_ID / "apps/mobile/.context-fdroid-input-audit.json"
+    if audit.exists():
+        shutil.copyfile(audit, diag.reports / "source-input-audit.json")
+    # Run the real recipe, with only disable removed in an ephemeral copy. The sole
+    # compiler exception was strictly validated above; source errors still stop this build.
     original = json.loads(json.dumps(app))
     del app["Builds"][0]["disable"]
-    original_command = "cd android && EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid ./gradlew --no-daemon assembleRelease"
+    original_command = "cd android && EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid gradle --no-daemon assembleRelease"
     if app["Builds"][0].get("build") != [original_command]:
-        raise ValueError("Review a changed recipe before replacing its exact Gradle-wrapper command")
+        raise ValueError("The recipe must use pinned system Gradle rather than the removed wrapper")
     gradle = diag.root / "gradle-9.4.1/bin/gradle"
     if Path(shutil.which("gradle") or "").resolve() != gradle.resolve():
         raise ValueError("Proposed recipe requires the hash-verified Gradle 9.4.1 executable on PATH")
-    app["Builds"][0]["build"] = [original_command.replace("./gradlew", "gradle")]
     expected = json.loads(json.dumps(original))
     del expected["Builds"][0]["disable"]
-    expected["Builds"][0]["build"] = [original_command.replace("./gradlew", "gradle")]
     if app != expected:
         raise ValueError("Unexpected metadata transformation")
     enabled = yaml.safe_dump(app, sort_keys=False, allow_unicode=True)
@@ -240,7 +255,7 @@ def metadata_checks(diag, candidate):
         fromfile="original-disabled-candidate", tofile="ephemeral-enabled-copy")))
     if diag.run("integrated-checkout-bootstrap", [sys.executable, Path(__file__).resolve(), "bootstrap",
             "--root", diag.root], integrated, timeout=600):
-        diag.run("integrated-fdroid-build", ["fdroid", "build", "--test", "--stop", "--scan-binary", f"{APP_ID}:1"], integrated,
+        diag.run("integrated-fdroid-build", ["fdroid", "build", "--test", "--stop", "--scan-binary", target], integrated,
                  timeout=3600)
 
 
@@ -250,7 +265,7 @@ def native_checks(diag, source):
     if env.get("EXPO_PUBLIC_CONTEXT_DISTRIBUTION") != "fdroid" or env.get("CONTEXT_FDROID_SOURCE_BUILD") != "1":
         raise ValueError("The independent native build must use the F-Droid source edition")
     commands = [("foss-prepare", ["node", "scripts/prepare-fdroid.cjs", "--apply"]),
-                ("locked-install", ["corepack", "pnpm", "install", "--frozen-lockfile", "--ignore-scripts"])]
+                ("locked-install", ["corepack", "pnpm", "install", "--prod", "--frozen-lockfile", "--ignore-scripts"])]
     for name, command in commands:
         if not diag.run(name, command, mobile):
             return
@@ -263,6 +278,8 @@ def native_checks(diag, source):
         return
     if not diag.run("unsigned-prepare", ["node", "scripts/prepare-fdroid.cjs", "--unsigned-android"], mobile):
         return
+    shutil.copyfile(mobile / ".context-fdroid-input-audit.json", diag.reports / "native-input-audit.json")
+    shutil.copyfile(mobile / "android/gradle.properties", diag.reports / "source-gradle.properties")
     android = mobile / "android"
     wrapper = (android / "gradle/wrapper/gradle-wrapper.properties").read_text()
     (diag.reports / "generated-gradle-wrapper.properties").write_text(wrapper)
@@ -281,12 +298,12 @@ def native_checks(diag, source):
     if not diag.run("apk-identity", [sdk / "build-tools/37.0.0/aapt2", "dump", "badging", apk], mobile):
         return
     identity = (diag.reports / "apk-identity.stdout.txt").read_text()
-    if f"name='{APP_ID}'" not in identity or "versionCode='1'" not in identity or "versionName='0.1.0'" not in identity:
+    if f"name='{APP_ID}'" not in identity or f"versionCode='{diag.release['versionCode']}'" not in identity or f"versionName='{diag.release['version']}'" not in identity:
         raise ValueError("APK identity differs from the immutable source release")
     if not diag.run("unsigned-signature-check", [sdk / "build-tools/37.0.0/apksigner", "verify", "--verbose", apk], mobile,
                     expected=(1,)):
         return
-    copied = diag.reports / "context-0.1.0-unsigned-diagnostic.apk"
+    copied = diag.reports / f"context-{diag.release['version']}-unsigned-diagnostic.apk"
     shutil.copyfile(apk, copied)
     (diag.reports / "unsigned-apk-sha256.txt").write_text(hashlib.sha256(apk.read_bytes()).hexdigest() + "\n")
     binary_root = diag.root / "binary-check"

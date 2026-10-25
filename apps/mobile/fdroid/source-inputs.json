@@ -1,0 +1,896 @@
+{
+  "schemaVersion": 1,
+  "description": "Reviewed unused inputs and narrow source patches for the locked Context Android F-Droid build. Never generated during a build.",
+  "packages": [
+    {
+      "name": "expo",
+      "version": "58.0.19",
+      "npmIntegrity": "sha512-+MHH9Bu7OFWsAl8Ox44KgqbVIe72xbxzAi3vLPtVf14o5zHE39iCD//uw/4nyBlqZii6cFUZsvtJDbeRo5OhMA==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo"
+      },
+      "remove": [
+        {
+          "path": "template.tgz",
+          "sha256": "fd958ca9b434d114ccc70c010d5404b537d49cd6ff09e239c917793ef4872991",
+          "reason": "native template already extracted by Expo prebuild",
+          "afterPrebuild": true
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-application",
+      "version": "58.1.2",
+      "npmIntegrity": "sha512-WYFdNHGaxe/j69oYREhK0cKsKYszuIuz399WXYCP+M1grfO+FCWB/RbuMgaXJsLWlzqhNjA/zLgfJ+33FwrQvw==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-application"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.application/58.1.2/expo.modules.application-58.1.2-sources.jar",
+          "sha256": "4e6b197ea81366e4ce706c9bf316457bb0a6dffab7a035f91dbeb4376dd0c6f1",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.application/58.1.2/expo.modules.application-58.1.2.aar",
+          "sha256": "cb349fe08e3c4f71acae0bdcac6a1d66a81de50d705fe6d6255ff90783ab110e",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": [
+        {
+          "id": "application-referrer-dependency",
+          "path": "android/build.gradle",
+          "beforeSha256": "30bee857819b582bffbdc477e45e0b7dd71b6601889ccef1d9a47bec9fc91325",
+          "afterSha256": "96970a131d0b86f8307a8320266089c8acf9a0f47ed83541005db68dc6522869"
+        },
+        {
+          "id": "application-referrer-source",
+          "path": "android/src/main/java/expo/modules/application/ApplicationModule.kt",
+          "beforeSha256": "f77be12b425c3730a9d41fa76b1bac0938a57dfad4346003772e879dc4295124",
+          "afterSha256": "31aa88c9c06a44a1db969f008c9bf613b01e509b7f9f22e56a073c195466ae85"
+        }
+      ]
+    },
+    {
+      "name": "expo-asset",
+      "version": "58.0.18",
+      "npmIntegrity": "sha512-Cc49mpDd81hIIKw1DVDkL52a/S6MJlHLA+LirUHNR7qJJfopoHrSypg9rRuqvCUVW7/JKvXKqbFX43NynpVzmg==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-asset"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/expo/modules/asset/expo.modules.asset/58.0.18/expo.modules.asset-58.0.18-sources.jar",
+          "sha256": "7088014d29ebd4efb4c3911b5d21ea193a7b935c494abf052ada90f00e914f55",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/expo/modules/asset/expo.modules.asset/58.0.18/expo.modules.asset-58.0.18.aar",
+          "sha256": "6638572bc255e7dd1653db31deff0bc5150b52a04b0fc4e9d9db5ac63e7cbbf8",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-calendar",
+      "version": "58.0.6",
+      "npmIntegrity": "sha512-M4NPgjj+NSB3woKekc4/en1fCvVQhv1UL64ZIjkflq3mm2rwwcX5k3vAM1wozzgFL0RUuysx9qyVxPB32oGv6A==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-calendar"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.calendar/58.0.6/expo.modules.calendar-58.0.6-sources.jar",
+          "sha256": "ae85d110a504530c45dc003d354a32f45246936fc68edbf1a860c664cc9b8f50",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.calendar/58.0.6/expo.modules.calendar-58.0.6.aar",
+          "sha256": "2fa225ea4c2841781d096302d817f17febd0bbee7a21aad2b1e9f9d9d5d87dd6",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-constants",
+      "version": "58.0.13",
+      "npmIntegrity": "sha512-zUj1rcnYg0O2wKF9L32ToEtFujc5OkslZJ4lWeg+fEwoPMLVwldn6kdEkX8zx31KgSwF94Ey1mIFdFX8Brp73Q==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-constants"
+      },
+      "remove": [],
+      "patch": []
+    },
+    {
+      "name": "expo-crypto",
+      "version": "58.0.7",
+      "npmIntegrity": "sha512-g+4i4UpqQ5jNy1VPRvVVvr9aIdh8WwvxbpwL2ntiSESDRsXyVSeb8JM6tHVdC3b9J2nGxjtrhrsaWOo0jbSxlA==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-crypto"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.crypto/58.0.7/expo.modules.crypto-58.0.7-sources.jar",
+          "sha256": "1e3afe80f27fbffc15cdfe466b064150901e88079deaad78b1fcbcb2ed2ca8ab",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.crypto/58.0.7/expo.modules.crypto-58.0.7.aar",
+          "sha256": "3e72ad98ec4ea60dbd6c7794ef67d31180d203a8de19b454d0af1af634f00859",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-file-system",
+      "version": "58.0.11",
+      "npmIntegrity": "sha512-accVZyXeA8RYUNk52ydkcHPnQaYMVJWlWvdF8pU0xLvt7ZPbaOgGzbgbeyTswjlsKSTmrAsKos4prx0PVM4ERA==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-file-system"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.filesystem/58.0.11/expo.modules.filesystem-58.0.11-sources.jar",
+          "sha256": "b32afa6e3a9fcdc24b9a3aa5ec04b69bd23e3d37f9020655251e6126869a0cb7",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.filesystem/58.0.11/expo.modules.filesystem-58.0.11.aar",
+          "sha256": "05b04d656f4a5b19617aeb299500fce68d6777c9c3272c1886efea7fdf2f0ab9",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "prebuilds/output/debug/xcframeworks/ExpoFileSystem.tar.gz",
+          "sha256": "44b327401be955e21b62a0f33dfe589b1a5bd65692c3b80b5e929cf69c595420",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        },
+        {
+          "path": "prebuilds/output/release/xcframeworks/ExpoFileSystem.tar.gz",
+          "sha256": "88a6266adeb6ad13abf27b182e72b5eb50d46efdcb139cadd6bec7c21c40f957",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-font",
+      "version": "58.0.10",
+      "npmIntegrity": "sha512-13orvRCiXg3EuirjMznWTKwFzhKHvtHRkUdgbvolbkyA1+EAbYDpp7LJMnvDnbTFU/m8Kb5awvOiaGzPYQ/ojg==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-font"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.font/58.0.10/expo.modules.font-58.0.10-sources.jar",
+          "sha256": "61ebcaeb6c5fc41c0843587efb274daa97d97e3d998d005d3cde29f6f992590f",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.font/58.0.10/expo.modules.font-58.0.10.aar",
+          "sha256": "8722bab1c001def6d5f57762b550c8520065b9def4951f15fa9118a310d4cd41",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "prebuilds/output/debug/xcframeworks/ExpoFont.tar.gz",
+          "sha256": "86f51373e8e401513ba873f48f2ae00c1a9cb8df57d5a894842bc940b9eb9639",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        },
+        {
+          "path": "prebuilds/output/release/xcframeworks/ExpoFont.tar.gz",
+          "sha256": "b1cdfbaeefca5dfe219743dbce305924158b91569cc3ecf8d5ece0445a2d601a",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-keep-awake",
+      "version": "58.0.3",
+      "npmIntegrity": "sha512-wLRF+XeVsD/Rt/ZyX+A0mk1brdf8vefWizNAPzqV5eOCgkj23LCRZdN8gUi5X8UwyR8UJ7Y7Dzdz4YDGB/4c9Q==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-keep-awake"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.keepawake/58.0.3/expo.modules.keepawake-58.0.3-sources.jar",
+          "sha256": "f42e5ce9f1a86bd91f165814106fd443aa422945add55724eb52c2523138ceb1",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.keepawake/58.0.3/expo.modules.keepawake-58.0.3.aar",
+          "sha256": "8d1d85f4ad5abad880118a04c9bd6db709b1a8c2843a25d6e4705828088f6f61",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-linking",
+      "version": "58.0.14",
+      "npmIntegrity": "sha512-cYzi8CTdllCTnEk+jmlaFXUZQudGlYv0KHw/DBvJIvsh4FYKMv/De2FlMObaXPU7XnGpRkBwuBKfIyAYjSDORw==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-linking"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.linking/58.0.14/expo.modules.linking-58.0.14-sources.jar",
+          "sha256": "9c79fa2568d8b5488a247a4d8dbdf4ed1112036477f567e9342e9659f5a9cc50",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.linking/58.0.14/expo.modules.linking-58.0.14.aar",
+          "sha256": "6b7c85fe2f27e3c8a6dad0a62f3c612b9d901f81af75757c2663d4e90c82479c",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-modules-core",
+      "version": "58.0.26",
+      "npmIntegrity": "sha512-HOuHt0nCBVv3E8+yMGeR6N6xa4WH+81CLqU/pWjDykt2NUBYGfXVMaWPsjwuBfeYOB/DcJTJR40yq+y9Ku/YcQ==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-modules-core"
+      },
+      "remove": [
+        {
+          "path": "prebuilds/output/debug/xcframeworks/ExpoModulesCore.tar.gz",
+          "sha256": "1f59fe17d42ea484676df806ea54827fcee10a030a6ad36458488766a37e5a58",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        },
+        {
+          "path": "prebuilds/output/debug/xcframeworks/ExpoModulesWorklets.tar.gz",
+          "sha256": "8810ce5d465e3a83804df535ef321640328a4b065d980e7e35edca4ce6cfa77b",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        },
+        {
+          "path": "prebuilds/output/headers/xcframeworks/ExpoModulesCoreHeaders.tar.gz",
+          "sha256": "72f1419add0a53e2446515ed227c79a42641da0a0f3337ef4ad110abb6cc3142",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        },
+        {
+          "path": "prebuilds/output/release/xcframeworks/ExpoModulesCore.tar.gz",
+          "sha256": "8f7658e3401f51e23503ee5d21ebd8fa8aee79190a166211c985fad4f14f4b6e",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        },
+        {
+          "path": "prebuilds/output/release/xcframeworks/ExpoModulesWorklets.tar.gz",
+          "sha256": "e588089f8d842eebebe76cc069f4c1f3eb6f14ce325c5698ae5d5210cc53fd58",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        },
+        {
+          "path": "android/prebuilt/native-libs.tar.xz",
+          "sha256": "83a718e90e922a8cf276dd898f01d83f28593fdf12f4a3f75946ff75c94a8acf",
+          "reason": "native core compiles with expo.core.buildFromSource=true"
+        }
+      ],
+      "patch": [
+        {
+          "id": "expo-core-local-publication",
+          "path": "android/ExpoModulesCorePlugin.gradle",
+          "beforeSha256": "f98d43a447043d50d4b4865fcd792d0734600136f0029fc05cbe92fdc9f81a16",
+          "afterSha256": "5c9877718f97d3c2786fd00ccdb7a600afe5375305fb3d4a94cb0bab12def4b8"
+        }
+      ]
+    },
+    {
+      "name": "expo-modules-jsi",
+      "version": "58.0.19",
+      "npmIntegrity": "sha512-dmYjRQnkSUdul6jZN3+yq6ZPKwiatUzLJW/pcXYx16q7QJW3i3+4RZ+MnxNeLNgg1rLrCR9F+dIgeh01+FxaFQ==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-modules-jsi"
+      },
+      "remove": [
+        {
+          "path": "prebuilds/output/headers/xcframeworks/ExpoModulesJSIHeaders.tar.gz",
+          "sha256": "424dce60fda6cec9168ad328f3251e586eb9ed9735aa31d892ea7c2fc4a9d4e4",
+          "reason": "Apple-only XCFramework archive; not an Android input"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-secure-store",
+      "version": "58.0.2",
+      "npmIntegrity": "sha512-VupWWEuQF6IiQ06McSymtn7/tehs8ifThhFwAU4UK8poomZcaa2S0UVt/y7G2XozBdkI3xpiPSx+r0pS2zsuYQ==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-secure-store"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.securestore/58.0.2/expo.modules.securestore-58.0.2-sources.jar",
+          "sha256": "63a8db12661664ad5466bdd934753f19fa5c9966db0b48d93ddf8e40cc0de903",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.securestore/58.0.2/expo.modules.securestore-58.0.2.aar",
+          "sha256": "803633f88203f6f8e7ebb6d054b694bb1c1c85de89e852f5c4509cacafb65b3c",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-sqlite",
+      "version": "58.0.14",
+      "npmIntegrity": "sha512-OEZsNXYYOzWDkMORprUYRblJVfhO/TKloMWHm5bLzIhYMgs8UcdQZ/RFIMLQFciiaMoYZDsCZbveG47OKcDRXg==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-sqlite"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.sqlite/58.0.14/expo.modules.sqlite-58.0.14-sources.jar",
+          "sha256": "e4feeb357b13c3da0d6690deff9aab2186a7874185369a06c55fa6da992fdc9c",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.sqlite/58.0.14/expo.modules.sqlite-58.0.14.aar",
+          "sha256": "6d6c7548d9149e50807984282121ae750a82f61cb8a2d8613d330eb86fe0f1b1",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "android/vec/arm64-v8a/vec.so",
+          "sha256": "0ff1080d5881edaae5a7cb6fded9e368a2a4647f218915a222f04762889394fd",
+          "reason": "SQLite vector extension explicitly disabled; ordinary SQLite compiles bundled sqlite3.c"
+        },
+        {
+          "path": "android/vec/armeabi-v7a/vec.so",
+          "sha256": "3c5bab87e8ecb5f5aab6c304029bff0f2e0bd531c820e8bbc65d5290a253ed27",
+          "reason": "SQLite vector extension explicitly disabled; ordinary SQLite compiles bundled sqlite3.c"
+        },
+        {
+          "path": "android/vec/x86/vec.so",
+          "sha256": "eec586c2ef5696c2727cf9088bea85b3937c07e391cd93c7b886c34ad903b5b5",
+          "reason": "SQLite vector extension explicitly disabled; ordinary SQLite compiles bundled sqlite3.c"
+        },
+        {
+          "path": "android/vec/x86_64/vec.so",
+          "sha256": "7995b101c0f27c248cab6fc714095ffee998e80e9a301aff6e9bcec5596b20f4",
+          "reason": "SQLite vector extension explicitly disabled; ordinary SQLite compiles bundled sqlite3.c"
+        },
+        {
+          "path": "web/wa-sqlite/wa-sqlite.wasm",
+          "sha256": "9a317ce271eac757171183a052866f5553f8e234ddc10c63af299d8e22b86b1c",
+          "reason": "web-only SQLite module; Android native build"
+        },
+        {
+          "path": "dev-plugin-dist/assets/_web/wa-sqlite/wa-sqlite.5e61fe84c4a4f49e0b1a33661b45c791.wasm",
+          "sha256": "9a317ce271eac757171183a052866f5553f8e234ddc10c63af299d8e22b86b1c",
+          "reason": "web developer-plugin SQLite module; Android native build"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-status-bar",
+      "version": "58.0.4",
+      "npmIntegrity": "sha512-e6JJHziSSNb1v1VSzmDrAPf6GFoPRdVOIDrTCcK3bHfbJEAZGZ3YZXfqlorZtUFDT0z6NcjaZf0mPWifJZcqew==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-status-bar"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.statusbar/58.0.4/expo.modules.statusbar-58.0.4-sources.jar",
+          "sha256": "03063a2c58254ec31d077a06e35a1b618b261c9fb422fdfbb269573c2b05cdb9",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.statusbar/58.0.4/expo.modules.statusbar-58.0.4.aar",
+          "sha256": "c57415373df6b0c2b60474ce414fc82f2735f387f6ec638b2ebdd6543dcebccf",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-web-browser",
+      "version": "58.0.6",
+      "npmIntegrity": "sha512-6/QtDqTOaTqM/ysYYdEZG4XDrWloOo1wVYCn4g3IgayF+1lZWTwMqa5j4kcn2TA1UBer8O7zbMQYLfSMppQ/zg==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-web-browser"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.webbrowser/58.0.6/expo.modules.webbrowser-58.0.6-sources.jar",
+          "sha256": "e1e79603476616408f0aad9fef0a1ac00916e6a3fd7dd5599dead6bc2a707021",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.webbrowser/58.0.6/expo.modules.webbrowser-58.0.6.aar",
+          "sha256": "405b2af8d6a528cfe6c9fd754d03d92b5833b10156c0b6cc5c6fe2c06c4c7b0f",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-navigation-bar",
+      "version": "58.0.4",
+      "npmIntegrity": "sha512-XO1Ljy9MlmVLYlmIGUNHxTCcHN8TjlbYQnf+jqjoxpbPxDCXDCSaX0+F7rKh0G4CUehKsfoebbMO/VIy87qSqg==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-navigation-bar"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.navigationbar/58.0.4/expo.modules.navigationbar-58.0.4-sources.jar",
+          "sha256": "41afd92565c4e6e5163151ea0382b71a3842c12746c21b5f2c4fdb006ee20b29",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.navigationbar/58.0.4/expo.modules.navigationbar-58.0.4.aar",
+          "sha256": "11db5985d78110de9cfb2e0b7d5362e3a4900df25dc383b536fdb7c25459db6d",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-system-ui",
+      "version": "58.0.6",
+      "npmIntegrity": "sha512-K1+GIYhNDc4J0lJAL0m8giesP1dgfavhN+joA6FQ45r1FXAWwS1PaueCiCJaq5hB6z5iAYT7b9XqYp76UU65yw==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-system-ui"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.systemui/58.0.6/expo.modules.systemui-58.0.6-sources.jar",
+          "sha256": "7d5e9f9a8dd6e8d5bcb81b1e4e05ee7b5d8d8788e7a5394fb0603ceec4b80eaf",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.systemui/58.0.6/expo.modules.systemui-58.0.6.aar",
+          "sha256": "89d2db5ac92abb5d6596bc9999cd995fc44cbda2ffeba55c1ffc12a8a9bb92f5",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "react-native-safe-area-context",
+      "version": "5.10.1",
+      "npmIntegrity": "sha512-ax0T3cAHQIhuAjDQpJ9C1Le96aRiM9PF+Kmgg7Y8+mD7QJMEIx04cG0eG3EGUTdvymgOkCrkakgZFwuOIuNQGw==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/appandflow/react-native-safe-area-context.git"
+      },
+      "remove": [],
+      "patch": [
+        {
+          "id": "safe-area-obsolete-local-repository",
+          "path": "android/build.gradle",
+          "beforeSha256": "e8ced7a5ff5ee09d85e361b1db0c9ef50ee438a91d38e242bc1e3c498d2d7843",
+          "afterSha256": "5e0db26bb3dbac5763de2f4020b2255982ffe625fd2d51be638d65b24edec970"
+        }
+      ]
+    },
+    {
+      "name": "expo-modules-macros",
+      "version": "0.22.0",
+      "npmIntegrity": "sha512-IHY+FkILfG19qsyf9G/z7dcWVgsyqdkWsvvob3n5nWKa2meCCAGeEjp42N68fG8Ta6dn/bsceuma7uh2i6ho9g==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/expo/expo-modules-macros.git"
+      },
+      "remove": [
+        {
+          "path": "apple/ExpoModulesMacros",
+          "sha256": "5c24b1e4cd8252e7503642a5486324a78a094290159c2b986f4dbb269294113f",
+          "reason": "Swift macro executable; Android does not compile Swift"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "@expo/modules-macros-win32-x64",
+      "version": "0.22.0",
+      "npmIntegrity": "sha512-IT5/YsBTj2gnfNlxDfv3sC51rBudiSHbPFBKoPBbpwmTCMcQg1rmWVdUoiy7LLC48NNzm86wyMxHpSI5lkW1Gg==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/expo/expo-modules-macros.git",
+        "directory": "platforms/win32-x64"
+      },
+      "remove": [
+        {
+          "path": "ExpoModulesMacros.exe",
+          "sha256": "bb8dfa64eb7b859141dc7b7aeb7284a7c1e87e7704898a6b62fd15b5bc434dc3",
+          "reason": "Swift macro executable; Android does not compile Swift"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "fb-dotslash",
+      "version": "0.5.8",
+      "npmIntegrity": "sha512-XHYLKk9J4BupDxi9bSEhkfss0m+Vr9ChTrjhf9l2iw3jB5C7BnY4GVPoMcqbrTutsKJso6yj2nAB6BI/F2oZaA==",
+      "license": "(MIT OR Apache-2.0)",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/facebook/dotslash.git"
+      },
+      "remove": [
+        {
+          "path": "bin/macos/dotslash",
+          "sha256": "b26bf1c4e44640c60e9b7e69662001557df93c9a4031cc3276c40b1e117d3e4d",
+          "reason": "React Native debugger-shell launcher; not used by noninteractive release assembly"
+        },
+        {
+          "path": "bin/windows-arm64/dotslash.exe",
+          "sha256": "803726ad37a62cc42c3bbd6056fbe8889d473a2135b515967335ad5b5e629644",
+          "reason": "React Native debugger-shell launcher; not used by noninteractive release assembly"
+        },
+        {
+          "path": "bin/windows/dotslash.exe",
+          "sha256": "1bc24c92262d801f2b1f9cd193cd45f191b325bc9038e1f713579a2bb0c4977f",
+          "reason": "React Native debugger-shell launcher; not used by noninteractive release assembly"
+        },
+        {
+          "path": "bin/linux-musl.x86_64/dotslash",
+          "sha256": "e4452ffa6578274cb4331a5d03d670c0029b28848409af0505f2f0c5e7f20018",
+          "reason": "React Native debugger-shell launcher; not used by noninteractive release assembly"
+        },
+        {
+          "path": "bin/linux-musl.aarch64/dotslash",
+          "sha256": "8f01b6200a5c9f85a75e3e390b682d398695598104326cd25f2820ef5cf18ef6",
+          "reason": "React Native debugger-shell launcher; not used by noninteractive release assembly"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "hermes-compiler",
+      "version": "260318099.0.4",
+      "npmIntegrity": "sha512-8odcPFkPC82HlqCl0C5QI9mBN4rEAT+IAo55sJhzwKw//K3qZloiv3ex6J2O8CuBbhdmkJozfidNsset2KH25w==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+ssh://git@github.com/facebook/hermes.git"
+      },
+      "remove": [
+        {
+          "path": "hermesc/osx-bin/hermesc",
+          "sha256": "1ce56f036bdadab6027cfd22a43e40640212562746b1d3ec29b62ca4b13f9a23",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/hermesc.exe",
+          "sha256": "7cb85cd14f918a5b81612ca2d273f646967ed59a615ee4daf7f2c51b158864df",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/icudt64.dll",
+          "sha256": "a622e206805898280243cc9efadd38fcb0c5054635965b2d01588f320984b4f1",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/icuin64.dll",
+          "sha256": "7f85455d31e4d131be8a62181e75c3b36192497e3ee3fa64963af704ad9d3e3f",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/icuio64.dll",
+          "sha256": "90e1913098bef58db660425c3228605ded65db89a481a39d6601216e6dcc4a6e",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/icutest64.dll",
+          "sha256": "4d925c3f651902cd542e404ab47b93e0ac9a18c27b76b810105f6d8f257a7313",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/icutu64.dll",
+          "sha256": "da93c111ab187d9953b82fc5f239efa8b6a9586130e08cae2ccd24db278fde12",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/icuuc64.dll",
+          "sha256": "c809d1ae462119a1586a6091018bf18d505a398727c60e429a978403b782cb7b",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/msvcp140.dll",
+          "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/vcruntime140.dll",
+          "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        },
+        {
+          "path": "hermesc/win64-bin/vcruntime140_1.dll",
+          "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e",
+          "reason": "non-Linux Hermes host executable/library; not used on the Linux builder"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "react-native",
+      "version": "0.88.0",
+      "npmIntegrity": "sha512-v/wee0nYWcammMYBnSat/e3WY/5iaf9YQOMcBrfKT/wPApPPlHp94hgZovBtwhMuthR01yc/8cGn0FpFTE/C4A==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/react/react-native.git",
+        "directory": "packages/react-native"
+      },
+      "remove": [
+        {
+          "path": "React/I18n/strings/ar.lproj/fbt_language_pack.bin",
+          "sha256": "be9b027cfb9fb3c25144976e3be19c8dff708da40f98dba98a15526c681fbd45",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/cs.lproj/fbt_language_pack.bin",
+          "sha256": "99d6fb0371d426021367c927628f12e3b7f9372890bb97974432184dd4ba9b87",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/da.lproj/fbt_language_pack.bin",
+          "sha256": "27e3705b7077f7823a2d58f8508a292d5ff3ae56f5d6eda67de4dcc43c2d80b9",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/de.lproj/fbt_language_pack.bin",
+          "sha256": "3a49b0e28867074f653ab9f5bee34b8683d104965c3037bcead844ac20568429",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/el.lproj/fbt_language_pack.bin",
+          "sha256": "c053414af02bc524855d7c54d353e98172aa5954143349f860ad69d1b8541627",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/en-GB.lproj/fbt_language_pack.bin",
+          "sha256": "460d10f35a0b8869e01f432dd6ea9027d685a50048409381bacd39c4aca40c69",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/es-ES.lproj/fbt_language_pack.bin",
+          "sha256": "bdaf2e43a99671a585ddb5b72b75eae7a3ffca18e0befcdeb853b5b0274a6a9c",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/es.lproj/fbt_language_pack.bin",
+          "sha256": "97543d3b9d17e30d85bdda51add94d7853dec746495dc6bff94daa861eb4e7d3",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/fi.lproj/fbt_language_pack.bin",
+          "sha256": "cca5de0b5a7fea57d54057992a5350a3dc663b148cb7ab39c445b259b4e0fed7",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/fr.lproj/fbt_language_pack.bin",
+          "sha256": "08452fbaf11071f63117b7c0ee44de195d4d6db7fe7c3df360b4bd02853051e4",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/he.lproj/fbt_language_pack.bin",
+          "sha256": "d69f2bb2c937e52744beea21f9834a2e3b9d1029b5640250204a3df7b70e5100",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/hi.lproj/fbt_language_pack.bin",
+          "sha256": "64b323639bb7d9c747f74ba625794c24e98bd570524f1dec2c92d0fb0d1ed51a",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/hr.lproj/fbt_language_pack.bin",
+          "sha256": "c96a18336c0f2e86240030e62d988b63896e7137c9da965549d6bad044d31bf4",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/hu.lproj/fbt_language_pack.bin",
+          "sha256": "37822c6aadc2631b7c0f1b8085299e6a32a3a0c581371a50a00913b4d792ff59",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/id.lproj/fbt_language_pack.bin",
+          "sha256": "0dcc4aa04a676c5f945bd4d5250b4b5a11751f265211e68fe581ec897ac0fd74",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/it.lproj/fbt_language_pack.bin",
+          "sha256": "825232470e74ce9f98111ec331c44fc9e2bc4848dd22d07e4abc8bcceb2e1a8a",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/ja.lproj/fbt_language_pack.bin",
+          "sha256": "26f8bfbe110fe5120439ebf634a390c8a5e139caf6b03ce67a076a9db9f080ae",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/ko.lproj/fbt_language_pack.bin",
+          "sha256": "1e21c323273d51d0f11f8dec5e7543141d3059866de2c37ea19e1b5f050948c5",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/ms.lproj/fbt_language_pack.bin",
+          "sha256": "699c877d7151baac8bd7bb5624c32b86dece4290475c850d8f943b1c1a902a62",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/nb.lproj/fbt_language_pack.bin",
+          "sha256": "183d7dbfdff5722224188b353b81af32f6858b05ad88378d7c9f60738ecff57f",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/nl.lproj/fbt_language_pack.bin",
+          "sha256": "7a3eb47dae0922e71929745673c53e0df8b5e6cfc9758639d6caaa80e764599f",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/pl.lproj/fbt_language_pack.bin",
+          "sha256": "979b47febe727cef65214d54f79d4e94976154ff895d70b6b29a15d90fd4633f",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/pt-PT.lproj/fbt_language_pack.bin",
+          "sha256": "4ea747fc7c6bfc0c5dfee69518d5aa419390e9c008440e810a8fc1e57b8a90e1",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/pt.lproj/fbt_language_pack.bin",
+          "sha256": "ca3de051ff7f946505e9e4b38d1ca895136935ec0ff8ff78fb3ba6129957a3d7",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/ro.lproj/fbt_language_pack.bin",
+          "sha256": "7a65ea11671985a1d218cb7edfb840538b1a48f731631dac6721bf8112f5e636",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/ru.lproj/fbt_language_pack.bin",
+          "sha256": "7bdadcc6fa96b37ab23e9cd54245052fc61dca6dbd239dd5b60d26b5659b4364",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/sk.lproj/fbt_language_pack.bin",
+          "sha256": "64f16a66930b15c860aaa0a22d4f577283662452d2b9f579ca023f4631dc29ac",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/sv.lproj/fbt_language_pack.bin",
+          "sha256": "8db1fdbd500ca956e64e67cc0b41e34707ba283a895a425fad9b8c414ff429c5",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/th.lproj/fbt_language_pack.bin",
+          "sha256": "69129b0706f52ccc4f30a6fdafa0c238e91c48e8a51c8ee2c42c3e64ebae55d2",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/tr.lproj/fbt_language_pack.bin",
+          "sha256": "421d66e10a567dcafbdd978568c462ef815280d08b9550306e6df2833a520a43",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/uk.lproj/fbt_language_pack.bin",
+          "sha256": "750e8ad1bf4b7cf7ef0143683546ab07662021e670181a2dbb9075fc1b488245",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/vi.lproj/fbt_language_pack.bin",
+          "sha256": "71b3dd7a9836d3ffef5c1be17c4915eb68105b9030c0c2ba62a34d3b659b9e80",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/zh-Hans.lproj/fbt_language_pack.bin",
+          "sha256": "f89453c6614873eac67abf46c5caabd7eb50c7e1f4564027e18fe0b1698aa517",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/zh-Hant-HK.lproj/fbt_language_pack.bin",
+          "sha256": "09d0aa3d7a75737e31509693ef3ea832fe25e178c775c54e068a8d7ae443a759",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/zh-Hant.lproj/fbt_language_pack.bin",
+          "sha256": "46fd971b378a423c2f509e9b9458fb085d4c2b4d3254f298b3622bea7c283c3f",
+          "reason": "Apple .lproj language resource; not used by Android"
+        },
+        {
+          "path": "React/I18n/strings/zu.lproj/fbt_language_pack.bin",
+          "sha256": "bd48e8527839123da9457c82adbd803cc4563f69e76ef1b385fa29734d71b78e",
+          "reason": "Apple .lproj language resource; not used by Android"
+        }
+      ],
+      "patch": [
+        {
+          "id": "react-native-local-publication",
+          "path": "ReactAndroid/publish.gradle",
+          "beforeSha256": "d263ed9139d97bcfeb4e5995455f67c0d602265126acb91bf17e8a356acf6149",
+          "afterSha256": "c94e0d0c162dcb4197571083beb8b2eabce632f82e0e0fb349565fd33119c839"
+        }
+      ]
+    },
+    {
+      "name": "@expo/modules-macros-linux-x64",
+      "version": "0.22.0",
+      "npmIntegrity": "sha512-4yN4cZTCUWkq1Olr0/lA57gFan8+MEo7K3K0cx0bB3TUEqHgL/hyJN79vQKXlp9NWTnOxO7J5uwqMQkQwfh6aw==",
+      "license": "MIT",
+      "repository": "https://github.com/expo/expo-modules-macros",
+      "remove": [
+        {
+          "path": "ExpoModulesMacros",
+          "sha256": "367c685f8f5024e541857b131437d61375403af47882fbe654bc27db95f04899",
+          "reason": "Swift macro executable; Android does not compile Swift"
+        }
+      ],
+      "patch": []
+    }
+  ],
+  "hermes": {
+    "package": "hermes-compiler",
+    "version": "260318099.0.4",
+    "path": "hermesc/linux64-bin/hermesc",
+    "sha256": "44d76b1e385b6584380e95e5c63d9f98a4f812cd3cc7aa0500bacd3c39fe0987",
+    "sourceCommit": "d412d3bd851278712c20cca25d094e32641a0465",
+    "source": "https://github.com/facebook/hermes/tree/d412d3bd851278712c20cca25d094e32641a0465",
+    "npmIntegrity": "sha512-8odcPFkPC82HlqCl0C5QI9mBN4rEAT+IAo55sJhzwKw//K3qZloiv3ex6J2O8CuBbhdmkJozfidNsset2KH25w==",
+    "policy": "https://f-droid.org/docs/Inclusion_Policy/#build-transparency-and-reproducibility"
+  }
+}

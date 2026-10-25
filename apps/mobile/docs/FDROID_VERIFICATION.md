@@ -3,9 +3,9 @@
 `.github/workflows/fdroid-verify.yml` runs without Expo, Google, Apple, or GitLab account secrets.
 It runs when a `codex/fdroid-*` branch is pushed, with the commit check visible in its pull request.
 Manual workflow dispatch is also available after the workflow exists on the default branch.
-It checks the fixed public `v0.1.0` source commit
-`eae2abdb22afb092c273acef4e60cbdb17c2743f`; changing a branch or providing a different tag cannot
-silently change the application being tested.
+It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
+and Android code to that checkout. A branch or tag cannot silently change the source. The original
+runs below used `v0.1.0`; the revised preparation must be tested against its new immutable source.
 
 The [first CI run](https://github.com/khushbakhtm-star/context/actions/runs/40171690827) installed the
 toolchain and ran the real metadata/source checks. Its results and the specific verifier fixes
@@ -31,18 +31,16 @@ scanner has a source-mode exit-code defect: it can emit errors and still exit ze
 therefore independently validates its JSON error arrays and fails when they are nonempty,
 preserving the original command exit code and every finding.
 
-A second scratch repository creates an explicitly proposed recipe: it removes the build's
-`disable` value and replaces its exact `./gradlew` invocation with `gradle`, after verifying that
-`PATH` resolves to the hash-verified Gradle 9.4.1 binary supplied by this workflow. It then runs a
-normal integrated attempt:
+A second scratch repository removes only the recipe's `disable` value, verifies that its `gradle`
+command resolves to hash-verified Gradle 9.4.1, and runs a normal integrated attempt:
 
 ```sh
 fdroid build --test --stop --scan-binary com.context.minuteledger:1
 ```
 
-The original candidate and template stay disabled. The proposed ephemeral copy and its full diff
-are artifacts; it is not represented as the unchanged original recipe. The attempt has no build
-`--force`, `--skip-scan`, `scanignore`, or `scandelete`.
+The candidate and template stay disabled. The ephemeral copy and its full diff are artifacts.
+The attempt has no build `--force`, `--skip-scan`, or `scandelete`. Its only `scanignore` is the
+exact hash-verified official Linux Hermes compiler under the explicit policy exception.
 Scanner findings stop this integrated build normally rather than being bypassed to obtain an APK.
 Before invoking the build, the helper uses F-Droid's own pinned VCS API to check out the exact source
 commit and establish `SOURCE_DATE_EPOCH`. This avoids 2.4.5's fresh-checkout initialization bug;
@@ -60,27 +58,22 @@ in `results.json`. Artifacts are uploaded even when a check fails. Installation/
 remain visible in the job logs and any partial evidence files. A successful independent assembly
 cannot override an unsuccessful source scan or integrated recipe attempt.
 
-## Known recipe defect: the Gradle wrapper
+## Resolved recipe defect: the Gradle wrapper
 
-The concrete candidate currently calls `./gradlew` manually. fdroidserver removes `gradlew`,
-`gradlew.bat`, and `gradle-wrapper.jar` while scanning prepared source. Therefore this candidate's
-manual build command is incompatible with the normal scanned build, even if all other scanner
-findings are resolved. `post-scanner-wrapper-state.json` records what remains after the real scan.
+The original 0.1.0 recipe called `./gradlew`. fdroidserver removes `gradlew`, `gradlew.bat`, and
+`gradle-wrapper.jar` during scanning, so that original command was incompatible. The revised recipe
+provisions hash-verified Gradle 9.4.1 and invokes it directly. Wrapper state remains an evidence artifact.
 
-The independent native job deliberately uses the verified Gradle distribution directly and
-therefore does **not** establish that the current scanned recipe works. A packager must provision
-an approved pinned Gradle 9.4.1 command on the F-Droid server and change the recipe to use it, for
-example with this command after establishing that exact version on `PATH`:
+Independent assembly alone still does **not** establish that the complete scanned recipe works:
 
 ```yaml
 build:
   - cd android && EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid gradle --no-daemon assembleRelease
 ```
 
-That example alone does not install Gradle or establish that a default server image contains the
-right version. Its provisioning and the resulting full integrated build must be reviewed before
-enabling the recipe. Do not retain the wrapper through a broad scanner exclusion. Other actual
-scanner findings, including binaries used by npm build tools, still need individual resolution.
+The recipe includes provisioning instead of assuming a default server has the right version.
+Its full integrated build must pass before enabling it. Do not retain the wrapper through a broad
+scanner exclusion. Other actual findings still need individual resolution.
 
 ## First actual CI findings
 
@@ -115,8 +108,8 @@ zero after checking known non-free classes and extra signing blocks. Evidence is
 This result does not establish source compliance, byte-for-byte reproducibility, successful use
 on a physical phone, acceptance of the proposed recipe, or official F-Droid publication.
 
-Review of the locked dependency source identifies concrete next work; none of these changes has
-been applied by the diagnostic workflow:
+The revised [source preparation](FDROID_SOURCE_PREPARATION.md) implements the following remediation;
+its cold production install and compiled-source graph still need the next immutable CI run:
 
 - Package-level `expo.autolinking.android.buildFromSource: [".*"]` selects source-built Expo
   modules. Gradle property `expo.core.buildFromSource=true` separately disables Expo core's native

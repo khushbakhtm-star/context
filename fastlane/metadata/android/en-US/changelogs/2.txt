@@ -1,0 +1,1 @@
+Minute entry now shows Save at the top left and a close icon at the top right. Tap the filled color button beside the timestamp to open an unlabeled color panel. Removed the keyboard and microphone hint. Existing ledger data and category mappings are retained. This remains a test release pending phone verification and store review.

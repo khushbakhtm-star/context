@@ -1,0 +1,71 @@
+# Context Android source preparation
+
+Preparation transforms a separate clean checkout. Its presence does not establish review success:
+the next immutable public source must pass the real source scan, integrated F-Droid build, and APK
+scan before the disabled recipe is enabled.
+
+## Lifecycle
+
+1. `prepare-fdroid.cjs --apply` requires the F-Droid distribution and explicit source-build flag,
+   checks clean tracked Git files, removes Google native sign-in/development-client and root dev
+   dependencies from the manifest/importer, and records the lock digest/canonical checkout path.
+   EAS's pre-install hook instead requires its own ephemeral cloud build checkout.
+2. Install with `corepack pnpm install --prod --frozen-lockfile --ignore-scripts`. The locked package
+   graph is preserved. `tsx` is esbuild's only incoming lock dependency and is a development test
+   runner, not an Android bundler requirement. Ordinary developer checkouts retain their test tools.
+3. The F-Droid-only config plugin sets package-level
+   `expo.autolinking.android.buildFromSource: [".*"]` and Gradle
+   `expo.core.buildFromSource=true`. These independently select all Expo Android modules and native
+   core C++ source, including the newly added Navigation Bar/System UI modules.
+4. After Expo extracts its native template, the plugin sanitizes installed inputs using the
+   committed inventory. It retains the template for EAS and never changes EAS signing.
+5. Official source builds call `--unsigned-android` after prebuild. This additionally removes the
+   consumed template archive, disables release signing, and enforces the source/vector properties.
+   `--sanitize` is also an explicit post-prebuild sanitation command.
+6. F-Droid scans the prepared tree, removes wrappers normally, and uses the pinned system Gradle
+   9.4.1 command. The recipe no longer depends on deleted `./gradlew` files.
+
+## Reviewed inputs
+
+`fdroid/source-inputs.json` records 25 package identities, npm integrity, 101 exact unused file
+removals, and five narrow source patches. Every affected file has a fixed SHA-256; the build never
+generates new trusted hashes for itself. Changed inputs fail and require review.
+
+- Prebuilt Expo local-Maven AAR/JAR publications and core's unused native cache are removed after
+  selecting source compilation. Apple XCFramework/Swift-macro files, non-Linux Hermes hosts, and
+  iOS `.lproj` resources are not Android inputs. DotSlash belongs to debugger-shell launch functions
+  and is not used by noninteractive release assembly.
+- SQLite vector `.so` files are unused with `expo.sqlite.withSQLiteVecExtension=false`; SQLCipher
+  is also false. Normal SQLite compiles bundled `sqlite3.c`. Web/developer-plugin WASM is omitted
+  from this native Android build.
+- AuthSession still depends transitively on `expo-application`. Its Install Referrer dependency
+  and Kotlin implementation are patched together, retaining identity/version constants. Referrer
+  calls explicitly report unsupported behavior instead of linking Google's library.
+- Two publishing-only local Maven destination blocks are removed from Expo core/React Native.
+  Safe Area Context's obsolete local npm React Native Maven block is removed because RN 0.88 no
+  longer ships that directory. Trusted Google/Maven Central repositories remain.
+
+There are no directory-wide scanner exclusions or deletion rules. The sole retained official
+Linux Hermes compiler has an exact-file, hash-checked [policy exception](../fdroid/HERMES_COMPILER.md).
+
+## Safety and evidence
+
+Sanitation rejects other roots, path escapes, symlinked input files, changed locks, and unprepared
+manifests. It unlinks a project file before patching bytes, detaching pnpm hardlinks and preserving
+the global store. A real hardlink test verifies the simulated shared cache is unchanged; negative
+tests cover changed hashes and path escapes.
+
+`.context-fdroid-input-audit.json` records each removed/patched path, hashes, reason, and retained
+compiler provenance. CI copies it into diagnostic artifacts. Actual source/native scans remain
+required; sanitation alone is not a pass.
+
+## Release and toolchain pins
+
+The metadata provisions official Node 24.19.0/Gradle 9.4.1 archives with SHA-256 verification,
+Corepack 0.36.0/pnpm 11.25.0, and Debian OpenJDK 17. The approved server SDK must provide platform
+37.0, Build Tools 37.0.0, NDK 27.1.12297006, and CMake 3.22.1. CI records its exact environment.
+
+The verifier requires a reviewed full `CONTEXT_SOURCE_COMMIT`, checks checkout identity, and
+compares metadata version/code with that commit's `app.json`. Publish source commit B first, then
+controller/metadata commit C pinning B. Keep the recipe disabled until that exact source passes.
+Future changes need a new immutable pin and another real run.

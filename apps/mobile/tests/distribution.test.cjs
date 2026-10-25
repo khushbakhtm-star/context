@@ -8,6 +8,7 @@ const { spawnSync } = require('node:child_process');
 const ts = require('typescript');
 const { createHash } = require('node:crypto');
 const { createFossManifest, createFossLock, unsignedGradle } = require('../scripts/prepare-fdroid.cjs');
+const { STATE, digest, writeDetached, prepareInstalledSources, sourcePatches, sourceGradleProperties } = require('../scripts/fdroid-source-inputs.cjs');
 
 const root = path.resolve(__dirname, '..');
 
@@ -37,7 +38,7 @@ test('F-Droid configuration removes Google and dev-client plugins regardless of 
       ['@react-native-google-signin/google-signin', { iosUrlScheme: 'old' }]] },
   });
   assert.equal(config.extra.distribution, 'fdroid');
-  assert.deepEqual(JSON.parse(JSON.stringify(config.plugins)), ['expo-sqlite']);
+  assert.deepEqual(JSON.parse(JSON.stringify(config.plugins)), ['expo-sqlite', './plugins/with-fdroid-source.cjs']);
 });
 
 test('F-Droid disables native Google autolinking and Metro resolves its import to a local source stub', () => {
@@ -114,13 +115,16 @@ test('source-build manifest excludes proprietary sign-in and development client 
   const foss = createFossManifest(original);
   assert.equal(foss.dependencies['@react-native-google-signin/google-signin'], undefined);
   assert.equal(foss.dependencies['expo-dev-client'], undefined);
+  assert.equal(foss.devDependencies, undefined);
   assert.ok(original.dependencies['@react-native-google-signin/google-signin']);
   assert.equal(foss.dependencies.expo, original.dependencies.expo);
   assert.equal(foss.packageManager, 'pnpm@11.25.0');
   assert.ok(foss.expo.autolinking.exclude.includes('@react-native-google-signin/google-signin'));
+  assert.deepEqual(foss.expo.autolinking.android.buildFromSource, ['.*']);
   const lock = createFossLock(fs.readFileSync(path.join(root, 'pnpm-lock.yaml'), 'utf8'));
   const importer = lock.slice(0, lock.indexOf('\npackages:\n'));
   assert.doesNotMatch(importer, /google-signin|expo-dev-client/);
+  assert.doesNotMatch(importer, /devDependencies:|tsx:|typescript:/);
   assert.match(importer, /expo-calendar:/);
   assert.match(lock, /lockfileVersion: '9.0'/);
   assert.equal(createFossLock(lock), lock);
@@ -171,6 +175,7 @@ test('F-Droid EAS hook prunes only the temporary build checkout and preserves it
   fs.mkdirSync(path.join(staging, 'scripts'));
   const script = path.join(staging, 'scripts/prepare-fdroid.cjs');
   fs.copyFileSync(path.join(root, 'scripts/prepare-fdroid.cjs'), script);
+  fs.copyFileSync(path.join(root, 'scripts/fdroid-source-inputs.cjs'), path.join(staging, 'scripts/fdroid-source-inputs.cjs'));
   fs.copyFileSync(path.join(root, 'package.json'), path.join(staging, 'package.json'));
   fs.copyFileSync(path.join(root, 'pnpm-lock.yaml'), path.join(staging, 'pnpm-lock.yaml'));
   const result = spawnSync(process.execPath, [script, '--eas-pre-install'], {
@@ -182,4 +187,59 @@ test('F-Droid EAS hook prunes only the temporary build checkout and preserves it
   assert.equal(manifest.dependencies['@react-native-google-signin/google-signin'], undefined);
   assert.equal(manifest.dependencies['expo-dev-client'], undefined);
   assert.ok(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).dependencies['@react-native-google-signin/google-signin']);
+});
+
+test('F-Droid source flags select Expo core compilation and keep optional vector binaries disabled', () => {
+  const properties = sourceGradleProperties('expo.core.buildFromSource=false\nexpo.sqlite.withSQLiteVecExtension=true\n');
+  assert.match(properties, /expo\.core\.buildFromSource=true/);
+  assert.match(properties, /expo\.sqlite\.withSQLiteVecExtension=false/);
+  assert.match(properties, /expo\.sqlite\.useSQLCipher=false/);
+  assert.equal(sourceGradleProperties(properties), properties);
+});
+
+test('reviewed source sanitation is hash checked, deferred until prebuild, and detaches pnpm hardlinks', (t) => {
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'context-fdroid-inputs-'));
+  t.after(() => fs.rmSync(staging, { recursive: true, force: true }));
+  const real = fs.realpathSync(staging);
+  const beforeEnv = { distribution: process.env.EXPO_PUBLIC_CONTEXT_DISTRIBUTION, source: process.env.CONTEXT_FDROID_SOURCE_BUILD };
+  process.env.EXPO_PUBLIC_CONTEXT_DISTRIBUTION = 'fdroid';
+  process.env.CONTEXT_FDROID_SOURCE_BUILD = '1';
+  t.after(() => {
+    if (beforeEnv.distribution === undefined) delete process.env.EXPO_PUBLIC_CONTEXT_DISTRIBUTION;
+    else process.env.EXPO_PUBLIC_CONTEXT_DISTRIBUTION = beforeEnv.distribution;
+    if (beforeEnv.source === undefined) delete process.env.CONTEXT_FDROID_SOURCE_BUILD;
+    else process.env.CONTEXT_FDROID_SOURCE_BUILD = beforeEnv.source;
+  });
+  fs.writeFileSync(path.join(real, 'package.json'), JSON.stringify({ name: 'context-mobile', expo: { autolinking: { android: { buildFromSource: ['.*'] } } } }));
+  fs.writeFileSync(path.join(real, 'pnpm-lock.yaml'), 'locked\n');
+  fs.writeFileSync(path.join(real, STATE), JSON.stringify({ root: real, lockSha256: digest(Buffer.from('locked\n')) }));
+  const directory = path.join(real, 'node_modules/.pnpm/reviewed@1.0.0/node_modules/reviewed');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ name: 'reviewed', version: '1.0.0' }));
+  fs.writeFileSync(path.join(directory, 'unused.aar'), 'unused publication');
+  fs.writeFileSync(path.join(directory, 'template.tgz'), 'extracted template');
+  const original = '    repositories {\n        maven {\n            name = "mavenTempLocal"\n            url = mavenTempLocalUrl\n        }\n    }';
+  const cache = path.join(real, 'simulated-pnpm-store-source.gradle');
+  fs.writeFileSync(cache, original);
+  fs.linkSync(cache, path.join(directory, 'publish.gradle'));
+  const hermes = path.join(real, 'node_modules/.pnpm/hermes-compiler@1.0.0/node_modules/hermes-compiler');
+  fs.mkdirSync(path.join(hermes, 'hermesc/linux64-bin'), { recursive: true });
+  fs.writeFileSync(path.join(hermes, 'package.json'), JSON.stringify({ name: 'hermes-compiler', version: '1.0.0' }));
+  fs.writeFileSync(path.join(hermes, 'hermesc/linux64-bin/hermesc'), 'official compiler fixture');
+  const inventory = { packages: [{ name: 'reviewed', version: '1.0.0', remove: [
+    { path: 'unused.aar', sha256: digest(Buffer.from('unused publication')) },
+    { path: 'template.tgz', sha256: digest(Buffer.from('extracted template')), afterPrebuild: true }],
+    patch: [{ id: 'react-native-local-publication', path: 'publish.gradle', beforeSha256: digest(Buffer.from(original)),
+      afterSha256: digest(Buffer.from(sourcePatches['react-native-local-publication'](original))) }] }],
+    hermes: { package: 'hermes-compiler', version: '1.0.0', path: 'hermesc/linux64-bin/hermesc', sha256: digest(Buffer.from('official compiler fixture')) } };
+  prepareInstalledSources(real, { inventory });
+  assert.equal(fs.existsSync(path.join(directory, 'unused.aar')), false);
+  assert.equal(fs.existsSync(path.join(directory, 'template.tgz')), true);
+  assert.equal(fs.readFileSync(cache, 'utf8'), original, 'the shared cache inode must retain its original bytes');
+  assert.doesNotMatch(fs.readFileSync(path.join(directory, 'publish.gradle'), 'utf8'), /url = mavenTempLocalUrl/);
+  prepareInstalledSources(real, { inventory, removeTemplate: true });
+  assert.equal(fs.existsSync(path.join(directory, 'template.tgz')), false);
+  assert.throws(() => writeDetached(real, path.join(real, '..', 'outside-fdroid-checkout.txt'), 'blocked'), /leaves/);
+  fs.writeFileSync(path.join(directory, 'unused.aar'), 'unexpected changed binary');
+  assert.throws(() => prepareInstalledSources(real, { inventory }), /Unreviewed F-Droid removal input/);
 });

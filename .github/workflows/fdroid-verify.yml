@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CONTEXT_SOURCE_COMMIT: eae2abdb22afb092c273acef4e60cbdb17c2743f
+  CONTEXT_SOURCE_COMMIT: 49cb65def8d6f951f5709e8ee5bd581d352b1693
   FDROID_DATA_COMMIT: dbd57558e5e687a018116b4242c42dd52d00124a
   FDROID_SERVER_SHA256: f9b52646264c732678e32e37e23a995db20cc61d45622dda5830ce23255547f4
   FDROID_SERVER_SDIST: https://files.pythonhosted.org/packages/f4/d8/7beac4add64c4b3d03dac01a073dc7c6beb69a7adbd4215bc8def3075d46/fdroidserver-2.4.5.tar.gz
@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: khushbakhtm-star/context
-          ref: eae2abdb22afb092c273acef4e60cbdb17c2743f
+          ref: ${{ env.CONTEXT_SOURCE_COMMIT }}
           path: release
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -93,8 +93,8 @@ jobs:
       - name: Run actual checks and retain their exit statuses
         env:
           VERIFY_MODE: ${{ matrix.mode }}
-          EXPO_PUBLIC_CONTEXT_DISTRIBUTION: fdroid
-          CONTEXT_FDROID_SOURCE_BUILD: '1'
+          EXPO_PUBLIC_CONTEXT_DISTRIBUTION: ${{ matrix.mode == 'native' && 'fdroid' || '' }}
+          CONTEXT_FDROID_SOURCE_BUILD: ${{ matrix.mode == 'native' && '1' || '' }}
           CI: '1'
         run: |
           "$FDROID_VENV/bin/python" controller/.github/scripts/fdroid-verify.py "$VERIFY_MODE" --source release --candidate controller/fdroid/metadata/com.context.minuteledger.yml --root "$CONTEXT_FDROID_ROOT"
