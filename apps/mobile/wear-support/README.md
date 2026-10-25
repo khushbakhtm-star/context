@@ -5,17 +5,20 @@ Context phone APK. Install an updated phone APK, enable **Allow watch access** i
 and open Context on the phone once. The watch does not require a Play developer account,
 calendar login, cloud storage account or separate ledger.
 
-The watch opens at the current minute. Scroll the 1,440-minute day or use the touch bezel
-to step by a minute. Tap a minute to type with the installed watch keyboard or choose Dictate.
-The editor keeps its original date/minute while the clock changes. The date heading accepts
-`YYYY-MM-DD` and includes previous/next day controls; Now returns to the current minute. Downloaded days remain
-available offline. An uncached day loads after the paired phone is running Context.
+The watch opens at the current minute. Its main screen contains the date heading, Now,
+and the 1,440-minute list. Scroll the list or use the touch bezel to step by a minute.
+Tap a minute to type with the installed watch keyboard or choose Dictate. The editor
+keeps its original date/minute while the clock changes. Tap the date heading to open a
+dialog with a `YYYY-MM-DD` field and previous/next day controls. Now returns to the current
+minute. Downloaded days remain available offline. An uncached day loads after the paired
+phone is running Context.
 
 Saving first commits an atomic private watch journal, then sends an immutable operation
 through Wear OS Data Layer. “Waiting for phone” means the phone has not committed it yet.
 While the phone app is closed the native inbox can receive edits; ledger updates apply when
 Context next runs. Conflicts retain both versions and direct the user to review them in Context
-on the phone. Resolving there updates the original receipt and clears the watch's saved conflict.
+on the phone. The watch shows both versions with a Back button; resolving the conflict in
+the phone's watch review updates the original receipt and clears the watch's saved conflict.
 
 ## Cloud build
 
@@ -26,7 +29,9 @@ eas build --platform android --profile wear-preview --non-interactive
 ```
 
 The config plugin generates `android/wear` from reviewed sources; the EAS profile runs
-`:wear:testReleaseUnitTest :wear:assembleRelease`. Cloud-only `credentials.json` supplies
+`:wear:test :wear:assembleRelease`. The module-level `test` task runs the enabled JVM
+tests; AGP 9 only creates unit tests for its selected test build type, which defaults to
+debug. Cloud-only `credentials.json` supplies
 the same remote signing key used by the phone. The watch version code is 100,000 plus the
 phone code (phone 9 becomes watch 100009), reserving separate Play artifact ranges.
 Release signing fails if those credentials

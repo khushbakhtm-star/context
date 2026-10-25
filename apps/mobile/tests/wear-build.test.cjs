@@ -58,8 +58,17 @@ test('watch cloud profile retains remote signing and uploads only the native wat
   const profile = JSON.parse(fs.readFileSync(path.join(root, 'eas.json'), 'utf8')).build['wear-preview'];
   assert.equal(profile.credentialsSource, 'remote');
   assert.equal(profile.env.CONTEXT_WEAR_BUILD, '1');
-  assert.equal(profile.android.gradleCommand, ':wear:testReleaseUnitTest :wear:assembleRelease');
+  assert.equal(profile.android.gradleCommand, ':wear:test :wear:assembleRelease');
   assert.equal(profile.android.applicationArchivePath, 'android/wear/build/outputs/apk/release/*.apk');
+});
+
+test('cloud upload ignores generated native roots without excluding the nested phone bridge', () => {
+  const ignore = fs.readFileSync(path.join(root, '.easignore'), 'utf8').replaceAll('\r\n', '\n');
+  assert.match(ignore, /^\/android\/$/m);
+  assert.match(ignore, /^\/ios\/$/m);
+  assert.doesNotMatch(ignore, /^(?:\*\*\/)?android\/$/m,
+    'an unanchored android directory rule removes modules/context-wear/android from the cloud upload');
+  assert.doesNotMatch(ignore, /^(?:\*\*\/)?ios\/$/m);
 });
 
 test('watch height budgets preserve the ledger and fixed editor actions on small round screens', () => {

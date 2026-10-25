@@ -4,8 +4,8 @@ node_modules/
 dist-android/
 dist-ios/
 dist-fdroid/
-android/
-ios/
+/android/
+/ios/
 *.log
 .env
 .env.*

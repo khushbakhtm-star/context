@@ -37,7 +37,7 @@
         "CONTEXT_WEAR_BUILD": "1"
       },
       "android": {
-        "gradleCommand": ":wear:testReleaseUnitTest :wear:assembleRelease",
+        "gradleCommand": ":wear:test :wear:assembleRelease",
         "applicationArchivePath": "android/wear/build/outputs/apk/release/*.apk"
       }
     },
