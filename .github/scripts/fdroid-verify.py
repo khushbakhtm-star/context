@@ -135,6 +135,47 @@ def checked_candidate(path):
     return raw, app
 
 
+def source_scanner_summary(report):
+    """2.4.5 forgets its source-mode nonzero exit; preserve and validate the actual JSON."""
+    build = report.get(APP_ID, {}).get("1")
+    if not isinstance(build, dict) or any(not isinstance(build.get(key), list) for key in ("errors", "warnings", "infos")):
+        raise ValueError("Source scanner did not emit the expected structured findings")
+    categories = {}
+    for entry in build["errors"]:
+        if not isinstance(entry, list) or not entry or not isinstance(entry[0], str):
+            raise ValueError("Malformed source scanner error entry")
+        categories[entry[0]] = categories.get(entry[0], 0) + 1
+    return {"errorCount": len(build["errors"]), "warningCount": len(build["warnings"]),
+            "infoCount": len(build["infos"]), "errorCategories": categories,
+            "successful": not build["errors"],
+            "notice": "fdroidserver 2.4.5 source mode can exit zero despite these errors; JSON findings determine this check."}
+
+
+def bootstrap_build_checkout():
+    """Work around the pinned server's pre-clone SOURCE_DATE_EPOCH bug through its own VCS API."""
+    from fdroidserver import common, metadata
+    parser = argparse.ArgumentParser()
+    common.setup_global_opts(parser)
+    metadata.add_metadata_arguments(parser)
+    sys.argv = ["fdroid-checkout-bootstrap"]
+    options = common.parse_args(parser)
+    metadata.warnings_action = options.W
+    common.get_config()
+    app = metadata.parse_metadata(Path(f"metadata/{APP_ID}.yml"))
+    build = app.Builds[0]
+    if app.Repo != REPO or build.commit != SOURCE:
+        raise ValueError("Bootstrap candidate identity differs from the immutable source release")
+    Path("build").mkdir(exist_ok=True)
+    directory = common.get_build_dir(app)
+    vcs = common.getvcs(app.RepoType, app.Repo, directory)
+    vcs.gotorevision(build.commit)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=directory, text=True).strip()
+    epoch = common.get_source_date_epoch(directory)
+    if commit != SOURCE or not isinstance(epoch, str) or not epoch.isdigit():
+        raise ValueError("F-Droid's own checkout bootstrap did not establish the expected source epoch")
+    print(f"Official F-Droid VCS checkout prepared: {commit}, SOURCE_DATE_EPOCH={epoch}")
+
+
 def metadata_checks(diag, candidate):
     import yaml
     raw, app = checked_candidate(candidate)
@@ -159,6 +200,12 @@ def metadata_checks(diag, candidate):
     diag.run("metadata-lint", ["fdroid", "lint", APP_ID], scratch)
     diag.run("source-scanner", ["fdroid", "scanner", "--force", "--exit-code", "--json", f"{APP_ID}:1"], scratch,
              timeout=1800)
+    summary = source_scanner_summary(json.loads((diag.reports / "source-scanner.stdout.txt").read_text()))
+    (diag.reports / "source-scanner-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    diag.results.append({"name": "source-scanner-structured-findings", "type": "report-validation", **summary})
+    diag.save()
+    print(f"Source report contains {summary['errorCount']} errors and {summary['warningCount']} warnings; "
+          "the scanner's raw exit code is preserved separately.", flush=True)
     android = scratch / "build" / APP_ID / "apps/mobile/android"
     wrappers = {name: (android / name).exists() for name in
                 ("gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar")}
@@ -167,12 +214,21 @@ def metadata_checks(diag, candidate):
         "Original candidate manually invokes ./gradlew. fdroidserver removes wrappers during source scanning.\n"
         "Consequently that build command needs an approved pinned system Gradle command before the recipe can work.\n"
         "Independent native assembly below uses Gradle 9.4.1 directly and does not prove this original recipe.\n")
-    # Normal F-Droid build, with only its disabled flag removed in an ephemeral copy.
+    # Proposed normal F-Droid build: remove disable and replace the deleted wrapper
+    # with the hash-verified Gradle binary already provisioned on this diagnostic runner.
     # No --force, --skip-scan, scanignore, or scandelete; scanner findings stop this build normally.
     original = json.loads(json.dumps(app))
     del app["Builds"][0]["disable"]
+    original_command = "cd android && EXPO_PUBLIC_CONTEXT_DISTRIBUTION=fdroid ./gradlew --no-daemon assembleRelease"
+    if app["Builds"][0].get("build") != [original_command]:
+        raise ValueError("Review a changed recipe before replacing its exact Gradle-wrapper command")
+    gradle = diag.root / "gradle-9.4.1/bin/gradle"
+    if Path(shutil.which("gradle") or "").resolve() != gradle.resolve():
+        raise ValueError("Proposed recipe requires the hash-verified Gradle 9.4.1 executable on PATH")
+    app["Builds"][0]["build"] = [original_command.replace("./gradlew", "gradle")]
     expected = json.loads(json.dumps(original))
     del expected["Builds"][0]["disable"]
+    expected["Builds"][0]["build"] = [original_command.replace("./gradlew", "gradle")]
     if app != expected:
         raise ValueError("Unexpected metadata transformation")
     enabled = yaml.safe_dump(app, sort_keys=False, allow_unicode=True)
@@ -182,8 +238,10 @@ def metadata_checks(diag, candidate):
     (diag.reports / "ephemeral-candidate.diff").write_text("".join(difflib.unified_diff(
         raw.splitlines(keepends=True), enabled.splitlines(keepends=True),
         fromfile="original-disabled-candidate", tofile="ephemeral-enabled-copy")))
-    diag.run("integrated-fdroid-build", ["fdroid", "build", "--test", "--stop", "--scan-binary", f"{APP_ID}:1"], integrated,
-             timeout=3600)
+    if diag.run("integrated-checkout-bootstrap", [sys.executable, Path(__file__).resolve(), "bootstrap",
+            "--root", diag.root], integrated, timeout=600):
+        diag.run("integrated-fdroid-build", ["fdroid", "build", "--test", "--stop", "--scan-binary", f"{APP_ID}:1"], integrated,
+                 timeout=3600)
 
 
 def native_checks(diag, source):
@@ -241,11 +299,16 @@ def native_checks(diag, source):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("metadata", "native"))
-    parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("mode", choices=("metadata", "native", "bootstrap"))
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--candidate", type=Path)
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
+    if args.mode == "bootstrap":
+        bootstrap_build_checkout()
+        return 0
+    if args.source is None or args.candidate is None:
+        parser.error("metadata/native diagnostics require --source and --candidate")
     diag = Diagnostics(args.root)
     try:
         diag.provenance(args.source.resolve())

@@ -7,9 +7,10 @@ It checks the fixed public `v0.1.0` source commit
 `eae2abdb22afb092c273acef4e60cbdb17c2743f`; changing a branch or providing a different tag cannot
 silently change the application being tested.
 
-This workflow is prepared for CI execution. Its checked-in presence does not assert that its
-checks have run or passed. Record the actual workflow run and inspect the diagnostic artifacts.
-It does not publish an APK or submit anything to F-Droid.
+The [first CI run](https://github.com/khushbakhtm-star/context/actions/runs/40171690827) installed the
+toolchain and ran the real metadata/source checks. Its results and the specific verifier fixes
+are recorded below. Read each later run's actual artifacts rather than inferring success from the
+workflow's presence. It does not publish an APK or submit anything to F-Droid.
 
 ## Actual checks and failure evidence
 
@@ -25,18 +26,27 @@ fdroid scanner --force --exit-code --json com.context.minuteledger:1
 Scanner `--force` includes disabled builds. It does not suppress scanner findings. The scanner
 runs the candidate's real `init` commands, then scans its prepared source and installed dependency
 tree. Its stdout and stderr are retained separately; stdout is not falsely labeled valid JSON if
-subprocess output was mixed into it. Actual nonzero exits remain failures.
+subprocess output was mixed into it. Actual nonzero exits remain failures. The pinned 2.4.5
+scanner has a source-mode exit-code defect: it can emit errors and still exit zero. The helper
+therefore independently validates its JSON error arrays and fails when they are nonempty,
+preserving the original command exit code and every finding.
 
-A second scratch repository removes only the build's `disable` value and runs a normal integrated
-attempt:
+A second scratch repository creates an explicitly proposed recipe: it removes the build's
+`disable` value and replaces its exact `./gradlew` invocation with `gradle`, after verifying that
+`PATH` resolves to the hash-verified Gradle 9.4.1 binary supplied by this workflow. It then runs a
+normal integrated attempt:
 
 ```sh
 fdroid build --test --stop --scan-binary com.context.minuteledger:1
 ```
 
-The original candidate and template stay disabled. The ephemeral enabled copy and its full diff
-are artifacts. The attempt has no build `--force`, `--skip-scan`, `scanignore`, or `scandelete`.
+The original candidate and template stay disabled. The proposed ephemeral copy and its full diff
+are artifacts; it is not represented as the unchanged original recipe. The attempt has no build
+`--force`, `--skip-scan`, `scanignore`, or `scandelete`.
 Scanner findings stop this integrated build normally rather than being bypassed to obtain an APK.
+Before invoking the build, the helper uses F-Droid's own pinned VCS API to check out the exact source
+commit and establish `SOURCE_DATE_EPOCH`. This avoids 2.4.5's fresh-checkout initialization bug;
+normal source preparation, scanning, and building still run.
 
 The **native** job uses a separate clean checkout of the same commit, applies FOSS dependency
 preparation, installs the frozen lockfile, and prebuilds with the digest-checked native template
@@ -71,6 +81,61 @@ That example alone does not install Gradle or establish that a default server im
 right version. Its provisioning and the resulting full integrated build must be reviewed before
 enabling the recipe. Do not retain the wrapper through a broad scanner exclusion. Other actual
 scanner findings, including binaries used by npm build tools, still need individual resolution.
+
+## First actual CI findings
+
+Run `40171690827` installed the pinned verifier and native toolchain successfully. Metadata lint
+returned zero. The real source scanner reported **91 errors and 9 warnings**, while returning zero
+because of the pinned server's defect. The structured-report guard now treats those errors as a
+failed check. Raw logs and the first-run artifacts remain unchanged evidence.
+
+| Error category reported by the scanner | Count |
+| --- | ---: |
+| Android AAR libraries | 12 |
+| Java JAR files | 12 |
+| Binaries, including esbuild/Hermes and React Native data | 47 |
+| Gzip archives, including prebuilt Expo/iOS artifacts and the native template | 11 |
+| Shared libraries in expo-sqlite | 4 |
+| WebAssembly files | 2 |
+| `com.android.installreferrer` dependency in expo-application | 1 |
+| Unknown Maven repository expressions | 2 |
+
+These findings require source-build, dependency, and packaging review; this table does not declare
+every flagged file proprietary. No finding is removed through a blanket exclusion. The first
+integrated attempt also exposed `SOURCE_DATE_EPOCH=None` before F-Droid cloned the empty scratch
+build directory. The explicit official-VCS checkout bootstrap addresses that verifier failure.
+The separate native job's result must be read independently and cannot erase these source findings.
+
+That first run's independent native job subsequently **succeeded**: Gradle assembled the unsigned
+release in 6 minutes 41 seconds, `aapt2` confirmed `com.context.minuteledger` / version `0.1.0` /
+version code `1` / compile SDK `37`, and the APK contains all four configured Android ABIs.
+The signature verifier returned the expected unsigned result. F-Droid's APK binary scanner returned
+zero after checking known non-free classes and extra signing blocks. Evidence is in
+[native diagnostic artifact 12591210515](https://github.com/khushbakhtm-star/context/actions/runs/40171690827/artifacts/12591210515).
+This result does not establish source compliance, byte-for-byte reproducibility, successful use
+on a physical phone, acceptance of the proposed recipe, or official F-Droid publication.
+
+Review of the locked dependency source identifies concrete next work; none of these changes has
+been applied by the diagnostic workflow:
+
+- Package-level `expo.autolinking.android.buildFromSource: [".*"]` selects source-built Expo
+  modules. Gradle property `expo.core.buildFromSource=true` separately disables Expo core's native
+  prebuilt cache. Unused published AAR/JAR files remain scanner inputs until exact-path cleanup is
+  justified against the resolved Gradle graph.
+- SQLite vector binaries are optional and disabled by default. Review their unused status
+  separately from ordinary SQLite's compiled `sqlite3.c` implementation.
+- `expo-application` imports Install Referrer classes and declares its dependency. A source patch
+  must remove the unused implementation as well as the dependency; deleting only the dependency
+  breaks compilation.
+- The two unknown Maven expressions are publishing destinations, including React Native's
+  `file:///tmp/maven-local`; review their actual build participation rather than assuming a remote
+  dependency service. Non-Android archives, web WASM, and language data need target-specific review.
+- Linux esbuild and Hermes executables are actual build tools. Resolve their source-built
+  replacements or accepted packaging treatment; deleting every binary is not a working build path.
+
+See [Expo source-build selection](https://docs.expo.dev/modules/autolinking/#buildfromsource) and
+[SQLite options](https://docs.expo.dev/versions/latest/sdk/sqlite/). Repeat real scans and native
+tests after each justified packaging change.
 
 ## Pinned tools and provenance
 
