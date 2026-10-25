@@ -37,7 +37,7 @@ Builds:
   - versionName: 0.1.8
     versionCode: 9
     disable: Pinned build-server toolchain, dependency scan, and native verification are pending
-    commit: ca49db043c90171eedff04d352f51cd7130d3c66
+    commit: 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24
     subdir: apps/mobile
     sudo:
       - apt-get update
