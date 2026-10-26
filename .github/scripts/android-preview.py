@@ -10,7 +10,7 @@ import struct
 import subprocess
 import zipfile
 
-SOURCE = "a097e00910cb3bb3b21f3792f94eda90a68bccdf"
+SOURCE = "0d39268f375721f4f98729100ee8ac8f79b468e8"
 VERSION = "0.1.11"
 CODE = 12
 APP_ID = "com.context.minuteledger"
