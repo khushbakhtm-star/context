@@ -89,7 +89,7 @@ jobs:
           corepack pnpm install --frozen-lockfile --ignore-scripts
           node scripts/google-oauth-preflight.cjs
           printf '%s  %s\n' 'fd958ca9b434d114ccc70c010d5404b537d49cd6ff09e239c917793ef4872991' 'node_modules/expo/template.tgz' | sha256sum --check -
-          corepack pnpm exec expo prebuild --platform android --no-install --template node_modules/expo/template.tgz
+          corepack pnpm exec expo prebuild --platform android --no-install --template "$(pwd)/node_modules/expo/template.tgz"
       - name: Disable release signing in the generated phone project
         run: python3 controller/.github/scripts/android-preview.py prepare --source release --reports "$CONTEXT_PREVIEW_REPORTS"
       - name: Assemble the unsigned phone APK
