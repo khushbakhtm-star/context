@@ -10,7 +10,7 @@ import struct
 import subprocess
 import zipfile
 
-SOURCE = "1a9234e45d3753c0e9cd67ceb0f0484ba1895eef"
+SOURCE = "2ef41523c124007968ae10163867d8cba3dc0c87"
 VERSION = "0.1.12"
 CODE = 13
 APP_ID = "com.context.minuteledger"
@@ -124,6 +124,14 @@ def verify(source, reports, receipt):
                        b"Lcom/google/android/gms/auth/api/signin/"):
             if marker not in dex:
                 raise ValueError("Actual Wear/Google native module marker missing")
+        native_markers = {
+            "printNativeMarkerVerified": b"Lexpo/modules/print/PrintModule;",
+            "sharingNativeMarkerVerified": b"Lexpo/modules/sharing/SharingModule;",
+            "calendarColorNativeMarkerVerified": b"Lexpo/modules/contextcalendarcolors/ContextCalendarColorsModule;",
+        }
+        for name, marker in native_markers.items():
+            if marker not in dex:
+                raise ValueError(f"Actual native module descriptor is missing: {name}")
     identity = run([tools / "aapt2", "dump", "badging", apk])
     wanted = f"package: name='{APP_ID}' versionCode='{CODE}' versionName='{VERSION}'"
     if wanted not in identity:
@@ -136,7 +144,8 @@ def verify(source, reports, receipt):
                     "zipIntegrity": True, "zipAlignment": "16 KB native libraries; checked before signing",
                     "nativeIdentityVerified": True, "noApkSigningBlock": True, "noJarSignature": True,
                     "apksignerExpectedUnsignedExit": 1, "googleClientIds": clients,
-                    "wearAndGoogleNativeMarkers": True, "bundleSha256": sha(bundle),
+                    "wearAndGoogleNativeMarkers": True,
+                    **{name: True for name in native_markers}, "bundleSha256": sha(bundle),
                     "scope": "Unsigned aligned APK only. Publisher signing, signature verification and phone Google sign-in testing remain separate. No Expo/EAS build service or signing credential was used."})
     return receipt
 
