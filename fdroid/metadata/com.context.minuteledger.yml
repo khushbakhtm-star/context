@@ -1,9 +1,5 @@
-# Independently verified Context 0.1.8 source candidate; official inclusion is pending.
-# Exact tested recipe: controller 994a269bbe1f861d9dcb318aa871a57a11efa0d5.
-# The Google-dependent Wear companion is excluded from this source build.
-# Disabled source-build candidate, not a submitted F-Droid listing.
-# Generate a release-specific candidate with prepare-submission.cjs after publishing the source.
-# Keep this build disabled until the unsigned native build and F-Droid scanner are verified.
+# Context 0.1.13/code14 source candidate; new independent verification is pending.
+# Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
     en-US: Optional Microsoft calendar and OneDrive connections use Microsoft's proprietary services. The local ledger, Android calendars, and user-selected WebDAV storage work without them.
@@ -35,10 +31,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.8
-    versionCode: 9
+  - versionName: 0.1.13
+    versionCode: 14
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24
+    commit: 39463542b837c80bce2064483ee8749babad053f
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -70,32 +66,20 @@ Builds:
     output: android/app/build/outputs/apk/release/app-release-unsigned.apk
 
 MaintainerNotes: |-
-  The upstream fastlane listing is at repository-root fastlane/metadata/android/en-US.
-  Independent GitHub Ubuntu verification passed for this exact source.
-  Run https://github.com/khushbakhtm-star/context/actions/runs/40245685971
-  passed metadata lint, source scan (0 errors, 0 warnings), the integrated
-  F-Droid recipe and APK scan, and independent unsigned assembly and APK scan.
-  The tested recipe is pinned to controller 994a269bbe1f861d9dcb318aa871a57a11efa0d5;
-  this receipt changes comments and review status only, not the tested recipe.
-  Optional Wear SDK and native watch sources are removed by 21 exact reviewed
-  file hashes before scanning; CI retains and checks the complete removal receipt.
-  The F-Droid edition provides no Google Wear transport. Prior verified results
-  remain documented in apps/mobile/docs/FDROID_VERIFICATION.md.
-  The recipe provisions Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, and Gradle
-  9.4.1 with official archive hashes. Android platform 37.0, Build Tools 37.0.0,
-  NDK 27.1.12297006, and CMake 3.22.1 must be available in the approved server SDK.
-  Dependency pruning runs before installation and leaves unreachable packages in
-  the source lock graph. Check the installed native graph and scanner findings;
-  Exact reviewed unused files are removed after prebuild with a per-file hash audit.
-  All Expo Android modules and core compile from source. Install Referrer is patched
-  out of the transitive expo-application module; identity constants remain available.
-  The sole scanignore is the policy-permitted official Linux Hermes compiler.
-  The exact v0.1.8 tag and tagged-source workflow 40246819174 were verified.
-  Physical 0.1.8 phone/watch checks and public maintenance history or an applicable
-  inclusion exception remain pending. No screenshots are supplied
-  until genuine captures of the native app are available.
+  New independent verification of this exact source is pending. Keep the build disabled.
+  Historical 0.1.8 results do not establish this version builds or passes scans.
+  The source-input inventory reviews 27 packages, 107 exact removable inputs and
+  five source patches, including six unused Print/Sharing publications or archives.
+  All Expo Android modules and core compile from source. Optional Google Wear
+  inputs are removed by exact hashes; Android calendar-color source is retained.
+  Only the documented official Linux Hermes compiler scanner exception remains.
+  The recipe pins Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, Gradle 9.4.1,
+  Android 37.0/Build Tools 37.0.0, NDK 27.1.12297006 and CMake 3.22.1.
+  Official server provisioning, inclusion review, signing and catalog publication
+  remain pending. Existing packaging request: fdroid/rfp issue 4667.
+  See apps/mobile/docs/FDROID_VERIFICATION.md for exact verification receipts.
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.8
-CurrentVersionCode: 9
+CurrentVersion: 0.1.13
+CurrentVersionCode: 14
