@@ -1,13 +1,47 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
-phone 0.1.11 (build 12), published on 2026-10-26 at 05:45:40 UTC. The FOSS phone and watch remain at
+phone 0.1.12 (build 13), published on 2026-10-26 at 13:15:49 UTC. The FOSS phone and watch remain at
 0.1.8, published on 2026-10-25 at 23:54:13 UTC. Official store entries remain absent pending actual
 availability. A source tag alone, unpublished upload, review submission, or queued release must not
 add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Published 0.1.12 Wear-phone update
+
+[Download the 0.1.12 phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.12/context-0.1.12-wear-phone-preview.apk)
+from the [release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.12), available since
+**2026-10-26 at 13:15:49 UTC**. Choose **Update** and keep Context installed to retain its ledger.
+This is the Wear-enabled phone edition, code **13**; the existing watch 0.1.8 remains compatible.
+[Share the permanent installation guide and QR code](SHARE_CONTEXT.md) for Obtainium updates.
+
+Generated calendar descriptions now contain timestamped notes without category labels, Context IDs or
+footers. Private metadata preserves account event ownership, original descriptions and editable minute
+logs. Existing owned legacy events are cleaned on their next authorized update. Uncertain native links
+pause for review; enabling account editing alone does not adopt an existing native-calendar event.
+Single-phone backups remain supported, and a verified second ledger actor enables peer safeguards.
+
+The release also adds contextual cell menus, group moves and partial Ungroup; direct header controls;
+Day/Week/Month/Year/Schedule; Pick or a finger-glide Range of up to 28 days; full source event color
+fills; configurable calendar/Schedule/Dashboard PDF printing; and recorded/unrecorded Dashboard bars.
+
+Application source is [`2ef41523c124007968ae10163867d8cba3dc0c87`](https://github.com/khushbakhtm-star/context/commit/2ef41523c124007968ae10163867d8cba3dc0c87).
+TypeScript and **426 tests** passed. The [unsigned build](https://github.com/khushbakhtm-star/context/actions/runs/40326992220)
+used controller `32d699895851b275fc757308baaf66911bfce3b4`; publisher signing stayed local. The builder
+preserves three audited native module identities through R8 so its strict DEX checks remain valid.
+The [exact tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40329070841) passed at that source.
+Public release **424270052**, APK asset **678216768**, matches the verified local signed APK:
+**78,773,362 bytes**, SHA-256 `797c59d1fab41984b8392aa8f0865a4a10f91b74315f27a90704eb82ecf0f8eb`.
+
+The release's attached receipts record native package identity, Google/Wear configuration, native
+Print/Sharing/calendar-color definitions, official APK signatures, certificate continuity, 16 KiB ZIP
+alignment and packaged UI labels. These checks do not establish physical gestures, printing, calendar
+runtime behavior or two-phone synchronization; **physical 0.1.12 validation remains pending**.
+Google OAuth remains in Testing. No new FOSS, watch or iOS binary is included; official store and
+F-Droid catalog availability remain pending.
+
 
 ## Published 0.1.11 Wear-phone update
 
