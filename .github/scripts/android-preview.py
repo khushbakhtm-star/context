@@ -15,6 +15,12 @@ VERSION = "0.1.12"
 CODE = 13
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned Wear-phone preview: local publisher signing is separate"
+NATIVE_RULE_MARKER = "# Context audited native module identities for packaging verification"
+NATIVE_MODULES = (
+    "expo.modules.print.PrintModule",
+    "expo.modules.sharing.SharingModule",
+    "expo.modules.contextcalendarcolors.ContextCalendarColorsModule",
+)
 
 
 def sha(data):
@@ -68,18 +74,35 @@ def contains(data, text):
     return text.encode("utf-8") in data or text.encode("utf-16le") in data
 
 
+def native_identity_rules(text):
+    if NATIVE_RULE_MARKER in text:
+        raise ValueError("Audited native module rules are already present")
+    # Expo core permits Module subclasses to be obfuscated. Preserve only these
+    # audited identities so actual DEX checks do not mistake renamed code for absence.
+    rules = "\n".join(f"-keep class {module} {{ *; }}" for module in NATIVE_MODULES)
+    return text.rstrip() + "\n\n" + NATIVE_RULE_MARKER + "\n" + rules + "\n"
+
+
 def prepare(source, reports):
     mobile = source_identity(source)
     target = mobile / "android/app/build.gradle"
     original = target.read_text()
     patched = unsigned_gradle(original)
     target.write_text(patched)
+    proguard = mobile / "android/app/proguard-rules.pro"
+    original_rules = proguard.read_text()
+    audited_rules = native_identity_rules(original_rules)
+    proguard.write_text(audited_rules)
+    (reports / "audited-native-proguard-rules.pro").write_text(audited_rules)
     receipt = {"schemaVersion": 1, "status": "prepared-not-built", "sourceCommit": SOURCE,
                "controllerCommit": os.environ.get("GITHUB_SHA"), "version": VERSION,
                "androidVersionCode": CODE, "applicationId": APP_ID, "distribution": "store",
                "releaseChannel": "standalone-wear", "signing": "disabled; no key supplied to CI",
                "originalGeneratedGradleSha256": sha(original.encode()),
                "unsignedGeneratedGradleSha256": sha(patched.encode()),
+               "originalProguardRulesSha256": sha(original_rules.encode()),
+               "auditedProguardRulesSha256": sha(audited_rules.encode()),
+               "preservedNativeModuleIdentities": list(NATIVE_MODULES),
                "lockfileSha256": sha((mobile / "pnpm-lock.yaml").read_bytes()),
                "scope": "Unsigned build only; not signed, installed, or publicly released."}
     return receipt
@@ -91,6 +114,8 @@ def verify(source, reports, receipt):
         raise ValueError("Missing exact-source unsigned preparation receipt")
     if receipt["lockfileSha256"] != sha((mobile / "pnpm-lock.yaml").read_bytes()):
         raise ValueError("The frozen lockfile changed during the native build")
+    if receipt.get("auditedProguardRulesSha256") != sha((mobile / "android/app/proguard-rules.pro").read_bytes()):
+        raise ValueError("The audited native module rules changed during the build")
     tools = Path(os.environ["ANDROID_HOME"]) / "build-tools/37.0.0"
     original = mobile / "android/app/build/outputs/apk/release/app-release-unsigned.apk"
     apk = reports / "context-0.1.12-wear-phone-unsigned.apk"
