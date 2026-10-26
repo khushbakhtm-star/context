@@ -5,18 +5,18 @@
 - Source: https://github.com/khushbakhtm-star/context
 - Issue tracker: https://github.com/khushbakhtm-star/context/issues
 - Releases: https://github.com/khushbakhtm-star/context/releases
-- Candidate: 0.1.15 FOSS phone (Android version code 16)
-- Immutable source: e34e2856d9449521560d316edb49c00d0bade5ab
-- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.15
-- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.15/context-0.1.15-foss-preview.apk
-- Preview APK SHA-256: `92f5c27fbbccbdf50e16ef59436f3b37dcdd11877dea7bf5bc30932e9a078d06`
-- Release publication: 2026-10-26 at 20:07:42 UTC; signed FOSS APK size 78,118,759 bytes
-- FOSS preview availability: 2026-10-26 at 20:12:17 UTC; asset 679330669
+- Candidate: 0.1.16 FOSS phone (Android version code 17)
+- Immutable source: 7e43f1e59d389fdbcac2b057605d7928c0b22611
+- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.16
+- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.16/context-0.1.16-foss-preview.apk
+- Preview APK SHA-256: `f5b9bd54972329674afdae397b0eddddfff3ae2e63cac1a60523da5dfec3f6f1`
+- Release publication: 2026-10-26 at 23:01:16 UTC; signed FOSS APK size 78,143,335 bytes
+- FOSS preview availability: 2026-10-26 at 23:05:32 UTC; asset 679763077
 - License: MIT
 - Summary: Capture your day minute by minute alongside your calendars
 
 This is a new public project requesting packaging review and an inclusion-policy
-assessment. It is not an accepted F-Droid app. The 0.1.15 source tag and signed FOSS
+assessment. It is not an accepted F-Droid app. The 0.1.16 source tag and signed FOSS
 Android preview are public. Both independent source-build verification jobs passed
 for the exact current candidate. Historical receipts remain below.
 
@@ -92,6 +92,10 @@ markers. The publisher-signed Wear pair shares a package and signing certificate
 an eventual official F-Droid signer is different and cannot supply this Data Layer
 pairing. Physical Galaxy Watch7 validation remains pending.
 
+Local saved notes load without waiting for optional provider requests. Previously loaded
+account/day plans may display from a valid device-local cache during an outage; new or never
+loaded calendar data still requires its source. Failed refreshes remain visible for retry.
+
 ## Packaging remediation and evidence
 
 The original 0.1.0 check found 91 source errors and nine warnings. Its unsigned
@@ -112,7 +116,21 @@ The recipe provisions hash-verified Node 24.19.0 and Gradle 9.4.1, with
 Corepack 0.36.0/pnpm 11.25.0 and OpenJDK 17. It uses system Gradle after F-Droid
 removes wrappers. Required Android SDK packages are recorded in the metadata.
 
-## Latest 0.1.15 verification
+## Latest 0.1.16 verification
+
+- Scope: local-first SQLite notes and independent bounded Month/Schedule ledger/cache/native/account queues. Valid previously loaded account/day snapshots can display only within the current consent/account/selected-calendar/timezone scope; a 10-second caller deadline and 60-second raw-request lease permit safe fallback and later recovery from stuck reads. Strict Print source-failure handling remains. TypeScript, 535 full-suite tests and 95 focused tests passed; no physical 0.1.16 offline or calendar behavior is inferred.
+
+- Exact source `7e43f1e59d389fdbcac2b057605d7928c0b22611`, Android code 17, passed both jobs in [run 40415367808](https://github.com/khushbakhtm-star/context/actions/runs/40415367808), controlled by `1aeef5f7d97d276a95fb8ada1113a91ffe4f893e`.
+- [Exact tested recipe](https://github.com/khushbakhtm-star/context/blob/1aeef5f7d97d276a95fb8ada1113a91ffe4f893e/fdroid/metadata/com.context.minuteledger.yml) remains disabled pending official maintainer review.
+- All 17 metadata and 15 native checks succeeded: lint exit 0; source JSON **0 errors, 0 warnings, 7 informational entries**; integrated F-Droid build/APK scan exit 0 (554.80 seconds); independent assembly `BUILD SUCCESSFUL in 9m 54s`; exact package 0.1.16/code17; expected unsigned-signature exit 1; binary scan exit 0.
+- Both actual audits record **106 removals, 5 source patches and 21 exact optional Wear-source removals**. The reviewed inventory contains 107 removable paths across 27 packages; one Windows-only input is absent on Linux. Only the hash-verified official Linux Hermes compiler scanner exception remains.
+- Locally downloaded/hashed [metadata artifact 12694913862](https://github.com/khushbakhtm-star/context/actions/runs/40415367808/artifacts/12694913862): 4,480,970 bytes; ZIP SHA-256 `1f6cd75cfecc8f42fd20996f842947f41950604964dd246e76483f14b2ce6c28`. [Native artifact 12695008763](https://github.com/khushbakhtm-star/context/actions/runs/40415367808/artifacts/12695008763): 37,204,453 bytes; ZIP SHA-256 `6a5214c7b51a0503caf4b074f210be86673be0ab4d54577147812c3c3230add4`. ZIP CRC, exact provenance, check results and source/Wear audits passed.
+- The [durable R8 build-evidence bundle](https://github.com/khushbakhtm-star/context/releases/download/v0.1.16/context-0.1.16-foss-build-evidence.zip) is 7,683,764 bytes, SHA-256 `758c9269d31b93eb064f36cfd0167406c9116d6e1c693c1194f62b11f942bf82`. Its 23 allowlisted entries retain exact mappings/configuration/seeds/registration, public receipts and per-file hashes; CRC and every manifest hash passed. The mapped Print, Sharing and calendar-color modules resolve to actual APK DEX class definitions.
+- Unsigned source-built APK: 78,042,996 bytes, SHA-256 `b0c73ef512923a2e5dd059dde839b705c588177c1d66d29a617982e6303168f3`. Published signed preview: 78,143,335 bytes, SHA-256 `f5b9bd54972329674afdae397b0eddddfff3ae2e63cac1a60523da5dfec3f6f1`, matching the verified public asset.
+- Official `apksigner` v2/v3, 16 KiB alignment, custom protected-content checks and original publisher-certificate continuity passed. All original unsigned protected entries, including `META-INF/services`, remain byte-identical after signing.
+- [Full verification diagnostics](../apps/mobile/docs/FDROID_VERIFICATION.md) retain exact source-to-DEX details, receipt links and historical 0.1.15 results. Public GitHub preview publication is separate from official F-Droid review, server provisioning/signing and catalog listing. Physical 0.1.16 phone gestures and calendar runtime behavior are not established by these checks.
+
+## Historical 0.1.15 verification
 
 - Scope: matching icons for the four hamburger-menu entries and Copy of one cell into a selected minute range, retaining text/fill/formatting. TypeScript, 509 full-suite tests and 69 focused tests passed; no physical 0.1.15 phone behavior is inferred.
 

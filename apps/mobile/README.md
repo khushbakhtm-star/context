@@ -5,6 +5,16 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
 
 ## Everyday use
 
+Local ledger rows load independently of optional device-calendar and account source reads. Saved notes
+remain available offline while those sources refresh separately.
+Where a valid prior account/day snapshot exists, approved Google/Microsoft plans can display
+from the device-local cache during a refresh or outage. Changed/revoked account access or
+calendar selection excludes that snapshot. Refresh failures remain visible for retry; Print
+requires complete readable sources instead of silently printing an offline cache as current.
+An account refresh has a ten-second caller deadline. Matching callers share its raw request
+for a sixty-second lease; a later retry can replace a stuck request after the lease. Superseded
+results are rejected, and old cleanup cannot remove the replacement request.
+
 - In the **Day** grid, tap a minute cell once to select it. Double-tap the cell to edit its existing
   text or enter a new note directly in the grid; the phone keyboard can also provide dictation.
   Neighboring entries stay visible. Text saves after a short pause, when leaving the cell, and when

@@ -6,6 +6,88 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
+## Verified 0.1.16 FOSS source candidate
+
+[Final independent run 40415367808](https://github.com/khushbakhtm-star/context/actions/runs/40415367808)
+passed both jobs against application source `7e43f1e59d389fdbcac2b057605d7928c0b22611`, using
+FOSS controller `1aeef5f7d97d276a95fb8ada1113a91ffe4f893e`. The
+[disabled tested recipe](https://github.com/khushbakhtm-star/context/blob/1aeef5f7d97d276a95fb8ada1113a91ffe4f893e/fdroid/metadata/com.context.minuteledger.yml)
+retains that immutable source and Android code 17. Historical 0.1.15 evidence below remains
+separate; its results are not substituted for this run.
+
+This source publishes SQLite minute notes independently of provider requests and other dates.
+Month/Schedule use separate bounded queues for ledger, local cache, native calendars and accounts.
+Only a valid previously loaded account/day snapshot can supply offline calendar plans, scoped to
+current consent, account identity, selected calendars and civil-day/timezone bounds. Account reads
+have a 10-second caller deadline and a 60-second raw-request lease; later requests can supersede
+stuck work, with identity guards rejecting obsolete results and protecting the replacement slot.
+Print retains strict failure handling instead of silently treating cached plans as current.
+TypeScript, **535 full-suite tests and 95 focused tests** passed. These are source checks, not a
+physical 0.1.16 offline, phone-gesture or calendar-delivery test.
+
+All **17 metadata checks and 15 independent native checks** succeeded. The downloaded diagnostic
+archives were checked against GitHub's byte lengths and ZIP SHA-256 values, then ZIP CRC,
+source/version/code, actual check results, exact sanitation inputs and optional Wear removal.
+
+| Actual check | Observed result |
+| --- | --- |
+| Metadata lint | Exit 0 |
+| Structured source scanner | **0 errors, 0 warnings, 7 informational entries** |
+| Integrated F-Droid recipe and APK scan | Exit 0; exact 0.1.16/code17 source; 554.80 seconds |
+| Independent unsigned assembly | Exit 0; `BUILD SUCCESSFUL in 9m 54s` |
+| Independent APK identity | `com.context.minuteledger` / 0.1.16 / code 17; minimum SDK 24, target SDK 36 |
+| Unsigned signature check | Expected exit 1 |
+| Independent APK binary scanner | Exit 0 |
+| Actual source sanitation in each job | 106 removed inputs, 5 source patches, 21 exact optional Wear-source removals |
+
+The reviewed inventory still contains **27 packages and 107 removable paths**. The Windows-only
+macro executable is absent on Linux, so each actual audit records 106 removals. Print, Sharing
+and Expo Android core/modules compile from source; the SDK-only calendar-color bridge remains.
+The sole scanner exception is the documented hash-verified official Linux Hermes compiler.
+
+| Downloaded diagnostic artifact | ZIP bytes | Locally verified ZIP SHA-256 |
+| --- | ---: | --- |
+| [Metadata 12694913862](https://github.com/khushbakhtm-star/context/actions/runs/40415367808/artifacts/12694913862) | 4,480,970 | `1f6cd75cfecc8f42fd20996f842947f41950604964dd246e76483f14b2ce6c28` |
+| [Native 12695008763](https://github.com/khushbakhtm-star/context/actions/runs/40415367808/artifacts/12695008763) | 37,204,453 | `6a5214c7b51a0503caf4b074f210be86673be0ab4d54577147812c3c3230add4` |
+
+The public [durable build-evidence bundle](https://github.com/khushbakhtm-star/context/releases/download/v0.1.16/context-0.1.16-foss-build-evidence.zip)
+is **7,683,764 bytes**, ZIP SHA-256
+`758c9269d31b93eb064f36cfd0167406c9116d6e1c693c1194f62b11f942bf82`.
+Its 23-entry allowlist preserves 95,375,890 uncompressed bytes of actual native/integrated R8
+mapping, configuration, seeds and generated module registration, public provenance, scanner and
+sanitation receipts, and a per-file hash manifest. ZIP CRC and every manifest hash passed.
+It excludes APKs, usage/full runtime logs, credentials, personal ledger data and desktop/private
+paths. Public ephemeral GitHub runner comments remain unchanged in exact configuration bytes.
+
+The exact R8 mapping resolves the required modules to inspected DEX `class_defs`, rather than
+relying on JavaScript or DEX string presence:
+
+| Original required module | Actual mapped class definition | APK DEX |
+| --- | --- | --- |
+| `expo.modules.print.PrintModule` | `Lkz1;` | `classes.dex` |
+| `expo.modules.sharing.SharingModule` | `Ljo2;` | `classes.dex` |
+| `expo.modules.contextcalendarcolors.ContextCalendarColorsModule` | `Lqx;` | `classes.dex` |
+
+The unsigned source-built APK is **78,042,996 bytes**, SHA-256
+`b0c73ef512923a2e5dd059dde839b705c588177c1d66d29a617982e6303168f3`.
+The published [publisher-signed FOSS preview](https://github.com/khushbakhtm-star/context/releases/download/v0.1.16/context-0.1.16-foss-preview.apk),
+asset 679763077, is **78,143,335 bytes**, SHA-256
+`f5b9bd54972329674afdae397b0eddddfff3ae2e63cac1a60523da5dfec3f6f1`.
+Official `apksigner` v2/v3 verification, 16 KiB ZIP alignment, custom v2 protected-content checks,
+and certificate continuity passed. The original publisher certificate SHA-256 remains
+`44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772`.
+The signed package preserves the unsigned protected entry set and every original byte, including
+runtime `META-INF/services`; only newly generated signature files are added.
+
+The [public 0.1.16 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.16)
+points to the application source above. Its [exact source-tag workflow 40416783638](https://github.com/khushbakhtm-star/context/actions/runs/40416783638) passed. Actual public asset sizes/digests match the local verified
+artifacts and receipts. The FOSS edition became available at **2026-10-26 23:05:32 UTC**.
+These independent checks establish the source-build and packaged scope;
+they do **not** establish physical phone gestures, calendar/runtime behavior, independent-machine
+byte reproducibility, official F-Droid provisioning, policy acceptance, signing or catalog listing.
+The recipe remains disabled and the existing [packaging request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667)
+remains the review route. The separate watch companion is still 0.1.8.
+
 ## Verified 0.1.15 FOSS source candidate
 
 [Final independent run 40390963846](https://github.com/khushbakhtm-star/context/actions/runs/40390963846)
