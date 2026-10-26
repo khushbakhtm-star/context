@@ -595,8 +595,16 @@ test('overlapping calendar moves become review conflicts and preserve both local
   const { device, remote, original } = await linkedPrayer(t);
   await saveRange(device, 1160, 3, 'Study session', 'study');
   remote.edit('personal', original.id, { start: iso(1160), end: iso(1170) });
-  await device.engine.synchronizeAccounts();
-  assert.equal((await device.engine.listProjections())[0].state, 'conflict');
+  const status = await device.engine.synchronizeAccounts();
+  const projections = await device.engine.listProjections();
+  // Projection documents are ordered by random IDs, not by their event identity.
+  const movedPrayer = projections.find((projection) => projection.sourceEventId === original.id);
+  assert.ok(movedPrayer);
+  assert.equal(movedPrayer.state, 'conflict');
+  assert.match(movedPrayer.conflict, /overlap|occupied|another/i);
+  assert.equal(status.conflicts, 1);
+  assert.ok(projections.some((projection) => projection.id !== movedPrayer.id && projection.state === 'synced'),
+    'the separately recorded study activity can synchronize without moving or replacing the prayer');
   assert.equal((await device.db.getMinuteEntry(day, 1135)).text, 'Pray fardh');
   assert.equal((await device.db.getMinuteEntry(day, 1160)).text, 'Study session');
 });

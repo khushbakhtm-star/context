@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -42,26 +42,29 @@ import { SettingsScreen } from './src/screens/SettingsScreen';
 import { TodayScreen } from './src/screens/TodayScreen';
 import { DateSelectionPopup } from './src/components/DateSelectionPopup';
 import { MonthOverview } from './src/components/MonthOverview';
+import { CalendarViewIcon } from './src/components/CalendarViewIcon';
+import { CalendarYearScreen } from './src/screens/CalendarYearScreen';
+import { CalendarScheduleScreen } from './src/screens/CalendarScheduleScreen';
 import { AppearanceProvider, useAppTheme } from './src/appearance';
 import type { AppColors } from './src/theme';
 import type { CalendarPreferences, DeviceCalendar, SearchResult } from './src/types';
 import { dateKey, minuteIndexForDate } from './src/utils/time';
 import { normalizeCalendarZoom } from './src/utils/calendar-layout';
 import { createCalendarRefreshBurst } from './src/utils/calendar-refresh';
-import { dateSelectionMode, isDateKey, normalizeSelectedDates } from './src/utils/date-selection';
-import { visibleCalendarDates } from './src/utils/calendar-grid';
-import { calendarNavigationTarget, type CalendarNavigationTarget } from './src/utils/calendar-navigation';
+import { isDateKey, normalizeSelectedDates } from './src/utils/date-selection';
+import type { CalendarNavigationTarget } from './src/utils/calendar-navigation';
+import { calendarViewDates, calendarViewKind, calendarViewModePageTarget, type CalendarViewMode } from './src/utils/calendar-view-mode';
 import { getAccounts } from './src/sync/accounts';
 import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
-import { flushInlineMinutes, retryInlineMinuteLinks, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
+import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
 import { redoSpreadsheetEdit, spreadsheetEditor, subscribeSpreadsheetCommits, undoSpreadsheetEdit } from './src/services/spreadsheet';
 import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/ReleaseUpdates';
 import { useWearBridge } from './src/wear/useWearBridge';
 
 type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
 type DayCount = 1 | 3 | 7;
-type NavigationAction = Exclude<Tab, 'today'> | 'day' | 'three-days' | 'week' | 'plan';
+type NavigationAction = Exclude<Tab, 'today'> | 'plan';
 
 const DEFAULT_PREFERENCES: CalendarPreferences = {
   selectedCalendarIds: [],
@@ -71,9 +74,6 @@ const DEFAULT_PREFERENCES: CalendarPreferences = {
 
 const NAVIGATION_ITEMS: { id: NavigationAction; label: string }[] = [
   { id: 'plan', label: 'Plan' },
-  { id: 'day', label: 'Day' },
-  { id: 'three-days', label: '3 days' },
-  { id: 'week', label: 'Week' },
   { id: 'reports', label: 'Reports' },
   { id: 'search', label: 'Search' },
   { id: 'settings', label: 'Settings' },
@@ -97,6 +97,9 @@ function AppController() {
   const [tab, setTab] = useState<Tab>('today');
   const [menuOpen, setMenuOpen] = useState(false);
   const [dayCount, setDayCount] = useState<DayCount>(1);
+  const [viewMode, setViewMode] = useState<CalendarViewMode>('day');
+  const [viewChanging, setViewChanging] = useState(false);
+  const viewChangingRef = useRef(false);
   const [selectedDateKeys, setSelectedDateKeys] = useState<string[] | null>(null);
   const [overviewMonth, setOverviewMonth] = useState<string | null>(null);
   const [datePickerOpen, setDatePickerOpen] = useState(false);
@@ -152,12 +155,13 @@ function AppController() {
       try {
         await initializeDatabase();
         await listCategories();
-        const [savedPreferences, savedDayCount, savedZoom, savedClockFormat, savedSelectedDates] = await Promise.all([
+        const [savedPreferences, savedDayCount, savedZoom, savedClockFormat, savedSelectedDates, savedViewMode] = await Promise.all([
           getSetting<CalendarPreferences>('calendar.preferences', DEFAULT_PREFERENCES),
           getSetting<unknown>('calendar.day-count', 1),
           getSetting<unknown>('calendar.zoom', 1),
           getSetting<unknown>('calendar.clock-format', '12h'),
           getSetting<unknown>('calendar.selected-date-keys', null),
+          getSetting<unknown>('calendar.view-mode', null),
         ]);
         const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
         setAccountCalendarWrites(directWrites);
@@ -166,8 +170,13 @@ function AppController() {
           savedPreferences.syncActuals && !directWrites ? savedPreferences.writeCalendarId : null,
         );
         setPreferences(savedPreferences);
-        setDayCount(savedDayCount === 3 || savedDayCount === 7 ? savedDayCount : 1);
         const normalizedDates = normalizeSelectedDates(savedSelectedDates);
+        const restoredMode: CalendarViewMode = normalizedDates.length ? normalizedDates.length > 7 ? 'month' : 'day' :
+          savedViewMode === 'day' || savedViewMode === 'three-days' || savedViewMode === 'week' ||
+          savedViewMode === 'month' || savedViewMode === 'year' || savedViewMode === 'schedule' ? savedViewMode :
+          savedDayCount === 7 ? 'week' : savedDayCount === 3 ? 'three-days' : 'day';
+        setViewMode(restoredMode);
+        setDayCount(restoredMode === 'week' ? 7 : restoredMode === 'three-days' ? 3 : 1);
         setSelectedDateKeys(normalizedDates.length ? normalizedDates : null);
         setOverviewMonth(null);
         if (normalizedDates.length) setActiveDate(normalizedDates[0]!);
@@ -335,6 +344,8 @@ function AppController() {
   }
 
   function changeDayCount(next: DayCount) {
+    const mode: CalendarViewMode = next === 7 ? 'week' : next === 3 ? 'three-days' : 'day';
+    setViewMode(mode);
     setSelectedDateKeys(null);
     setOverviewMonth(null);
     setDayCount(next);
@@ -344,12 +355,48 @@ function AppController() {
       .then(async () => {
         await setSetting('calendar.selected-date-keys', null);
         await setSetting('calendar.day-count', next);
+        await setSetting('calendar.view-mode', mode);
       }).catch(() => undefined);
+  }
+
+  async function changeViewMode(next: CalendarViewMode, anchor = activeDate) {
+    if (viewChangingRef.current) return;
+    viewChangingRef.current = true;
+    setViewChanging(true);
+    Keyboard.dismiss();
+    try {
+      // A view change can unmount the minute editor. Keep its draft in place if saving fails.
+      await flushInlineMinutes();
+      if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
+        throw new Error('Your current minute could not be saved. Try again before changing views.');
+      }
+      setViewMode(next);
+      setActiveDate(anchor);
+      setDayCount(next === 'week' ? 7 : next === 'three-days' ? 3 : 1);
+      setSelectedDateKeys(null);
+      setOverviewMonth(next === 'month' || next === 'schedule' ? anchor.slice(0, 7) + '-01' : null);
+      setFocusRequest(null);
+      setCalendarViewResetToken((token) => token + 1);
+      changeCalendarZoom(1);
+      setTab('today');
+      viewWrites.current = viewWrites.current.catch(() => undefined).then(async () => {
+        await setSetting('calendar.selected-date-keys', null);
+        await setSetting('calendar.day-count', next === 'week' ? 7 : next === 'three-days' ? 3 : 1);
+        await setSetting('calendar.view-mode', next);
+      }).catch(() => undefined);
+    } catch (error) {
+      Alert.alert('Could not change view', error instanceof Error ? error.message : 'Save your current minute and try again.');
+    } finally {
+      viewChangingRef.current = false;
+      setViewChanging(false);
+    }
   }
 
   function chooseDates(value: string[]) {
     const dates = normalizeSelectedDates(value);
     if (!dates.length) return;
+    const mode: CalendarViewMode = dates.length > 7 ? 'month' : 'day';
+    setViewMode(mode);
     setSelectedDateKeys(dates);
     setOverviewMonth(dates[0]!.slice(0, 7) + '-01');
     setActiveDate(dates[0]!);
@@ -359,7 +406,10 @@ function AppController() {
     setDatePickerOpen(false);
     setTab('today');
     viewWrites.current = viewWrites.current.catch(() => undefined)
-      .then(() => setSetting('calendar.selected-date-keys', dates)).catch(() => undefined);
+      .then(async () => {
+        await setSetting('calendar.selected-date-keys', dates);
+        await setSetting('calendar.view-mode', mode);
+      }).catch(() => undefined);
   }
 
   function openCalendarMinute(day: string, minute: number) {
@@ -386,7 +436,8 @@ function AppController() {
   }
 
   function visibleOverviewMonthChanged(month: string) {
-    if (isDateKey(month) && selectedDateKeys?.some((day) => day.slice(0, 7) === month.slice(0, 7))) {
+    if (isDateKey(month) && (selectedDateKeys?.some((day) => day.slice(0, 7) === month.slice(0, 7)) ||
+        (!selectedDateKeys && month.slice(0, 7) === activeDate.slice(0, 7)))) {
       setOverviewMonth(month);
     }
   }
@@ -439,26 +490,21 @@ function AppController() {
       void createConnectedPlan();
       return;
     }
-    if (action === 'day' || action === 'three-days' || action === 'week') {
-      changeDayCount(action === 'week' ? 7 : action === 'three-days' ? 3 : 1);
-      setFocusRequest(null);
-      setTab('today');
-      return;
-    }
     setTab(action);
   }
 
-  const navigationState = { activeDate, dayCount, selectedDates: selectedDateKeys, overviewMonth };
-  const previousView = calendarNavigationTarget(navigationState, -1);
-  const nextView = calendarNavigationTarget(navigationState, 1);
+  const navigationState = { activeDate, mode: viewMode, selectedDates: selectedDateKeys, overviewMonth };
+  const previousView = calendarViewModePageTarget(navigationState, -1);
+  const nextView = calendarViewModePageTarget(navigationState, 1);
+  const viewKind = calendarViewKind(viewMode, selectedDateKeys);
+  const overviewDates = useMemo(() => calendarViewDates(viewMode, activeDate, selectedDateKeys),
+    [viewMode, activeDate, selectedDateKeys]);
 
   return (
     <AppearanceProvider ready={ready}>
       <ApplicationFrame
         ready={ready}
         tab={tab}
-        dayCount={dayCount}
-        customDatesSelected={selectedDateKeys != null}
         menuOpen={menuOpen}
         onMenuChange={setMenuOpen}
         onNavigate={navigate}
@@ -472,14 +518,21 @@ function AppController() {
         ) : (
           <>
             <ReleaseUpdateNotice updates={releaseUpdates} />
-            <View style={{ flex: 1 }}>
+            <View style={{ flex: 1 }} pointerEvents={viewChanging ? 'none' : 'auto'}>
               {tab === 'today' ? <>
                 <CalendarHeader onOpenMenu={() => setMenuOpen(true)} onJumpToNow={jumpToCurrentMinute}
+                  viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
                   onPrevious={() => shiftCalendarView(previousView)} onNext={() => shiftCalendarView(nextView)}
                   onOpenDatePicker={() => setDatePickerOpen(true)} />
-                {selectedDateKeys && dateSelectionMode(selectedDateKeys) === 'month' ? <MonthOverview
-                  selectedDates={selectedDateKeys}
+                {viewKind === 'year' ? <CalendarYearScreen activeDate={activeDate} onOpenMinute={openCalendarMinute}
+                  onOpenMonth={(month) => void changeViewMode('month', month)} /> : viewKind === 'schedule' ? <CalendarScheduleScreen
+                  activeDate={activeDate} selectedDates={overviewDates} calendars={calendars}
+                  preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
+                  dataVersion={dataVersion} clockFormat={clockFormat} onOpenMinute={openCalendarMinute}
+                  onVisibleMonthChange={visibleOverviewMonthChanged}
+                /> : viewKind === 'month' ? <MonthOverview
+                  selectedDates={overviewDates}
                   calendars={calendars}
                   preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
                   dataVersion={dataVersion}
@@ -535,13 +588,22 @@ function AppController() {
         )}
       </ApplicationFrame>
       <DateSelectionPopup visible={datePickerOpen && ready} selectedDates={selectedDateKeys ??
-        visibleCalendarDates(activeDate, dayCount)} anchorDate={activeDate}
+        calendarViewDates(viewMode === 'year' ? 'day' : viewMode, activeDate)} anchorDate={activeDate}
         onApply={chooseDates} onClose={() => setDatePickerOpen(false)} />
     </AppearanceProvider>
   );
 }
 
-function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext }: {
+const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
+  { mode: 'day', label: 'Day' },
+  { mode: 'week', label: 'Week' },
+  { mode: 'month', label: 'Month' },
+  { mode: 'year', label: 'Year' },
+  { mode: 'schedule', label: 'Schedule' },
+];
+
+function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+  viewMode, viewChanging, onViewModeChange }: {
   onOpenMenu: () => void;
   onJumpToNow: () => void;
   onOpenDatePicker: () => void;
@@ -549,6 +611,9 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
   canGoNext: boolean;
   onPrevious: () => void;
   onNext: () => void;
+  viewMode: CalendarViewMode;
+  viewChanging: boolean;
+  onViewModeChange: (mode: CalendarViewMode) => Promise<void>;
 }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -557,6 +622,13 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
   const [history, setHistory] = useState(() => spreadsheetEditor.snapshot());
   const [historyPending, setHistoryPending] = useState(false);
   const historyOperation = useRef(false);
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const [viewMenuTop, setViewMenuTop] = useState(48);
+  const [viewMenuRight, setViewMenuRight] = useState(8);
+  const viewMenuAnchor = useRef<ComponentRef<typeof View>>(null);
+  const { width, height } = useWindowDimensions();
+
+  useEffect(() => { setViewMenuOpen(false); }, [width]);
 
   useEffect(() => {
     const update = () => setHistory(spreadsheetEditor.snapshot());
@@ -567,7 +639,7 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
 
   async function changeHistory(action: 'undo' | 'redo') {
     const snapshot = spreadsheetEditor.snapshot();
-    if (historyOperation.current || snapshot.busy || !(action === 'undo' ? snapshot.canUndo : snapshot.canRedo)) return;
+    if (viewChanging || historyOperation.current || snapshot.busy || !(action === 'undo' ? snapshot.canUndo : snapshot.canRedo)) return;
     historyOperation.current = true;
     setHistoryPending(true);
     Keyboard.dismiss();
@@ -601,51 +673,91 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
     return () => { if (timer) clearTimeout(timer); subscription.remove(); };
   }, []);
 
-  const abbreviatedMonth = new Intl.DateTimeFormat(undefined, { month: 'short' }).format(current).toLocaleUpperCase();
   const currentDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(current);
-  const openPicker = () => { Keyboard.dismiss(); onOpenDatePicker(); };
+  const openPicker = () => { setViewMenuOpen(false); Keyboard.dismiss(); onOpenDatePicker(); };
+  const openViews = () => {
+    if (viewChanging) return;
+    Keyboard.dismiss();
+    viewMenuAnchor.current?.measureInWindow((x, y, anchorWidth, anchorHeight) => {
+      setViewMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 304)));
+      setViewMenuRight(Math.max(8, Math.min(width - x - anchorWidth, width - 216)));
+      setViewMenuOpen(true);
+    });
+  };
 
-  return <View style={styles.calendarHeader}>
+  return <><View style={styles.calendarHeader}>
     <Pressable accessibilityRole="button" accessibilityLabel="Undo Context edit"
-      accessibilityState={{ disabled: !history.canUndo || history.busy || historyPending }}
-      disabled={!history.canUndo || history.busy || historyPending} onPress={() => void changeHistory('undo')}
-      style={[styles.menuButton, (!history.canUndo || history.busy || historyPending) && styles.disabledCalendarNavigation]}>
+      accessibilityState={{ disabled: !history.canUndo || history.busy || historyPending || viewChanging }}
+      disabled={!history.canUndo || history.busy || historyPending || viewChanging} onPress={() => void changeHistory('undo')}
+      style={[styles.menuButton, (!history.canUndo || history.busy || historyPending || viewChanging) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.historyArrow}>↶</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
-      accessibilityState={{ disabled: !history.canRedo || history.busy || historyPending }}
-      disabled={!history.canRedo || history.busy || historyPending} onPress={() => void changeHistory('redo')}
-      style={[styles.menuButton, (!history.canRedo || history.busy || historyPending) && styles.disabledCalendarNavigation]}>
+      accessibilityState={{ disabled: !history.canRedo || history.busy || historyPending || viewChanging }}
+      disabled={!history.canRedo || history.busy || historyPending || viewChanging} onPress={() => void changeHistory('redo')}
+      style={[styles.menuButton, (!history.canRedo || history.busy || historyPending || viewChanging) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Open navigation menu"
-      onPress={onOpenMenu} style={styles.menuButton}>
+      disabled={viewChanging} accessibilityState={{ disabled: viewChanging }}
+      onPress={() => { setViewMenuOpen(false); onOpenMenu(); }} style={styles.menuButton}>
       <View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} />
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Previous calendar view"
-      accessibilityState={{ disabled: !canGoPrevious }} disabled={!canGoPrevious} onPress={onPrevious}
-      style={[styles.menuButton, !canGoPrevious && styles.disabledCalendarNavigation]}>
+      accessibilityState={{ disabled: !canGoPrevious || viewChanging }} disabled={!canGoPrevious || viewChanging} onPress={onPrevious}
+      style={[styles.menuButton, (!canGoPrevious || viewChanging) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel={`Go to ${currentDate}, current minute`}
+      disabled={viewChanging} accessibilityState={{ disabled: viewChanging }}
       accessibilityHint="Touch and hold to choose dates"
       accessibilityActions={[{ name: 'longpress', label: 'Choose dates' }]}
       onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') { held.current = true; openPicker(); } }}
       onPressIn={() => { held.current = false; }}
       onLongPress={() => { held.current = true; openPicker(); }} delayLongPress={450}
       onPress={() => { if (!held.current) onJumpToNow(); held.current = false; }} style={styles.menuButton}>
-      <View pointerEvents="none" accessible={false} style={styles.calendarGlyph}>
-        <View style={styles.calendarBindings}><View style={styles.calendarBinding} /><View style={styles.calendarBinding} /></View>
-        <Text accessible={false} allowFontScaling={false} numberOfLines={1} style={styles.calendarGlyphMonth}>{abbreviatedMonth}</Text>
-        <Text accessible={false} allowFontScaling={false} style={styles.calendarGlyphDay}>{current.getDate()}</Text>
-      </View>
+      <CalendarViewIcon mode="day" currentDate={current} />
     </Pressable>
+    <View ref={viewMenuAnchor} collapsable={false}>
+      <Pressable accessibilityRole="button" accessibilityLabel="Choose calendar view"
+        accessibilityState={{ expanded: viewMenuOpen, disabled: viewChanging }} disabled={viewChanging}
+        onPress={openViews} style={styles.menuButton}>
+        {viewChanging ? <ActivityIndicator size="small" color={colors.graphite} /> :
+          <Text allowFontScaling={false} style={styles.viewDropdownArrow}>▼</Text>}
+      </Pressable>
+    </View>
     <Pressable accessibilityRole="button" accessibilityLabel="Next calendar view"
-      accessibilityState={{ disabled: !canGoNext }} disabled={!canGoNext} onPress={onNext}
-      style={[styles.menuButton, !canGoNext && styles.disabledCalendarNavigation]}>
+      accessibilityState={{ disabled: !canGoNext || viewChanging }} disabled={!canGoNext || viewChanging} onPress={onNext}
+      style={[styles.menuButton, (!canGoNext || viewChanging) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>›</Text>
     </Pressable>
-  </View>;
+  </View>
+    <Modal visible={viewMenuOpen} transparent animationType="fade" statusBarTranslucent navigationBarTranslucent
+      onRequestClose={() => setViewMenuOpen(false)}>
+      <View style={styles.viewMenuBackdrop}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Close calendar views"
+          onPress={() => setViewMenuOpen(false)} style={StyleSheet.absoluteFill} />
+        <View accessibilityViewIsModal style={[styles.viewMenu, { top: viewMenuTop, right: viewMenuRight,
+          maxHeight: Math.max(44, height - viewMenuTop - 8) }]}>
+          <ScrollView>
+            {CALENDAR_VIEW_OPTIONS.map((option) => {
+              const selected = viewMode === option.mode || (viewMode === 'three-days' && option.mode === 'day');
+              return <Pressable key={option.mode} accessibilityRole="button" accessibilityLabel={`${option.label} view`}
+                accessibilityState={{ selected }} onPress={() => {
+                  setViewMenuOpen(false);
+                  void onViewModeChange(option.mode);
+                }} style={[styles.viewOption, selected && styles.viewOptionSelected]}>
+                <CalendarViewIcon mode={option.mode} currentDate={option.mode === 'day' ? current : undefined} />
+                <Text maxFontSizeMultiplier={1.5} style={[styles.viewOptionText, selected && styles.viewOptionTextSelected]}>
+                  {option.label}
+                </Text>
+              </Pressable>;
+            })}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  </>;
 }
 
 const SCREEN_TITLES: Record<Tab, string> = {
@@ -654,12 +766,10 @@ const SCREEN_TITLES: Record<Tab, string> = {
 };
 
 function ApplicationFrame({
-  ready, tab, dayCount, customDatesSelected, menuOpen, onMenuChange, onNavigate, onReturnToCalendar, children,
+  ready, tab, menuOpen, onMenuChange, onNavigate, onReturnToCalendar, children,
 }: {
   ready: boolean;
   tab: Tab;
-  dayCount: DayCount;
-  customDatesSelected: boolean;
   menuOpen: boolean;
   onMenuChange: (open: boolean) => void;
   onNavigate: (action: NavigationAction) => void;
@@ -744,9 +854,7 @@ function ApplicationFrame({
             </View>
             <ScrollView contentContainerStyle={styles.drawerItems}>
               {NAVIGATION_ITEMS.map((item) => {
-                const selected = item.id === 'week' ? tab === 'today' && !customDatesSelected && dayCount === 7 :
-                  item.id === 'three-days' ? tab === 'today' && !customDatesSelected && dayCount === 3 :
-                    item.id === 'day' ? tab === 'today' && !customDatesSelected && dayCount === 1 : item.id === tab;
+                const selected = item.id === tab;
                 return (
                   <Pressable
                     key={item.id}
@@ -800,14 +908,16 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   calendarMenuLine: { height: 3, width: 28, marginVertical: 2.5, backgroundColor: colors.graphite },
   calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
   historyArrow: { color: colors.graphite, fontSize: 27, lineHeight: 34 },
+  viewDropdownArrow: { color: colors.graphite, fontSize: 12, lineHeight: 20 },
   disabledCalendarNavigation: { opacity: 0.3 },
-  calendarGlyph: { width: 30, height: 32, borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 4,
-    alignItems: 'center', justifyContent: 'center' },
-  calendarBindings: { position: 'absolute', left: 5, right: 5, top: -4, flexDirection: 'row', justifyContent: 'space-between' },
-  calendarBinding: { height: 6, width: 2, backgroundColor: colors.graphite, borderRadius: 1 },
-  calendarGlyphMonth: { width: '100%', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.muted,
-    paddingTop: 1, paddingBottom: 1, textAlign: 'center', color: colors.graphite, fontSize: 7, lineHeight: 9, fontWeight: '700' },
-  calendarGlyphDay: { color: colors.graphite, fontSize: 16, lineHeight: 18, fontWeight: '500' },
+  viewMenuBackdrop: { flex: 1 },
+  viewMenu: { position: 'absolute', width: 208, paddingVertical: 8, borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.hairline, borderRadius: 12, backgroundColor: colors.paper,
+    shadowColor: '#000000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.18, shadowRadius: 12, elevation: 8 },
+  viewOption: { minHeight: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, gap: 16 },
+  viewOptionSelected: { backgroundColor: colors.panel },
+  viewOptionText: { flex: 1, color: colors.graphite, fontSize: 16 },
+  viewOptionTextSelected: { color: colors.ink, fontWeight: '700' },
   screenHeader: {
     minHeight: 56, flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 10, borderBottomWidth: StyleSheet.hairlineWidth,

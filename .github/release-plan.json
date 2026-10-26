@@ -8,5 +8,5 @@
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare contextual long-press spreadsheet actions, with Undo and Redo in the header and no bottom formatting bar. Add underline, text and activity colors, content-aware AutoFill, whole activity-group moves and partial Ungroup while preserving minute notes and existing calendar-write consent. Native 0.1.12 and physical phone interaction checks remain pending. The published phone 0.1.11 and verified F-Droid/watch 0.1.8 remain their actual releases until a new verified APK is public. Google OAuth Testing and official store/F-Droid acceptance remain pending."
+  "notes": "Prepare contextual spreadsheet menus, text-only Clear, header Undo/Redo, activity moves and partial Ungroup, plus a grayscale calendar-view dropdown with Week, Month, Year and Schedule. Existing calendar-write consent and minute notes are preserved. The first 0.1.12 build was superseded before publication to include the new calendar views. Native 0.1.12 and physical phone interaction checks remain pending. Published phone 0.1.11 and verified F-Droid/watch 0.1.8 remain their actual releases until a new verified APK is public. Google OAuth Testing and official store/F-Droid acceptance remain pending."
 }
