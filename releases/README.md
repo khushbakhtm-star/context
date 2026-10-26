@@ -1,12 +1,36 @@
 # Installed-app update notices
 
-`latest.json` is the public availability feed. It announces the verified public Android standalone
-previews 0.1.8 (phone build 9), published on 2026-10-25 at 23:54:13 UTC. Official store entries remain
-absent pending actual availability. A source tag alone, unpublished upload, review submission, or queued
-release must not add a released entry.
+`latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
+phone 0.1.9 (build 10), published on 2026-10-26 at 03:27:45 UTC. The FOSS phone and watch remain at
+0.1.8, published on 2026-10-25 at 23:54:13 UTC. Official store entries remain absent pending actual
+availability. A source tag alone, unpublished upload, review submission, or queued release must not
+add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Published 0.1.9 Wear-phone update
+
+[Download the 0.1.9 Wear-phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.9/context-0.1.9-wear-phone-preview.apk)
+from the [published release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.9), available
+since **2026-10-26 at 03:27:45 UTC**, then open it and choose **Update**. Keep Context installed to
+retain its ledger. It uses version 0.1.9/code 10 and the existing compatible publisher certificate.
+The existing 0.1.8 watch APK remains compatible and unchanged. No new FOSS or iOS binary is included;
+the verified F-Droid candidate remains 0.1.8.
+
+The phone was built from `cf09982de3b70a1278786572a9d0b49264bc7e46` through the
+[unsigned GitHub build](https://github.com/khushbakhtm-star/context/actions/runs/40262475236), controlled by
+`b9081edfd6c69ff1089307db42b2ae2e708e2ce6`, then signed locally after Expo's monthly Android build
+quota was exhausted. The public tag resolves to that exact application source. Public asset
+676873751's size/digest match the locally inspected signed APK: 78,515,258 bytes,
+SHA-256 `d4f0e5338138d2f489850ac6ff53484faa24cf85493520eea408897b57e8bedd`.
+Native identity checks show 0.1.9/code 10, minimum SDK 24 and target SDK 36. Official `apksigner`
+v2/v3 verification, publisher-certificate continuity and 16 KiB alignment checks passed.
+The [exact v0.1.9 tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40264191419)
+also passed at that application source.
+
+Google OAuth is configured for the publisher's approved **Testing** accounts only. Physical Google
+sign-in has not yet been confirmed. The iOS client ID is configured, but no iOS app was built.
 
 ## Install the Android preview update
 

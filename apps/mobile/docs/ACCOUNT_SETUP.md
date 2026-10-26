@@ -98,8 +98,18 @@ ledger files or revoke the provider's existing grant. The user can revoke that g
 or Microsoft account settings. A native request already in flight may finish when a permission is
 disabled.
 
-No provider client IDs are included in this repository. Until the app owner configures the
-registrations and builds the app, connection buttons return a configuration-needed message.
+The publisher's public Google Web and iOS client IDs are configured in EAS's **preview** and
+**production** environments. The alternative unsigned Android workflow,
+`.github/workflows/android-preview.yml`, also includes those public IDs explicitly. Client IDs
+identify an app; they are not client secrets. OAuth client secrets, signing credentials and user
+access/refresh tokens are not included in that workflow or committed as build configuration.
+
+The publisher's Google OAuth app currently uses **Testing** access, limited to approved test
+accounts. Configured identifiers and a successful native build do not prove that sign-in succeeded
+on an installed phone. The iOS identifier is ready for native configuration, but no iOS binary has
+been built or verified. Fork publishers must create their own provider registrations for their
+package/bundle IDs and signing certificates, then configure their own EAS/workflow public IDs.
+Unconfigured builds still return a configuration-needed message when a connection is attempted.
 
 ## References
 
