@@ -5,6 +5,26 @@
       "platform": "android",
       "channel": "standalone",
       "applicationId": "com.context.minuteledger",
+      "version": "0.1.15",
+      "buildNumber": "16",
+      "released": true,
+      "publishedAt": "2026-10-26T20:12:17Z",
+      "url": "https://github.com/khushbakhtm-star/context/releases"
+    },
+    {
+      "platform": "android",
+      "channel": "standalone-wear",
+      "applicationId": "com.context.minuteledger",
+      "version": "0.1.15",
+      "buildNumber": "16",
+      "released": true,
+      "publishedAt": "2026-10-26T20:07:42Z",
+      "url": "https://github.com/khushbakhtm-star/context/releases"
+    },
+    {
+      "platform": "android",
+      "channel": "standalone",
+      "applicationId": "com.context.minuteledger",
       "version": "0.1.14",
       "buildNumber": "15",
       "released": true,

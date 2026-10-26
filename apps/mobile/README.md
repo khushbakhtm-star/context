@@ -36,6 +36,10 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   the selected minutes from that activity; any remaining portions above and below become separate
   groups. Hold a grouped cell longer, then drag to move the complete activity to another minute or
   day, preserving its minute notes and formatting.
+- Copying one whole cell into a selected multi-minute range repeats its text, activity fill, and
+  formatting into every selected minute. Each minute remains editable. Occupied targets require
+  **Replace** confirmation, and **Undo** restores the complete paste together. This range-fill
+  behavior applies to **Copy**; **Cut** continues to move its captured cells rather than repeat them.
 - Whole-cell **Cut / Copy** captures the selected cells' text, activity fills, and formatting. Select a
   destination and hold it for **Paste**. There is no copied/cut notification banner. Context asks for
   **Replace** confirmation if destination cells contain entries or formatting. Cut leaves its source
@@ -61,6 +65,7 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   only in **Settings**; the minute column fits the selected time labels, such as `13:11`. Light,
   dark, and system appearance are also available in Settings.
 - The three-bar menu opens **Dashboard**, **Print**, **Search**, and **Settings**, in that order.
+  These four entries have matching monochrome icons.
   Explanations in Settings and account controls are available through their information icons.
   Hold **Sync** to read any synchronization error; the icon has no added information badge.
   **Dashboard** shows recorded time

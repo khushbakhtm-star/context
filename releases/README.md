@@ -1,13 +1,85 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
-phone 0.1.14 (build 15), available by 2026-10-26 at 19:27:34 UTC. The FOSS phone 0.1.14 (build 15) was available by 2026-10-26 at 19:27:34 UTC.
+phone 0.1.15 (build 16), available by 2026-10-26 at 20:07:42 UTC. The FOSS phone 0.1.15 (build 16) was available by 2026-10-26 at 20:12:17 UTC.
 The watch remains at 0.1.8, published on 2026-10-25 at 23:54:13 UTC. Official store entries remain absent pending actual
 availability. A source tag alone, unpublished upload, review submission, or queued release must not
 add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Published 0.1.15 FOSS phone update
+
+[Download the 0.1.15 FOSS phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.15/context-0.1.15-foss-preview.apk)
+from the [public release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.15); both phone editions and all twelve checked files
+were available by **2026-10-26 at 20:12:17 UTC**. Choose **Update** over the installed Context to retain its ledger.
+This publisher-signed FOSS phone edition is code **16**. It omits native Google account sign-in
+and optional Wear transport. Use the Wear-enabled phone edition for a paired Galaxy Watch7 or
+native Google sign-in. The watch 0.1.8 binary is unchanged; this APK belongs on a phone.
+
+The [independent F-Droid build and scans](https://github.com/khushbakhtm-star/context/actions/runs/40390963846) used
+application source [`e34e2856d9449521560d316edb49c00d0bade5ab`](https://github.com/khushbakhtm-star/context/commit/e34e2856d9449521560d316edb49c00d0bade5ab) and controller `487d879edfc1743a17701c8e01ba262ff3b6430e`.
+The structured source scan reported **zero errors and zero warnings**; integrated recipe assembly
+and both APK scans passed. Audits matched **106 removed inputs,
+5 source patches and 21 Wear removals**.
+Actual Print, Sharing and calendar-color DEX class definitions were verified using the collected
+registration and R8 evidence where applicable. Official APK signatures, original publisher
+certificate, 16 KiB alignment and unchanged source-built protected content passed after signing.
+TypeScript, **509 full-suite tests** and **69 focused final tests** passed at that source.
+The [exact source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40392860838) also passed.
+
+Public release **424707038**, FOSS APK asset **679330669**: **78,118,759 bytes**,
+SHA-256 `92f5c27fbbccbdf50e16ef59436f3b37dcdd11877dea7bf5bc30932e9a078d06`. All twelve public assets match the locally verified files by size and digest. The current UI
+receipt identifies the exact application source. No superseded 0.1.15 receipt is included;
+earlier release evidence, including 0.1.14's preserved report, remains in the history.
+The [permanent evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.15/context-0.1.15-foss-build-evidence.zip) contains
+**23 checked files**, **7,682,938 bytes**,
+SHA-256 `14016c3a4d5a3f84f0ad1d50fa70b83dce9af72840483075b2df18d0870ffebb`. It preserves source/native audits and class-definition evidence
+independently of expiring Actions artifacts.
+
+Use the FOSS Obtainium filter in [Android updates](ANDROID_UPDATES.md) for this phone edition.
+This publisher preview and independent scan success do **not** establish official F-Droid catalog
+acceptance. [Request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667) needs maintainer review.
+This source adds matching monochrome icons to the **Dashboard / Print / Search / Settings**
+dropdown and fills a selected multi-minute range when pasting one copied whole cell, including
+its text, activity fill and formatting. Replace confirmation and atomic Undo remain available.
+The user's one-tap popup confirmation concerned 0.1.14 after updating, not a physical test of
+this binary. Physical gestures, calendar behavior, printing and two-phone synchronization
+remain unverified for this new binary. No new watch or iOS binary is announced.
+
+## Published 0.1.15 Wear-phone update
+
+[Download the 0.1.15 phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.15/context-0.1.15-wear-phone-preview.apk)
+from the [published release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.15); the six verified phone files were available by **2026-10-26 at 20:07:42 UTC**.
+Choose **Update** over the installed Context to retain its ledger. This is the Wear-enabled
+phone edition, code **16**. The separate watch companion remains 0.1.8.
+
+The three-bar dropdown now pairs **Dashboard / Print / Search / Settings** with matching
+monochrome icons. Copying one whole cell and pasting into a selected multi-minute range fills
+every selected minute with that cell's text, activity fill and formatting. Occupied targets still
+require Replace confirmation; the complete paste can be undone together. Native partial-text
+copy remains separate from whole-cell Copy, and a Cut clipboard retains its move behavior.
+
+The user confirmed one-tap popup actions after installing 0.1.14. That is a limited observation
+of 0.1.14, not a physical test of this new binary or every gesture and calendar flow.
+
+Application source is [`e34e2856d9449521560d316edb49c00d0bade5ab`](https://github.com/khushbakhtm-star/context/commit/e34e2856d9449521560d316edb49c00d0bade5ab). TypeScript and
+**509 full-suite tests** and **69 focused final tests** passed.
+The [unsigned Android build](https://github.com/khushbakhtm-star/context/actions/runs/40390840174) used controller
+`84630a2997c63abc4c629da673367e834aef0534`; publisher signing stayed local. The
+[exact source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40392860838) passed at that application source.
+Public release **424707038**, APK asset **679319540**, matches the verified signed APK.
+All six phone assets match their local files by size and digest. The signed APK is
+**78,830,706 bytes**, SHA-256 `230b1ecb110f7e48ffbcfcc3e4c01d49e7713c0153622d5afa49e758d8dcd772`.
+
+Receipts verify native identity, Google/Wear configuration, actual Print/Sharing/calendar-color
+class definitions, **63** packaged UI markers and **14** obsolete-control checks,
+official signatures, publisher-certificate continuity and 16 KiB alignment. These checks do not
+establish physical phone gestures, calendar synchronization or printing. No new FOSS, watch or
+iOS binary is announced by this phone receipt; official store and F-Droid catalog acceptance
+remain separate. The current UI receipt identifies the exact source; no superseded 0.1.15
+receipt is included. Earlier release receipts, including 0.1.14's preserved report, remain below.
 
 ## Published 0.1.14 FOSS phone update
 
