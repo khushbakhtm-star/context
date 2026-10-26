@@ -173,6 +173,8 @@ function phone(t, remote, initialAccount = account()) {
   const db = load(path.join(__dirname, '../src/data/database.ts'));
   const engine = load(path.join(__dirname, '../src/sync/engine.ts'));
   return { db, engine, accounts, secure, sqlite,
+    sheet: load(path.join(__dirname, '../src/services/spreadsheet.ts')),
+    inline: load(path.join(__dirname, '../src/services/inline-minutes.ts')),
     codec: load(path.join(__dirname, '../src/sync/codec.ts')),
     categories: load(path.join(__dirname, '../src/services/categories.ts')) };
 }
@@ -839,4 +841,122 @@ test('a differently colored minute inside an activity projects separately and im
   assert.deepEqual(plain(segments.map((segment) => segment.activityTitle)), ['Sleep', 'Brief bathroom visit', 'Sleep']);
   assert.equal([...remote.events.values()].find((event) => event.id === events[0].id).title, 'Sleep');
   assert.equal([...remote.events.values()].find((event) => event.id === events[2].id).title, 'Sleep');
+});
+
+test('whole named group moves and Undo reschedule the original approved event across hours and distant dates without replacing its identity', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const original = originalPrayer(); remote.seed(original);
+  await explicitGroup(device, 1135, ['Kettle', 'Talk to Mum', 'Pour', 'Drink'], 'Make coffee');
+  await device.engine.linkActualsToAccounts([day], planned(original), { dateKey: day, minuteIndex: 1135 });
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1); assert.equal([...remote.events.values()][0].id, original.id);
+  const ids = () => [...remote.events.values()].map((event) => event.id);
+  for (const destination of [{ dateKey: day, startMinute: 200 }, { dateKey: '2026-11-05', startMinute: 700 }]) {
+    const currentProjection = (await device.engine.listProjections()).find((projection) => projection.sourceEventId === original.id && projection.state !== 'deleted');
+    const group = await device.sheet.getMovableActivityGroup(currentProjection.dateKey, currentProjection.startMinute);
+    const beforeCalls = remote.calls.length;
+    await device.sheet.moveActivityGroup(group, destination); await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+    assert.deepEqual(ids(), [original.id]);
+    const saved = [...remote.events.values()][0];
+    const start = new Date(`${destination.dateKey}T12:00:00`); start.setHours(Math.floor(destination.startMinute / 60), destination.startMinute % 60, 0, 0);
+    assert.equal(saved.start, start.toISOString());
+    assert.match(saved.description, /Kettle/); assert.match(saved.description, /Talk to Mum/); assert.match(saved.description, /Pour/); assert.match(saved.description, /Drink/);
+    assert.equal(remote.calls.slice(beforeCalls).filter((call) => ['delete', 'create', 'updateSeries'].includes(call.type)).length, 0);
+    await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+    assert.deepEqual(ids(), [original.id]); assert.equal([...remote.events.values()][0].start, iso(1135));
+  }
+});
+
+test('multicolor overlapping and cross-day activity moves preserve every original calendar event ID and minute description through Undo', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const original = originalPrayer(); remote.seed(original);
+  await explicitGroup(device, 1135, ['A1', 'A2', 'B1', 'B2'], 'Coffee');
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1137, endMinute: 1138 }, 'work');
+  await device.inline.flushInlineMinutes();
+  await device.engine.linkActualsToAccounts([day], planned(original), { dateKey: day, minuteIndex: 1135 });
+  await device.engine.synchronizeAccounts();
+  const initial = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
+  assert.equal(initial.length, 2); assert.equal(initial[0].id, original.id);
+  const originalIds = initial.map((event) => event.id);
+  for (const destination of [{ dateKey: day, startMinute: 1137 }, { dateKey: '2026-11-06', startMinute: 500 }]) {
+    const group = await device.sheet.getMovableActivityGroup(day, 1135);
+    const preview = await device.sheet.prepareActivityGroupMove(group, destination);
+    await device.sheet.moveActivityGroup(group, destination, { previewToken: preview.token });
+    await device.inline.flushInlineMinutes(); const result = await device.engine.synchronizeAccounts();
+    assert.equal(result.message, 'Accounts synchronized');
+    const current = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
+    assert.deepEqual(current.map((event) => event.id), originalIds);
+    assert.match(current[0].description, /A1[\s\S]*A2/); assert.doesNotMatch(current[0].description, /B1/);
+    assert.match(current[1].description, /B1[\s\S]*B2/); assert.doesNotMatch(current[1].description, /A1/);
+    await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+    const undone = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
+    assert.deepEqual(undone.map((event) => event.id), originalIds);
+    assert.deepEqual(undone.map((event) => event.start), initial.map((event) => event.start));
+  }
+});
+
+test('moving a linked activity does not bypass a revoked calendar-write permission', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await explicitGroup(device, 1000, ['A', 'B'], 'Read');
+  const original = [...remote.events.values()][0];
+  device.accounts[0].consent.calendarWrite = false;
+  const before = remote.calls.length;
+  const group = await device.sheet.getMovableActivityGroup(day, 1000);
+  await device.sheet.moveActivityGroup(group, { dateKey: '2026-11-08', startMinute: 600 });
+  await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.get(`personal:${original.id}`).start, original.start);
+  assert.equal(remote.calls.slice(before).filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length, 0);
+  device.accounts[0].consent.calendarWrite = true;
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1); assert.notEqual(remote.events.get(`personal:${original.id}`).start, original.start);
+});
+
+test('a provider failure after atomic multicolor reanchoring can retry without changing source IDs or deleting original events', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await explicitGroup(device, 1000, ['A1', 'A2', 'B1', 'B2'], 'Coffee');
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1002, endMinute: 1003 }, 'work');
+  await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+  const initial = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
+  assert.equal(initial.length, 2);
+  remote.onGet = () => { if (remote.calls.at(-1).id === initial[1].id) throw new Error('Temporary provider failure'); };
+  const startCalls = remote.calls.length;
+  const group = await device.sheet.getMovableActivityGroup(day, 1000);
+  await device.sheet.moveActivityGroup(group, { dateKey: '2026-11-05', startMinute: 700 });
+  await device.inline.flushInlineMinutes();
+  const failed = await device.engine.synchronizeAccounts();
+  assert.match(failed.message, /Temporary provider failure/);
+  assert.deepEqual([...remote.events.values()].map((event) => event.id).sort(), initial.map((event) => event.id).sort());
+  remote.onGet = null;
+  const retried = await device.engine.synchronizeAccounts(); assert.equal(retried.message, 'Accounts synchronized');
+  const moved = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
+  assert.deepEqual(moved.map((event) => event.id), initial.map((event) => event.id));
+  assert.match(moved[0].description, /A1[\s\S]*A2/); assert.match(moved[1].description, /B1[\s\S]*B2/);
+  await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+  assert.deepEqual([...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start)).map((event) => [event.id, event.start]),
+    initial.map((event) => [event.id, event.start]));
+  assert.equal(remote.calls.slice(startCalls).filter((call) => ['create', 'delete', 'updateSeries'].includes(call.type)).length, 0);
+});
+
+test('ambiguous moved named-group geometry preserves existing calendar events for review instead of deleting them', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await explicitGroup(device, 1000, ['A1', 'A2', 'B1', 'B2'], 'Coffee');
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1002, endMinute: 1003 }, 'work');
+  await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+  const initial = plain([...remote.events.values()]);
+  const group = await device.sheet.getMovableActivityGroup(day, 1000);
+  const sourceCells = await device.db.getSpreadsheetCells({ dateKey: day, startMinute: 1000, endMinute: 1003 });
+  const targetCells = await device.db.getSpreadsheetCells({ dateKey: '2026-11-06', startMinute: 500, endMinute: 503 });
+  // A merged ledger may contain a simultaneous color edit and move; its changed
+  // run geometry is not a provable translation of either existing source event.
+  await device.db.applySpreadsheetTransaction([
+    { day, expected: sourceCells, target: sourceCells.map((cell) => ({ minuteIndex: cell.minuteIndex, entry: null, format: {} })) },
+    { day: '2026-11-06', expected: targetCells, target: sourceCells.map((cell, index) => ({ minuteIndex: 500 + index,
+      entry: { text: cell.entry.text, categoryId: index === 1 ? 'work' : cell.entry.categoryId, blockId: group.blockId }, format: cell.format })) },
+  ], { textChanged: true, formatChanged: true });
+  const beforeCalls = remote.calls.length;
+  const result = await device.engine.synchronizeAccounts();
+  assert.match(result.message, /ambiguous calendar shape/);
+  assert.deepEqual(plain([...remote.events.values()]), initial);
+  assert.equal(remote.calls.slice(beforeCalls).filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length, 0);
+  assert.equal((await device.db.getDayEntries('2026-11-06')).length, 4);
 });

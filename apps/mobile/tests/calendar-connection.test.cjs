@@ -55,6 +55,8 @@ function calendarRuntime(overrides = {}) {
       if (name === '../data/database') return {};
       if (name === '../theme') return { categoryById: () => ({ name: 'Activity' }) };
       if (name === '../utils/time') return timeModule.exports;
+      if (name === '../utils/cell-format') return require('../src/utils/cell-format.ts');
+      if (name === '../utils/activity-translation') return require('../src/utils/activity-translation.ts');
       throw new Error(`Unexpected calendar test import: ${name}`);
     },
   }, { filename });

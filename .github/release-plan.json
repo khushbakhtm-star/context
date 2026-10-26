@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.11",
-  "sourceAndroidVersionCode": 12,
-  "sourceIosBuildNumber": "12",
+  "version": "0.1.12",
+  "sourceAndroidVersionCode": 13,
+  "sourceIosBuildNumber": "13",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare a Wear-enabled phone update with a current-date calendar icon: tap to reach the current minute and hold to select dates, with grayscale arrows to browse backward or forward through the current view. Up to seven selected dates use the minute grid; larger selections use a month overview with event times and titles. Day, 3 days and Week remain directly in the menu, zoom uses pinch gestures, time format is set in Settings, and explanations open from information buttons. Native 0.1.11 verification and physical phone UI checks remain pending. The user confirmed Google sign-in on the S23 in 0.1.9; broader two-phone synchronization is not established. The verified F-Droid 0.1.8 candidate stays pinned to 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24. The existing watch 0.1.8 companion remains unchanged. Public Google OAuth verification, store publication and official F-Droid acceptance remain pending."
+  "notes": "Prepare contextual long-press spreadsheet actions, with Undo and Redo in the header and no bottom formatting bar. Add underline, text and activity colors, content-aware AutoFill, whole activity-group moves and partial Ungroup while preserving minute notes and existing calendar-write consent. Native 0.1.12 and physical phone interaction checks remain pending. The published phone 0.1.11 and verified F-Droid/watch 0.1.8 remain their actual releases until a new verified APK is public. Google OAuth Testing and official store/F-Droid acceptance remain pending."
 }

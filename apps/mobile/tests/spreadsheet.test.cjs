@@ -205,8 +205,8 @@ test('Paste rejects day overflow and invalid civil dates before touching the sou
   assert.equal((await api.getMinuteEntry(day, 100)).text, 'Source');
   assert.equal(sheet.getSpreadsheetClipboard().count, 2);
   sheet.clearSpreadsheetClipboard();
-  await assert.rejects(sheet.copyMinuteRange(range(900)), /no recorded minute/);
-  assert.equal(sheet.getSpreadsheetClipboard(), null);
+  await sheet.copyMinuteRange(range(900));
+  assert.equal(sheet.getSpreadsheetClipboard().count, 1, 'an empty selection is valid clipboard content');
 });
 
 test('canceling Cut during a pending Paste rolls back the move instead of deleting its original cells', async (t) => {
@@ -469,6 +469,67 @@ test('clear and Undo restore text and formats, while formatting an empty source 
   assert.ok(linkCalls.every((args) => args[1] === null), 'sheet commands use ordinary permission-gated linking, never select a new source occurrence');
 });
 
+test('Clear text preserves group membership, colors and formatting through Undo, Redo and private-ledger replay', async (t) => {
+  const a = harness(t); const b = harness(t); await a.api.initializeDatabase(); await b.api.initializeDatabase();
+  await save(a.api, 400, 'Read this', 'study'); await save(a.api, 401, 'A different note', 'study');
+  await a.sheet.groupMinuteRange(range(400, 402), { title: 'Reading', categoryId: 'study' });
+  await a.sheet.colorMinuteRange(range(401), 'family');
+  await a.sheet.applyCellFormat(range(400, 402), { bold: true, italic: true, underline: true, textColor: '#123456' });
+  const before = await a.api.getDayEntries(day); const blockId = before[0].blockId;
+  const formats = plain([...(await a.sheet.getDayCellFormats(day))]);
+  activate(a.inline, 400, 'Read this');
+  await a.sheet.clearTextMinuteRange(range(400, 403));
+  let entries = await a.api.getDayEntries(day);
+  assert.deepEqual(entries.map((entry) => [entry.text, entry.categoryId, entry.blockId]),
+    [['', 'study', blockId], ['', 'family', blockId], ['', 'study', blockId]]);
+  assert.deepEqual(entries.map((entry) => entry.id), before.map((entry) => entry.id));
+  assert.equal(await a.api.getMinuteEntry(day, 403), null);
+  assert.equal(a.inline.inlineMinuteDrafts.get(day, 400).text, '');
+  assert.deepEqual(plain([...(await a.sheet.getDayCellFormats(day))]), formats);
+  await a.sheet.undoSpreadsheetEdit();
+  assert.deepEqual((await a.api.getDayEntries(day)).map((entry) => entry.text), ['Read this', 'A different note', '']);
+  await a.sheet.redoSpreadsheetEdit();
+  const documents = plain(await a.api.getSyncDocuments(''));
+  await b.api.mergeSyncDocuments(documents);
+  assert.deepEqual((await b.api.getDayEntries(day)).map((entry) => [entry.text, entry.categoryId, entry.blockId]),
+    [['', 'study', blockId], ['', 'family', blockId], ['', 'study', blockId]]);
+  assert.deepEqual(plain([...(await b.sheet.getDayCellFormats(day))]), formats);
+});
+
+test('Clear text records a blank override only for supplied displayed-plan minutes and keeps their displayed color', async (t) => {
+  const { api, sheet, inline } = harness(t); await api.initializeDatabase();
+  await save(api, 500, 'Actual note', 'family');
+  await sheet.applyCellFormat(range(501), { underline: true });
+  activate(inline, 501, 'Projected plan title', 'study');
+  await sheet.clearTextMinuteRange(range(500, 502), [
+    { minuteIndex: 500, categoryId: 'study' }, { minuteIndex: 501, categoryId: 'study' },
+  ]);
+  assert.equal((await api.getMinuteEntry(day, 500)).categoryId, 'family');
+  const planOverride = await api.getMinuteEntry(day, 501);
+  assert.equal(planOverride.text, ''); assert.equal(planOverride.categoryId, 'study');
+  assert.equal(inline.inlineMinuteDrafts.get(day, 501).text, '');
+  assert.equal(inline.inlineMinuteDrafts.get(day, 501).keepColor, true);
+  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(501)), { underline: true });
+  assert.equal(await api.getMinuteEntry(day, 502), null);
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 500)).text, 'Actual note');
+  assert.equal(await api.getMinuteEntry(day, 501), null);
+  assert.equal(inline.inlineMinuteDrafts.get(day, 501).text, 'Projected plan title');
+  await sheet.redoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 501)).blockId, planOverride.blockId);
+});
+
+test('Clear text on blank raw cells is a no-op and rejects invalid displayed-color fallbacks before writing', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await sheet.clearTextMinuteRange(range(550, 552));
+  assert.equal(sheet.spreadsheetEditor.snapshot().canUndo, false);
+  assert.equal((await api.getDayEntries(day)).length, 0);
+  await assert.rejects(sheet.clearTextMinuteRange(range(550), [{ minuteIndex: 551, categoryId: 'study' }]), /valid displayed minutes/);
+  await assert.rejects(sheet.clearTextMinuteRange(range(550), [{ minuteIndex: 550, categoryId: 'missing-color' }]), /color is unavailable/);
+  assert.equal((await api.getDayEntries(day)).length, 0);
+  assert.equal(sheet.spreadsheetEditor.snapshot().canUndo, false);
+});
+
 test('a late native typing callback is retained while a formatting transaction is busy', async (t) => {
   const device = harness(t); const { api, sheet, inline } = device;
   await api.initializeDatabase(); await save(api, 450, 'Before'); activate(inline, 450, 'Before');
@@ -618,4 +679,159 @@ test('clearing a grouped note then immediately recoloring it preserves its blank
   await sheet.undoSpreadsheetEdit();
   const restored = await api.getMinuteEntry(day, 880);
   assert.equal(restored.text, 'Initial note'); assert.equal(restored.categoryId, 'study'); assert.equal(restored.blockId, blockId);
+});
+
+test('blank selections can be copied or cut without recording time; reviewed blank Paste clears a destination and Undo restores it', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await sheet.copyMinuteRange(range(100, 102));
+  await save(api, 200, 'Keep until reviewed');
+  await assert.rejects(sheet.pasteMinuteRange({ dateKey: day, startMinute: 200 }), /Review the destination/);
+  const preview = await sheet.prepareMinutePaste({ dateKey: day, startMinute: 200 });
+  await sheet.pasteMinuteRange({ dateKey: day, startMinute: 200 }, { previewToken: preview.token });
+  assert.equal((await api.getDayEntries(day)).length, 0);
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 200)).text, 'Keep until reviewed');
+  await sheet.cutMinuteRange(range(300, 302));
+  await sheet.pasteMinuteRange({ dateKey: '2026-11-02', startMinute: 500 });
+  assert.equal((await api.getDayEntries('2026-11-02')).length, 0);
+});
+
+test('underline survives Copy, Auto fill, Undo and encrypted-ledger replay', async (t) => {
+  const a = harness(t); const b = harness(t); await a.api.initializeDatabase(); await b.api.initializeDatabase();
+  await save(a.api, 100, 'Read');
+  await a.sheet.applyCellFormat(range(100), { underline: true, bold: true });
+  await a.sheet.fillMinuteRange(range(100, 102), 100);
+  assert.deepEqual(plain((await a.sheet.getDayCellFormats(day)).get(102)), { bold: true, underline: true });
+  await a.sheet.copyMinuteRange(range(100, 102));
+  await a.sheet.pasteMinuteRange({ dateKey: '2026-10-26', startMinute: 400 });
+  await b.api.mergeSyncDocuments(plain(await a.api.getSyncDocuments('')));
+  assert.equal((await b.sheet.getDayCellFormats('2026-10-26')).get(402).underline, true);
+  await a.sheet.applyCellFormat(range(100), { underline: false });
+  assert.equal((await a.sheet.getDayCellFormats(day)).get(100).underline, undefined);
+  await a.sheet.undoSpreadsheetEdit();
+  assert.equal((await a.sheet.getDayCellFormats(day)).get(100).underline, true);
+});
+
+test('cell color changes preserve every distinct note, style and group membership', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 200, 'Boil water'); await save(api, 202, 'Talk to Mum');
+  await sheet.groupMinuteRange(range(200, 202), { title: 'Make coffee', categoryId: 'study' });
+  const id = (await api.getMinuteEntry(day, 200)).blockId;
+  await sheet.applyCellFormat(range(201), { italic: true, underline: true, textColor: '#123456' });
+  await sheet.colorMinuteRange(range(200, 202), 'work');
+  const entries = await api.getDayEntries(day);
+  assert.deepEqual(entries.map((entry) => entry.text), ['Boil water', '', 'Talk to Mum']);
+  assert.ok(entries.every((entry) => entry.categoryId === 'work' && entry.blockId === id));
+  assert.equal((await sheet.getDayCellFormats(day)).get(201).underline, true);
+  await sheet.undoSpreadsheetEdit();
+  assert.ok((await api.getDayEntries(day)).every((entry) => entry.categoryId === 'study'));
+  await assert.rejects(sheet.colorMinuteRange(range(200, 202), 'not-google'), /Google Calendar color/);
+});
+
+test('Ungrouping a middle selection retains minute content and creates distinct remaining event groups, with atomic Undo and sync replay', async (t) => {
+  const a = harness(t); const b = harness(t); await a.api.initializeDatabase(); await b.api.initializeDatabase();
+  for (const [offset, text] of ['A', 'B', 'Talk to Mum', '', 'E'].entries()) await save(a.api, 300 + offset, text);
+  await a.sheet.groupMinuteRange(range(300, 304), { title: 'Make coffee', categoryId: 'study' });
+  await a.sheet.applyCellFormat(range(301, 303), { underline: true });
+  const original = (await a.api.getMinuteEntry(day, 300)).blockId;
+  await a.sheet.ungroupMinuteRange(range(302));
+  const groups = await a.sheet.getDayActivityGroups(day);
+  assert.deepEqual(plain(groups.map((group) => [group.startMinute, group.endMinute, group.title])), [[300, 301, 'Make coffee'], [303, 304, 'Make coffee']]);
+  assert.notEqual(groups[0].blockId, original); assert.notEqual(groups[1].blockId, original);
+  assert.notEqual(groups[0].blockId, groups[1].blockId);
+  const removed = await a.api.getMinuteEntry(day, 302);
+  assert.equal(removed.text, 'Talk to Mum'); assert.equal(removed.categoryId, 'study');
+  assert.equal((await a.sheet.getDayCellFormats(day)).get(302).activityGroup, undefined);
+  assert.equal((await a.sheet.getDayCellFormats(day)).get(302).underline, true);
+  await b.api.mergeSyncDocuments(plain(await a.api.getSyncDocuments('')));
+  assert.deepEqual(plain(await b.sheet.getDayActivityGroups(day)), plain(groups));
+  await a.sheet.undoSpreadsheetEdit();
+  assert.deepEqual(plain((await a.sheet.getDayActivityGroups(day)).map((group) => [group.blockId, group.startMinute, group.endMinute])), [[original, 300, 304]]);
+  await a.sheet.redoSpreadsheetEdit();
+  assert.deepEqual((await a.api.getDayEntries(day)).map((entry) => entry.text), ['A', 'B', 'Talk to Mum', '', 'E']);
+});
+
+test('Ungrouping blank edge or entire group leaves its time/color and notes recorded without old group labels', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await sheet.groupMinuteRange(range(400, 403), { title: 'Quiet time', categoryId: 'study' });
+  await sheet.ungroupMinuteRange(range(400, 401));
+  assert.deepEqual(plain((await sheet.getDayActivityGroups(day)).map((group) => [group.startMinute, group.endMinute])), [[402, 403]]);
+  assert.equal((await api.getDayEntries(day)).length, 4);
+  await sheet.ungroupMinuteRange(range(402, 403));
+  assert.equal((await sheet.getDayActivityGroups(day)).length, 0);
+  assert.ok((await api.getDayEntries(day)).every((entry) => entry.text === '' && entry.categoryId === 'study'));
+});
+
+test('whole activity Move handles own overlap, preserves colored minute notes/styles and named identity, then Undo/Redo restores its range', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  for (const [offset, text] of ['A', 'B', 'C', 'D', 'E'].entries()) await save(api, 500 + offset, text);
+  await sheet.groupMinuteRange(range(500, 504), { title: 'Coffee', categoryId: 'study' });
+  await sheet.colorMinuteRange(range(502), 'work');
+  await sheet.applyCellFormat(range(502), { underline: true, italic: true });
+  const group = await sheet.getMovableActivityGroup(day, 502);
+  assert.equal(group.startMinute, 500); assert.equal(group.endMinute, 504);
+  const preview = await sheet.prepareActivityGroupMove(group, { dateKey: day, startMinute: 501 });
+  assert.equal(preview.occupiedCount, 0, 'own overlapping cells do not require replacement confirmation');
+  await sheet.moveActivityGroup(group, { dateKey: day, startMinute: 501 }, { previewToken: preview.token });
+  assert.equal(await api.getMinuteEntry(day, 500), null);
+  assert.deepEqual((await api.getDayEntries(day)).map((entry) => entry.text), ['A', 'B', 'C', 'D', 'E']);
+  assert.ok((await api.getDayEntries(day)).every((entry) => entry.blockId === group.blockId));
+  assert.equal((await api.getMinuteEntry(day, 503)).categoryId, 'work');
+  assert.equal((await sheet.getDayCellFormats(day)).get(503).underline, true);
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 500)).text, 'A'); assert.equal(await api.getMinuteEntry(day, 505), null);
+  await sheet.redoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 505)).text, 'E');
+});
+
+test('cross-day whole-group Move previews occupied cells, commits both dates/outboxes together and converges after Undo/Redo replay', async (t) => {
+  const a = harness(t); const b = harness(t); await a.api.initializeDatabase(); await b.api.initializeDatabase();
+  await save(a.api, 600, 'Boil'); await save(a.api, 601, 'Pour');
+  await a.sheet.groupMinuteRange(range(600, 602), { title: 'Coffee', categoryId: 'study' });
+  const group = await a.sheet.getMovableActivityGroup(day, 601);
+  const target = { dateKey: '2026-11-05', startMinute: 700 };
+  await a.api.saveMinuteEntry({ dateKey: target.dateKey, minuteIndex: 700, text: 'Old', categoryId: 'work' });
+  await assert.rejects(a.sheet.moveActivityGroup(group, target), /Review the destination/);
+  assert.equal((await a.api.getMinuteEntry(day, 600)).text, 'Boil');
+  const preview = await a.sheet.prepareActivityGroupMove(group, target); assert.equal(preview.occupiedCount, 1);
+  await a.sheet.moveActivityGroup(group, target, { previewToken: preview.token });
+  assert.equal((await a.api.getDayEntries(day)).length, 0);
+  assert.deepEqual((await a.api.getDayEntries(target.dateKey)).map((entry) => entry.text), ['Boil', 'Pour', '']);
+  assert.equal((await a.sheet.getDayActivityGroups(target.dateKey))[0].blockId, group.blockId);
+  assert.ok((await a.api.getPendingInlineMinuteLinks()).some((ticket) => ticket.dateKey === target.dateKey));
+  await b.api.mergeSyncDocuments(plain(await a.api.getSyncDocuments('')));
+  assert.equal((await b.sheet.getDayActivityGroups(target.dateKey))[0].blockId, group.blockId);
+  await a.sheet.undoSpreadsheetEdit();
+  assert.equal((await a.api.getMinuteEntry(target.dateKey, 700)).text, 'Old');
+  assert.equal((await a.sheet.getDayActivityGroups(day))[0].blockId, group.blockId);
+  await a.sheet.redoSpreadsheetEdit();
+  await b.api.mergeSyncDocuments(plain(await a.api.getSyncDocuments('')));
+  assert.equal((await b.api.getDayEntries(day)).length, 0);
+  assert.equal((await b.api.getMinuteEntry(target.dateKey, 701)).text, 'Pour');
+});
+
+test('Move rejects stale source/destination revisions, changed membership and day overflow before removing source cells', async (t) => {
+  for (const changed of ['source', 'destination', 'membership']) {
+    const { api, sheet } = harness(t); await api.initializeDatabase();
+    await sheet.groupMinuteRange(range(800, 802), { title: 'Coffee', categoryId: 'study' });
+    const group = await sheet.getMovableActivityGroup(day, 801);
+    const target = { dateKey: '2026-10-26', startMinute: 100 };
+    const preview = await sheet.prepareActivityGroupMove(group, target);
+    if (changed === 'source') {
+      await sheet.applyCellFormat(range(801), { bold: true }); await sheet.applyCellFormat(range(801), { bold: false });
+    } else if (changed === 'destination') {
+      await api.saveMinuteEntry({ dateKey: target.dateKey, minuteIndex: 100, text: 'Later', categoryId: 'study' });
+      await api.deleteMinuteEntry(target.dateKey, 100);
+    } else {
+      const entry = await api.getMinuteEntry(day, 800);
+      await api.applySpreadsheetCells(day, [{ minuteIndex: 803, entry: { text: '', categoryId: entry.categoryId, blockId: group.blockId },
+        format: { activityGroup: { id: group.blockId, title: group.title } } }],
+        [{ minuteIndex: 803, entry: null, format: {} }], { textChanged: true, formatChanged: true });
+    }
+    await assert.rejects(sheet.moveActivityGroup(group, target, { previewToken: preview.token }), /changed/);
+    assert.equal((await api.getMinuteEntry(day, 800)).blockId, group.blockId);
+    assert.equal(await api.getMinuteEntry(target.dateKey, 100), null);
+    await assert.rejects(sheet.prepareActivityGroupMove(await sheet.getMovableActivityGroup(day, 801),
+      { dateKey: target.dateKey, startMinute: 1439 }), /valid minute range/);
+  }
 });

@@ -5,9 +5,12 @@ import * as CalendarRead from 'expo-calendar';
 import {
   deleteSyncBinding,
   getDaySegments,
+  getEntriesForBlock,
   getPendingSyncDates,
   getPendingSyncDatesFor,
   getSyncBindings,
+  getSyncBindingsForBlock,
+  remapActivitySyncBindings,
   markSyncDateComplete,
   markSyncDateFailed,
   saveSyncBinding,
@@ -15,6 +18,8 @@ import {
 import { categoryById } from '../theme';
 import type { ActivitySegment, DeviceCalendar, PlannedEvent, SyncBinding } from '../types';
 import { addDays, dateKey, localDateAtMinute, minuteLabel, parseDateKey } from '../utils/time';
+import { isActivityGroupId } from '../utils/cell-format';
+import { bindingInterval, matchActivityTranslation } from '../utils/activity-translation';
 
 function isWeb() {
   return Platform.OS === 'web';
@@ -470,10 +475,30 @@ export async function syncActualDay(
 ): Promise<CalendarSyncResult> {
   if (isWeb()) return { created: 0, updated: 0, removed: 0 };
 
-  const [segments, bindings] = await Promise.all([
-    getDaySegments(value),
-    getSyncBindings(value),
-  ]);
+  const segments = await getDaySegments(value);
+  for (const blockId of new Set(segments.filter((segment) => isActivityGroupId(segment.blockId)).map((segment) => segment.blockId))) {
+    const members = await getEntriesForBlock(blockId);
+    if (!members.every((entry) => entry.dateKey === value)) continue;
+    const existing = await getSyncBindingsForBlock(blockId);
+    if (!existing.length) continue;
+    const previous = existing.map((binding) => bindingInterval(binding.segmentKey, blockId));
+    const current = segments.filter((segment) => segment.blockId === blockId).map((segment) => ({ key: segment.segmentKey,
+      dateKey: segment.dateKey, startMinute: segment.startMinute, endMinute: segment.endMinute }));
+    const mapping = previous.every((interval) => interval != null)
+      ? matchActivityTranslation(previous, current) : null;
+    if (mapping && mapping.shiftMinutes !== 0) {
+      if (!canContinue()) throw new ProjectionCancelledError();
+      await remapActivitySyncBindings(blockId, mapping.matches.map(({ previous: old, current: next }) => {
+        const before = existing.find((binding) => binding.segmentKey === old.key)!;
+        return { before, after: { ...before, segmentKey: next.key, dateKey: next.dateKey } };
+      }), members);
+    } else if (!mapping && existing.some((binding) => binding.dateKey !== value) &&
+        previous.every((interval) => interval != null) &&
+        previous.reduce((total, interval) => total + interval.endMinute - interval.startMinute + 1, 0) === members.length) {
+      throw new Error('This activity moved with an ambiguous calendar shape. Review its linked events before synchronizing.');
+    }
+  }
+  const bindings = await getSyncBindings(value);
   const unused = new Map(bindings.map((binding) => [binding.segmentKey, binding]));
   const claimedEventIds = new Set(
     bindings
@@ -545,6 +570,25 @@ export async function syncActualDay(
   let cleanupError: unknown;
   for (const binding of unused.values()) {
     if (!canContinue()) throw new ProjectionCancelledError();
+    if (isActivityGroupId(binding.blockId) && !segments.some((segment) => segment.blockId === binding.blockId) &&
+        (await getEntriesForBlock(binding.blockId)).some((entry) => entry.dateKey !== value)) {
+      const members = await getEntriesForBlock(binding.blockId);
+      const existing = await getSyncBindingsForBlock(binding.blockId);
+      const previous = existing.map((item) => bindingInterval(item.segmentKey, binding.blockId));
+      const current = (await Promise.all([...new Set(members.map((member) => member.dateKey))].map(getDaySegments)))
+        .flat().filter((segment) => segment.blockId === binding.blockId).map((segment) => ({ key: segment.segmentKey,
+          dateKey: segment.dateKey, startMinute: segment.startMinute, endMinute: segment.endMinute }));
+      const mapping = previous.every((interval) => interval != null) ? matchActivityTranslation(previous, current) : null;
+      if (mapping && mapping.shiftMinutes !== 0) {
+        // The target date's durable outbox updates these same events. Empty-source
+        // cleanup must not delete them before that date has been processed.
+        continue;
+      }
+      if (!mapping && previous.every((interval) => interval != null) &&
+          previous.reduce((total, interval) => total + interval.endMinute - interval.startMinute + 1, 0) === members.length) {
+        throw new Error('This activity moved with an ambiguous calendar shape. Review its linked events before synchronizing.');
+      }
+    }
     let remoteEventIsGone = false;
     try {
       await Calendar.deleteEventAsync(binding.eventId);

@@ -557,6 +557,14 @@ export async function getEntriesBetween(startDate: string, endDate: string) {
   return rows.map(mapMinuteRow);
 }
 
+/** Stable activity identities can move outside their previous calendar date window. */
+export async function getEntriesForBlock(blockId: string): Promise<MinuteEntry[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries
+    WHERE block_id = ? ORDER BY date_key, minute_index`, blockId);
+  return rows.map(mapMinuteRow);
+}
+
 export async function getCategoryTimeTotals(startDate: string, endDate: string) {
   const db = await database();
   return db.getAllAsync<{ dateKey: string; categoryId: string; minutes: number }>(
@@ -624,6 +632,86 @@ export async function getSyncBindings(value: string): Promise<SyncBinding[]> {
     eventId: row.event_id,
     updatedAt: row.updated_at,
   }));
+}
+
+/** Local device-calendar bindings follow a moved activity instead of creating a copy. */
+export async function getSyncBindingsForBlock(blockId: string): Promise<SyncBinding[]> {
+  const db = await database();
+  return (await db.getAllAsync<{ segment_key: string; block_id: string; date_key: string;
+    calendar_id: string; event_id: string; updated_at: string }>(
+    `SELECT * FROM sync_bindings WHERE block_id = ? ORDER BY date_key, segment_key`, blockId))
+    .map((row) => ({ segmentKey: row.segment_key, blockId: row.block_id, dateKey: row.date_key,
+      calendarId: row.calendar_id, eventId: row.event_id, updatedAt: row.updated_at }));
+}
+
+type ActivityMemberSnapshot = Pick<MinuteEntry, 'dateKey' | 'minuteIndex' | 'categoryId'>;
+async function requireActivityMembers(txn: Pick<SQLite.SQLiteDatabase, 'getAllAsync'>,
+  blockId: string, expected: readonly ActivityMemberSnapshot[]) {
+  if (!isActivityGroupId(blockId) || !expected.length || expected.length > 1440) throw new Error('Invalid activity identity.');
+  const actual = await txn.getAllAsync<{ date_key: string; minute_index: number; category_id: string }>(
+    `SELECT date_key, minute_index, category_id FROM minute_entries WHERE block_id = ? ORDER BY date_key, minute_index`, blockId);
+  const normalized = [...expected].map(({ dateKey, minuteIndex, categoryId }) => ({ dateKey, minuteIndex, categoryId }))
+    .sort((a, b) => a.dateKey.localeCompare(b.dateKey) || a.minuteIndex - b.minuteIndex);
+  if (canonicalValue(actual.map((row) => ({ dateKey: row.date_key, minuteIndex: row.minute_index, categoryId: row.category_id }))) !== canonicalValue(normalized)) {
+    throw new Error('The activity changed while its calendar link was moving. Retry synchronization.');
+  }
+}
+
+/** Rekey all local calendar links together, avoiding overlapping old/new key collisions. */
+export async function remapActivitySyncBindings(blockId: string,
+  changes: { before: SyncBinding; after: Omit<SyncBinding, 'updatedAt'> }[], members: readonly ActivityMemberSnapshot[]) {
+  if (!changes.length || new Set(changes.map((change) => change.before.segmentKey)).size !== changes.length ||
+      new Set(changes.map((change) => change.after.segmentKey)).size !== changes.length || changes.some(({ before, after }) =>
+        before.blockId !== blockId || after.blockId !== blockId || before.eventId !== after.eventId || before.calendarId !== after.calendarId)) {
+    throw new Error('Invalid activity calendar-link move.');
+  }
+  const db = await database();
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    await requireActivityMembers(txn, blockId, members);
+    for (const { before, after } of changes) {
+      validateMinuteCellRange({ dateKey: after.dateKey, startMinute: 0, endMinute: 1439 });
+      const row = await txn.getFirstAsync<{ event_id: string; calendar_id: string; block_id: string; date_key: string; updated_at: string }>(
+        `SELECT * FROM sync_bindings WHERE segment_key = ?`, before.segmentKey);
+      if (!row || row.event_id !== before.eventId || row.calendar_id !== before.calendarId || row.block_id !== blockId ||
+          row.date_key !== before.dateKey || row.updated_at !== before.updatedAt) throw new Error('A calendar link changed. Retry synchronization.');
+    }
+    for (const { before } of changes) await txn.runAsync(`DELETE FROM sync_bindings WHERE segment_key = ?`, before.segmentKey);
+    for (const { after } of changes) await txn.runAsync(`INSERT INTO sync_bindings
+      (segment_key, block_id, date_key, calendar_id, event_id, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      after.segmentKey, blockId, after.dateKey, after.calendarId, after.eventId, new Date().toISOString());
+  });
+}
+
+/** Coordinate-only projection reanchoring preserves provider IDs, etags and consent state. */
+export async function remapActivityProjections(blockId: string,
+  changes: { key: string; before: Record<string, unknown>; after: Record<string, unknown> }[],
+  members: readonly ActivityMemberSnapshot[]) {
+  if (!changes.length || new Set(changes.map((change) => change.key)).size !== changes.length) throw new Error('Invalid activity projection move.');
+  const invariant = (value: Record<string, unknown>) => {
+    const result = { ...value };
+    for (const key of ['dateKey', 'endDateKey', 'startMinute', 'endMinute', 'state']) delete result[key];
+    return canonicalValue(result);
+  };
+  for (const change of changes) {
+    if (!change.key.startsWith('projection:') || change.key !== `projection:${change.before.id}` ||
+        change.before.blockId !== blockId || change.after.blockId !== blockId || change.before.state === 'deleted' ||
+        change.before.state === 'conflict' || change.after.state !== 'pending' || invariant(change.before) !== invariant(change.after)) {
+      throw new Error('Invalid activity projection identity.');
+    }
+    validateMinuteCellRange({ dateKey: String(change.after.dateKey), startMinute: Number(change.after.startMinute), endMinute: Number(change.after.startMinute) });
+    validateMinuteCellRange({ dateKey: String(change.after.endDateKey ?? change.after.dateKey), startMinute: Number(change.after.endMinute), endMinute: Number(change.after.endMinute) });
+  }
+  const db = await database();
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    await requireActivityMembers(txn, blockId, members);
+    for (const change of changes) {
+      const row = await txn.getFirstAsync<{ value_json: string | null }>(`SELECT value_json FROM ledger_documents WHERE key = ?`, change.key);
+      if (!row?.value_json || canonicalValue(JSON.parse(row.value_json)) !== canonicalValue(change.before)) {
+        throw new Error('The linked calendar event changed. Retry synchronization.');
+      }
+    }
+    for (const change of changes) await putSyncDocumentInside(txn, change.key, change.after);
+  });
 }
 
 export async function saveSyncBinding(binding: Omit<SyncBinding, 'updatedAt'>, oldKey?: string) {
@@ -801,6 +889,7 @@ export type SpreadsheetCellState = { minuteIndex: number; entry: SpreadsheetCell
   version?: { minuteRevision: string | null; formatRevision: string | null } };
 export type SpreadsheetDayChange = { day: string; target: SpreadsheetCellState[]; expected: SpreadsheetCellState[] };
 export type SpreadsheetGuard = { day: string; cells: SpreadsheetCellState[] };
+export type SpreadsheetBlockGuard = { blockId: string; members: { dateKey: string; minuteIndex: number }[] };
 
 /** Read content, formatting, and their ledger revisions from one database snapshot. */
 export async function getSpreadsheetCells(range: { dateKey: string; startMinute: number; endMinute: number }) {
@@ -837,7 +926,8 @@ export async function applySpreadsheetCells(day: string, target: SpreadsheetCell
  * therefore share one SQLite transaction, including ledger and calendar outboxes. */
 export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[],
   options: { textChanged: boolean; formatChanged: boolean; canApply?: () => boolean;
-    localReceipt?: { key: string; value: Record<string, unknown> } }, guards: SpreadsheetGuard[] = []) {
+    localReceipt?: { key: string; value: Record<string, unknown> } }, guards: SpreadsheetGuard[] = [],
+  blockGuards: SpreadsheetBlockGuard[] = []) {
   if (options.localReceipt && (!/^wear\.receipt\.[0-9a-f-]{36}$/i.test(options.localReceipt.key) ||
       JSON.stringify(options.localReceipt.value).length > 4096)) throw new Error('Invalid local watch receipt.');
   const validate = (day: string, cells: SpreadsheetCellState[]) => {
@@ -856,10 +946,26 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
       cell.minuteIndex !== change.expected[index]?.minuteIndex)) throw new Error('Invalid spreadsheet cell range.');
   }
   for (const guard of guards) validate(guard.day, guard.cells);
+  for (const guard of blockGuards) {
+    if (!isActivityGroupId(guard.blockId) || !guard.members.length || guard.members.length > 1440 ||
+        new Set(guard.members.map((member) => `${member.dateKey}:${member.minuteIndex}`)).size !== guard.members.length) {
+      throw new Error('Invalid activity membership guard.');
+    }
+    for (const member of guard.members) validateMinuteCellRange({ dateKey: member.dateKey,
+      startMinute: member.minuteIndex, endMinute: member.minuteIndex });
+  }
   const db = await database();
   const now = new Date().toISOString();
   let textChanged = false;
   await db.withExclusiveTransactionAsync(async (txn) => {
+    for (const guard of blockGuards) {
+      const members = await txn.getAllAsync<{ date_key: string; minute_index: number }>(
+        `SELECT date_key, minute_index FROM minute_entries WHERE block_id = ? ORDER BY date_key, minute_index`, guard.blockId);
+      const expected = [...guard.members].sort((a, b) => a.dateKey.localeCompare(b.dateKey) || a.minuteIndex - b.minuteIndex);
+      if (canonicalValue(members.map((member) => ({ dateKey: member.date_key, minuteIndex: member.minute_index }))) !== canonicalValue(expected)) {
+        throw new Error('The activity group changed. Select it again before moving or ungrouping.');
+      }
+    }
     const byDay = new Map<string, Map<number, MinuteRow>>();
     for (const day of new Set([...changes.map((change) => change.day), ...guards.map((guard) => guard.day)])) {
       const rows = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ?`, day);

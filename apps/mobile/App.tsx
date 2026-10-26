@@ -55,7 +55,7 @@ import { getAccounts } from './src/sync/accounts';
 import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
 import { flushInlineMinutes, retryInlineMinuteLinks, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
-import { subscribeSpreadsheetCommits } from './src/services/spreadsheet';
+import { redoSpreadsheetEdit, spreadsheetEditor, subscribeSpreadsheetCommits, undoSpreadsheetEdit } from './src/services/spreadsheet';
 import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/ReleaseUpdates';
 import { useWearBridge } from './src/wear/useWearBridge';
 
@@ -554,6 +554,34 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [current, setCurrent] = useState(() => new Date());
   const held = useRef(false);
+  const [history, setHistory] = useState(() => spreadsheetEditor.snapshot());
+  const [historyPending, setHistoryPending] = useState(false);
+  const historyOperation = useRef(false);
+
+  useEffect(() => {
+    const update = () => setHistory(spreadsheetEditor.snapshot());
+    const unsubscribe = spreadsheetEditor.subscribe(update);
+    update();
+    return unsubscribe;
+  }, []);
+
+  async function changeHistory(action: 'undo' | 'redo') {
+    const snapshot = spreadsheetEditor.snapshot();
+    if (historyOperation.current || snapshot.busy || !(action === 'undo' ? snapshot.canUndo : snapshot.canRedo)) return;
+    historyOperation.current = true;
+    setHistoryPending(true);
+    Keyboard.dismiss();
+    try {
+      await flushInlineMinutes();
+      await (action === 'undo' ? undoSpreadsheetEdit() : redoSpreadsheetEdit());
+    } catch (error) {
+      Alert.alert(action === 'undo' ? 'Could not undo edit' : 'Could not redo edit',
+        error instanceof Error ? error.message : 'The edit could not be restored. Try again.');
+    } finally {
+      historyOperation.current = false;
+      setHistoryPending(false);
+    }
+  }
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -578,6 +606,18 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
   const openPicker = () => { Keyboard.dismiss(); onOpenDatePicker(); };
 
   return <View style={styles.calendarHeader}>
+    <Pressable accessibilityRole="button" accessibilityLabel="Undo Context edit"
+      accessibilityState={{ disabled: !history.canUndo || history.busy || historyPending }}
+      disabled={!history.canUndo || history.busy || historyPending} onPress={() => void changeHistory('undo')}
+      style={[styles.menuButton, (!history.canUndo || history.busy || historyPending) && styles.disabledCalendarNavigation]}>
+      <Text allowFontScaling={false} style={styles.historyArrow}>↶</Text>
+    </Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
+      accessibilityState={{ disabled: !history.canRedo || history.busy || historyPending }}
+      disabled={!history.canRedo || history.busy || historyPending} onPress={() => void changeHistory('redo')}
+      style={[styles.menuButton, (!history.canRedo || history.busy || historyPending) && styles.disabledCalendarNavigation]}>
+      <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
+    </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Open navigation menu"
       onPress={onOpenMenu} style={styles.menuButton}>
       <View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} />
@@ -759,6 +799,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   calendarHeader: { minHeight: 44, flexDirection: 'row', alignItems: 'center', backgroundColor: colors.paper },
   calendarMenuLine: { height: 3, width: 28, marginVertical: 2.5, backgroundColor: colors.graphite },
   calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
+  historyArrow: { color: colors.graphite, fontSize: 27, lineHeight: 34 },
   disabledCalendarNavigation: { opacity: 0.3 },
   calendarGlyph: { width: 30, height: 32, borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 4,
     alignItems: 'center', justifyContent: 'center' },

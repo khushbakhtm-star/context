@@ -3,15 +3,17 @@ import * as SecureStore from 'expo-secure-store';
 
 import {
   acknowledgeUploaded, getActivityTitleForEntries, getDayEntries, getDaySegments, getDocumentsForUpload, getEntriesBetween,
-  getSetting, getSyncDocuments, hasSeenSyncFile,
-  markSyncFileSeen, mergeSyncDocuments, putSyncDocument, replaceProjectedMinutes, setSetting,
+  getEntriesForBlock, getSetting, getSyncDocuments, hasSeenSyncFile,
+  markSyncFileSeen, mergeSyncDocuments, putSyncDocument, remapActivityProjections, replaceProjectedMinutes, setSetting,
 } from '../data/database';
 import { categoryById } from '../theme';
 import { CATEGORIES } from '../theme';
 import { categoryProviderColor, listCategories } from '../services/categories';
-import type { ActivitySegment, PlannedEvent } from '../types';
+import type { ActivitySegment, MinuteEntry, PlannedEvent } from '../types';
 import { addDays, dateKey, localDateAtMinute, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
 import { getAccounts } from './accounts';
+import { isActivityGroupId } from '../utils/cell-format';
+import { matchActivityTranslation } from '../utils/activity-translation';
 import { clearLedgerKeyCache, decryptBatch, encryptBatch, hashValue, parseProjectedMinutes } from './codec';
 import { createCalendarAdapter } from './providers';
 import { createLedgerStorage } from './storage';
@@ -180,6 +182,7 @@ export async function linkActualsToAccounts(
   const linkedBlocks = new Set(projections.filter((p) => dates.some((day) =>
     p.dateKey <= day && (p.endDateKey ?? p.dateKey) >= day)).map((p) => p.blockId));
   if (editedBlock) linkedBlocks.add(editedBlock);
+  await reanchorMovedActivities(projections, linkedBlocks);
   const claimedGroups = new Set<string>();
   // A minute interruption can split an old block, while filling a gap can merge its children.
   // Keep the original occurrence on the first surviving group and retire duplicate child events.
@@ -338,24 +341,72 @@ function localWriteHash(write: CalendarEventWrite) {
   const { sourceOperationId: _operation, ...content } = write;
   return hashValue(content);
 }
-async function getProjectionSegment(projection: Projection) {
-  const entries = (await getEntriesBetween(dateKey(addDays(projection.dateKey, -1)),
-    dateKey(addDays(projection.endDateKey ?? projection.dateKey, 1))))
-    .filter((entry) => entry.blockId === projection.blockId);
+function partitionActivity(entries: MinuteEntry[]) {
   const civil = (day: string, minute: number) => Date.parse(`${day}T00:00:00Z`) + minute * 60000;
-  const groups: typeof entries[] = [];
+  const groups: MinuteEntry[][] = [];
   for (const entry of entries) {
     const previousGroup = groups.at(-1);
     const previous = previousGroup?.at(-1);
     if (previous && previous.categoryId === entry.categoryId &&
-        civil(entry.dateKey, entry.minuteIndex) - civil(previous.dateKey, previous.minuteIndex) === 60000) {
-      previousGroup!.push(entry);
-    } else groups.push([entry]);
+        civil(entry.dateKey, entry.minuteIndex) - civil(previous.dateKey, previous.minuteIndex) === 60000) previousGroup!.push(entry);
+    else groups.push([entry]);
   }
+  return groups;
+}
+
+/** Resolve the whole translated shape before any individual anchor can claim an
+ * overlapping sibling. All projection coordinates commit together; provider IDs,
+ * remote versions and the existing permission checks remain intact. */
+async function reanchorMovedActivities(projections: Projection[], linkedBlocks: Set<string>) {
+  for (const blockId of linkedBlocks) {
+    if (!isActivityGroupId(blockId)) continue;
+    const members = await getEntriesForBlock(blockId);
+    const groups = partitionActivity(members);
+    if (!groups.length) continue;
+    const current = groups.map((group) => ({ key: `${group[0]!.dateKey}:${group[0]!.minuteIndex}`,
+      dateKey: group[0]!.dateKey, startMinute: group[0]!.minuteIndex,
+      endDateKey: group.at(-1)!.dateKey, endMinute: group.at(-1)!.minuteIndex }));
+    const owners = new Map<string, Projection[]>();
+    for (const projection of projections.filter((item) => item.blockId === blockId && item.state !== 'deleted')) {
+      const owner = `${projection.accountId}\0${projection.calendarId}`;
+      const rows = owners.get(owner) ?? []; rows.push(projection); owners.set(owner, rows);
+    }
+    for (const rows of owners.values()) {
+      if (rows.some((projection) => projection.state === 'conflict')) continue;
+      const mapping = matchActivityTranslation(rows.map((projection) => ({ key: projection.id,
+        dateKey: projection.dateKey, startMinute: projection.startMinute,
+        endDateKey: projection.endDateKey, endMinute: projection.endMinute })), current);
+      if (!mapping || mapping.shiftMinutes === 0) continue;
+      const changes = mapping.matches.map(({ previous, current: target }) => {
+        const projection = rows.find((item) => item.id === previous.key)!;
+        return { key: `projection:${projection.id}`, before: sanitized(projection),
+          after: sanitized({ ...projection, dateKey: target.dateKey, startMinute: target.startMinute,
+            endDateKey: target.endDateKey ?? target.dateKey, endMinute: target.endMinute, state: 'pending' }) };
+      });
+      await remapActivityProjections(blockId, changes, members);
+      for (const change of changes) Object.assign(rows.find((item) => `projection:${item.id}` === change.key)!, change.after);
+    }
+  }
+}
+
+async function getProjectionSegment(projection: Projection) {
+  const namedActivity = isActivityGroupId(projection.blockId);
+  const entries = namedActivity ? await getEntriesForBlock(projection.blockId) :
+    (await getEntriesBetween(dateKey(addDays(projection.dateKey, -1)),
+      dateKey(addDays(projection.endDateKey ?? projection.dateKey, 1))))
+      .filter((entry) => entry.blockId === projection.blockId);
+  const civil = (day: string, minute: number) => Date.parse(`${day}T00:00:00Z`) + minute * 60000;
+  const groups = partitionActivity(entries);
   const start = civil(projection.dateKey, projection.startMinute);
   const end = civil(projection.endDateKey ?? projection.dateKey, projection.endMinute);
   const selected = groups.find((group) => civil(group[0]!.dateKey, group[0]!.minuteIndex) <= end &&
-    civil(group.at(-1)!.dateKey, group.at(-1)!.minuteIndex) >= start);
+    civil(group.at(-1)!.dateKey, group.at(-1)!.minuteIndex) >= start) ??
+    // A whole named activity keeps its identity when moved beyond its old date/time.
+    // Ambiguous split groups still require the anchored match above.
+    (namedActivity && groups.length === 1 ? groups[0] : undefined);
+  if (!selected && namedActivity && groups.length) {
+    throw new Error('This activity moved with an ambiguous calendar shape. Review its linked events before synchronizing.');
+  }
   if (!selected) return null;
   if (selected.length > 1440) throw new Error('Split activities longer than 24 hours before calendar synchronization.');
   return { segmentKey: projection.id, blockId: projection.blockId, dateKey: selected[0]!.dateKey,

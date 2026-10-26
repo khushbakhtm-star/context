@@ -1,14 +1,15 @@
-import { applySpreadsheetTransaction, getSpreadsheetCells, getDaySegments, getEntriesBetween, getSyncDocuments,
-  type SpreadsheetCellState, type SpreadsheetGuard } from '../data/database';
+import { applySpreadsheetTransaction, getSpreadsheetCells, getDaySegments, getEntriesBetween, getEntriesForBlock, getSyncDocuments,
+  type SpreadsheetCellState, type SpreadsheetGuard, type SpreadsheetBlockGuard } from '../data/database';
 import { inlineMinuteDrafts, retryInlineMinuteLinks } from './inline-minutes';
 import { CELL_FORMAT_PREFIX, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, validateMinuteCellRange,
   type CellFormat, type MinuteCellRange } from '../utils/cell-format';
 import { inlineMinuteKey, type InlineMinuteValue } from '../utils/inline-minute-drafts';
 import { addDays, dateKey } from '../utils/time';
-import { listSelectableActivityCategories } from './categories';
+import { listCategories, listSelectableActivityCategories } from './categories';
 
 export type { CellFormat, MinuteCellRange } from '../utils/cell-format';
-export type CellFormatPatch = { bold?: boolean; italic?: boolean; textColor?: string | null };
+export type CellFormatPatch = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string | null };
+export type MinuteDisplayedColorFallback = { minuteIndex: number; categoryId: string };
 export type SpreadsheetCommit = { affectedDates: string[]; textChanged: boolean };
 export type ActivityGroup = { blockId: string; dateKey: string; startMinute: number; endMinute: number;
   title: string; categoryId: string };
@@ -19,17 +20,39 @@ export async function getDayActivityGroups(day: string): Promise<ActivityGroup[]
     title: segment.activityTitle, categoryId: segment.categoryId,
   }] : []);
 }
+
+/** Resolve the entire named activity, including minute notes with differing colors. */
+export async function getMovableActivityGroup(day: string, minute: number): Promise<ActivityGroup | null> {
+  validateMinuteCellRange({ dateKey: day, startMinute: minute, endMinute: minute });
+  const cell = (await getSpreadsheetCells({ dateKey: day, startMinute: minute, endMinute: minute }))[0]!;
+  const blockId = cell.entry?.blockId;
+  if (!isActivityGroupId(blockId)) return null;
+  const members = await getEntriesForBlock(blockId);
+  if (!members.length || members.some((member) => member.dateKey !== day) ||
+      members.at(-1)!.minuteIndex - members[0]!.minuteIndex + 1 !== members.length) {
+    throw new Error('Choose one complete activity within a single day before moving it.');
+  }
+  const formats = await getDayCellFormats(day);
+  const title = members.map((member) => formats.get(member.minuteIndex)?.activityGroup)
+    .find((label) => label?.id === blockId)?.title;
+  if (!title) throw new Error('The activity title could not be read. Refresh before moving it.');
+  return { blockId, dateKey: day, startMinute: members[0]!.minuteIndex,
+    endMinute: members.at(-1)!.minuteIndex, title, categoryId: members[0]!.categoryId };
+}
 type CellState = SpreadsheetCellState & { display?: InlineMinuteValue };
 type Command = { day: string; before: Promise<CellState[]>; after: CellState[];
   textChanged: boolean; formatChanged: boolean; draftKey?: string; draftRevision?: number;
   patches?: { day: string; before: CellState[]; after: CellState[] }[]; guards?: SpreadsheetGuard[];
-  canApply?: () => boolean; applied?: boolean };
+  canApply?: () => boolean; applied?: boolean;
+  blockGuardsBefore?: SpreadsheetBlockGuard[]; blockGuardsAfter?: SpreadsheetBlockGuard[] };
 
 export type SpreadsheetClipboard = { mode: 'copy' | 'cut'; range: MinuteCellRange; count: number; token: string };
 export type MinutePasteDestination = { dateKey: string; startMinute: number };
 export type MinutePastePreview = { token: string; range: MinuteCellRange; occupiedCount: number; mode: 'copy' | 'cut' };
 type ClipboardRecord = SpreadsheetClipboard & { cells: CellState[] };
 type PasteRecord = MinutePastePreview & { clipboardToken: string; before: CellState[] };
+export type ActivityGroupMovePreview = { token: string; source: ActivityGroup; range: MinuteCellRange; occupiedCount: number };
+type GroupMoveRecord = ActivityGroupMovePreview & { sourceCells: CellState[]; destinationCells: CellState[] };
 type Typing = { key: string; command: Command; lastAt: number };
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -75,6 +98,7 @@ class SpreadsheetEditor {
   private deferredEdits = new Map<string, { day: string; minute: number; changes: Partial<InlineMinuteValue> }>();
   private clipboard: ClipboardRecord | null = null;
   private pastePreview: PasteRecord | null = null;
+  private groupMovePreview: GroupMoveRecord | null = null;
 
   constructor() {
     inlineMinuteDrafts.subscribeCommits((value, result) => {
@@ -196,7 +220,8 @@ class SpreadsheetEditor {
     const result = await inlineMinuteDrafts.runExclusive(() => applySpreadsheetTransaction(changes,
       { textChanged: command.textChanged, formatChanged: command.formatChanged,
         canApply: !undo && !command.applied ? command.canApply : undefined },
-      !undo && !command.applied ? command.guards : undefined));
+      !undo && !command.applied ? command.guards : undefined,
+      undo ? command.blockGuardsAfter : command.blockGuardsBefore));
     command.applied = true;
     if (command.textChanged) {
       for (const { day, target } of changes) inlineMinuteDrafts.rebaseCommitted(target.map((cell) => cell.display ?? {
@@ -219,6 +244,7 @@ class SpreadsheetEditor {
     validateMinuteCellRange(range);
     if ((patch.bold !== undefined && typeof patch.bold !== 'boolean') ||
         (patch.italic !== undefined && typeof patch.italic !== 'boolean') ||
+        (patch.underline !== undefined && typeof patch.underline !== 'boolean') ||
         (patch.textColor != null && !/^#[0-9a-f]{6}$/i.test(patch.textColor))) {
       return Promise.reject(new Error('Use a six-digit text color and valid formatting choices.'));
     }
@@ -275,6 +301,142 @@ class SpreadsheetEditor {
       await this.perform({ day: range.dateKey, before: Promise.resolve(before), after, textChanged: true, formatChanged: true });
     });
   }
+  color(range: MinuteCellRange, categoryId: string) {
+    validateMinuteCellRange(range);
+    return this.enqueue(async () => {
+      if (!(await listSelectableActivityCategories()).some((category) => category.id === categoryId)) {
+        throw new Error('Choose a Google Calendar color before coloring these minutes.');
+      }
+      const before = await readCells(range);
+      const after = before.map((cell) => ({ ...clone(cell), entry: {
+        ...cell.entry, text: cell.entry?.text ?? '', categoryId,
+        blockId: cell.entry?.blockId ?? this.newToken('sheet'),
+      } }));
+      await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
+        textChanged: true, formatChanged: false });
+    });
+  }
+  ungroup(range: MinuteCellRange) {
+    validateMinuteCellRange(range);
+    return this.enqueue(async () => {
+      const day = await readCells({ dateKey: range.dateKey, startMinute: 0, endMinute: 1439 });
+      const selected = (minute: number) => minute >= range.startMinute && minute <= range.endMinute;
+      const ids = new Set(day.filter((cell) => selected(cell.minuteIndex) && isActivityGroupId(cell.entry?.blockId))
+        .map((cell) => cell.entry!.blockId!));
+      if (!ids.size) return;
+      const before = day.filter((cell) => selected(cell.minuteIndex) || ids.has(cell.entry?.blockId ?? ''));
+      const after = clone(before);
+      const byMinute = new Map(after.map((cell) => [cell.minuteIndex, cell]));
+      const blockGuardsBefore: SpreadsheetBlockGuard[] = [];
+      const blockGuardsAfter: SpreadsheetBlockGuard[] = [];
+      for (const blockId of ids) {
+        const members = await getEntriesForBlock(blockId);
+        blockGuardsBefore.push({ blockId, members: members.map(({ dateKey, minuteIndex }) => ({ dateKey, minuteIndex })) });
+        const outside = members.filter((member) => member.dateKey !== range.dateKey);
+        if (outside.length) blockGuardsAfter.push({ blockId,
+          members: outside.map(({ dateKey, minuteIndex }) => ({ dateKey, minuteIndex })) });
+        const label = day.map((cell) => cell.format.activityGroup).find((value) => value?.id === blockId);
+        const remainder = day.filter((cell) => cell.entry?.blockId === blockId && !selected(cell.minuteIndex));
+        let run: CellState[] = [];
+        const finish = () => {
+          if (!run.length) return;
+          const id = this.newToken('activity');
+          for (const cell of run) {
+            const target = byMinute.get(cell.minuteIndex)!;
+            target.entry = { ...target.entry!, blockId: id };
+            target.format = normalizeCellFormat({ ...target.format,
+              activityGroup: { id, title: label?.title ?? 'Activity' } });
+          }
+          blockGuardsAfter.push({ blockId: id,
+            members: run.map((cell) => ({ dateKey: range.dateKey, minuteIndex: cell.minuteIndex })) });
+          run = [];
+        };
+        for (const cell of remainder) {
+          if (run.length && run.at(-1)!.minuteIndex + 1 !== cell.minuteIndex) finish();
+          run.push(cell);
+        }
+        finish();
+      }
+      for (const cell of after) {
+        if (!selected(cell.minuteIndex) || !ids.has(cell.entry?.blockId ?? '')) continue;
+        cell.entry = { ...cell.entry!, blockId: this.newToken('sheet') };
+        delete cell.format.activityGroup;
+      }
+      await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
+        textChanged: true, formatChanged: true, blockGuardsBefore, blockGuardsAfter });
+    });
+  }
+  private async prepareGroupMoveInside(source: ActivityGroup, destination: MinutePasteDestination) {
+    const current = await getMovableActivityGroup(source.dateKey, source.startMinute);
+    if (!current || current.blockId !== source.blockId || current.startMinute !== source.startMinute ||
+        current.endMinute !== source.endMinute || current.title !== source.title) {
+      throw new Error('The activity group changed. Select it again before moving.');
+    }
+    const sourceRange = validateMinuteCellRange({ dateKey: current.dateKey,
+      startMinute: current.startMinute, endMinute: current.endMinute });
+    const range = validateMinuteCellRange({ dateKey: destination.dateKey, startMinute: destination.startMinute,
+      endMinute: destination.startMinute + current.endMinute - current.startMinute });
+    const sourceCells = clone(await readCells(sourceRange));
+    const destinationCells = clone(await readCells(range));
+    const own = (minute: number) => range.dateKey === sourceRange.dateKey &&
+      minute >= sourceRange.startMinute && minute <= sourceRange.endMinute;
+    const preview: GroupMoveRecord = { token: this.newToken('groupMove'), source: current, range,
+      sourceCells, destinationCells,
+      occupiedCount: destinationCells.filter((cell) => !own(cell.minuteIndex) &&
+        (Boolean(cell.entry) || Object.keys(cell.format).length > 0)).length };
+    this.groupMovePreview = preview;
+    return { token: preview.token, source: { ...current }, range: { ...range }, occupiedCount: preview.occupiedCount };
+  }
+  prepareGroupMove(source: ActivityGroup, destination: MinutePasteDestination) {
+    return this.enqueue(() => this.prepareGroupMoveInside(source, destination));
+  }
+  moveGroup(source: ActivityGroup, destination: MinutePasteDestination, options: { previewToken?: string } = {}) {
+    return this.enqueue(async () => {
+      if (!options.previewToken) {
+        const preview = await this.prepareGroupMoveInside(source, destination);
+        if (preview.occupiedCount) throw new Error('The destination contains entries or formatting. Review the destination before replacing it.');
+      }
+      const preview = this.groupMovePreview;
+      if (!preview || (options.previewToken && options.previewToken !== preview.token) ||
+          preview.source.blockId !== source.blockId || preview.source.dateKey !== source.dateKey ||
+          preview.source.startMinute !== source.startMinute || preview.source.endMinute !== source.endMinute ||
+          preview.range.dateKey !== destination.dateKey || preview.range.startMinute !== destination.startMinute) {
+        throw new Error('The activity or destination changed. Select the activity again before moving.');
+      }
+      const changes = new Map<string, { before: Map<number, CellState>; after: Map<number, CellState> }>();
+      const changeFor = (day: string) => {
+        if (!changes.has(day)) changes.set(day, { before: new Map(), after: new Map() });
+        return changes.get(day)!;
+      };
+      const origin = changeFor(source.dateKey);
+      for (const cell of preview.sourceCells) {
+        origin.before.set(cell.minuteIndex, clone(cell));
+        origin.after.set(cell.minuteIndex, { minuteIndex: cell.minuteIndex, entry: null, format: {} });
+      }
+      const target = changeFor(preview.range.dateKey);
+      for (let offset = 0; offset < preview.sourceCells.length; offset += 1) {
+        const minuteIndex = preview.range.startMinute + offset;
+        if (!target.before.has(minuteIndex)) target.before.set(minuteIndex, clone(preview.destinationCells[offset]!));
+        const original = preview.sourceCells[offset]!;
+        target.after.set(minuteIndex, { minuteIndex,
+          entry: { text: original.entry!.text, categoryId: original.entry!.categoryId, blockId: source.blockId },
+          format: clone(original.format) });
+      }
+      const patches = [...changes].map(([day, values]) => ({ day,
+        before: [...values.before.values()].sort((a, b) => a.minuteIndex - b.minuteIndex),
+        after: [...values.after.values()].sort((a, b) => a.minuteIndex - b.minuteIndex) }));
+      await this.perform({ day: source.dateKey, before: Promise.resolve([]), after: [], patches,
+        guards: [{ day: source.dateKey, cells: preview.sourceCells },
+          { day: preview.range.dateKey, cells: preview.destinationCells }],
+        blockGuardsBefore: [{ blockId: source.blockId,
+          members: preview.sourceCells.map((cell) => ({ dateKey: source.dateKey, minuteIndex: cell.minuteIndex })) }],
+        blockGuardsAfter: [{ blockId: source.blockId,
+          members: preview.sourceCells.map((_cell, offset) => ({ dateKey: preview.range.dateKey, minuteIndex: preview.range.startMinute + offset })) }],
+        textChanged: true, formatChanged: true,
+        canApply: () => this.groupMovePreview?.token === preview.token });
+      this.groupMovePreview = null;
+    });
+  }
   clear(range: MinuteCellRange) {
     validateMinuteCellRange(range);
     return this.enqueue(async () => {
@@ -284,13 +446,39 @@ class SpreadsheetEditor {
         textChanged: true, formatChanged: true });
     });
   }
+  clearText(range: MinuteCellRange, displayedColorFallbacks: readonly MinuteDisplayedColorFallback[] = []) {
+    validateMinuteCellRange(range);
+    if (displayedColorFallbacks.some((cell) => !Number.isInteger(cell.minuteIndex) ||
+        cell.minuteIndex < range.startMinute || cell.minuteIndex > range.endMinute ||
+        typeof cell.categoryId !== 'string') ||
+        new Set(displayedColorFallbacks.map((cell) => cell.minuteIndex)).size !== displayedColorFallbacks.length) {
+      return Promise.reject(new Error('Choose valid displayed minutes before clearing their text.'));
+    }
+    const fallback = new Map(displayedColorFallbacks.map((cell) => [cell.minuteIndex, cell.categoryId]));
+    return this.enqueue(async () => {
+      if (fallback.size) {
+        const categories = new Set((await listCategories()).map((category) => category.id));
+        if ([...fallback.values()].some((id) => !categories.has(id))) {
+          throw new Error('A displayed calendar color is unavailable. Refresh before clearing its text.');
+        }
+      }
+      const before = (await readCells(range)).filter((cell) => Boolean(cell.entry?.text.trim()) ||
+        (!cell.entry && fallback.has(cell.minuteIndex)));
+      if (!before.length) return;
+      const after = before.map((cell) => {
+        const categoryId = cell.entry?.categoryId ?? fallback.get(cell.minuteIndex)!;
+        return { ...clone(cell),
+          entry: { ...cell.entry, text: '', categoryId, blockId: cell.entry?.blockId ?? this.newToken('sheet') },
+          display: { dateKey: range.dateKey, minuteIndex: cell.minuteIndex, text: '', categoryId, keepColor: true } };
+      });
+      await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
+        textChanged: true, formatChanged: false });
+    });
+  }
   copy(range: MinuteCellRange, mode: 'copy' | 'cut') {
     validateMinuteCellRange(range);
     return this.enqueue(async () => {
       const cells = clone(await readCells(range));
-      if (cells.every((cell) => !cell.entry && Object.keys(cell.format).length === 0)) {
-        throw new Error('There is no recorded minute or formatting to copy. Record the source minute first.');
-      }
       this.clipboard = { mode, range: { ...range }, count: cells.length,
         token: this.newToken('clipboard'), cells };
       this.pastePreview = null; this.notify();
@@ -387,7 +575,14 @@ export const applyCellFormat = (range: MinuteCellRange, patch: CellFormatPatch) 
 export const fillMinuteRange = (range: MinuteCellRange, sourceMinute: number, categoryId?: string) =>
   spreadsheetEditor.fill(range, sourceMinute, categoryId);
 export const clearMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.clear(range);
+export const clearTextMinuteRange = (range: MinuteCellRange, displayedColorFallbacks?: readonly MinuteDisplayedColorFallback[]) =>
+  spreadsheetEditor.clearText(range, displayedColorFallbacks);
 export const groupMinuteRange = (range: MinuteCellRange, input: { title: string; categoryId: string }) => spreadsheetEditor.group(range, input);
+export const colorMinuteRange = (range: MinuteCellRange, categoryId: string) => spreadsheetEditor.color(range, categoryId);
+export const ungroupMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.ungroup(range);
+export const prepareActivityGroupMove = (source: ActivityGroup, destination: MinutePasteDestination) => spreadsheetEditor.prepareGroupMove(source, destination);
+export const moveActivityGroup = (source: ActivityGroup, destination: MinutePasteDestination, options?: { previewToken?: string }) =>
+  spreadsheetEditor.moveGroup(source, destination, options);
 export const undoSpreadsheetEdit = () => spreadsheetEditor.undo();
 export const redoSpreadsheetEdit = () => spreadsheetEditor.redo();
 export const copyMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.copy(range, 'copy');
