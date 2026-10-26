@@ -68,6 +68,7 @@ import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/Release
 import { useWearBridge } from './src/wear/useWearBridge';
 import { calendarColorDraftObserver } from './src/utils/calendar-color-drafts';
 import { createCoalescedDateWork } from './src/utils/coalesced-date-work';
+import { createCalendarBinderPress } from './src/utils/calendar-binder-press';
 
 type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
 type DayCount = 1 | 3 | 7;
@@ -561,8 +562,21 @@ function AppController() {
   }
 
   function jumpToCurrentMinute() {
-    const current = new Date();
-    openCalendarMinute(dateKey(current), minuteIndexForDate(current));
+    return transitionFromCalendar(() => {
+      const current = new Date();
+      const today = dateKey(current);
+      // Keep the current view and zoom. Clear a custom past-only selection so
+      // the present can be displayed inside that same kind of view.
+      setActiveDate(today);
+      setSelectedDateKeys(null);
+      setOverviewMonth(viewMode === 'month' || viewMode === 'schedule' ? today.slice(0, 7) + '-01' : null);
+      setFocusRequest({ dateKey: today, minuteIndex: minuteIndexForDate(current),
+        token: ++focusSequence.current, openEditor: false });
+      setCalendarViewResetToken((token) => token + 1);
+      setTab('today');
+      viewWrites.current = viewWrites.current.catch(() => undefined)
+        .then(() => setSetting('calendar.selected-date-keys', null)).catch(() => undefined);
+    }, 'Could not go to the current time');
   }
 
   function shiftCalendarView(target: CalendarNavigationTarget | null) {
@@ -803,13 +817,15 @@ function AppController() {
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
                   onPrevious={() => shiftCalendarView(previousView)} onNext={() => shiftCalendarView(nextView)}
                   onOpenDatePicker={() => setDatePickerOpen(true)} />
-                {viewKind === 'year' ? <CalendarYearScreen activeDate={activeDate} onOpenMinute={openCalendarMinute}
+                {viewKind === 'year' ? <CalendarYearScreen activeDate={activeDate} onOpenMinute={openCalendarMinute} focusRequest={focusRequest}
                   onOpenMonth={(month) => void changeViewMode('month', month)} /> : viewKind === 'schedule' ? <CalendarScheduleScreen
                   activeDate={activeDate} selectedDates={overviewDates} calendars={calendars}
                   preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
                   dataVersion={dataVersion} clockFormat={clockFormat} onOpenMinute={openCalendarMinute}
+                  focusRequest={focusRequest}
                   onVisibleMonthChange={visibleOverviewMonthChanged}
                 /> : viewKind === 'month' ? <MonthOverview
+                  activeDate={activeDate} focusRequest={focusRequest}
                   selectedDates={overviewDates}
                   calendars={calendars}
                   preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
@@ -908,7 +924,6 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [current, setCurrent] = useState(() => new Date());
-  const held = useRef(false);
   const [history, setHistory] = useState(() => spreadsheetEditor.snapshot());
   const [historyPending, setHistoryPending] = useState(false);
   const historyOperation = useRef(false);
@@ -931,13 +946,18 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const dispatchingGearAction = useRef(false);
   const { width, height } = useWindowDimensions();
   const [availableWidth, setAvailableWidth] = useState(width);
-  const controlWidth = Math.max(40, Math.min(44, availableWidth / 8));
+  const controlWidth = Math.max(40, Math.min(44, availableWidth / 7));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
   const navigationBusy = viewChanging || syncing || historyPending || history.busy;
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
+  const binderActions = useRef({ single: onJumpToNow, double: () => {}, long: () => {} });
+  const binderPress = useMemo(() => createCalendarBinderPress({ allowed: () => headerMayNavigate(),
+    single: () => binderActions.current.single(), double: () => binderActions.current.double(),
+    long: () => binderActions.current.long() }), []);
 
   function invalidateMenus(render = true) {
+    binderPress.cancel();
     menuRequestSequence.current += 1;
     pendingGearAction.current = null;
     if (gearActionFrame.current != null) { cancelAnimationFrame(gearActionFrame.current); gearActionFrame.current = null; }
@@ -970,8 +990,12 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     return () => { headerMountedRef.current = false; invalidateMenus(false); };
   }, []);
 
-  useEffect(() => { invalidateMenus(); }, [width]);
+  useEffect(() => { invalidateMenus(); }, [width, viewMode]);
+  // Dismissing an open keyboard can change only the window height. Cancel a
+  // pending tap, but keep the dropdown the user just requested visible.
+  useEffect(() => { binderPress.cancel(); }, [height]);
   useEffect(() => {
+    if (navigationBusy) binderPress.cancel();
     if (!navigationBusy) dispatchingGearAction.current = false;
   }, [navigationBusy]);
 
@@ -985,6 +1009,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   async function changeHistory(action: 'undo' | 'redo') {
     const snapshot = spreadsheetEditor.snapshot();
     if (viewChanging || historyOperation.current || snapshot.busy || !(action === 'undo' ? snapshot.canUndo : snapshot.canRedo)) return;
+    binderPress.cancel();
     historyOperation.current = true;
     setHistoryPending(true);
     Keyboard.dismiss();
@@ -1088,69 +1113,71 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       finishGearAction(sequence);
     });
   };
+  binderActions.current = { single: onJumpToNow, double: openViews, long: openPicker };
+  const viewLabel = CALENDAR_VIEW_OPTIONS.find((option) => option.mode === viewMode)?.label ?? 'Day';
 
   return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
-    contentContainerStyle={styles.calendarHeaderContent} scrollEnabled={availableWidth < controlWidth * 8 - 0.5}
+    keyboardShouldPersistTaps="always" keyboardDismissMode="none" onScrollBeginDrag={() => binderPress.cancelPress()}
+    contentContainerStyle={styles.calendarHeaderContent} scrollEnabled={availableWidth < controlWidth * 7 - 0.5}
     onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}>
-    <View style={[styles.calendarHeader, { minWidth: controlWidth * 8 }]}>
+    <View style={[styles.calendarHeader, { minWidth: controlWidth * 7 }]}>
     <View ref={gearMenuAnchor} collapsable={false}>
-    <Pressable accessibilityRole="button" accessibilityLabel="Settings, print, search and dashboard"
+    <Pressable accessibilityRole="button" accessibilityLabel="Open menu"
       disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, expanded: gearMenuOpen }}
-      onPress={openGear} style={controlStyle}>
-      <CalendarHeaderIcon name="settings" />
+      onPressIn={() => binderPress.cancel()} onPress={openGear} style={controlStyle}>
+      <CalendarHeaderIcon name="menu" />
     </Pressable>
     </View>
     <Pressable accessibilityRole="button" accessibilityLabel="Previous calendar view"
-      accessibilityState={{ disabled: !canGoPrevious || navigationBusy }} disabled={!canGoPrevious || navigationBusy} onPress={onPrevious}
+      accessibilityState={{ disabled: !canGoPrevious || navigationBusy }} disabled={!canGoPrevious || navigationBusy}
+      onPressIn={() => binderPress.cancel()} onPress={() => { binderPress.cancel(); onPrevious(); }}
       style={[controlStyle, (!canGoPrevious || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
     </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel={`Go to ${currentDate}, current minute`}
-      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
-      accessibilityHint="Touch and hold to choose dates"
-      accessibilityActions={[{ name: 'longpress', label: 'Choose dates' }]}
-      onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') { held.current = true; openPicker(); } }}
-      onPressIn={() => { held.current = false; }}
-      onLongPress={() => { held.current = true; openPicker(); }} delayLongPress={450}
-      onPress={() => { if (!held.current) onJumpToNow(); held.current = false; }} style={controlStyle}>
-      <CalendarViewIcon mode="day" currentDate={current} />
-    </Pressable>
     <View ref={viewMenuAnchor} collapsable={false}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Choose calendar view"
-        accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy }} disabled={navigationBusy}
-        onPress={openViews} style={controlStyle}>
-        {viewChanging ? <ActivityIndicator size="small" color={colors.graphite} /> :
-          <Text allowFontScaling={false} style={styles.viewDropdownArrow}>▼</Text>}
+      <Pressable accessibilityRole="button" accessibilityLabel={`${viewLabel} view. Go to ${currentDate}, now`}
+        accessibilityHint="Double tap to change view. Touch and hold to choose dates."
+        accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy, busy: viewChanging }} disabled={navigationBusy}
+        accessibilityActions={[{ name: 'showViews', label: 'Choose calendar view' }, { name: 'longpress', label: 'Choose dates' }]}
+        onAccessibilityAction={(event) => {
+          if (event.nativeEvent.actionName === 'showViews') { binderPress.cancel(); openViews(); }
+          else if (event.nativeEvent.actionName === 'longpress') { binderPress.cancel(); openPicker(); }
+        }}
+        onPressIn={(event) => { if (event.nativeEvent.touches?.length > 1) binderPress.cancelPress(); else binderPress.pressIn(); }}
+        onTouchStart={(event) => { if (event.nativeEvent.touches?.length > 1) binderPress.cancelPress(); }}
+        onLongPress={() => binderPress.longPress()} delayLongPress={450}
+        onTouchEnd={() => binderPress.touchEnd()} onTouchCancel={() => binderPress.cancelPress()}
+        onPress={() => binderPress.press()} style={controlStyle}>
+        <CalendarViewIcon mode={viewMode} currentDate={current} />
       </Pressable>
     </View>
     <Pressable accessibilityRole="button" accessibilityLabel="Next calendar view"
-      accessibilityState={{ disabled: !canGoNext || navigationBusy }} disabled={!canGoNext || navigationBusy} onPress={onNext}
+      accessibilityState={{ disabled: !canGoNext || navigationBusy }} disabled={!canGoNext || navigationBusy}
+      onPressIn={() => binderPress.cancel()} onPress={() => { binderPress.cancel(); onNext(); }}
       style={[controlStyle, (!canGoNext || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>›</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Undo Context edit"
       accessibilityState={{ disabled: !history.canUndo || navigationBusy }}
-      disabled={!history.canUndo || navigationBusy} onPress={() => void changeHistory('undo')}
+      disabled={!history.canUndo || navigationBusy} onPressIn={() => binderPress.cancel()} onPress={() => void changeHistory('undo')}
       style={[controlStyle, (!history.canUndo || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.historyArrow}>↶</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
       accessibilityState={{ disabled: !history.canRedo || navigationBusy }}
-      disabled={!history.canRedo || navigationBusy} onPress={() => void changeHistory('redo')}
+      disabled={!history.canRedo || navigationBusy} onPressIn={() => binderPress.cancel()} onPress={() => void changeHistory('redo')}
       style={[controlStyle, (!history.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel={syncing ? 'Synchronizing calendars' : syncError ? 'Calendar sync needs attention. Tap to retry' : 'Sync attached calendars'}
       accessibilityHint={syncError ? 'Touch and hold for sync details' : undefined}
       disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, busy: syncing }}
+      onPressIn={() => binderPress.cancel()}
       onLongPress={() => { if (syncError) Alert.alert('Calendar synchronization', syncError); }}
       accessibilityActions={syncError ? [{ name: 'longpress', label: 'Show sync details' }] : []}
       onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress' && syncError) Alert.alert('Calendar synchronization', syncError); }}
-      onPress={onSync} style={controlStyle}>
-      {syncing ? <ActivityIndicator size="small" color={colors.graphite} /> : <>
-        <CalendarHeaderIcon name="sync" />
-        {syncError ? <Text allowFontScaling={false} style={styles.syncInfo}>ⓘ</Text> : null}
-      </>}
+      onPress={() => { binderPress.cancel(); onSync(); }} style={controlStyle}>
+      {syncing ? <ActivityIndicator size="small" color={colors.graphite} /> : <CalendarHeaderIcon name="sync" />}
     </Pressable>
     </View>
   </ScrollView>
@@ -1164,10 +1191,10 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
           onPress={() => invalidateMenus()} style={StyleSheet.absoluteFill} />
         <View accessibilityViewIsModal style={[styles.viewMenu, { top: gearMenuTop, left: gearMenuLeft,
           maxHeight: Math.max(44, height - gearMenuTop - 8) }]}>
-          <ScrollView>
-            <Pressable accessibilityRole="button" accessibilityLabel="Open Settings"
-              onPress={() => chooseGearAction('settings')} style={styles.viewOption}>
-              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Settings</Text>
+          <ScrollView keyboardShouldPersistTaps="always" keyboardDismissMode="none">
+            <Pressable accessibilityRole="button" accessibilityLabel="Open Dashboard"
+              onPress={() => chooseGearAction('reports')} style={styles.viewOption}>
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Dashboard</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Print displayed dates"
               onPress={() => chooseGearAction('print')} style={styles.viewOption}>
@@ -1177,9 +1204,9 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
               onPress={() => chooseGearAction('search')} style={styles.viewOption}>
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Search</Text>
             </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Open Dashboard"
-              onPress={() => chooseGearAction('reports')} style={styles.viewOption}>
-              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Dashboard</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Open Settings"
+              onPress={() => chooseGearAction('settings')} style={styles.viewOption}>
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Settings</Text>
             </Pressable>
           </ScrollView>
         </View>
@@ -1192,7 +1219,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
           onPress={() => invalidateMenus()} style={StyleSheet.absoluteFill} />
         <View accessibilityViewIsModal style={[styles.viewMenu, { top: viewMenuTop, right: viewMenuRight,
           maxHeight: Math.max(44, height - viewMenuTop - 8) }]}>
-          <ScrollView>
+          <ScrollView keyboardShouldPersistTaps="always" keyboardDismissMode="none">
             {CALENDAR_VIEW_OPTIONS.map((option) => {
               const selected = viewMode === option.mode || (viewMode === 'three-days' && option.mode === 'day');
               return <Pressable key={option.mode} accessibilityRole="button" accessibilityLabel={`${option.label} view`}
@@ -1312,8 +1339,6 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     justifyContent: 'space-between', backgroundColor: colors.paper },
   calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
   historyArrow: { color: colors.graphite, fontSize: 27, lineHeight: 34 },
-  syncInfo: { position: 'absolute', bottom: 1, right: 1, color: colors.muted, fontSize: 12 },
-  viewDropdownArrow: { color: colors.graphite, fontSize: 12, lineHeight: 20 },
   disabledCalendarNavigation: { opacity: 0.3 },
   viewMenuBackdrop: { flex: 1 },
   viewMenu: { position: 'absolute', width: 208, paddingVertical: 8, borderWidth: StyleSheet.hairlineWidth,

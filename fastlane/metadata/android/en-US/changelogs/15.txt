@@ -1,0 +1,1 @@
+Refine the seven-control calendar header: tap the binder for Now, double tap for views, or hold for dates. Now keeps your selected view and reveals today. Put the current-time line below its minute. Move cell actions outside the scrolling grid for single-press commands. Preserve partial-text editing, clipboard, Undo/redo and existing calendar permissions.

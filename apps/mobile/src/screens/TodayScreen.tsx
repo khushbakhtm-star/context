@@ -127,6 +127,8 @@ export function TodayScreen({
   const positionedViewRef = useRef(false);
   const gridViewportRef = useRef<ComponentRef<typeof View>>(null);
   const minuteViewportRef = useRef<ComponentRef<typeof View>>(null);
+  const screenViewportRef = useRef<ComponentRef<typeof View>>(null);
+  const viewportMeasurementRef = useRef(0);
   const bodyWindowRef = useRef({ x: 0, y: insets.top + 110, height: 500 });
   const pendingZoomAnchorRef = useRef<(CalendarZoomAnchor & { generation: number }) | null>(null);
   const pinchRef = useRef<{ distance: number; zoom: number; anchor: CalendarZoomAnchor; generation: number } | null>(null);
@@ -196,6 +198,9 @@ export function TodayScreen({
   const fillHandleLeft = useRef(new Animated.Value(0)).current;
   const fillHandleOpacity = useRef(new Animated.Value(0)).current;
   const cellMenuTop = useRef(new Animated.Value(0)).current;
+  const cellMenuOriginX = useRef(new Animated.Value(0)).current;
+  const cellMenuOriginY = useRef(new Animated.Value(0)).current;
+  const menuOriginRef = useRef({ x: 0, y: 0 });
   const cellMenuHeightRef = useRef(100);
   const menuTouchActiveRef = useRef(false);
   const menuTouchReleaseFrameRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null);
@@ -239,11 +244,23 @@ export function TodayScreen({
   projectionConfigRef.current = { enabled: preferences.syncActuals, calendarId: preferences.writeCalendarId };
 
   function measureMinuteViewport() {
-    gridViewportRef.current?.measureInWindow((x) => { bodyWindowRef.current.x = x; });
-    minuteViewportRef.current?.measureInWindow((_x, y, _width, height) => {
-      bodyWindowRef.current.y = y; bodyWindowRef.current.height = height;
+    const root = screenViewportRef.current;
+    const grid = gridViewportRef.current;
+    const body = minuteViewportRef.current;
+    if (!root || !grid || !body) return;
+    const sequence = ++viewportMeasurementRef.current;
+    const generation = navigationGenerationRef.current;
+    const measured: { root?: { x: number; y: number }; grid?: { x: number }; body?: { y: number; height: number } } = {};
+    const apply = () => {
+      if (!measured.root || !measured.grid || !measured.body || !mountedRef.current ||
+          sequence !== viewportMeasurementRef.current || generation !== navigationGenerationRef.current) return;
+      bodyWindowRef.current = { x: measured.grid.x, y: measured.body.y, height: measured.body.height };
+      menuOriginRef.current = { x: measured.grid.x - measured.root.x, y: measured.body.y - measured.root.y };
       positionFillHandle();
-    });
+    };
+    root.measureInWindow((x, y) => { measured.root = { x, y }; apply(); });
+    grid.measureInWindow((x) => { measured.grid = { x }; apply(); });
+    body.measureInWindow((_x, y, _width, height) => { measured.body = { y, height }; apply(); });
   }
 
   function positionFillHandle() {
@@ -275,7 +292,10 @@ export function TodayScreen({
     if (menuY < handleTop + 30 && menuY + menuHeight > handleTop) {
       menuY = handleTop + menuHeight + 38 <= height - 6 ? handleTop + 32 : handleTop - menuHeight - 8;
     }
-    if (!menuTouchActiveRef.current && !menuCommandPendingRef.current) cellMenuTop.setValue(Math.max(6, Math.min(menuLimit, menuY)));
+    if (!menuTouchActiveRef.current && !menuCommandPendingRef.current) {
+      cellMenuOriginX.setValue(menuOriginRef.current.x); cellMenuOriginY.setValue(menuOriginRef.current.y);
+      cellMenuTop.setValue(Math.max(6, Math.min(menuLimit, menuY)));
+    }
   }
 
   function setMenuTouchActive(active: boolean) {
@@ -1631,13 +1651,14 @@ export function TodayScreen({
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={insets.top + 44} onLayout={(event) => setViewportWidth(event.nativeEvent.layout.width)}>
+      <View ref={screenViewportRef} collapsable={false} style={styles.container} onLayout={measureMinuteViewport}>
       <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.timeMeasurement}>
         <Text key={measurementKey} style={[styles.minuteTime, styles.timeMeasurementText]} maxFontSizeMultiplier={1.4}
           onTextLayout={(event) => recordTimeLabelWidth(Math.max(0, ...event.nativeEvent.lines.map((line) => line.width)), measurementKey)}>
           {clockFormat === '12h' ? '12:59 AM\n12:59 PM' : '23:59'}
         </Text>
       </View>
-      <View ref={gridViewportRef} style={styles.gridViewport} onLayout={measureMinuteViewport}
+      <View ref={gridViewportRef} collapsable={false} style={styles.gridViewport} onLayout={measureMinuteViewport}
         onTouchEnd={endCellHold} onTouchCancel={cancelCellInteraction} {...pinchResponder.panHandlers}>
       <Animated.ScrollView ref={horizontalRef} horizontal directionalLockEnabled nestedScrollEnabled scrollEnabled={!pinching && !rangeDragging && !groupDragging}
         style={styles.horizontalViewport} contentContainerStyle={[styles.horizontalContent, { width: gridLayout.contentWidth }]}
@@ -1733,7 +1754,7 @@ export function TodayScreen({
         </View>
       ) : null}
 
-      <View ref={minuteViewportRef} style={styles.minuteViewport} onLayout={measureMinuteViewport}>
+      <View ref={minuteViewportRef} collapsable={false} style={styles.minuteViewport} onLayout={measureMinuteViewport}>
       <FlatList ref={listRef} data={MINUTE_ITEMS} keyExtractor={(minute) => minute.toString()}
         style={styles.minuteList} contentContainerStyle={styles.minuteListContent}
         getItemLayout={(_, index) => ({ length: gridLayout.rowHeight, offset: gridLayout.rowHeight * index, index })}
@@ -1921,11 +1942,19 @@ export function TodayScreen({
       }]}>
         <Text style={styles.dragPromptText}>{selectedRange.endMinute - selectedRange.startMinute + 1} minutes</Text>
       </Animated.View> : null}
+
+      </View>
+
+        </View>
+      </Animated.ScrollView>
+      </View>
+
       {cellMenuOpen && inlineSelection && !groupDragging && !rangeDragging && !groupComposerOpen ? (
+        <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
         <Animated.View style={[styles.cellMenuPosition, {
           width: Math.min(440, gridLayout.viewportWidth - 16),
           left: Math.max(8, (gridLayout.viewportWidth - Math.min(440, gridLayout.viewportWidth - 16)) / 2),
-          transform: [{ translateX: horizontalOffset }, { translateY: cellMenuTop }],
+          transform: [{ translateX: cellMenuOriginX }, { translateY: Animated.add(cellMenuOriginY, cellMenuTop) }],
         }]}>
           <CellActionMenu busy={menuCommandPending || toolBusy || spreadsheetState.busy}
             onCut={() => void dispatchCellCommand((scope) => captureSelectedCells('cut', scope))}
@@ -1948,12 +1977,8 @@ export function TodayScreen({
             onTouchActiveChange={setMenuTouchActive}
             onClose={() => { if (!menuCommandPendingRef.current && !toolBusyRef.current) closeRangeOptions(); }} />
         </Animated.View>
-      ) : null}
-      </View>
-
         </View>
-      </Animated.ScrollView>
-      </View>
+      ) : null}
 
       {onCreatePlan && !inlineSelection && !rangeSelecting && !editor ? (
         <Pressable accessibilityRole="button" accessibilityLabel="Create calendar event"
@@ -1969,6 +1994,7 @@ export function TodayScreen({
         minuteIndex={editor?.minuteIndex ?? 0} entry={editor?.entry ?? null} plan={editor?.plan ?? null}
         planDurationMinutes={editor?.planDuration} onClose={() => setEditor(null)} onSave={save} onDelete={remove}
         onOpenPlan={editor?.plan ? () => openPlan(editor.plan!) : undefined} />
+      </View>
     </KeyboardAvoidingView>
   );
 }
@@ -2066,7 +2092,7 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
       textAlignVertical: 'center', backgroundColor: 'transparent' },
     placeholder: { color: colors.muted, fontWeight: '400', fontSize: 11 },
     planText: { color: colors.graphite, fontWeight: '400' },
-    currentLine: { position: 'absolute', left: 0, right: 0, top: 0,
+    currentLine: { position: 'absolute', left: 0, right: 0, bottom: 0,
       height: 1.5, backgroundColor: colors.currentTime },
     currentDot: { position: 'absolute', left: -3, top: -3.25, width: 8, height: 8,
       borderRadius: 4, backgroundColor: colors.currentTime },

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.13",
-  "sourceAndroidVersionCode": 14,
-  "sourceIosBuildNumber": "14",
+  "version": "0.1.14",
+  "sourceAndroidVersionCode": 15,
+  "sourceIosBuildNumber": "15",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare phone 0.1.13: single taps select and popup actions execute once; double taps edit inline, and the keyboard checkmark saves locally. The active inline editor preserves native partial-text selection and Cut, Copy and Paste without changing cell color, style or group membership. Stable menu geometry prevents keyboard dismissal from cancelling a press. A serialized SQLite writer gate prevents Undo/calendar contention and recovers after failed transactions without consuming history. Clipboard actions await local work only; background synchronization is coalesced and refreshes foreground accounts every 15 seconds. Remove copied banners and automatic minute/range panels. Header Sync refreshes calendars; the gear contains Settings, Print, Search and Dashboard. Linked source color edits preserve notes, groups and formatting. Calendar descriptions compact identical adjacent notes with version-two metadata and v1 baseline compatibility. Published phone 0.1.12 remains current until separate native verification and publication. F-Droid/watch 0.1.8 remain existing releases; physical Android gestures, official catalog acceptance and store review are not verified."
+  "notes": "Prepare Context 0.1.14/code15: a seven-control hamburger header and binder single-tap Now, double-tap views and long-press dates; Now keeps the chosen view and reveals today using measured Month/Year/Schedule positions. Put the current-minute line below its minute cell. Move the contextual action overlay outside the scrolling grid to prevent ancestor responders consuming the first press. Preserve inline partial-text editing, local clipboard/Undo operations, calendar color reconciliation and existing source-event permissions. Native builds, exact packaged UI markers and physical phone gestures require separate verification before publication. Published 0.1.13 Wear-phone and FOSS previews remain current; the watch companion remains 0.1.8. Public feeds and installation documents stay on 0.1.13 until verified 0.1.14 artifacts are published. Official F-Droid catalog acceptance, store review and iOS distribution remain pending."
 }

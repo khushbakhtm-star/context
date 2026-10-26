@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { AppState, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useAppTheme } from '../appearance';
 import { getDaySegments } from '../data/database';
@@ -11,8 +11,11 @@ import { isDateKey, monthDateCells, normalizeSelectedDates } from '../utils/date
 import { monthAgendaItems, type MonthAgendaItem } from '../utils/month-agenda';
 import { addDays, dateKey, formatDayHeading, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
 import { InfoButton } from './InfoButton';
+import { createCalendarListFocus, type CalendarViewFocusRequest } from '../utils/calendar-list-focus';
 
 type Props = {
+  activeDate?: string;
+  focusRequest?: CalendarViewFocusRequest | null;
   selectedDates: string[];
   calendars: DeviceCalendar[];
   preferences: CalendarPreferences;
@@ -23,7 +26,7 @@ type Props = {
 };
 type DayState = { items: MonthAgendaItem[]; failed: boolean };
 
-export function MonthOverview({ selectedDates, calendars, preferences, dataVersion, clockFormat, onOpenMinute,
+export function MonthOverview({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, clockFormat, onOpenMinute,
   onVisibleMonthChange }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -31,6 +34,28 @@ export function MonthOverview({ selectedDates, calendars, preferences, dataVersi
   const days = useMemo(() => daysKey ? daysKey.split('|') : [], [daysKey]);
   const selected = useMemo(() => new Set(days), [days]);
   const months = useMemo(() => [...new Set(days.map((day) => day.slice(0, 7)))], [days]);
+  const list = useRef<FlatList<string>>(null);
+  const listFocus = useMemo(() => createCalendarListFocus(() => list.current, () => AppState.currentState === 'active'), []);
+  const pendingFocus = useRef<CalendarViewFocusRequest | null>(null);
+  const weekOffsets = useRef(new Map<string, number>());
+  const monthKey = months.join('|');
+  const focusWeek = (request: CalendarViewFocusRequest) => {
+    const month = request.dateKey.slice(0, 7);
+    const index = months.indexOf(month);
+    if (index < 0) return;
+    const week = Math.floor(monthDateCells(`${month}-01`).findIndex((cell) => cell.dateKey === request.dateKey) / 7);
+    const offset = weekOffsets.current.get(`${month}:${week}`);
+    listFocus.request(index, offset === undefined ? 0 : -offset);
+    // Earlier week rows can grow when their events arrive. Keep this explicit
+    // focus anchored through those layouts until the user drags or changes view.
+  };
+  useEffect(() => {
+    if (!focusRequest || !isDateKey(focusRequest.dateKey) || !selected.has(focusRequest.dateKey)) return;
+    pendingFocus.current = focusRequest;
+    focusWeek(focusRequest);
+    return () => { listFocus.cancel(); pendingFocus.current = null; };
+  }, [focusRequest?.token, focusRequest?.dateKey, monthKey, daysKey, listFocus]);
+  useEffect(() => () => listFocus.cancel(), [listFocus]);
   const [data, setData] = useState<Record<string, DayState>>({});
   const [retry, setRetry] = useState(0);
   const requestMonths = useRef<(months: string[]) => void>(() => {});
@@ -111,7 +136,9 @@ export function MonthOverview({ selectedDates, calendars, preferences, dataVersi
       </Pressable>
       <InfoButton title="Month events" message="The overview shows the available calendar events and recorded activity blocks for your selected dates. Some sources could not be read. Retry, or check the selected calendars and account connection in Settings. Tap a day or event to open its minute cells." />
     </View> : null}
-    <FlatList key={daysKey} data={months} keyExtractor={(month) => month} initialNumToRender={1} maxToRenderPerBatch={2} windowSize={3}
+    <FlatList ref={list} key={daysKey} data={months} keyExtractor={(month) => month} initialNumToRender={1} maxToRenderPerBatch={2} windowSize={3}
+      extraData={activeDate} onScrollToIndexFailed={listFocus.onFailure}
+      onScrollBeginDrag={() => { listFocus.cancel(); pendingFocus.current = null; }}
       onViewableItemsChanged={onViewableItemsChanged} viewabilityConfig={viewability}
       contentContainerStyle={styles.content} renderItem={({ item: month }) => {
         const cells = monthDateCells(`${month}-01`);
@@ -121,7 +148,12 @@ export function MonthOverview({ selectedDates, calendars, preferences, dataVersi
           </Text>
           <View style={styles.weekRow}>{weekdays.map((weekday, index) =>
             <Text key={index} numberOfLines={1} maxFontSizeMultiplier={1.3} style={styles.weekday}>{weekday}</Text>)}</View>
-          {Array.from({ length: Math.ceil(cells.length / 7) }, (_, week) => <View key={week} style={styles.weekRow}>
+          {Array.from({ length: Math.ceil(cells.length / 7) }, (_, week) => <View key={week} style={styles.weekRow}
+            onLayout={(event) => {
+              weekOffsets.current.set(`${month}:${week}`, event.nativeEvent.layout.y);
+              const pending = pendingFocus.current;
+              if (pending?.dateKey.slice(0, 7) === month && cells.slice(week * 7, week * 7 + 7).some((cell) => cell.dateKey === pending.dateKey)) focusWeek(pending);
+            }}>
             {cells.slice(week * 7, week * 7 + 7).map((cell) => {
               const active = cell.inMonth && selected.has(cell.dateKey);
               const state = active ? data[cell.dateKey] : undefined;
@@ -129,8 +161,9 @@ export function MonthOverview({ selectedDates, calendars, preferences, dataVersi
               const heading = formatDayHeading(cell.dateKey);
               return <View key={cell.dateKey} style={[styles.day, !active && styles.unselectedDay]}>
                 <Pressable accessibilityRole="button" accessibilityLabel={`Open ${heading}`} disabled={!isDateKey(cell.dateKey)}
+                  accessibilityState={{ selected: cell.dateKey === activeDate }}
                   onPress={() => openDay(cell.dateKey)} style={styles.dateButton}>
-                  <View style={[styles.dateCircle, active && styles.selectedDate, cell.dateKey === today && styles.today]}>
+                  <View style={[styles.dateCircle, active && styles.selectedDate, cell.dateKey === activeDate && styles.focusedDate, cell.dateKey === today && styles.today]}>
                     <Text maxFontSizeMultiplier={1.5} style={[styles.dayNumber, !cell.inMonth && styles.outsideMonth,
                       cell.dateKey === today && styles.todayText]}>{cell.day}</Text>
                   </View>
@@ -173,6 +206,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   dateButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   dateCircle: { minWidth: 28, minHeight: 28, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   selectedDate: { backgroundColor: colors.selectedDay },
+  focusedDate: { borderWidth: 1.5, borderColor: colors.graphite },
   today: { backgroundColor: colors.accent },
   dayNumber: { color: colors.ink, fontSize: 13, fontWeight: '600' },
   outsideMonth: { color: colors.muted },

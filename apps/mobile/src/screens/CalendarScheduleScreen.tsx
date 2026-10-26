@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useAppTheme } from '../appearance';
 import { InfoButton } from '../components/InfoButton';
@@ -12,8 +12,10 @@ import { calendarViewDates } from '../utils/calendar-view-mode';
 import { isDateKey } from '../utils/date-selection';
 import { scheduleAgendaItems, scheduleDescription, scheduleTimeRange, type ScheduleAgendaItem } from '../utils/schedule-agenda';
 import { dateKey, formatDayHeading, minuteIndexForDate, parseDateKey } from '../utils/time';
+import { createCalendarListFocus, type CalendarViewFocusRequest } from '../utils/calendar-list-focus';
 
 type Props = {
+  focusRequest?: CalendarViewFocusRequest | null;
   activeDate: string;
   selectedDates?: readonly string[] | null;
   calendars: DeviceCalendar[];
@@ -25,12 +27,18 @@ type Props = {
 };
 type DayState = { items: ScheduleAgendaItem[]; failed: boolean };
 
-export function CalendarScheduleScreen({ activeDate, selectedDates, calendars, preferences, dataVersion, clockFormat,
+export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, clockFormat,
   onOpenMinute, onVisibleMonthChange }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const daysKey = calendarViewDates('schedule', activeDate, selectedDates).join('|');
   const days = useMemo(() => daysKey ? daysKey.split('|') : [], [daysKey]);
+  const list = useRef<FlatList<string>>(null);
+  const listFocus = useMemo(() => createCalendarListFocus(() => list.current, () => AppState.currentState === 'active'), []);
+  useEffect(() => {
+    if (focusRequest && isDateKey(focusRequest.dateKey)) listFocus.request(days.indexOf(focusRequest.dateKey));
+    return () => listFocus.cancel();
+  }, [focusRequest?.token, focusRequest?.dateKey, daysKey, listFocus]);
   const [data, setData] = useState<Record<string, DayState>>({});
   const [retry, setRetry] = useState(0);
   const requestDays = useRef<(days: string[]) => void>(() => {});
@@ -111,7 +119,9 @@ export function CalendarScheduleScreen({ activeDate, selectedDates, calendars, p
       </Pressable>
       <InfoButton title="Schedule events" message="Available calendar events and recorded activities appear together. Recorded minutes replace the overlapping part of a plan. Retry missing sources, or check the calendar selection and account connection in Settings. Tap an activity to open its minute cells." />
     </View> : null}
-    <FlatList key={daysKey} data={days} extraData={data} keyExtractor={(day) => day}
+    <FlatList ref={list} key={daysKey} data={days} extraData={data} keyExtractor={(day) => day}
+      onScrollToIndexFailed={listFocus.onFailure} onScrollBeginDrag={listFocus.cancel}
+      maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
       initialNumToRender={5} maxToRenderPerBatch={5} windowSize={5}
       onViewableItemsChanged={onViewableItemsChanged} viewabilityConfig={viewability}
       contentContainerStyle={styles.content} renderItem={({ item: day }) => {

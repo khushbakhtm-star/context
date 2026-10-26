@@ -33,7 +33,8 @@ function screen(t) {
     TextInput: 'TextInput', KeyboardAvoidingView: 'KeyboardAvoidingView', RefreshControl: 'RefreshControl',
     Platform: { OS: 'android' }, StyleSheet: { create: (value) => value, hairlineWidth: 0.5 },
     useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
-    Animated: { Value, View: 'AnimatedView', ScrollView: 'AnimatedScrollView', event: (_mapping, options) => options.listener },
+    Animated: { Value, View: 'AnimatedView', ScrollView: 'AnimatedScrollView', event: (_mapping, options) => options.listener,
+      add: (left, right) => ({ get value() { return left.value + right.value; } }) },
     PanResponder: { create: (handlers) => ({ panHandlers: handlers }) },
     Keyboard: { dismiss() { dismisses++; }, addListener: () => ({ remove() {} }) },
     AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
@@ -113,6 +114,28 @@ function screen(t) {
   function menuPosition(node = tree) { if (!node || typeof node !== 'object') return null;
     if (node.type === 'AnimatedView' && node.props.children?.type === 'CellActionMenu') return node.props.style[1].transform[1].translateY.value;
     for (const child of [node.props?.children].flat(Infinity)) { if (child === undefined) continue; const value = menuPosition(child); if (value != null) return value; } return null; }
+  function menuAncestors(node = tree, trail = []) { if (!node || typeof node !== 'object') return null;
+    if (node.type === 'CellActionMenu') return trail;
+    for (const child of [node.props?.children].flat(Infinity)) { if (child === undefined) continue;
+      const value = menuAncestors(child, [...trail, node]); if (value) return value; } return null; }
+  function measureViewport({ rootX = 0, rootY = 80, gridX = 0, bodyY = 146, height = 500, defer = false } = {}) {
+    const screen = tree.props.children;
+    const grid = [screen.props.children].flat(Infinity).find((node) => node?.props?.onPanResponderGrant);
+    const body = find(tree, 'FlatList');
+    let bodyParent;
+    function visit(node) { if (!node || typeof node !== 'object') return;
+      if ([node.props?.children].flat().includes(body)) bodyParent = node;
+      for (const child of [node.props?.children].flat(Infinity)) visit(child); }
+    visit(tree);
+    for (const host of [screen, grid, bodyParent]) assert.equal(host.props.collapsable, false, 'measured Android anchors must retain native hosts');
+    const callbacks = [];
+    const measure = (...values) => (callback) => { if (defer) callbacks.push(() => callback(...values)); else callback(...values); };
+    screen.props.ref.current = { measureInWindow: measure(rootX, rootY, 390, 700) };
+    grid.props.ref.current = { measureInWindow: measure(gridX, rootY, 390, 700) };
+    bodyParent.props.ref.current = { measureInWindow: measure(gridX, bodyY, 390, height) };
+    screen.props.onLayout();
+    return callbacks;
+  }
   async function tap(minute) { const target = cell(minute); target.props.onPressIn(); target.props.onTouchStart(event()); now += 60;
     target.props.onTouchEnd(event()); target.props.onPress(event()); await settle(); }
   async function hold(minute) { const target = cell(minute); target.props.onPressIn(); target.props.onTouchStart(event());
@@ -120,7 +143,8 @@ function screen(t) {
     await settle(); target.props.onTouchEnd(event()); target.props.onPress(event()); await settle(); }
   t.after(() => { for (const slot of slots) slot?.cleanup?.(); timers.clear(); });
   return { day, calls, rows, drafts, async start() { render(); await settle(); }, tap, hold, settle,
-    menu: () => find(tree, 'CellActionMenu')?.props, menuPosition, input: (minute = 600) => find(cell(minute), 'TextInput')?.props,
+    menu: () => find(tree, 'CellActionMenu')?.props, menuPosition, menuAncestors, measureViewport,
+    input: (minute = 600) => find(cell(minute), 'TextInput')?.props,
     get dismisses() { return dismisses; }, set failure(value) { failure = value; },
     set writeGate(value) { writeGate = value; }, advance(ms) { now += ms; }, cell, get tree() { return tree; } };
 }
@@ -177,6 +201,55 @@ test('a keyboard-hide layout change cannot move a menu button between touch down
   assert.equal(r.calls.length, 0, 'touch down alone must never trigger a destructive action');
   r.menu().onTouchActiveChange(false); r.menu().onCopy(); await r.settle();
   assert.deepEqual(r.calls.map((call) => call.action), ['copy']);
+});
+
+test('the compact menu is outside the RN scroll responder that consumes the first tap during momentum', async (t) => {
+  const scrollSource = fs.readFileSync(path.join(__dirname,
+    '../node_modules/react-native/Libraries/Components/ScrollView/ScrollView.js'), 'utf8');
+  const method = scrollSource.match(/_handleStartShouldSetResponderCapture:\s*\(e: GestureResponderEvent\) => boolean =\s*\(e: GestureResponderEvent\) => (\{[\s\S]*?\n    \});/);
+  assert.ok(method, 'exercise the installed React Native capture implementation, rather than a copied policy');
+  const capture = vm.runInNewContext('(function(e) ' + method[1] + ')',
+    { __DEV__: false, console, TextInputState: { isTextInput: () => false } });
+  let momentum = true; let delivered = 0;
+  const ancestor = { props: { keyboardShouldPersistTaps: 'always', disableScrollViewPanResponder: true },
+    _isAnimating: () => momentum, _softKeyboardIsDetached: () => false, _keyboardIsDismissible: () => false };
+  const event = { target: {} };
+  if (!capture.call(ancestor, event)) delivered++;
+  assert.equal(delivered, 0, 'even persist=always and disabled JS pan responder cannot bypass momentum capture');
+  momentum = false;
+  if (!capture.call(ancestor, event)) delivered++;
+  assert.equal(delivered, 1, 'this exact ancestor policy explains a first consumed tap followed by a working tap');
+
+  const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Copy once', categoryId: 'work', blockId: 'note' });
+  await r.start(); r.measureViewport(); await r.hold(600);
+  const parents = r.menuAncestors(); assert.ok(parents.length);
+  assert.ok(parents.some((node) => node.props.pointerEvents === 'box-none'));
+  assert.ok(!parents.some((node) => ['ScrollView', 'AnimatedScrollView', 'FlatList', 'Modal'].includes(node.type)));
+  assert.ok(!parents.some((node) => node.props.onPanResponderGrant), 'the menu also sits outside grid pinch/group responders');
+  momentum = true; r.menu().onCopy(); await r.settle();
+  assert.deepEqual(r.calls.map((call) => call.action), ['copy'], 'the first menu release reaches its original command without an ancestor capture');
+});
+
+test('the sibling menu preserves root-relative anchors and outside cells still select in one tap', async (t) => {
+  const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Original', categoryId: 'work', blockId: 'note' });
+  await r.start(); await r.hold(600); r.menu().onHeightChange(100);
+  const initial = r.menuPosition(); assert.equal(typeof initial, 'number');
+  r.measureViewport({ rootY: 80, bodyY: 146 }); const anchored = r.menuPosition();
+  assert.equal(anchored, initial + 66, 'the old minute-viewport anchor is translated into the sibling root coordinates');
+  r.menu().onTouchActiveChange(true);
+  r.measureViewport({ rootY: 80, bodyY: 170 }); assert.equal(r.menuPosition(), anchored, 'resize cannot move a pressed target');
+  await r.tap(601);
+  assert.equal(r.menu(), undefined); assert.equal(r.cell(601).props.accessibilityState.selected, true);
+  assert.equal(r.input(601), undefined, 'an outside cell selects directly without a dismiss-then-select tap or keyboard');
+});
+
+test('late native geometry callbacks cannot replace a newer root/body menu anchor', async (t) => {
+  const r = screen(t); await r.start(); await r.hold(600); r.menu().onHeightChange(100);
+  const before = r.menuPosition();
+  const old = r.measureViewport({ rootY: 80, bodyY: 146, defer: true });
+  const latest = r.measureViewport({ rootY: 80, bodyY: 180, defer: true });
+  latest.forEach((complete) => complete()); assert.equal(r.menuPosition(), before + 100);
+  old.forEach((complete) => complete()); assert.equal(r.menuPosition(), before + 100);
 });
 
 test('single taps only select filled cells, double tap edits, and Save waits for current typing', async (t) => {

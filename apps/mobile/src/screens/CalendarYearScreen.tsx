@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { type ComponentRef, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { useAppTheme } from '../appearance';
@@ -6,14 +6,16 @@ import type { AppColors } from '../theme';
 import { calendarYearMonths } from '../utils/calendar-view-mode';
 import { isDateKey, monthDateCells } from '../utils/date-selection';
 import { addDays, dateKey, formatDayHeading, minuteIndexForDate, parseDateKey } from '../utils/time';
+import type { CalendarViewFocusRequest } from '../utils/calendar-list-focus';
 
 type Props = {
+  focusRequest?: CalendarViewFocusRequest | null;
   activeDate: string;
   onOpenMinute: (day: string, minute: number) => void;
   onOpenMonth?: (month: string) => void;
 };
 
-export function CalendarYearScreen({ activeDate, onOpenMinute, onOpenMonth }: Props) {
+export function CalendarYearScreen({ activeDate, focusRequest, onOpenMinute, onOpenMonth }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const { width, fontScale } = useWindowDimensions();
@@ -23,6 +25,23 @@ export function CalendarYearScreen({ activeDate, onOpenMinute, onOpenMonth }: Pr
     new Intl.DateTimeFormat(undefined, { weekday: 'narrow' }).format(addDays('2026-10-19', index))), []);
   const twoColumns = width >= 360 && fontScale <= 1.25;
   const compact = twoColumns && width < 720;
+  const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
+  const pendingFocus = useRef<CalendarViewFocusRequest | null>(null);
+  const geometry = useMemo(() => ({ top: null as number | null, offsets: new Map<string, number>() }),
+    [activeDate.slice(0, 4), twoColumns, width, fontScale]);
+  const revealFocus = () => {
+    const pending = pendingFocus.current;
+    if (!pending || !scroll.current || geometry.top === null || AppState.currentState !== 'active') return;
+    const offset = geometry.offsets.get(`${pending.dateKey.slice(0, 7)}-01`);
+    if (offset === undefined) return;
+    scroll.current.scrollTo({ y: geometry.top + offset, animated: false });
+    pendingFocus.current = null;
+  };
+  useEffect(() => {
+    pendingFocus.current = focusRequest && isDateKey(focusRequest.dateKey) ? focusRequest : null;
+    revealFocus();
+    return () => { pendingFocus.current = null; };
+  }, [focusRequest?.token, focusRequest?.dateKey, geometry]);
 
   useEffect(() => {
     const update = () => setToday(dateKey(new Date()));
@@ -37,13 +56,15 @@ export function CalendarYearScreen({ activeDate, onOpenMinute, onOpenMonth }: Pr
     onOpenMinute(day, day === dateKey(now) ? minuteIndexForDate(now) : 9 * 60);
   };
 
-  return <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+  return <ScrollView key={`${activeDate.slice(0, 4)}:${twoColumns}:${width}:${fontScale}`} ref={scroll} style={styles.container} contentContainerStyle={styles.content}
+    onScrollBeginDrag={() => { pendingFocus.current = null; }}>
     <Text accessibilityRole="header" style={styles.year}>{activeDate.slice(0, 4)}</Text>
-    <View style={styles.months}>
+    <View style={styles.months} onLayout={(event) => { geometry.top = event.nativeEvent.layout.y; revealFocus(); }}>
       {months.map((month) => {
         const title = new Intl.DateTimeFormat(undefined, { month: 'long' }).format(parseDateKey(month));
         const cells = monthDateCells(month);
-        return <View key={month} style={[styles.month, twoColumns && styles.halfMonth]}>
+        return <View key={month} style={[styles.month, twoColumns && styles.halfMonth]}
+          onLayout={(event) => { geometry.offsets.set(month, event.nativeEvent.layout.y); revealFocus(); }}>
           {onOpenMonth ? <Pressable accessibilityRole="button" accessibilityLabel={`Open ${title} ${month.slice(0, 4)}`}
             onPress={() => onOpenMonth(month)} style={styles.monthTitleButton}>
             <Text style={[styles.monthTitle, compact && styles.compactMonthTitle]}>{title}</Text>
