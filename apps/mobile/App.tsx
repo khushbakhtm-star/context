@@ -48,8 +48,9 @@ import type { CalendarPreferences, DeviceCalendar, SearchResult } from './src/ty
 import { dateKey, minuteIndexForDate } from './src/utils/time';
 import { normalizeCalendarZoom } from './src/utils/calendar-layout';
 import { createCalendarRefreshBurst } from './src/utils/calendar-refresh';
-import { dateSelectionMode, normalizeSelectedDates } from './src/utils/date-selection';
+import { dateSelectionMode, isDateKey, normalizeSelectedDates } from './src/utils/date-selection';
 import { visibleCalendarDates } from './src/utils/calendar-grid';
+import { calendarNavigationTarget, type CalendarNavigationTarget } from './src/utils/calendar-navigation';
 import { getAccounts } from './src/sync/accounts';
 import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
@@ -97,6 +98,7 @@ function AppController() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [dayCount, setDayCount] = useState<DayCount>(1);
   const [selectedDateKeys, setSelectedDateKeys] = useState<string[] | null>(null);
+  const [overviewMonth, setOverviewMonth] = useState<string | null>(null);
   const [datePickerOpen, setDatePickerOpen] = useState(false);
   const [calendarZoom, setCalendarZoom] = useState(1);
   const [calendarViewResetToken, setCalendarViewResetToken] = useState(0);
@@ -167,6 +169,7 @@ function AppController() {
         setDayCount(savedDayCount === 3 || savedDayCount === 7 ? savedDayCount : 1);
         const normalizedDates = normalizeSelectedDates(savedSelectedDates);
         setSelectedDateKeys(normalizedDates.length ? normalizedDates : null);
+        setOverviewMonth(null);
         if (normalizedDates.length) setActiveDate(normalizedDates[0]!);
         setCalendarZoom(normalizeCalendarZoom(savedZoom));
         setClockFormat(savedClockFormat === '24h' ? '24h' : '12h');
@@ -333,6 +336,7 @@ function AppController() {
 
   function changeDayCount(next: DayCount) {
     setSelectedDateKeys(null);
+    setOverviewMonth(null);
     setDayCount(next);
     setCalendarViewResetToken((token) => token + 1);
     changeCalendarZoom(1);
@@ -347,6 +351,7 @@ function AppController() {
     const dates = normalizeSelectedDates(value);
     if (!dates.length) return;
     setSelectedDateKeys(dates);
+    setOverviewMonth(dates[0]!.slice(0, 7) + '-01');
     setActiveDate(dates[0]!);
     setFocusRequest(null);
     setCalendarViewResetToken((token) => token + 1);
@@ -367,6 +372,23 @@ function AppController() {
   function jumpToCurrentMinute() {
     const current = new Date();
     openCalendarMinute(dateKey(current), minuteIndexForDate(current));
+  }
+
+  function shiftCalendarView(target: CalendarNavigationTarget | null) {
+    if (!target) return;
+    setActiveDate(target.activeDate);
+    setSelectedDateKeys(target.selectedDates);
+    setOverviewMonth(target.overviewMonth);
+    setFocusRequest(null);
+    setCalendarViewResetToken((token) => token + 1);
+    viewWrites.current = viewWrites.current.catch(() => undefined)
+      .then(() => setSetting('calendar.selected-date-keys', target.selectedDates)).catch(() => undefined);
+  }
+
+  function visibleOverviewMonthChanged(month: string) {
+    if (isDateKey(month) && selectedDateKeys?.some((day) => day.slice(0, 7) === month.slice(0, 7))) {
+      setOverviewMonth(month);
+    }
   }
 
   function changeCalendarZoom(next: number) {
@@ -426,6 +448,10 @@ function AppController() {
     setTab(action);
   }
 
+  const navigationState = { activeDate, dayCount, selectedDates: selectedDateKeys, overviewMonth };
+  const previousView = calendarNavigationTarget(navigationState, -1);
+  const nextView = calendarNavigationTarget(navigationState, 1);
+
   return (
     <AppearanceProvider ready={ready}>
       <ApplicationFrame
@@ -449,6 +475,8 @@ function AppController() {
             <View style={{ flex: 1 }}>
               {tab === 'today' ? <>
                 <CalendarHeader onOpenMenu={() => setMenuOpen(true)} onJumpToNow={jumpToCurrentMinute}
+                  canGoPrevious={previousView != null} canGoNext={nextView != null}
+                  onPrevious={() => shiftCalendarView(previousView)} onNext={() => shiftCalendarView(nextView)}
                   onOpenDatePicker={() => setDatePickerOpen(true)} />
                 {selectedDateKeys && dateSelectionMode(selectedDateKeys) === 'month' ? <MonthOverview
                   selectedDates={selectedDateKeys}
@@ -457,6 +485,7 @@ function AppController() {
                   dataVersion={dataVersion}
                   clockFormat={clockFormat}
                   onOpenMinute={openCalendarMinute}
+                  onVisibleMonthChange={visibleOverviewMonthChanged}
                 /> : <TodayScreen
                   activeDate={activeDate}
                   onDateChange={setActiveDate}
@@ -512,10 +541,14 @@ function AppController() {
   );
 }
 
-function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker }: {
+function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext }: {
   onOpenMenu: () => void;
   onJumpToNow: () => void;
   onOpenDatePicker: () => void;
+  canGoPrevious: boolean;
+  canGoNext: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
 }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -549,6 +582,11 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker }: {
       onPress={onOpenMenu} style={styles.menuButton}>
       <View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} />
     </Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel="Previous calendar view"
+      accessibilityState={{ disabled: !canGoPrevious }} disabled={!canGoPrevious} onPress={onPrevious}
+      style={[styles.menuButton, !canGoPrevious && styles.disabledCalendarNavigation]}>
+      <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
+    </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel={`Go to ${currentDate}, current minute`}
       accessibilityHint="Touch and hold to choose dates"
       accessibilityActions={[{ name: 'longpress', label: 'Choose dates' }]}
@@ -561,6 +599,11 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker }: {
         <Text accessible={false} allowFontScaling={false} numberOfLines={1} style={styles.calendarGlyphMonth}>{abbreviatedMonth}</Text>
         <Text accessible={false} allowFontScaling={false} style={styles.calendarGlyphDay}>{current.getDate()}</Text>
       </View>
+    </Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel="Next calendar view"
+      accessibilityState={{ disabled: !canGoNext }} disabled={!canGoNext} onPress={onNext}
+      style={[styles.menuButton, !canGoNext && styles.disabledCalendarNavigation]}>
+      <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>›</Text>
     </Pressable>
   </View>;
 }
@@ -715,6 +758,8 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   screen: { flex: 1 },
   calendarHeader: { minHeight: 44, flexDirection: 'row', alignItems: 'center', backgroundColor: colors.paper },
   calendarMenuLine: { height: 3, width: 28, marginVertical: 2.5, backgroundColor: colors.graphite },
+  calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
+  disabledCalendarNavigation: { opacity: 0.3 },
   calendarGlyph: { width: 30, height: 32, borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 4,
     alignItems: 'center', justifyContent: 'center' },
   calendarBindings: { position: 'absolute', left: 5, right: 5, top: -4, flexDirection: 'row', justifyContent: 'space-between' },

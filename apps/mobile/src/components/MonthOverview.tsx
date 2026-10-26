@@ -19,10 +19,12 @@ type Props = {
   dataVersion: number;
   clockFormat: '12h' | '24h';
   onOpenMinute: (day: string, minute: number) => void;
+  onVisibleMonthChange?: (month: string) => void;
 };
 type DayState = { items: MonthAgendaItem[]; failed: boolean };
 
-export function MonthOverview({ selectedDates, calendars, preferences, dataVersion, clockFormat, onOpenMinute }: Props) {
+export function MonthOverview({ selectedDates, calendars, preferences, dataVersion, clockFormat, onOpenMinute,
+  onVisibleMonthChange }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const daysKey = normalizeSelectedDates(selectedDates).join('|');
@@ -33,12 +35,18 @@ export function MonthOverview({ selectedDates, calendars, preferences, dataVersi
   const [retry, setRetry] = useState(0);
   const requestMonths = useRef<(months: string[]) => void>(() => {});
   const visibleMonths = useRef<string[]>([]);
+  const visibleMonthCallback = useRef(onVisibleMonthChange);
+  visibleMonthCallback.current = onVisibleMonthChange;
   const calendarKey = JSON.stringify(calendars);
   const preferenceKey = JSON.stringify(preferences.selectedCalendarIds);
   const viewability = useRef({ itemVisiblePercentThreshold: 5 }).current;
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: { item: string }[] }) => {
-    const visible = viewableItems.flatMap((item) => typeof item.item === 'string' ? [item.item] : []);
-    if (visible.length) { visibleMonths.current = visible; requestMonths.current(visible); }
+    const visible = viewableItems.flatMap((item) => typeof item.item === 'string' && isDateKey(`${item.item}-01`) ? [item.item] : []);
+    if (visible.length) {
+      visibleMonths.current = visible;
+      requestMonths.current(visible);
+      visibleMonthCallback.current?.(`${visible[0]}-01`);
+    }
   }).current;
 
   useEffect(() => {
@@ -103,7 +111,7 @@ export function MonthOverview({ selectedDates, calendars, preferences, dataVersi
       </Pressable>
       <InfoButton title="Month events" message="The overview shows the available calendar events and recorded activity blocks for your selected dates. Some sources could not be read. Retry, or check the selected calendars and account connection in Settings. Tap a day or event to open its minute cells." />
     </View> : null}
-    <FlatList data={months} keyExtractor={(month) => month} initialNumToRender={1} maxToRenderPerBatch={2} windowSize={3}
+    <FlatList key={daysKey} data={months} keyExtractor={(month) => month} initialNumToRender={1} maxToRenderPerBatch={2} windowSize={3}
       onViewableItemsChanged={onViewableItemsChanged} viewabilityConfig={viewability}
       contentContainerStyle={styles.content} renderItem={({ item: month }) => {
         const cells = monthDateCells(`${month}-01`);
