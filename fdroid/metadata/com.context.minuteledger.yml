@@ -1,4 +1,4 @@
-# Context 0.1.14/code15 source candidate; independent source-build checks passed.
+# Context 0.1.15/code16 source candidate; new independent verification is pending.
 # Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
@@ -31,10 +31,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.14
-    versionCode: 15
+  - versionName: 0.1.15
+    versionCode: 16
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: a388cc8eeba09664cd6fe0a4dc52da07ab19184f
+    commit: e34e2856d9449521560d316edb49c00d0bade5ab
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -66,32 +66,20 @@ Builds:
     output: android/app/build/outputs/apk/release/app-release-unsigned.apk
 
 MaintainerNotes: |-
-  Independent run 40384762580 passed both jobs for Context 0.1.14/code15.
-  Exact application source: a388cc8eeba09664cd6fe0a4dc52da07ab19184f.
-  Tested controller: acf7e140316ac22e32ed5aca989c5b7945cc1335.
-  All 17 metadata and 15 native checks passed; source JSON reports 0 errors,
-  0 warnings and 7 informational entries. Actual audits in each job recorded
-  106 removed inputs, 5 source patches and 21 optional Wear-source removals.
-  The inventory reviews 27 packages and 107 removable paths; one Windows-only
-  input is absent on Linux. Expo Android modules and core compile from source.
-  Print/Sharing source builds and the SDK-only calendar-color bridge remain.
-  The sole scanner exception is the hash-verified official Linux Hermes compiler.
-  Durable R8 mapping/configuration/seeds/registration evidence: 23 entries,
-  7684132 ZIP bytes, SHA-256
-  1b1735f794b7ce626699eabc9bcb4192a25d999dd90f0e15cc601dd1a70ccea7.
-  Required Print, Sharing and calendar-color modules resolve to actual DEX
-  class definitions using that exact mapping. Signed preview and public asset
-  hashes agree; apksigner v2/v3, 16 KiB alignment and certificate checks pass.
-  These checks do not establish physical phone behavior or reproducibility
-  across independent machines. Keep the build disabled pending official
-  provisioning, policy assessment, maintainer acceptance, signing and catalog
-  publication. Existing packaging request: fdroid/rfp issue 4667.
-  Historical 0.1.13 receipts remain separate in the verification documentation.
+  New independent verification of this exact source is pending. Keep the build disabled.
+  Historical 0.1.14 results do not establish this version builds or passes scans.
+  The source-input inventory reviews 27 packages, 107 exact removable inputs and
+  five source patches, including six unused Print/Sharing publications or archives.
+  All Expo Android modules and core compile from source. Optional Google Wear
+  inputs are removed by exact hashes; Android calendar-color source is retained.
+  Only the documented official Linux Hermes compiler scanner exception remains.
   The recipe pins Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, Gradle 9.4.1,
   Android 37.0/Build Tools 37.0.0, NDK 27.1.12297006 and CMake 3.22.1.
-  See apps/mobile/docs/FDROID_VERIFICATION.md for exact receipts and asset links.
+  Official server provisioning, inclusion review, signing and catalog publication
+  remain pending. Existing packaging request: fdroid/rfp issue 4667.
+  See apps/mobile/docs/FDROID_VERIFICATION.md for exact verification receipts.
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.14
-CurrentVersionCode: 15
+CurrentVersion: 0.1.15
+CurrentVersionCode: 16
