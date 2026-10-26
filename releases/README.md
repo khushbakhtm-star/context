@@ -1,13 +1,52 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
-phone 0.1.9 (build 10), published on 2026-10-26 at 03:27:45 UTC. The FOSS phone and watch remain at
+phone 0.1.11 (build 12), published on 2026-10-26 at 05:45:40 UTC. The FOSS phone and watch remain at
 0.1.8, published on 2026-10-25 at 23:54:13 UTC. Official store entries remain absent pending actual
 availability. A source tag alone, unpublished upload, review submission, or queued release must not
 add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Published 0.1.11 Wear-phone update
+
+[Download the 0.1.11 Wear-phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.11/context-0.1.11-wear-phone-preview.apk)
+from the [published release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.11), available
+since **2026-10-26 at 05:45:40 UTC**, then open it and choose **Update**. Keep Context installed to
+retain its ledger. This is the phone-only 0.1.11/code 12 update; the compatible watch 0.1.8 companion
+is unchanged. No new FOSS, watch or iOS binary is included. The verified F-Droid candidate remains 0.1.8.
+
+Gray previous/next arrows flank the calendar icon, which always shows today's date. Tap it to reach
+the current minute, or hold it to select exact dates. One to seven selected dates use minute columns;
+eight or more use a month overview showing event times and titles. **Day**, **3 days**, and **Week**
+remain directly in the main menu. The grid uses pinch zoom, without the old month popup, date-entry
+box, zoom buttons or percentage. Choose **12-hour time with AM/PM** or **24-hour time** in Settings.
+Settings and account screens use concise action labels with gray information buttons for explanations,
+while connection states, errors and review notes remain visible.
+
+The public tag resolves to exact application source
+[`0d39268f375721f4f98729100ee8ac8f79b468e8`](https://github.com/khushbakhtm-star/context/commit/0d39268f375721f4f98729100ee8ac8f79b468e8).
+TypeScript, **272 tests**, scoped source checks and review passed. The
+[unsigned Android build](https://github.com/khushbakhtm-star/context/actions/runs/40275001446) passed
+at controller `ebdd7a239d79b6fc995a37f762b6d912fdbd92fa`, with native assembly successful in 6m56s.
+Publisher signing followed locally using the existing key, after Expo's monthly Android build quota
+was exhausted. The [exact v0.1.11 tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40275968460)
+also passed at that application source.
+
+Public release **423894793**, APK asset **677156691**, matches the locally checked signed APK:
+**78,548,026 bytes**, SHA-256
+`0bf9d623ea93441cbb1629a8536dce6ce295b655ee005540dd7d56eee7497318`.
+Native package/version checks, official `apksigner` v2/v3 verification, publisher-certificate continuity
+and 16 KiB alignment checks passed. The published verification receipts also confirm the packaged
+Google/Wear configuration and required UI strings, with obsolete Today labels absent. These binary
+checks do not establish screen layout or gesture behavior; **physical 0.1.11 interface validation remains pending**.
+
+Google OAuth remains in **Testing** for approved accounts. The user confirmed Google sign-in on the
+S23 in 0.1.9 and an existing watch note reaching the phone ledger; those observations do not establish
+physical 0.1.11 UI validation or encrypted-ledger synchronization between two phones. The earlier
+0.1.10/code 11 APK was verified locally but superseded before publication; there is no public 0.1.10
+release, tag or availability entry.
 
 ## Published 0.1.9 Wear-phone update
 
@@ -29,8 +68,10 @@ v2/v3 verification, publisher-certificate continuity and 16 KiB alignment checks
 The [exact v0.1.9 tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40264191419)
 also passed at that application source.
 
-Google OAuth is configured for the publisher's approved **Testing** accounts only. Physical Google
-sign-in has not yet been confirmed. The iOS client ID is configured, but no iOS app was built.
+Google OAuth is configured for the publisher's approved **Testing** accounts only. The user confirmed
+Google sign-in on their Galaxy S23. That confirmation covers sign-in on that phone; synchronization
+of the encrypted ledger between two phones remains unverified. The iOS client ID is configured,
+but no iOS app was built.
 
 ## Install the Android preview update
 
@@ -50,11 +91,11 @@ The watch APK belongs on the watch. Follow the separate [watch setup](../apps/mo
 for wireless installation. Open the Wear-enabled phone app and explicitly enable **Settings → Paired
 watch** access. The native watch app offers a minute list, date navigation, typing/dictation and an
 offline note journal. Phone ledger changes apply when Context runs; conflicts retain both versions
-for review. Physical Galaxy Watch7 validation remains pending.
+for review. The user confirmed that a note entered on their Galaxy Watch7 reached the phone ledger.
 
 The user later confirmed the phone 0.1.7 calendar result on the S23: Check connection showed eight
 timed events, and the events then appeared in Today. This resolves that reported blank-calendar
-test. It does not establish physical 0.1.8 or paired-watch validation.
+test.
 
 The existing [Obtainium setup](ANDROID_UPDATES.md) selects only `-foss-preview.apk` phone assets.
 For a Wear-enabled phone, configure its APK filter to select only:
