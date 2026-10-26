@@ -17,7 +17,9 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
 - Hold a selected cell outside text editing to open the compact cell-action menu. Blank selections
   offer **Cut / Copy / Paste**. Text selections also offer **Clear** and formatting controls for
   **Bold**, **Italic**, **Underline**, text color, and activity fill. Available range actions depend on
-  the selection's contents; grouped minutes also offer **Ungroup**. Buttons execute with one press.
+  the selection's contents; grouped minutes also offer **Ungroup**. Menu actions use one completed
+  tap even while the grid was scrolling or the keyboard was open. You can tap another minute cell
+  without first dismissing the menu; holding or scrolling across a command does not execute it.
 - To select several minutes, tap the source cell and drag its small corner handle up or down within
   that day. The grid scrolls at its top and bottom edges. Releasing opens the cell-action menu while
   keeping the grid visible. Both endpoints are included. **AutoFill** is available when the range
@@ -45,17 +47,23 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
   the detailed editor for source-event and recurring-series controls, including ranges crossing
   midnight. Selecting or double-tapping a cell does not open an automatic color/details or range
   popup, and there is no bottom editing toolbar.
-- The top row contains the gear, previous arrow, current month/day icon, view dropdown, next arrow,
-  **Undo**, **Redo**, and **Sync**. The date icon always shows today's date; tap it to return to the
-  current minute, or hold it to choose dates. **Pick** selects individual days; **Range** selects a
+- The top row contains the three-bar menu, previous arrow, current-view calendar icon, next arrow,
+  **Undo**, **Redo**, and the two-arrow **Sync** icon. The calendar icon matches **Day**, **Week**,
+  **Month**, **Year**, or **Schedule**. Tap it once to return to now without changing that view or
+  pinch zoom: the minute grid reveals the current minute, Month/Year reveal today, and Schedule
+  positions today's heading at the top. A short delay distinguishes a single tap from a double-tap.
+  Double-tap the icon to choose **Day / Week / Month / Year / Schedule**; there is no separate
+  triangle button. Hold it to choose dates. **Pick** selects individual days; **Range** selects a
   continuous span of up to 28 days. Up to seven selected days show minute columns; larger selections
-  use a calendar overview. The dropdown offers **Day / Week / Month / Year / Schedule**.
+  use a calendar overview. Going to now clears a custom date selection so today can be displayed.
 - Pinch to zoom the minute rows and day columns. Wider columns scroll horizontally while the time
   rail remains fixed. Zoom is remembered separately on each phone. Choose **12-hour** or **24-hour**
   only in **Settings**; the minute column fits the selected time labels, such as `13:11`. Light,
   dark, and system appearance are also available in Settings.
-- The gear opens **Settings**, **Print**, **Search**, and **Dashboard**. Explanations in Settings and
-  account controls are available through their information icons. **Dashboard** shows recorded time
+- The three-bar menu opens **Dashboard**, **Print**, **Search**, and **Settings**, in that order.
+  Explanations in Settings and account controls are available through their information icons.
+  Hold **Sync** to read any synchronization error; the icon has no added information badge.
+  **Dashboard** shows recorded time
   by activity color for a day, week, month, or year, with minute/hour totals and percentages. Its
   **Recorded / Unrecorded** toggle distinguishes recorded activity from the remaining civil-minute
   slots; future slots are unrecorded too. Calendar plans alone are not recorded ledger time.

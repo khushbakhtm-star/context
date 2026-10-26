@@ -6,6 +6,77 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
+## Verified 0.1.14 FOSS source candidate
+
+[Final independent run 40384762580](https://github.com/khushbakhtm-star/context/actions/runs/40384762580)
+passed both jobs against application source `a388cc8eeba09664cd6fe0a4dc52da07ab19184f`, using
+FOSS controller `acf7e140316ac22e32ed5aca989c5b7945cc1335`. The
+[disabled tested recipe](https://github.com/khushbakhtm-star/context/blob/acf7e140316ac22e32ed5aca989c5b7945cc1335/fdroid/metadata/com.context.minuteledger.yml)
+retains that immutable source and Android code 15. Historical 0.1.13 evidence below remains
+separate; its results are not substituted for this run.
+
+All **17 metadata checks and 15 independent native checks** succeeded. The downloaded diagnostic
+archives were checked against GitHub's byte lengths and ZIP SHA-256 values, then ZIP CRC,
+source/version/code, actual check results, exact sanitation inputs and optional Wear removal.
+
+| Actual check | Observed result |
+| --- | --- |
+| Metadata lint | Exit 0 |
+| Structured source scanner | **0 errors, 0 warnings, 7 informational entries** |
+| Integrated F-Droid recipe and APK scan | Exit 0; exact 0.1.14/code15 source; 628.63 seconds |
+| Independent unsigned assembly | Exit 0; `BUILD SUCCESSFUL in 8m 55s` |
+| Independent APK identity | `com.context.minuteledger` / 0.1.14 / code 15; minimum SDK 24, target SDK 36 |
+| Unsigned signature check | Expected exit 1 |
+| Independent APK binary scanner | Exit 0 |
+| Actual source sanitation in each job | 106 removed inputs, 5 source patches, 21 exact optional Wear-source removals |
+
+The reviewed inventory still contains **27 packages and 107 removable paths**. The Windows-only
+macro executable is absent on Linux, so each actual audit records 106 removals. Print, Sharing
+and Expo Android core/modules compile from source; the SDK-only calendar-color bridge remains.
+The sole scanner exception is the documented hash-verified official Linux Hermes compiler.
+
+| Downloaded diagnostic artifact | ZIP bytes | Locally verified ZIP SHA-256 |
+| --- | ---: | --- |
+| [Metadata 12680312413](https://github.com/khushbakhtm-star/context/actions/runs/40384762580/artifacts/12680312413) | 4,481,244 | `81ac72edb6328df580e137f150e73eeeb9707ed119248d19a57d3b767dc7dff7` |
+| [Native 12680447150](https://github.com/khushbakhtm-star/context/actions/runs/40384762580/artifacts/12680447150) | 37,196,089 | `4c53a1a70c2211954b50c631999679297d652e56805dff90bfd619f110d5196e` |
+
+The public [durable build-evidence bundle](https://github.com/khushbakhtm-star/context/releases/download/v0.1.14/context-0.1.14-foss-build-evidence.zip)
+is **7,684,132 bytes**, ZIP SHA-256
+`1b1735f794b7ce626699eabc9bcb4192a25d999dd90f0e15cc601dd1a70ccea7`.
+Its 23-entry allowlist preserves 95,375,891 uncompressed bytes of actual native/integrated R8
+mapping, configuration, seeds and generated module registration, public provenance, scanner and
+sanitation receipts, and a per-file hash manifest. ZIP CRC and every manifest hash passed.
+It excludes APKs, usage/full runtime logs, credentials, personal ledger data and desktop/private
+paths. Public ephemeral GitHub runner comments remain unchanged in exact configuration bytes.
+
+The exact R8 mapping resolves the required modules to inspected DEX `class_defs`, rather than
+relying on JavaScript or DEX string presence:
+
+| Original required module | Actual mapped class definition | APK DEX |
+| --- | --- | --- |
+| `expo.modules.print.PrintModule` | `Lkz1;` | `classes.dex` |
+| `expo.modules.sharing.SharingModule` | `Ljo2;` | `classes.dex` |
+| `expo.modules.contextcalendarcolors.ContextCalendarColorsModule` | `Lqx;` | `classes.dex` |
+
+The unsigned source-built APK is **78,016,724 bytes**, SHA-256
+`d2b1c52e81763060169af114e96b0f46fab945fa4ebc9df81ab44df92b7b0a4e`.
+The published [publisher-signed FOSS preview](https://github.com/khushbakhtm-star/context/releases/download/v0.1.14/context-0.1.14-foss-preview.apk),
+asset 679215007, is **78,114,663 bytes**, SHA-256
+`64af76c4c98c45f2fe647f248f4258383ed26e117fda998aab9ab565321bda86`.
+Official `apksigner` v2/v3 verification, 16 KiB ZIP alignment, custom v2 protected-content checks,
+and certificate continuity passed. The original publisher certificate SHA-256 remains
+`44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772`.
+The signed package preserves the unsigned protected entry set and every original byte, including
+runtime `META-INF/services`; only newly generated signature files are added.
+
+The [public 0.1.14 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.14)
+points to the application source above. Actual public asset sizes/digests match the local verified
+artifacts and receipts. These independent checks establish the source-build and packaged scope;
+they do **not** establish physical phone gestures, calendar/runtime behavior, independent-machine
+byte reproducibility, official F-Droid provisioning, policy acceptance, signing or catalog listing.
+The recipe remains disabled and the existing [packaging request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667)
+remains the review route. The separate watch companion is still 0.1.8.
+
 ## Verified 0.1.13 FOSS source candidate
 
 [Final independent run 40351936739](https://github.com/khushbakhtm-star/context/actions/runs/40351936739)

@@ -5,19 +5,19 @@
 - Source: https://github.com/khushbakhtm-star/context
 - Issue tracker: https://github.com/khushbakhtm-star/context/issues
 - Releases: https://github.com/khushbakhtm-star/context/releases
-- Candidate: 0.1.8 FOSS phone (Android version code 9)
-- Immutable source: 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24
-- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.8
-- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.8/context-0.1.8-foss-preview.apk
-- Preview APK SHA-256: `b10b831c2d880921a511d5106d1b5ebb1ff6345aecbbd6ef7826520e1cd4bfb7`
-- Publication: 2026-10-25 at 23:54:13 UTC; signed FOSS APK size 77,716,460 bytes
+- Candidate: 0.1.14 FOSS phone (Android version code 15)
+- Immutable source: a388cc8eeba09664cd6fe0a4dc52da07ab19184f
+- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.14
+- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.14/context-0.1.14-foss-preview.apk
+- Preview APK SHA-256: `64af76c4c98c45f2fe647f248f4258383ed26e117fda998aab9ab565321bda86`
+- Release publication: 2026-10-26 at 19:23:20 UTC; signed FOSS APK size 78,114,663 bytes
 - License: MIT
 - Summary: Capture your day minute by minute alongside your calendars
 
 This is a new public project requesting packaging review and an inclusion-policy
-assessment. It is not an accepted F-Droid app. The 0.1.8 source tag and signed FOSS
-Android preview are public. Both cold-build verification jobs passed; the older
-0.1.0 release is not the remediated source candidate.
+assessment. It is not an accepted F-Droid app. The 0.1.14 source tag and signed FOSS
+Android preview are public. Both independent source-build verification jobs passed
+for the exact current candidate. Historical receipts remain below.
 
 ## Application and edition
 
@@ -36,9 +36,12 @@ Activity/group color choices use the 21 documented CalendarApp.Color values as a
 offline fallback plus exact imported Google API palette and label colors. This is
 not a claim to enumerate the current 24-color event picker. Historical activity
 colors remain intact; text formatting keeps its separate palette. Activity cells
-use a solid color fill with a readable foreground. First tap types inline, a second
-tap opens color/details. Holding a cell or releasing a dragged range opens compact
-floating Cut / Copy / Auto fill / Clear actions while the grid remains visible. Today's date jumps to the current minute. A measured time
+use a solid color fill with a readable foreground. A single tap selects a cell and a
+double tap edits inline, with native partial-text selection. Holding a cell after
+editing or releasing a dragged range opens compact floating clipboard, AutoFill,
+Group, Clear and formatting actions. The action overlay is outside the grid scroll
+responders. The binder single tap requests Now in the current view, a double tap
+opens view choices, and a long press opens Pick/Range date selection. A measured time
 column supports a saved 12-hour/24-hour preference. With no minute selected, **+**
 requires calendar read access and an available phone calendar explicitly checked in
 Settings; missing setup opens connection guidance without selecting calendars for
@@ -57,8 +60,9 @@ source, an explicit color-only fill preserves target notes. Group retains each n
 Cut or Copy uses a private in-app clipboard; after navigating to another date/minute,
 Paste asks for Replace confirmation if the reviewed destination is occupied. Cut
 moves both dates atomically, guards the original source and reviewed destination,
-and supports session Undo. Today/Day resets the view to one full day despite prior
-zoom. Drag endpoint mapping accounts for the captured grip offset.
+and supports session Undo. Day uses a one-day minute view; Now retains the chosen
+view and zoom and reveals today in Day/Week/Month/Year/Schedule. Drag endpoint
+mapping accounts for the captured grip offset.
 
 The Android reader uses current overlap semantics, serializes per-calendar reads,
 and preserves readable calendars when another fails. Settings' local Check connection
@@ -90,7 +94,7 @@ pairing. Physical Galaxy Watch7 validation remains pending.
 The original 0.1.0 check found 91 source errors and nine warnings. Its unsigned
 native assembly and binary scan succeeded, but that did not establish source
 compliance. The revised source selects Expo Android modules and core for source
-compilation; records 101 precisely reviewed removable binary inputs by fixed hash;
+compilation; records 107 precisely reviewed removable binary-input paths across 27 packages by fixed hash;
 and applies five narrow patches, including removal of transitive Install Referrer
 source/dependency and unused local Maven publication/repository blocks.
 
@@ -105,7 +109,29 @@ The recipe provisions hash-verified Node 24.19.0 and Gradle 9.4.1, with
 Corepack 0.36.0/pnpm 11.25.0 and OpenJDK 17. It uses system Gradle after F-Droid
 removes wrappers. Required Android SDK packages are recorded in the metadata.
 
-## Latest 0.1.8 verification
+## Latest 0.1.14 verification
+
+- Exact source `a388cc8eeba09664cd6fe0a4dc52da07ab19184f`, Android code 15, passed both jobs in [run 40384762580](https://github.com/khushbakhtm-star/context/actions/runs/40384762580), controlled by `acf7e140316ac22e32ed5aca989c5b7945cc1335`.
+- [Exact tested recipe](https://github.com/khushbakhtm-star/context/blob/acf7e140316ac22e32ed5aca989c5b7945cc1335/fdroid/metadata/com.context.minuteledger.yml) remains disabled pending official maintainer review.
+- All 17 metadata and 15 native checks succeeded: lint exit 0; source JSON **0 errors, 0 warnings, 7 informational entries**; integrated F-Droid build/APK scan exit 0 (628.63 seconds); independent assembly `BUILD SUCCESSFUL in 8m 55s`; exact package 0.1.14/code15; expected unsigned-signature exit 1; binary scan exit 0.
+- Both actual audits record **106 removals, 5 source patches and 21 exact optional Wear-source removals**. The reviewed inventory contains 107 removable paths across 27 packages; one Windows-only input is absent on Linux. Only the hash-verified official Linux Hermes compiler scanner exception remains.
+- Locally downloaded/hashed [metadata artifact 12680312413](https://github.com/khushbakhtm-star/context/actions/runs/40384762580/artifacts/12680312413): 4,481,244 bytes; ZIP SHA-256 `81ac72edb6328df580e137f150e73eeeb9707ed119248d19a57d3b767dc7dff7`. [Native artifact 12680447150](https://github.com/khushbakhtm-star/context/actions/runs/40384762580/artifacts/12680447150): 37,196,089 bytes; ZIP SHA-256 `4c53a1a70c2211954b50c631999679297d652e56805dff90bfd619f110d5196e`. ZIP CRC, exact provenance, check results and source/Wear audits passed.
+- The [durable R8 build-evidence bundle](https://github.com/khushbakhtm-star/context/releases/download/v0.1.14/context-0.1.14-foss-build-evidence.zip) is 7,684,132 bytes, SHA-256 `1b1735f794b7ce626699eabc9bcb4192a25d999dd90f0e15cc601dd1a70ccea7`. Its 23 allowlisted entries retain exact mappings/configuration/seeds/registration, public receipts and per-file hashes; CRC and every manifest hash passed. The mapped Print, Sharing and calendar-color modules resolve to actual APK DEX class definitions.
+- Unsigned source-built APK: 78,016,724 bytes, SHA-256 `d2b1c52e81763060169af114e96b0f46fab945fa4ebc9df81ab44df92b7b0a4e`. Published signed preview: 78,114,663 bytes, SHA-256 `64af76c4c98c45f2fe647f248f4258383ed26e117fda998aab9ab565321bda86`, matching the verified public asset.
+- Official `apksigner` v2/v3, 16 KiB alignment, custom protected-content checks and original publisher-certificate continuity passed. All original unsigned protected entries, including `META-INF/services`, remain byte-identical after signing.
+- [Full verification diagnostics](../apps/mobile/docs/FDROID_VERIFICATION.md) retain exact source-to-DEX details, receipt links and historical 0.1.13 results. Public GitHub preview publication is separate from official F-Droid review, server provisioning/signing and catalog listing. Physical 0.1.14 phone gestures and calendar runtime behavior are not established by these checks.
+
+## Historical 0.1.13 verification
+
+The [0.1.13 FOSS source candidate](../apps/mobile/docs/FDROID_VERIFICATION.md#verified-0113-foss-source-candidate)
+used source `4c92502370158dfd7422471d17ffff9c5e15f87f`, controller
+`9e942ea8929dca7c0031857ebc2bee3d4cf04fe4` and [run 40351936739](https://github.com/khushbakhtm-star/context/actions/runs/40351936739).
+Both jobs passed; the source scanner recorded 0 errors, 0 warnings and 7 informational entries,
+and actual audits recorded 106 removals, 5 patches and 21 Wear removals. Its public signed preview,
+R8 evidence and exact hashes remain recorded in the historical diagnostics. These are separate
+results, not evidence substituted for 0.1.14.
+
+## Historical 0.1.8 verification
 
 - Final phone/FOSS source: `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24`; final [independent CI 40245685971](https://github.com/khushbakhtm-star/context/actions/runs/40245685971) completed successfully with controller `994a269bbe1f861d9dcb318aa871a57a11efa0d5`.
 - [Exact final tested recipe](https://github.com/khushbakhtm-star/context/blob/994a269bbe1f861d9dcb318aa871a57a11efa0d5/fdroid/metadata/com.context.minuteledger.yml); the candidate remains disabled for official maintainer review.
