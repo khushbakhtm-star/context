@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.14",
-  "sourceAndroidVersionCode": 15,
-  "sourceIosBuildNumber": "15",
+  "version": "0.1.15",
+  "sourceAndroidVersionCode": 16,
+  "sourceIosBuildNumber": "16",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context 0.1.14/code15: a seven-control hamburger header and binder single-tap Now, double-tap views and long-press dates; Now keeps the chosen view and reveals today using measured Month/Year/Schedule positions. Put the current-minute line below its minute cell. Move the contextual action overlay outside the scrolling grid to prevent ancestor responders consuming the first press. Preserve inline partial-text editing, local clipboard/Undo operations, calendar color reconciliation and existing source-event permissions. Native builds, exact packaged UI markers and physical phone gestures require separate verification before publication. Published 0.1.13 Wear-phone and FOSS previews remain current; the watch companion remains 0.1.8. Public feeds and installation documents stay on 0.1.13 until verified 0.1.14 artifacts are published. Official F-Droid catalog acceptance, store review and iOS distribution remain pending."
+  "notes": "Prepare Context 0.1.15/code16 with four matching dropdown icons for Dashboard, Print, Search and Settings, and single-cell clipboard Paste across the selected minute range with text, fill and formatting. Preserve existing binder single-tap Now, double-tap view choices and long-press Pick/Range dates. The user confirmed single-press Copy/Clear after actually installing 0.1.14; this is limited human observation of that version, not general hardware validation of 0.1.15. Published 0.1.14 Wear-phone and FOSS previews remain current, and the watch companion remains 0.1.8. Range-Paste atomicity/Undo/concurrency tests, final exact source/provenance pins, packaged icons and APK signatures require verification before publication. Keep public feeds on 0.1.14 until verified 0.1.15 artifacts are published. Official F-Droid catalog acceptance, store review and iOS distribution remain pending."
 }

@@ -1,0 +1,1 @@
+Add matching menu icons for Dashboard, Print, Search and Settings. Paste one copied cell across selected minutes with its text, fill and formatting. Keep binder tap for Now, double tap for calendar views and hold for Pick/Range dates.

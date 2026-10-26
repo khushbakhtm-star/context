@@ -10,7 +10,7 @@ const ts = require('typescript');
 function screen(t) {
   const day = '2026-10-25'; let now = 10000; let hook = 0; let dirty = true; let tree;
   const slots = []; const effects = []; const timers = new Map(); let timerId = 0;
-  const calls = []; const listeners = new Set(); const rows = new Map(); const modules = new Map();
+  const calls = []; const pastePreviews = []; const listeners = new Set(); const rows = new Map(); const modules = new Map();
   let clipboard = null; let failure = null; let writeGate = null; let dismisses = 0;
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
   const react = {
@@ -50,7 +50,7 @@ function screen(t) {
     copyMinuteRange: (range) => capture('copy', range), cutMinuteRange: (range) => capture('cut', range),
     clearTextMinuteRange: async (range) => { command('clear', range); for (let minute = range.startMinute; minute <= range.endMinute; minute++) {
       const row = rows.get(`${range.dateKey}:${minute}`); if (row) { row.text = ''; drafts.rebaseCommitted([{ ...row, keepColor: true }]); } } },
-    prepareMinutePaste: async (range) => ({ ...range, token: 'preview', occupiedCount: 0 }),
+    prepareMinutePaste: async (range) => { pastePreviews.push({ ...range }); return { ...range, token: 'preview', occupiedCount: 0 }; },
     pasteMinuteRange: async (destination) => { command('paste', destination); for (let offset = 0; offset < clipboard.cells.length; offset++) {
       const source = clipboard.cells[offset]; const minuteIndex = destination.startMinute + offset;
       rows.set(`${destination.dateKey}:${minuteIndex}`, { ...source, dateKey: destination.dateKey, minuteIndex });
@@ -142,7 +142,13 @@ function screen(t) {
     now += 460; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); }
     await settle(); target.props.onTouchEnd(event()); target.props.onPress(event()); await settle(); }
   t.after(() => { for (const slot of slots) slot?.cleanup?.(); timers.clear(); });
-  return { day, calls, rows, drafts, async start() { render(); await settle(); }, tap, hold, settle,
+  return { day, calls, pastePreviews, rows, drafts, async start() { render(); await settle(); }, tap, hold, settle,
+    async selectThrough(minute) {
+      function handle(node) { if (!node || typeof node !== 'object') return null;
+        if (node.props?.accessibilityLabel === 'Drag to select minutes for Auto fill') return node;
+        for (const child of [node.props?.children].flat(Infinity)) { const found = handle(child); if (found) return found; } return null; }
+      handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
+    },
     menu: () => find(tree, 'CellActionMenu')?.props, menuPosition, menuAncestors, measureViewport,
     input: (minute = 600) => find(cell(minute), 'TextInput')?.props,
     get dismisses() { return dismisses; }, set failure(value) { failure = value; },
@@ -156,6 +162,16 @@ test('a held recorded cell dispatches whole-cell Copy, then a held destination d
   await r.tap(601); await r.hold(601); assert.equal(r.menu().canPaste, true); await r.menu().onPaste(); await r.settle();
   assert.equal(r.calls[1].action, 'paste'); assert.equal(r.calls[1].startMinute, 601); assert.equal(r.rows.get(`${r.day}:601`).text, 'Read Context answer');
   assert.equal(r.rows.get(`${r.day}:601`).categoryId, 'work'); assert.equal(r.rows.get(`${r.day}:600`).text, 'Read Context answer');
+});
+
+test('Paste forwards every selected minute to both overwrite preview and application', async (t) => {
+  const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Read and follow along', categoryId: 'work', blockId: 'note' });
+  await r.start(); await r.hold(600); await r.menu().onCopy(); await r.settle();
+  r.advance(500); await r.tap(601); await r.selectThrough(604);
+  assert.ok(r.menu()); await r.menu().onPaste(); await r.settle();
+  assert.deepEqual(r.pastePreviews, [{ dateKey: r.day, startMinute: 601, endMinute: 604 }]);
+  const applied = r.calls.find((call) => call.action === 'paste');
+  assert.equal(applied.startMinute, 601); assert.equal(applied.endMinute, 604);
 });
 
 test('Cut remains deferred until Paste and Clear flushes pending typing before applying', async (t) => {

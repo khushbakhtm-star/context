@@ -1602,7 +1602,10 @@ export function TodayScreen({
     if (!selection || !clipboard || !await prepareOptions(selection)) return;
     const token = selectionTokenRef.current;
     const generation = navigationGenerationRef.current;
-    const destination = { dateKey: selection.dateKey, startMinute: command?.range.startMinute ?? selectedRange?.startMinute ?? selection.minuteIndex };
+    const targetRange = command?.range ?? parsedRange();
+    const destination = { dateKey: selection.dateKey,
+      startMinute: targetRange?.startMinute ?? selection.minuteIndex,
+      endMinute: targetRange?.endMinute ?? selection.minuteIndex };
     let preview: Awaited<ReturnType<typeof prepareMinutePaste>> | null = null;
     const prepared = await runSpreadsheetTool(async () => { preview = await prepareMinutePaste(destination); });
     if (!prepared || !preview || !selectionStillCurrent(selection, token, generation)) return;

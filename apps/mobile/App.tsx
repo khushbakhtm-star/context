@@ -1194,18 +1194,22 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
           <ScrollView keyboardShouldPersistTaps="always" keyboardDismissMode="none">
             <Pressable accessibilityRole="button" accessibilityLabel="Open Dashboard"
               onPress={() => chooseGearAction('reports')} style={styles.viewOption}>
+              <CalendarHeaderIcon name="reports" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Dashboard</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Print displayed dates"
               onPress={() => chooseGearAction('print')} style={styles.viewOption}>
+              <CalendarHeaderIcon name="print" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Print</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Open Search"
               onPress={() => chooseGearAction('search')} style={styles.viewOption}>
+              <CalendarHeaderIcon name="search" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Search</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Open Settings"
               onPress={() => chooseGearAction('settings')} style={styles.viewOption}>
+              <CalendarHeaderIcon name="settings" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Settings</Text>
             </Pressable>
           </ScrollView>

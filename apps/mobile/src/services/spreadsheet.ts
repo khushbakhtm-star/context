@@ -47,7 +47,7 @@ type Command = { day: string; before: Promise<CellState[]>; after: CellState[];
   blockGuardsBefore?: SpreadsheetBlockGuard[]; blockGuardsAfter?: SpreadsheetBlockGuard[] };
 
 export type SpreadsheetClipboard = { mode: 'copy' | 'cut'; range: MinuteCellRange; count: number; token: string };
-export type MinutePasteDestination = { dateKey: string; startMinute: number };
+export type MinutePasteDestination = { dateKey: string; startMinute: number; endMinute?: number };
 export type MinutePastePreview = { token: string; range: MinuteCellRange; occupiedCount: number; mode: 'copy' | 'cut' };
 type ClipboardRecord = SpreadsheetClipboard & { cells: CellState[] };
 type PasteRecord = MinutePastePreview & { clipboardToken: string; before: CellState[] };
@@ -487,8 +487,13 @@ class SpreadsheetEditor {
   }
   private newToken(prefix: string) { return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`; }
   private destinationRange(destination: MinutePasteDestination, clipboard: ClipboardRecord) {
+    if (destination.endMinute !== undefined) validateMinuteCellRange({ dateKey: destination.dateKey,
+      startMinute: destination.startMinute, endMinute: destination.endMinute });
+    // A copied single cell fills a selected destination. A cut is one move,
+    // and a multi-cell snapshot keeps its original sequential shape.
+    const broadcast = clipboard.mode === 'copy' && clipboard.count === 1 && destination.endMinute !== undefined;
     return validateMinuteCellRange({ dateKey: destination.dateKey, startMinute: destination.startMinute,
-      endMinute: destination.startMinute + clipboard.count - 1 });
+      endMinute: broadcast ? destination.endMinute! : destination.startMinute + clipboard.count - 1 });
   }
   private async preparePasteInside(destination: MinutePasteDestination) {
     const clipboard = this.clipboard;
@@ -531,10 +536,11 @@ class SpreadsheetEditor {
       }
       const target = changeFor(range.dateKey);
       const blocks = new Map<string, string>();
-      for (let offset = 0; offset < clipboard.count; offset += 1) {
+      const destinationCount = range.endMinute - range.startMinute + 1;
+      for (let offset = 0; offset < destinationCount; offset += 1) {
         const minuteIndex = range.startMinute + offset;
         if (!target.before.has(minuteIndex)) target.before.set(minuteIndex, clone(preview.before[offset]!));
-        const cell = clipboard.cells[offset]!;
+        const cell = clipboard.cells[clipboard.count === 1 ? 0 : offset]!;
         const format = clone(cell.format); delete format.activityGroup;
         let entry = null;
         if (cell.entry) {
