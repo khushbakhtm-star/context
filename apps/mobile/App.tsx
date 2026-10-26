@@ -43,6 +43,7 @@ import { TodayScreen } from './src/screens/TodayScreen';
 import { DateSelectionPopup } from './src/components/DateSelectionPopup';
 import { MonthOverview } from './src/components/MonthOverview';
 import { CalendarViewIcon } from './src/components/CalendarViewIcon';
+import { CalendarHeaderIcon } from './src/components/CalendarHeaderIcon';
 import { CalendarYearScreen } from './src/screens/CalendarYearScreen';
 import { CalendarScheduleScreen } from './src/screens/CalendarScheduleScreen';
 import { AppearanceProvider, useAppTheme } from './src/appearance';
@@ -72,15 +73,6 @@ const DEFAULT_PREFERENCES: CalendarPreferences = {
   syncActuals: false,
 };
 
-const NAVIGATION_ITEMS: { id: NavigationAction; label: string }[] = [
-  { id: 'plan', label: 'Plan' },
-  { id: 'reports', label: 'Reports' },
-  { id: 'search', label: 'Search' },
-  { id: 'settings', label: 'Settings' },
-  { id: 'accounts', label: 'Calendar accounts & synchronization' },
-  { id: 'categories', label: 'Activity colors' },
-];
-
 export default function App() {
   return (
     <SafeAreaProvider initialMetrics={initialWindowMetrics}>
@@ -95,7 +87,6 @@ function AppController() {
   const [initializationError, setInitializationError] = useState<string | null>(null);
   const [initializationAttempt, setInitializationAttempt] = useState(0);
   const [tab, setTab] = useState<Tab>('today');
-  const [menuOpen, setMenuOpen] = useState(false);
   const [dayCount, setDayCount] = useState<DayCount>(1);
   const [viewMode, setViewMode] = useState<CalendarViewMode>('day');
   const [viewChanging, setViewChanging] = useState(false);
@@ -238,10 +229,7 @@ function AppController() {
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (menuOpen) {
-        setMenuOpen(false);
-        return true;
-      }
+      if (viewChangingRef.current) return true;
       if (tab !== 'today') {
         setTab('today');
         return true;
@@ -249,7 +237,7 @@ function AppController() {
       return false;
     });
     return () => subscription.remove();
-  }, [menuOpen, tab]);
+  }, [tab]);
 
   const dataChanged = useCallback(() => {
     setDataVersion((version) => version + 1);
@@ -359,17 +347,28 @@ function AppController() {
       }).catch(() => undefined);
   }
 
-  async function changeViewMode(next: CalendarViewMode, anchor = activeDate) {
+  async function transitionFromCalendar(change: () => void, failureTitle: string) {
     if (viewChangingRef.current) return;
     viewChangingRef.current = true;
     setViewChanging(true);
     Keyboard.dismiss();
     try {
-      // A view change can unmount the minute editor. Keep its draft in place if saving fails.
+      // Navigation can unmount the minute editor. Keep its draft in place if saving fails.
       await flushInlineMinutes();
       if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
-        throw new Error('Your current minute could not be saved. Try again before changing views.');
+        throw new Error('Your current minute could not be saved. Try again.');
       }
+      change();
+    } catch (error) {
+      Alert.alert(failureTitle, error instanceof Error ? error.message : 'Save your current minute and try again.');
+    } finally {
+      viewChangingRef.current = false;
+      setViewChanging(false);
+    }
+  }
+
+  function changeViewMode(next: CalendarViewMode, anchor = activeDate) {
+    return transitionFromCalendar(() => {
       setViewMode(next);
       setActiveDate(anchor);
       setDayCount(next === 'week' ? 7 : next === 'three-days' ? 3 : 1);
@@ -384,12 +383,7 @@ function AppController() {
         await setSetting('calendar.day-count', next === 'week' ? 7 : next === 'three-days' ? 3 : 1);
         await setSetting('calendar.view-mode', next);
       }).catch(() => undefined);
-    } catch (error) {
-      Alert.alert('Could not change view', error instanceof Error ? error.message : 'Save your current minute and try again.');
-    } finally {
-      viewChangingRef.current = false;
-      setViewChanging(false);
-    }
+    }, 'Could not change view');
   }
 
   function chooseDates(value: string[]) {
@@ -484,13 +478,12 @@ function AppController() {
   }
 
   function navigate(action: NavigationAction) {
-    setMenuOpen(false);
-    if (action === 'plan') {
-      setTab('today');
-      void createConnectedPlan();
-      return;
-    }
-    setTab(action);
+    return transitionFromCalendar(() => {
+      if (action === 'plan') {
+        setTab('today');
+        void createConnectedPlan();
+      } else setTab(action);
+    }, action === 'plan' ? 'Could not open calendar' : 'Could not open screen');
   }
 
   const navigationState = { activeDate, mode: viewMode, selectedDates: selectedDateKeys, overviewMonth };
@@ -505,9 +498,6 @@ function AppController() {
       <ApplicationFrame
         ready={ready}
         tab={tab}
-        menuOpen={menuOpen}
-        onMenuChange={setMenuOpen}
-        onNavigate={navigate}
         onReturnToCalendar={() => setTab('today')}
       >
         {!ready ? (
@@ -520,7 +510,8 @@ function AppController() {
             <ReleaseUpdateNotice updates={releaseUpdates} />
             <View style={{ flex: 1 }} pointerEvents={viewChanging ? 'none' : 'auto'}>
               {tab === 'today' ? <>
-                <CalendarHeader onOpenMenu={() => setMenuOpen(true)} onJumpToNow={jumpToCurrentMinute}
+                <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void navigate('search')}
+                  onOpenReports={() => void navigate('reports')} onJumpToNow={jumpToCurrentMinute}
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
                   onPrevious={() => shiftCalendarView(previousView)} onNext={() => shiftCalendarView(nextView)}
@@ -548,7 +539,7 @@ function AppController() {
                   focusRequest={focusRequest}
                   onFocusConsumed={consumeFocus}
                   onDataChanged={dataChanged}
-                  onOpenSettings={() => setTab('settings')}
+                  onOpenSettings={() => void navigate('settings')}
                   dayCount={dayCount}
                   selectedDates={selectedDateKeys}
                   dateSelectionOpen={datePickerOpen}
@@ -557,7 +548,7 @@ function AppController() {
                   viewResetToken={calendarViewResetToken}
                   onZoomChange={changeCalendarZoom}
                   clockFormat={clockFormat}
-                  onCreatePlan={() => navigate('plan')}
+                  onCreatePlan={() => void navigate('plan')}
                 />
                 }
               </> : null}
@@ -602,9 +593,11 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
   viewMode, viewChanging, onViewModeChange }: {
-  onOpenMenu: () => void;
+  onOpenSettings: () => void;
+  onOpenSearch: () => void;
+  onOpenReports: () => void;
   onJumpToNow: () => void;
   onOpenDatePicker: () => void;
   canGoPrevious: boolean;
@@ -627,6 +620,10 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
   const [viewMenuRight, setViewMenuRight] = useState(8);
   const viewMenuAnchor = useRef<ComponentRef<typeof View>>(null);
   const { width, height } = useWindowDimensions();
+  const [availableWidth, setAvailableWidth] = useState(width);
+  const controlWidth = Math.max(40, Math.min(44, availableWidth / 9));
+  const controlStyle = [styles.menuButton, { width: controlWidth }];
+  const navigationBusy = viewChanging || historyPending || history.busy;
 
   useEffect(() => { setViewMenuOpen(false); }, [width]);
 
@@ -674,9 +671,12 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
   }, []);
 
   const currentDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(current);
-  const openPicker = () => { setViewMenuOpen(false); Keyboard.dismiss(); onOpenDatePicker(); };
+  const openPicker = () => {
+    if (navigationBusy || historyOperation.current) return;
+    setViewMenuOpen(false); Keyboard.dismiss(); onOpenDatePicker();
+  };
   const openViews = () => {
-    if (viewChanging) return;
+    if (navigationBusy || historyOperation.current) return;
     Keyboard.dismiss();
     viewMenuAnchor.current?.measureInWindow((x, y, anchorWidth, anchorHeight) => {
       setViewMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 304)));
@@ -685,53 +685,67 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
     });
   };
 
-  return <><View style={styles.calendarHeader}>
-    <Pressable accessibilityRole="button" accessibilityLabel="Undo Context edit"
-      accessibilityState={{ disabled: !history.canUndo || history.busy || historyPending || viewChanging }}
-      disabled={!history.canUndo || history.busy || historyPending || viewChanging} onPress={() => void changeHistory('undo')}
-      style={[styles.menuButton, (!history.canUndo || history.busy || historyPending || viewChanging) && styles.disabledCalendarNavigation]}>
-      <Text allowFontScaling={false} style={styles.historyArrow}>↶</Text>
-    </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
-      accessibilityState={{ disabled: !history.canRedo || history.busy || historyPending || viewChanging }}
-      disabled={!history.canRedo || history.busy || historyPending || viewChanging} onPress={() => void changeHistory('redo')}
-      style={[styles.menuButton, (!history.canRedo || history.busy || historyPending || viewChanging) && styles.disabledCalendarNavigation]}>
-      <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
-    </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel="Open navigation menu"
-      disabled={viewChanging} accessibilityState={{ disabled: viewChanging }}
-      onPress={() => { setViewMenuOpen(false); onOpenMenu(); }} style={styles.menuButton}>
-      <View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} />
+  return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
+    contentContainerStyle={styles.calendarHeaderContent} scrollEnabled={availableWidth < controlWidth * 9 - 0.5}
+    onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}>
+    <View style={[styles.calendarHeader, { minWidth: controlWidth * 9 }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel="Open Settings"
+      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
+      onPress={onOpenSettings} style={controlStyle}>
+      <CalendarHeaderIcon name="settings" />
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Previous calendar view"
-      accessibilityState={{ disabled: !canGoPrevious || viewChanging }} disabled={!canGoPrevious || viewChanging} onPress={onPrevious}
-      style={[styles.menuButton, (!canGoPrevious || viewChanging) && styles.disabledCalendarNavigation]}>
+      accessibilityState={{ disabled: !canGoPrevious || navigationBusy }} disabled={!canGoPrevious || navigationBusy} onPress={onPrevious}
+      style={[controlStyle, (!canGoPrevious || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel={`Go to ${currentDate}, current minute`}
-      disabled={viewChanging} accessibilityState={{ disabled: viewChanging }}
+      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
       accessibilityHint="Touch and hold to choose dates"
       accessibilityActions={[{ name: 'longpress', label: 'Choose dates' }]}
       onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') { held.current = true; openPicker(); } }}
       onPressIn={() => { held.current = false; }}
       onLongPress={() => { held.current = true; openPicker(); }} delayLongPress={450}
-      onPress={() => { if (!held.current) onJumpToNow(); held.current = false; }} style={styles.menuButton}>
+      onPress={() => { if (!held.current) onJumpToNow(); held.current = false; }} style={controlStyle}>
       <CalendarViewIcon mode="day" currentDate={current} />
     </Pressable>
     <View ref={viewMenuAnchor} collapsable={false}>
       <Pressable accessibilityRole="button" accessibilityLabel="Choose calendar view"
-        accessibilityState={{ expanded: viewMenuOpen, disabled: viewChanging }} disabled={viewChanging}
-        onPress={openViews} style={styles.menuButton}>
+        accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy }} disabled={navigationBusy}
+        onPress={openViews} style={controlStyle}>
         {viewChanging ? <ActivityIndicator size="small" color={colors.graphite} /> :
           <Text allowFontScaling={false} style={styles.viewDropdownArrow}>▼</Text>}
       </Pressable>
     </View>
     <Pressable accessibilityRole="button" accessibilityLabel="Next calendar view"
-      accessibilityState={{ disabled: !canGoNext || viewChanging }} disabled={!canGoNext || viewChanging} onPress={onNext}
-      style={[styles.menuButton, (!canGoNext || viewChanging) && styles.disabledCalendarNavigation]}>
+      accessibilityState={{ disabled: !canGoNext || navigationBusy }} disabled={!canGoNext || navigationBusy} onPress={onNext}
+      style={[controlStyle, (!canGoNext || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>›</Text>
     </Pressable>
-  </View>
+    <Pressable accessibilityRole="button" accessibilityLabel="Open Search"
+      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
+      onPress={onOpenSearch} style={controlStyle}>
+      <CalendarHeaderIcon name="search" />
+    </Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel="Undo Context edit"
+      accessibilityState={{ disabled: !history.canUndo || navigationBusy }}
+      disabled={!history.canUndo || navigationBusy} onPress={() => void changeHistory('undo')}
+      style={[controlStyle, (!history.canUndo || navigationBusy) && styles.disabledCalendarNavigation]}>
+      <Text allowFontScaling={false} style={styles.historyArrow}>↶</Text>
+    </Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
+      accessibilityState={{ disabled: !history.canRedo || navigationBusy }}
+      disabled={!history.canRedo || navigationBusy} onPress={() => void changeHistory('redo')}
+      style={[controlStyle, (!history.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
+      <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
+    </Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel="Open Reports"
+      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
+      onPress={onOpenReports} style={controlStyle}>
+      <CalendarHeaderIcon name="reports" />
+    </Pressable>
+    </View>
+  </ScrollView>
     <Modal visible={viewMenuOpen} transparent animationType="fade" statusBarTranslucent navigationBarTranslucent
       onRequestClose={() => setViewMenuOpen(false)}>
       <View style={styles.viewMenuBackdrop}>
@@ -761,24 +775,20 @@ function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker, canGoPrevio
 }
 
 const SCREEN_TITLES: Record<Tab, string> = {
-  today: 'Today', reports: 'Reports', search: 'Search', settings: 'Settings',
+  today: 'Day', reports: 'Reports', search: 'Search', settings: 'Settings',
   accounts: 'Calendar accounts', categories: 'Activity colors',
 };
 
 function ApplicationFrame({
-  ready, tab, menuOpen, onMenuChange, onNavigate, onReturnToCalendar, children,
+  ready, tab, onReturnToCalendar, children,
 }: {
   ready: boolean;
   tab: Tab;
-  menuOpen: boolean;
-  onMenuChange: (open: boolean) => void;
-  onNavigate: (action: NavigationAction) => void;
   onReturnToCalendar: () => void;
   children: ReactNode;
 }) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const { width } = useWindowDimensions();
 
   useEffect(() => {
     void SystemUI.setBackgroundColorAsync(colors.paper).catch(() => undefined);
@@ -791,21 +801,9 @@ function ApplicationFrame({
         <AndroidNavigationBar style={resolvedMode === 'dark' ? 'light' : 'dark'} />
       ) : null}
       <SafeAreaView edges={['top', 'right', 'bottom', 'left']} style={styles.safeArea}>
-        <View
-          style={styles.screen}
-          importantForAccessibility={menuOpen ? 'no-hide-descendants' : 'auto'}
-        >
+        <View style={styles.screen}>
           {ready && tab !== 'today' ? (
             <View style={styles.screenHeader}>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Open menu"
-                hitSlop={4}
-                onPress={() => onMenuChange(true)}
-                style={styles.menuButton}
-              >
-                <Text style={styles.menuIcon}>☰</Text>
-              </Pressable>
               <Text style={styles.screenTitle}>{SCREEN_TITLES[tab]}</Text>
               <Pressable
                 accessibilityRole="button"
@@ -821,58 +819,6 @@ function ApplicationFrame({
         </View>
       </SafeAreaView>
 
-      <Modal
-        visible={ready && menuOpen}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        navigationBarTranslucent
-        onRequestClose={() => onMenuChange(false)}
-      >
-        <View style={styles.drawerBackdrop}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Close menu"
-            onPress={() => onMenuChange(false)}
-            style={StyleSheet.absoluteFill}
-          />
-          <SafeAreaView
-            accessibilityViewIsModal
-            edges={['top', 'bottom', 'left']}
-            style={[styles.drawer, { width: Math.min(width * 0.86, 360) }]}
-          >
-            <View style={styles.drawerHeading}>
-              <Text style={styles.drawerTitle}>Menu</Text>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Close menu"
-                onPress={() => onMenuChange(false)}
-                style={styles.menuButton}
-              >
-                <Text style={styles.closeIcon}>×</Text>
-              </Pressable>
-            </View>
-            <ScrollView contentContainerStyle={styles.drawerItems}>
-              {NAVIGATION_ITEMS.map((item) => {
-                const selected = item.id === tab;
-                return (
-                  <Pressable
-                    key={item.id}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected }}
-                    onPress={() => onNavigate(item.id)}
-                    style={[styles.drawerItem, selected && styles.drawerItemSelected]}
-                  >
-                    <Text style={[styles.drawerItemText, selected && styles.drawerItemTextSelected]}>
-                      {item.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-          </SafeAreaView>
-        </View>
-      </Modal>
     </>
   );
 }
@@ -904,8 +850,10 @@ function LoadingState({ error, onRetry }: { error: string | null; onRetry: () =>
 const createStyles = (colors: AppColors) => StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.paper },
   screen: { flex: 1 },
-  calendarHeader: { minHeight: 44, flexDirection: 'row', alignItems: 'center', backgroundColor: colors.paper },
-  calendarMenuLine: { height: 3, width: 28, marginVertical: 2.5, backgroundColor: colors.graphite },
+  calendarHeaderScroll: { height: 44, flexGrow: 0, flexShrink: 0, backgroundColor: colors.paper },
+  calendarHeaderContent: { flexGrow: 1 },
+  calendarHeader: { minHeight: 44, flexGrow: 1, flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', backgroundColor: colors.paper },
   calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
   historyArrow: { color: colors.graphite, fontSize: 27, lineHeight: 34 },
   viewDropdownArrow: { color: colors.graphite, fontSize: 12, lineHeight: 20 },
@@ -924,21 +872,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     borderBottomColor: colors.hairline, backgroundColor: colors.paper,
   },
   menuButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  menuIcon: { color: colors.ink, fontSize: 28, lineHeight: 32 },
   screenTitle: { flex: 1, marginLeft: 8, color: colors.ink, fontSize: 17, fontWeight: '600' },
   backButton: { minHeight: 44, paddingHorizontal: 10, justifyContent: 'center' },
   backText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
-  drawerBackdrop: { flex: 1, backgroundColor: colors.scrim },
-  drawer: { height: '100%', backgroundColor: colors.paper },
-  drawerHeading: { minHeight: 60, flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'space-between', paddingHorizontal: 18 },
-  drawerTitle: { color: colors.ink, fontSize: 22, fontWeight: '600' },
-  closeIcon: { color: colors.muted, fontSize: 30, lineHeight: 34 },
-  drawerItems: { paddingHorizontal: 12, paddingBottom: 20, gap: 4 },
-  drawerItem: { minHeight: 52, paddingHorizontal: 14, justifyContent: 'center', borderRadius: 10 },
-  drawerItemSelected: { backgroundColor: colors.panel },
-  drawerItemText: { color: colors.graphite, fontSize: 15 },
-  drawerItemTextSelected: { color: colors.ink, fontWeight: '700' },
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.paper },
   loadingText: { marginTop: 14, color: colors.muted, fontSize: 13 },
   errorPanel: { width: '82%', maxWidth: 360, alignItems: 'center' },

@@ -8,5 +8,5 @@
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare contextual spreadsheet menus, text-only Clear, header Undo/Redo, activity moves and partial Ungroup, plus a grayscale calendar-view dropdown with Week, Month, Year and Schedule. Existing calendar-write consent and minute notes are preserved. The first 0.1.12 build was superseded before publication to include the new calendar views. Native 0.1.12 and physical phone interaction checks remain pending. Published phone 0.1.11 and verified F-Droid/watch 0.1.8 remain their actual releases until a new verified APK is public. Google OAuth Testing and official store/F-Droid acceptance remain pending."
+  "notes": "Prepare contextual spreadsheet menus, text-only Clear, activity moves and partial Ungroup, plus a grayscale Day/Week/Month/Year/Schedule dropdown. Replace the navigation menu with direct Settings, date navigation, view picker, Search, Undo, Redo and Reports icons. Existing calendar-write consent and minute notes are preserved. Earlier 0.1.12 builds were superseded before publication to include the latest navigation requests. Native 0.1.12 and physical phone interaction checks remain pending. Published phone 0.1.11 and verified F-Droid/watch 0.1.8 remain actual releases until a new verified APK is public. Google OAuth Testing and official store/F-Droid acceptance remain pending."
 }
