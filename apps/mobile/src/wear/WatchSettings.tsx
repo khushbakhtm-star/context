@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAppTheme } from '../appearance';
+import { InfoButton } from '../components/InfoButton';
 import type { AppColors } from '../theme';
 import { formatDayHeading, minuteLabel } from '../utils/time';
 import { drainWearInbox, getWearState, refreshWearStatus, resolveWearConflict, setWearEnabled,
@@ -34,14 +35,17 @@ export function WatchSettings() {
   }
   return <View style={styles.card}>
     <View style={styles.heading}>
-      <Text style={styles.title}>Paired watch</Text>
+      <View style={styles.labelRow}>
+        <Text style={styles.title}>Paired watch</Text>
+        <InfoButton title="Paired watch" message={state.available
+          ? 'Allow a paired Wear OS watch to read requested days and record minute notes. This starts off. Keep Context open on the phone to synchronize; notes remain saved on the watch while waiting.'
+          : 'Watch connection is available in the Wear-enabled Android edition of Context.'} />
+      </View>
       {state.available ? <Switch accessibilityLabel="Allow paired watch access to Context"
         value={state.enabled} disabled={busy} onValueChange={(enabled) => void run(() => setWearEnabled(enabled))}
         trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }} thumbColor={colors.switchThumb} /> : null}
     </View>
-    <Text style={styles.body}>{state.available
-      ? 'Allow a paired Wear OS watch to read requested days and record minute notes. This starts off. Keep Context open on the phone to synchronize; notes remain saved on the watch while waiting.'
-      : 'Watch connection is available in the Wear-enabled Android edition of Context.'}</Text>
+    {!state.available ? <Text style={styles.body}>Unavailable in this edition.</Text> : null}
     {state.available ? <>
       <Text style={styles.body}>{state.enabled
         ? `${state.connectedNodeCount ? 'Paired watch connected' : 'Waiting for the paired watch'} · ${state.pendingCount} in the phone inbox`
@@ -62,7 +66,11 @@ export function WatchSettings() {
     </> : null}
     <Modal visible={Boolean(review)} animationType="slide" onRequestClose={() => setReview(null)}>
       <SafeAreaView style={styles.review}>
-        <View style={styles.heading}><Text style={styles.title}>Review watch note</Text>
+        <View style={styles.heading}>
+          <View style={styles.labelRow}>
+            <Text style={styles.title}>Review watch note</Text>
+            <InfoButton title="Review watch note" message="Choose the note to keep, or append the watch note to the phone note. A newer phone edit requires another review." />
+          </View>
           <Pressable accessibilityRole="button" accessibilityLabel="Close watch note review" onPress={() => setReview(null)} style={styles.button}>
             <Text style={styles.buttonText}>×</Text>
           </Pressable></View>
@@ -72,7 +80,6 @@ export function WatchSettings() {
             <Text style={styles.reviewTitle}>Phone note</Text><Text selectable style={styles.note}>{review.phone.text || 'Blank'}</Text>
             <Text style={styles.reviewTitle}>Watch note</Text><Text selectable style={styles.note}>{review.watchText || 'Blank'}</Text>
           </ScrollView>
-          <Text style={styles.body}>Choose the note to keep, or append the watch note to the phone note. A newer phone edit requires another review.</Text>
           {(['phone', 'append', 'watch'] as const).map((choice) => <Pressable key={choice} accessibilityRole="button"
             disabled={busy || !state.enabled} onPress={() => void resolve(choice)} style={styles.button}>
             <Text style={styles.buttonText}>{choice === 'phone' ? 'Keep phone note' : choice === 'append' ? 'Append watch note' : 'Use watch note'}</Text>
@@ -85,7 +92,8 @@ export function WatchSettings() {
 const createStyles = (colors: AppColors) => StyleSheet.create({
   card: { marginTop: 20, padding: 16, backgroundColor: colors.panel, borderColor: colors.hairline, borderWidth: 1, borderRadius: 14 },
   heading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  title: { color: colors.ink, fontSize: 18, fontWeight: '600', flex: 1 },
+  labelRow: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  title: { color: colors.ink, fontSize: 18, fontWeight: '600', flexShrink: 1 },
   body: { marginTop: 8, color: colors.muted, fontSize: 13, lineHeight: 20 },
   button: { padding: 12, marginTop: 10, minHeight: 44, borderWidth: 1, borderColor: colors.hairline, borderRadius: 8 },
   buttonText: { color: colors.ink, fontSize: 14, fontWeight: '600' },

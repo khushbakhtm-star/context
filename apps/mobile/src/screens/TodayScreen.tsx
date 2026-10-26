@@ -31,7 +31,7 @@ import { linkActualsToAccounts, loadAccountPlans, synchronizeAccounts } from '..
 import type { CalendarPreferences, DeviceCalendar, MinuteEntry, PlannedEvent } from '../types';
 import {
   calendarEntriesAreCurrent, calendarLoadIsCurrent, calendarSelectionIsCurrent, indexCalendarDay,
-  loadCalendarMinuteSelection, parseCalendarDateInput, visibleCalendarDates,
+  loadCalendarMinuteSelection, visibleCalendarDates,
   type CalendarDayCount, type CalendarMinuteSelection,
 } from '../utils/calendar-grid';
 import {
@@ -39,7 +39,6 @@ import {
 } from '../utils/time';
 
 const MINUTE_ITEMS = Array.from({ length: MINUTES_PER_DAY }, (_, index) => index);
-const DAY_COUNTS: CalendarDayCount[] = [1, 3, 7];
 
 type FocusRequest = { dateKey: string; minuteIndex: number; token: number; openEditor?: boolean } | null;
 type DayData = { entries: MinuteEntry[]; plans: PlannedEvent[]; calendarReadError: boolean;
@@ -61,7 +60,6 @@ type Props = {
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
   clockFormat?: '12h' | '24h';
-  onClockFormatChange?: (value: '12h' | '24h') => void;
   onCreatePlan?: () => void;
   viewResetToken?: number;
 };
@@ -69,7 +67,7 @@ type Props = {
 export function TodayScreen({
   activeDate, onDateChange, calendars, preferences, dataVersion, focusRequest,
   onFocusConsumed, onDataChanged, onOpenSettings, dayCount = 1, onDayCountChange, onOpenMenu,
-  zoom = 1, onZoomChange, clockFormat = '12h', onClockFormatChange, onCreatePlan, viewResetToken = 0,
+  zoom = 1, onZoomChange, clockFormat = '12h', onCreatePlan, viewResetToken = 0,
 }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -189,10 +187,6 @@ export function TodayScreen({
   const [accountWarning, setAccountWarning] = useState<string | null>(null);
   const [inlineLinkWarning, setInlineLinkWarning] = useState(false);
   const [now, setNow] = useState(() => new Date());
-  const [modeMenuOpen, setModeMenuOpen] = useState(false);
-  const [dateInputOpen, setDateInputOpen] = useState(false);
-  const [dateInput, setDateInput] = useState('');
-  const [dateInputError, setDateInputError] = useState(false);
   const dayDataRef = useRef(dayData);
   const editorRef = useRef(editor);
   const clockDayRef = useRef(dateKey(now));
@@ -680,12 +674,12 @@ export function TodayScreen({
     const pending = pendingRolloverRef.current;
     if (!pending) return;
     if (activeDate !== pending.from) { pendingRolloverRef.current = null; return; }
-    // Follow the current day after midnight, but finish any dated draft or date selection first.
-    if (!editor && !inlineSelection && !dateInputOpen) {
+    // Follow the current day after midnight, but finish any dated draft first.
+    if (!editor && !inlineSelection) {
       pendingRolloverRef.current = null;
       onDateChange(pending.to);
     }
-  }, [activeDate, today, editor, inlineSelection, dateInputOpen, onDateChange]);
+  }, [activeDate, today, editor, inlineSelection, onDateChange]);
 
   const jumpToMinute = useCallback((minute: number) => {
     const generation = navigationGenerationRef.current;
@@ -1004,14 +998,6 @@ export function TodayScreen({
     } catch { setActionError('The calendar plan could not be opened.'); }
   }
 
-  function goToEnteredDate() {
-    const next = parseCalendarDateInput(dateInput);
-    if (!next) { setDateInputError(true); return; }
-    setDateInputError(false);
-    setDateInputOpen(false);
-    onDateChange(next);
-  }
-
   const monthFormat = new Intl.DateTimeFormat(undefined, { month: 'long' });
   const monthTitle = monthFormat.format(parseDateKey(activeDate));
   const notice = (inlineError ? 'A minute could not be saved. Tap to retry; your draft is kept.' : null) ?? actionError ??
@@ -1215,7 +1201,7 @@ export function TodayScreen({
     const selection = inlineSelectionRef.current;
     if (selection) inlineMinuteDrafts.close(inlineMinuteKey(selection.dateKey, selection.minuteIndex));
     setInlineSelection(null); setCellMenuOpen(false); setColorPanelOpen(false); setRangePanelOpen(false); setRangeSelecting(false);
-    setModeMenuOpen(false); setDateInputOpen(false); inlineTapRef.current = null;
+    inlineTapRef.current = null;
     inputTouchRef.current = null; suppressCellPressRef.current = null;
     Keyboard.dismiss(); setNow(current);
     revealInlineMinute(minuteIndexForDate(current), day);
@@ -1224,12 +1210,6 @@ export function TodayScreen({
   function formatSelection(patch: Partial<CellFormat>) {
     const range = parsedRange();
     if (range) void runSpreadsheetTool(() => applyCellFormat(range, patch));
-  }
-
-  function stepZoom(amount: number) {
-    const next = normalizeCalendarZoom(zoomRef.current + amount);
-    applyLiveZoom(next, captureZoomAnchor());
-    onZoomChangeRef.current?.(next);
   }
 
   return (
@@ -1253,13 +1233,9 @@ export function TodayScreen({
                 onPress={onOpenMenu ?? onOpenSettings} style={styles.menuButton}>
                 <View style={styles.menuLine} /><View style={styles.menuLine} /><View style={styles.menuLine} />
               </Pressable>
-              <Pressable accessibilityRole="button" accessibilityLabel="Calendar date, view and zoom"
-                accessibilityState={{ expanded: modeMenuOpen }}
-                onPress={() => { const open = !modeMenuOpen; setDateInput(activeDate); setDateInputError(false);
-                  setColorPanelOpen(false); setRangePanelOpen(false); setRangeSelecting(false); setDateInputOpen(open); setModeMenuOpen(open); }}
-                style={styles.monthButton}>
+              <View style={styles.monthHeading}>
                 <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.65} style={styles.monthTitle}>{monthTitle}</Text>
-              </Pressable>
+              </View>
           </Animated.View>
           <View style={styles.dateHeader}>
             <Animated.View style={[styles.headerRail, { transform: [{ translateX: horizontalOffset }] }]} />
@@ -1284,60 +1260,6 @@ export function TodayScreen({
           </View>
           <Animated.View style={[styles.floatingControls, { width: gridLayout.viewportWidth,
             transform: [{ translateX: horizontalOffset }] }]}>
-
-      {modeMenuOpen ? (
-        <View>
-        <View style={styles.modeChoices}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Previous dates"
-            onPress={() => onDateChange(dateKey(addDays(activeDate, -dayCount)))} style={styles.dateArrow}>
-            <Text style={styles.arrow}>‹</Text>
-          </Pressable>
-          {DAY_COUNTS.map((count) => (
-            <Pressable key={count} accessibilityRole="radio" accessibilityState={{ checked: count === dayCount }}
-              onPress={() => { onDayCountChange?.(count); setModeMenuOpen(false); setDateInputOpen(false); }}
-              style={[styles.modeChoice, count === dayCount && styles.selectedModeChoice]}>
-              <Text style={[styles.modeChoiceText, count === dayCount && styles.selectedModeText]}>
-                {count === 1 ? 'Day' : count + ' days'}
-              </Text>
-            </Pressable>
-          ))}
-          <Pressable accessibilityRole="button" accessibilityLabel="Next dates"
-            onPress={() => onDateChange(dateKey(addDays(activeDate, dayCount)))} style={styles.dateArrow}>
-            <Text style={styles.arrow}>›</Text>
-          </Pressable>
-        </View>
-        <View style={styles.zoomChoices}>
-          <Text style={styles.zoomLabel}>Zoom</Text>
-          <Pressable accessibilityRole="button" accessibilityLabel="Zoom out minute grid" disabled={liveZoom <= 0.5}
-            onPress={() => stepZoom(-0.1)} style={styles.zoomButton}><Text style={styles.zoomButtonText}>−</Text></Pressable>
-          <Text accessibilityLiveRegion="polite" style={styles.zoomLabel}>{Math.round(liveZoom * 100)}%</Text>
-          <Pressable accessibilityRole="button" accessibilityLabel="Zoom in minute grid" disabled={liveZoom >= 2.5}
-            onPress={() => stepZoom(0.1)} style={styles.zoomButton}><Text style={styles.zoomButtonText}>+</Text></Pressable>
-        </View>
-        <View style={styles.clockChoices}>
-          <Text style={styles.zoomLabel}>Time</Text>
-          {(['12h', '24h'] as const).map((value) => <Pressable key={value} accessibilityRole="radio"
-            accessibilityState={{ checked: clockFormat === value }} disabled={!onClockFormatChange}
-            onPress={() => onClockFormatChange?.(value)} style={[styles.modeChoice, clockFormat === value && styles.selectedModeChoice]}>
-            <Text style={[styles.modeChoiceText, clockFormat === value && styles.selectedModeText]}>
-              {value === '12h' ? '12-hour' : '24-hour'}
-            </Text>
-          </Pressable>)}
-        </View>
-        </View>
-      ) : null}
-
-      {dateInputOpen ? (
-        <View style={styles.dateJump}>
-          <TextInput value={dateInput} onChangeText={setDateInput}
-            onSubmitEditing={goToEnteredDate} returnKeyType="go" accessibilityLabel="Go to date"
-            placeholder="MM/DD/YYYY" placeholderTextColor={colors.muted} style={styles.dateInput} />
-          <Pressable accessibilityRole="button" onPress={goToEnteredDate} style={styles.goButton}>
-            <Text style={styles.goText}>Go</Text>
-          </Pressable>
-          {dateInputError ? <Text style={styles.dateError}>Enter a valid date.</Text> : null}
-        </View>
-      ) : null}
 
       {spreadsheetState.clipboard ? <View style={styles.selectionPrompt}>
         <Text style={styles.selectionPromptText}>{spreadsheetState.clipboard.mode === 'cut' ? 'Cut' : 'Copied'} · {spreadsheetState.clipboard.count} {spreadsheetState.clipboard.count === 1 ? 'minute' : 'minutes'} · Tap a destination to paste</Text>
@@ -1748,30 +1670,9 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     gridContent: { height: '100%', backgroundColor: grid },
     topHeader: { height: 44, flexDirection: 'row', alignItems: 'center', zIndex: 22, backgroundColor: colors.paper },
     headerRail: { width: railWidth, height: 66, zIndex: 20, backgroundColor: colors.paper },
-    monthButton: { flex: 1, minHeight: 44, justifyContent: 'center', paddingHorizontal: 7 },
+    monthHeading: { flex: 1, minHeight: 44, justifyContent: 'center', paddingHorizontal: 7 },
     monthTitle: { color: colors.ink, fontSize: 18, fontWeight: '400' },
-    railControls: { flexDirection: 'row', alignItems: 'center' },
-    zoomChoices: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingBottom: 3 },
-    clockChoices: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingBottom: 6 },
-    zoomLabel: { color: colors.graphite, fontSize: 12, minWidth: 42, textAlign: 'center' },
-    zoomButton: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
-    zoomButtonText: { color: colors.ink, fontSize: 24 },
-    dateArrow: { width: 32, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
-    arrow: { color: colors.graphite, fontSize: 29, fontWeight: '400' },
     floatingControls: { zIndex: 21, backgroundColor: colors.paper },
-    modeChoices: { flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 4, paddingHorizontal: 6, paddingBottom: 6 },
-    modeChoice: { minHeight: 44, minWidth: 65, paddingHorizontal: 8, borderRadius: 3,
-      alignItems: 'center', justifyContent: 'center', backgroundColor: colors.panel },
-    selectedModeChoice: { backgroundColor: colors.accent },
-    modeChoiceText: { color: colors.graphite, fontSize: 12, fontWeight: '600' },
-    selectedModeText: { color: colors.onAccent },
-    dateJump: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 12, paddingBottom: 10 },
-    dateInput: { flex: 1, minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.hairline,
-      borderRadius: 10, backgroundColor: colors.surface, color: colors.ink, fontSize: 14 },
-    goButton: { minHeight: 44, paddingHorizontal: 16, borderRadius: 10, backgroundColor: colors.accent,
-      justifyContent: 'center' },
-    goText: { color: colors.onAccent, fontWeight: '600' },
-    dateError: { width: '100%', color: colors.danger, fontSize: 12 },
     dateHeader: { flexDirection: 'row', alignItems: 'center', height: 66,
       borderBottomWidth: 1, borderBottomColor: gridLine, backgroundColor: colors.paper },
     menuButton: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', gap: 5 },

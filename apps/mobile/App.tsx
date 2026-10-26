@@ -55,7 +55,7 @@ import { useWearBridge } from './src/wear/useWearBridge';
 
 type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
 type DayCount = 1 | 3 | 7;
-type NavigationAction = Tab | 'week' | 'plan';
+type NavigationAction = Exclude<Tab, 'today'> | 'day' | 'three-days' | 'week' | 'plan';
 
 const DEFAULT_PREFERENCES: CalendarPreferences = {
   selectedCalendarIds: [],
@@ -65,7 +65,8 @@ const DEFAULT_PREFERENCES: CalendarPreferences = {
 
 const NAVIGATION_ITEMS: { id: NavigationAction; label: string }[] = [
   { id: 'plan', label: 'Plan' },
-  { id: 'today', label: 'Today' },
+  { id: 'day', label: 'Day' },
+  { id: 'three-days', label: '3 days' },
   { id: 'week', label: 'Week' },
   { id: 'reports', label: 'Reports' },
   { id: 'search', label: 'Search' },
@@ -322,7 +323,7 @@ function AppController() {
   function changeDayCount(next: DayCount) {
     setDayCount(next);
     setCalendarViewResetToken((token) => token + 1);
-    if (next === 1) changeCalendarZoom(1);
+    changeCalendarZoom(1);
     viewWrites.current = viewWrites.current.catch(() => undefined)
       .then(() => setSetting('calendar.day-count', next)).catch(() => undefined);
   }
@@ -375,13 +376,9 @@ function AppController() {
       void createConnectedPlan();
       return;
     }
-    if (action === 'today' || action === 'week') {
-      const current = new Date();
-      const currentDay = dateKey(current);
-      setActiveDate(currentDay);
-      changeDayCount(action === 'week' ? 7 : 1);
-      setFocusRequest({ dateKey: currentDay, minuteIndex: minuteIndexForDate(current),
-        token: ++focusSequence.current, openEditor: false });
+    if (action === 'day' || action === 'three-days' || action === 'week') {
+      changeDayCount(action === 'week' ? 7 : action === 'three-days' ? 3 : 1);
+      setFocusRequest(null);
       setTab('today');
       return;
     }
@@ -425,7 +422,6 @@ function AppController() {
                   viewResetToken={calendarViewResetToken}
                   onZoomChange={changeCalendarZoom}
                   clockFormat={clockFormat}
-                  onClockFormatChange={changeClockFormat}
                   onCreatePlan={() => navigate('plan')}
                   onOpenMenu={() => setMenuOpen(true)}
                 />
@@ -445,6 +441,8 @@ function AppController() {
                   onChange={changePreferences}
                   onOpenAccounts={() => setTab('accounts')}
                   onOpenCategories={() => setTab('categories')}
+                  clockFormat={clockFormat}
+                  onClockFormatChange={changeClockFormat}
                   updates={releaseUpdates}
                 />
               ) : null}
@@ -554,7 +552,8 @@ function ApplicationFrame({
             <ScrollView contentContainerStyle={styles.drawerItems}>
               {NAVIGATION_ITEMS.map((item) => {
                 const selected = item.id === 'week' ? tab === 'today' && dayCount === 7 :
-                  item.id === 'today' ? tab === 'today' && dayCount !== 7 : item.id === tab;
+                  item.id === 'three-days' ? tab === 'today' && dayCount === 3 :
+                    item.id === 'day' ? tab === 'today' && dayCount === 1 : item.id === tab;
                 return (
                   <Pressable
                     key={item.id}

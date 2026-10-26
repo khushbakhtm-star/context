@@ -4,6 +4,7 @@ import Constants from 'expo-constants';
 
 import { getSetting, setSetting } from '../data/database';
 import { useAppTheme } from '../appearance';
+import { InfoButton } from './InfoButton';
 import type { AppColors } from '../theme';
 import { installedReleaseFromEmbeddedConfig } from '../services/installed-release';
 import {
@@ -181,11 +182,13 @@ export function ReleaseUpdateSettings({ updates }: { updates: ReleaseUpdatesStat
     <View style={styles.settings}>
       <View style={styles.settingRow}>
         <View style={styles.copy}>
-          <Text style={styles.title}>Check for released updates</Text>
-          <Text style={styles.body}>
-            {updates.configured ? 'While Context is open, check this edition’s release feed. No ledger or account details are sent.' :
-              'Update checks become available when this edition has a configured public release feed.'}
-          </Text>
+          <View style={styles.settingsLabel}>
+            <Text style={styles.title}>Update checks</Text>
+            <InfoButton title="Update checks" message={updates.configured
+              ? 'While Context is open, check this edition’s release feed. No ledger or account details are sent.'
+              : 'Update checks become available when this edition has a configured public release feed.'} />
+          </View>
+          {!updates.configured ? <Text style={styles.body}>Unavailable in this edition.</Text> : null}
         </View>
         <Switch accessibilityLabel="Check for released Context updates" value={updates.enabled}
           disabled={!updates.configured || updates.loading} onValueChange={(value) => { void updates.setEnabled(value); }}
@@ -223,6 +226,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   settings: { marginTop: 12, padding: 16, borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.hairline, borderRadius: 14, backgroundColor: colors.surface },
   settingRow: { flexDirection: 'row', alignItems: 'center' },
+  settingsLabel: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   settingsActions: { marginTop: 12, flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
   status: { marginTop: 10, color: colors.muted, fontSize: 12, lineHeight: 18 },
 });

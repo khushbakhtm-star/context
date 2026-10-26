@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
+import { InfoButton } from '../components/InfoButton';
 import { dismissLedgerConflict, getLedgerConflicts, restoreLedgerConflict } from '../data/database';
 import {
   connectAccount, connectWebDavAccount, disconnectAccount, getAccounts, updateAccountConsent,
@@ -33,14 +34,14 @@ const INITIAL_CONSENT: AccountConsent = {
 };
 
 const PERMISSIONS: { id: keyof AccountConsent; title: string; detail: string }[] = [
-  { id: 'ledgerStorage', title: 'Private ledger storage', detail: 'Store encrypted ledger updates in this account’s app folder for your other phone.' },
-  { id: 'calendarRead', title: 'Read calendar plans', detail: 'Show plans from the calendars you select below.' },
-  { id: 'calendarWrite', title: 'Write actual activities', detail: 'Publish activity blocks and timestamped notes to a selected calendar.' },
-  { id: 'replaceOccurrences', title: 'Replace original plan occurrences', detail: 'A confirmed linked activity can reschedule that occurrence. Other days in the series keep their plan.' },
-  { id: 'importCalendarEdits', title: 'Import changes to actuals', detail: 'Bring changes made to linked calendar activities back into the minute ledger.' },
-  { id: 'editInvitations', title: 'Edit invitations and meetings', detail: 'Allow explicitly approved source meetings to change. The provider may notify attendees; organizer restrictions still apply.' },
-  { id: 'editSeries', title: 'Edit a whole recurring series', detail: 'Allow a separate, explicit whole-series choice. Confirming actual minutes still changes only one occurrence by default.' },
-  { id: 'categoryRead', title: 'Read calendar category labels', detail: 'Import the names and colors of category labels from this account.' },
+  { id: 'ledgerStorage', title: 'Sync private ledger', detail: 'Store encrypted ledger updates in this account’s app folder for your other phone.' },
+  { id: 'calendarRead', title: 'Read plans', detail: 'Show plans from the calendars you select below.' },
+  { id: 'calendarWrite', title: 'Write actuals', detail: 'Publish activity blocks and timestamped notes to a selected calendar.' },
+  { id: 'replaceOccurrences', title: 'Replace plan occurrences', detail: 'A confirmed linked activity can reschedule that occurrence. Other days in the series keep their plan.' },
+  { id: 'importCalendarEdits', title: 'Import calendar edits', detail: 'Bring changes made to linked calendar activities back into the minute ledger.' },
+  { id: 'editInvitations', title: 'Edit meetings & invitations', detail: 'Allow explicitly approved source meetings to change. The provider may notify attendees; organizer restrictions still apply.' },
+  { id: 'editSeries', title: 'Edit recurring series', detail: 'Allow a separate, explicit whole-series choice. Confirming actual minutes still changes only one occurrence by default.' },
+  { id: 'categoryRead', title: 'Read category labels', detail: 'Import the names and colors of category labels from this account.' },
 ];
 
 function changedConsent(consent: AccountConsent, key: keyof AccountConsent, value: boolean): AccountConsent {
@@ -82,8 +83,8 @@ function PermissionRows({ value, disabled, onChange, storageOnly = false }: {
         <View key={permission.id} style={styles.permissionRow}>
           <View style={styles.permissionCopy}>
             <Text style={styles.permissionTitle}>{permission.title}</Text>
-            <Text style={styles.permissionDetail}>{permission.detail}</Text>
           </View>
+          <InfoButton title={permission.title} message={permission.detail} />
           <Switch
             accessibilityLabel={permission.title}
             value={value[permission.id]}
@@ -222,60 +223,71 @@ export function AccountsScreen({ onDataChanged }: Props) {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-      <Text style={styles.eyebrow}>ACCOUNTS & SYNC</Text>
-      <Text style={styles.title}>One ledger, both phones</Text>
-      <Text style={styles.intro}>
-        Connect the same account on Android and iPhone and use the same ledger passphrase. Choose
-        storage access and calendar permissions separately for each account.
-      </Text>
+      <View style={styles.titleRow}>
+        <Text style={styles.title}>Accounts & sync</Text>
+        <InfoButton
+          title="Accounts & sync"
+          message="Connect the same account on Android and iPhone and use the same ledger passphrase. Choose storage access and calendar permissions separately for each account. Original-plan replacement is limited to the occurrence linked to your entry. Calendar notes follow that calendar’s sharing settings. Other calendars can still be shown through your phone’s calendar connection in Settings."
+        />
+      </View>
 
       <View style={styles.syncCard}>
-        <Text style={styles.cardTitle}>{busy || status.message || 'Ready when you are'}</Text>
-        <Text style={styles.help}>
-          {status.lastSyncedAt
-            ? `Last synchronized ${new Date(status.lastSyncedAt).toLocaleString()}`
-            : 'Updates synchronize while Context is open and when it returns to the foreground.'}
-        </Text>
-        <Pressable disabled={Boolean(busy)} onPress={() => void sync()} style={[styles.primaryButton, busy && styles.disabled]}>
-          <Text style={styles.primaryButtonText}>{busy ? 'Working…' : 'Sync now'}</Text>
-        </Pressable>
+        <Text style={styles.cardTitle}>{busy || status.message || 'Ready'}</Text>
+        {status.lastSyncedAt ? (
+          <Text style={styles.help}>Last synchronized {new Date(status.lastSyncedAt).toLocaleString()}</Text>
+        ) : null}
+        <View style={styles.actionRow}>
+          <Pressable disabled={Boolean(busy)} onPress={() => void sync()} style={[styles.primaryButton, busy && styles.disabled]}>
+            <Text style={styles.primaryButtonText}>{busy ? 'Working…' : 'Sync now'}</Text>
+          </Pressable>
+          <InfoButton
+            title="Synchronization"
+            message="Updates synchronize while Context is open and when it returns to the foreground. Use Sync now to request an update."
+          />
+        </View>
       </View>
 
       {error ? <Text selectable style={styles.error}>{error}</Text> : null}
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Private ledger encryption</Text>
+        <View style={styles.labelRow}>
+          <Text style={styles.cardTitle}>Ledger passphrase</Text>
+          <InfoButton
+            title="Private ledger encryption"
+            message={hasKey
+              ? 'Your ledger key is saved securely on this phone. Use the same passphrase on your other phone. Keep a copy somewhere safe; it is needed to recover your encrypted history.'
+              : 'Create a passphrase of at least 12 characters for your first phone, or enter the existing passphrase to unlock your ledger on another phone. Use the same passphrase on both phones. Your provider stores encrypted ledger updates. Calendar event notes remain readable in that calendar.'}
+          />
+        </View>
         {hasKey ? (
           <>
-            <Text style={styles.help}>
-              Your ledger key is saved securely on this phone. Use the same passphrase on your other
-              phone. Keep a copy somewhere safe; it is needed to recover your encrypted history.
-            </Text>
-            <Pressable disabled={Boolean(busy)} onPress={forgetPassphrase} style={styles.secondaryButton}>
-              <Text style={styles.secondaryButtonText}>Forget saved passphrase</Text>
-            </Pressable>
+            <Text style={styles.help}>Saved on this phone</Text>
+            <View style={styles.actionRow}>
+              <Pressable disabled={Boolean(busy)} onPress={forgetPassphrase} style={[styles.secondaryButton, styles.pairedButton]}>
+                <Text style={styles.secondaryButtonText}>Forget passphrase</Text>
+              </Pressable>
+              <InfoButton
+                title="Forget saved passphrase"
+                message="This removes the key from this phone. Your local entries and encrypted cloud files stay in place. You will need the original passphrase to unlock existing cloud history again."
+              />
+            </View>
           </>
         ) : (
           <>
-            <Text style={styles.help}>
-              Create a passphrase for your first phone, or enter the existing passphrase to unlock
-              your ledger on another phone. Your provider stores encrypted ledger updates. Calendar
-              event notes remain readable in that calendar.
-            </Text>
             <TextInput keyboardAppearance={resolvedMode}
               secureTextEntry autoCapitalize="none" autoCorrect={false}
-              accessibilityLabel="Ledger passphrase" placeholder="Ledger passphrase · at least 12 characters"
+              accessibilityLabel="Ledger passphrase" placeholder="Ledger passphrase"
               placeholderTextColor={colors.muted} value={passphrase} onChangeText={setPassphrase}
               editable={!busy} style={styles.input}
             />
             <TextInput keyboardAppearance={resolvedMode}
               secureTextEntry autoCapitalize="none" autoCorrect={false}
-              accessibilityLabel="Confirm ledger passphrase" placeholder="Confirm the same passphrase"
+              accessibilityLabel="Confirm ledger passphrase" placeholder="Confirm passphrase"
               placeholderTextColor={colors.muted} value={passphraseConfirmation} onChangeText={setPassphraseConfirmation}
               editable={!busy} style={styles.input}
             />
             <Pressable disabled={Boolean(busy)} onPress={() => void saveKey()} style={styles.secondaryButton}>
-              <Text style={styles.secondaryButtonText}>Save ledger passphrase</Text>
+              <Text style={styles.secondaryButtonText}>Save passphrase</Text>
             </Pressable>
           </>
         )}
@@ -291,6 +303,10 @@ export function AccountsScreen({ onDataChanged }: Props) {
             <Pressable disabled={Boolean(busy)} onPress={() => disconnect(view.account)} hitSlop={8}>
               <Text style={styles.disconnect}>Disconnect</Text>
             </Pressable>
+            <InfoButton
+              title="Disconnect account"
+              message="New requests will stop. Existing ledger files and calendar events will remain in your account."
+            />
           </View>
           <PermissionRows
             value={view.account.consent} disabled={Boolean(busy)}
@@ -302,8 +318,13 @@ export function AccountsScreen({ onDataChanged }: Props) {
           {view.calendarError ? <Text style={styles.error}>{view.calendarError}</Text> : null}
           {view.account.consent.calendarRead ? (
             <>
-              <Text style={styles.sectionLabel}>Calendars for this account</Text>
-              <Text style={styles.help}>Select calendars for plans. Mark one writable calendar for new actual activities.</Text>
+              <View style={styles.sectionRow}>
+                <Text style={styles.sectionLabel}>Calendars</Text>
+                <InfoButton
+                  title="Calendar selection"
+                  message="Select calendars for plans. Mark one writable calendar for new actual activities. Use selects that calendar for actuals; Actuals shows the current selection."
+                />
+              </View>
               {view.calendars.map((calendar) => {
                 const selected = view.preferences.selectedCalendarIds.includes(calendar.id);
                 const destination = view.preferences.writeCalendarId === calendar.id;
@@ -342,13 +363,14 @@ export function AccountsScreen({ onDataChanged }: Props) {
                   </View>
                 );
               })}
-              {!view.calendarError && view.calendars.length === 0 ? <Text style={styles.help}>No calendars are currently available for this account.</Text> : null}
+              {!view.calendarError && view.calendars.length === 0 ? <Text style={styles.help}>No calendars available</Text> : null}
             </>
           ) : null}
           {view.account.provider === 'webdav' ? (
-            <Text selectable style={styles.help}>
-              {view.account.storageUrl}{'\n'}Reconnect this same folder below to update its app password.
-            </Text>
+            <View style={styles.storageRow}>
+              <Text selectable style={[styles.help, styles.flex]}>{view.account.storageUrl}</Text>
+              <InfoButton title="WebDAV app password" message="Reconnect this same folder below to update its app password." />
+            </View>
           ) : <Pressable
             disabled={Boolean(busy)} style={styles.secondaryButton}
             onPress={() => void perform('Reconnecting account…', async () => {
@@ -361,8 +383,13 @@ export function AccountsScreen({ onDataChanged }: Props) {
       ))}
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Connect an account</Text>
-        <Text style={styles.help}>Choose what Context may do. The provider will ask you to grant the required account access.</Text>
+        <View style={styles.labelRow}>
+          <Text style={styles.cardTitle}>Connect an account</Text>
+          <InfoButton
+            title="Connect an account"
+            message="Choose what Context may do using the permissions below. The provider will ask you to grant the required account access."
+          />
+        </View>
         <PermissionRows value={newConsent} disabled={Boolean(busy)} onChange={setNewConsent} />
         <View style={styles.connectButtons}>
           <Pressable disabled={Boolean(busy)} onPress={() => connect('google')} style={[styles.connectButton, busy && styles.disabled]}>
@@ -375,27 +402,28 @@ export function AccountsScreen({ onDataChanged }: Props) {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Other storage · WebDAV</Text>
-        <Text style={styles.help}>
-          Use an existing dedicated Context folder on a WebDAV provider such as Nextcloud. Enter the
-          exact HTTPS folder URL, your username, and a provider app password. This connection stores
-          your encrypted ledger and does not access calendars.
-        </Text>
+        <View style={styles.labelRow}>
+          <Text style={styles.cardTitle}>WebDAV storage</Text>
+          <InfoButton
+            title="WebDAV storage"
+            message="Use an existing dedicated Context folder on a WebDAV provider such as Nextcloud. Enter the exact HTTPS folder URL, your username, and a provider app password. For example: https://cloud.example.com/remote.php/dav/files/USERNAME/Context/. This connection stores your encrypted ledger and does not access calendars."
+          />
+        </View>
         <TextInput keyboardAppearance={resolvedMode}
           autoCapitalize="none" autoCorrect={false} keyboardType="url"
-          accessibilityLabel="WebDAV Context folder URL" placeholder="https://cloud.example.com/…/Context/"
+          accessibilityLabel="WebDAV Context folder URL" placeholder="Folder URL"
           placeholderTextColor={colors.muted} value={webDavUrl} onChangeText={setWebDavUrl}
           editable={!busy} style={styles.input}
         />
         <TextInput keyboardAppearance={resolvedMode}
           autoCapitalize="none" autoCorrect={false}
-          accessibilityLabel="WebDAV username" placeholder="WebDAV username"
+          accessibilityLabel="WebDAV username" placeholder="Username"
           placeholderTextColor={colors.muted} value={webDavUser} onChangeText={setWebDavUser}
           editable={!busy} style={styles.input}
         />
         <TextInput keyboardAppearance={resolvedMode}
           secureTextEntry autoCapitalize="none" autoCorrect={false}
-          accessibilityLabel="WebDAV app password" placeholder="Provider app password"
+          accessibilityLabel="WebDAV app password" placeholder="App password"
           placeholderTextColor={colors.muted} value={webDavPassword} onChangeText={setWebDavPassword}
           editable={!busy} style={styles.input}
         />
@@ -407,14 +435,19 @@ export function AccountsScreen({ onDataChanged }: Props) {
           })}
           style={[styles.secondaryButton, (busy || !webDavUrl.trim() || !webDavUser.trim() || !webDavPassword) && styles.disabled]}
         >
-          <Text style={styles.secondaryButtonText}>Connect WebDAV storage</Text>
+          <Text style={styles.secondaryButtonText}>Connect WebDAV</Text>
         </Pressable>
       </View>
 
       {projections.length > 0 || ledgerConflicts.length > 0 ? (
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Calendar conflicts & saved alternatives</Text>
-          <Text style={styles.help}>Both versions are kept when edits overlap. Choose the version that reflects what happened.</Text>
+          <View style={styles.labelRow}>
+            <Text style={styles.cardTitle}>Changes to review</Text>
+            <InfoButton
+              title="Calendar conflicts & saved alternatives"
+              message="Both versions are kept when edits overlap. Choose the version that reflects what happened."
+            />
+          </View>
           {projections.map((projection) => (
             <View key={projection.id} style={styles.conflict}>
               <Text style={styles.conflictTitle}>{projection.baseEvent?.title || 'Linked activity'} · {projection.dateKey}</Text>
@@ -464,11 +497,6 @@ export function AccountsScreen({ onDataChanged }: Props) {
         </View>
       ) : null}
 
-      <Text style={styles.footer}>
-        Original-plan replacement is limited to the occurrence linked to your entry. Calendar notes
-        follow that calendar’s sharing settings. Other calendars can still be shown through your
-        phone’s calendar connection in Settings.
-      </Text>
     </ScrollView>
   );
 }
@@ -476,16 +504,20 @@ export function AccountsScreen({ onDataChanged }: Props) {
 const createStyles = (colors: AppColors) => StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.paper },
   content: { padding: 20, paddingBottom: 44 },
-  eyebrow: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1.1 },
-  title: { marginTop: 6, color: colors.ink, fontSize: 27, lineHeight: 33, fontWeight: '700' },
-  intro: { marginTop: 9, color: colors.muted, fontSize: 14, lineHeight: 21 },
+  titleRow: { marginTop: 6, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  title: { flex: 1, color: colors.ink, fontSize: 27, lineHeight: 33, fontWeight: '700' },
+  labelRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  actionRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 14 },
+  sectionRow: { marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  storageRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   syncCard: { marginTop: 21, padding: 17, borderRadius: 15, backgroundColor: colors.panel },
   card: { marginTop: 17, padding: 16, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 15, backgroundColor: colors.surface },
-  cardTitle: { color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '700' },
+  cardTitle: { color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '700', flexShrink: 1 },
   help: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },
-  primaryButton: { alignSelf: 'flex-start', marginTop: 14, paddingHorizontal: 19, paddingVertical: 12, borderRadius: 11, backgroundColor: colors.accent },
+  primaryButton: { alignSelf: 'flex-start', paddingHorizontal: 19, paddingVertical: 12, borderRadius: 11, backgroundColor: colors.accent },
   primaryButtonText: { color: colors.onAccent, fontSize: 13, fontWeight: '700' },
   secondaryButton: { alignSelf: 'flex-start', marginTop: 14, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: colors.hairline, borderRadius: 10, backgroundColor: colors.panel },
+  pairedButton: { marginTop: 0, flexShrink: 1 },
   secondaryButtonText: { color: colors.graphite, fontSize: 12, fontWeight: '700' },
   error: { marginTop: 14, color: colors.danger, fontSize: 12, lineHeight: 18 },
   input: { minHeight: 46, marginTop: 12, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: colors.silver, borderRadius: 10, backgroundColor: colors.paper, color: colors.ink, fontSize: 13 },
@@ -497,8 +529,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   permissionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.hairline },
   permissionCopy: { flex: 1, paddingRight: 13 },
   permissionTitle: { color: colors.graphite, fontSize: 13, lineHeight: 18, fontWeight: '600' },
-  permissionDetail: { marginTop: 3, color: colors.muted, fontSize: 11, lineHeight: 16 },
-  sectionLabel: { marginTop: 19, color: colors.ink, fontSize: 13, fontWeight: '700' },
+  sectionLabel: { flex: 1, color: colors.ink, fontSize: 13, fontWeight: '700' },
   calendarRow: { minHeight: 53, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.hairline },
   calendarChoice: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
   checkbox: { width: 19, height: 19, borderWidth: 1.5, borderColor: colors.silver, borderRadius: 5, alignItems: 'center', justifyContent: 'center' },
@@ -519,5 +550,4 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   conflictActions: { marginTop: 9, flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   conflictButton: { paddingHorizontal: 11, paddingVertical: 10, borderWidth: 1, borderColor: colors.hairline, borderRadius: 9, backgroundColor: colors.panel },
   alternativeText: { marginTop: 7, color: colors.muted, fontSize: 12, lineHeight: 18 },
-  footer: { marginTop: 19, color: colors.muted, fontSize: 11, lineHeight: 17 },
 });

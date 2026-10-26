@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.9",
-  "sourceAndroidVersionCode": 10,
-  "sourceIosBuildNumber": "10",
+  "version": "0.1.10",
+  "sourceAndroidVersionCode": 11,
+  "sourceIosBuildNumber": "11",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare a Wear-enabled phone update with registered Google OAuth client IDs supplied through EAS preview/production environments rather than committed identifiers. A build preflight rejects missing or malformed Google phone configuration while leaving F-Droid and pure-watch builds independent. Native 0.1.9 build verification and real Google sign-in on the phone remain pending; no public sign-in success is claimed. The independently verified F-Droid 0.1.8 candidate stays pinned to 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24. Physical watch validation, store publication and official F-Droid acceptance remain pending."
+  "notes": "Prepare a Wear-enabled phone UI update that moves Settings and calendar-account explanations into information-button popups. Today removes the month popup and date-entry box; Day, 3 days and Week are selected directly in the hamburger menu, zoom uses pinch gestures only, and time format is set only in Settings. Native 0.1.10 build verification and physical phone UI checks remain pending. Google OAuth remains in Testing for approved test accounts; physical Google sign-in success is not claimed. The independently verified F-Droid 0.1.8 candidate stays pinned to 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24. Physical watch validation, store publication and official F-Droid acceptance remain pending."
 }
