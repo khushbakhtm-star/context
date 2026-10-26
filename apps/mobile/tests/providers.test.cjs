@@ -15,6 +15,7 @@ function loadProviders(handler) {
     module, exports: module.exports,
     require(name) {
       if (name === './accounts') return { accountFetch: handler };
+      if (name === '../utils/calendar-description') return require('../src/utils/calendar-description.ts');
       throw new Error(`Unexpected test import: ${name}`);
     },
     Headers, Response, URL, console,
@@ -75,6 +76,33 @@ test('Google reads expanded occurrences and follows every page', async () => {
   assert.equal(result[0].isSeriesMaster, false);
   assert.equal(requests[0].searchParams.get('singleEvents'), 'true');
   assert.equal(requests[1].searchParams.get('pageToken'), 'second');
+});
+
+test('Google standard event colors use the exact provider palette without requiring a local category import', async () => {
+  const requests = [];
+  const { createCalendarAdapter } = loadProviders(async (_account, url) => {
+    requests.push(url);
+    if (url.endsWith('/colors')) return json({ event: { 7: { background: '#Ab12CD' } } });
+    return json({ items: [{ id: 'colored', colorId: '7', start: { dateTime: write.start }, end: { dateTime: write.end } }] });
+  });
+  const events = await createCalendarAdapter(account('google')).listEvents('primary', write.start, write.end);
+  assert.equal(events[0].displayColor, '#Ab12CD');
+  assert.equal(requests.length, 2); assert.ok(requests[1].endsWith('/colors'));
+});
+
+test('Google named event label colors require existing category consent and take precedence over standard color IDs', async () => {
+  for (const permitted of [false, true]) {
+    const requests = [];
+    const { createCalendarAdapter } = loadProviders(async (_account, url) => {
+      requests.push(url);
+      if (!url.includes('/events?')) return json({ labelProperties: { eventLabels: [{ id: 'label', backgroundColor: '#123456' }] } });
+      return json({ items: [{ id: 'labeled', colorId: '7', eventLabelId: 'label', start: { dateTime: write.start }, end: { dateTime: write.end } }] });
+    });
+    const selected = account('google'); selected.consent = { ...selected.consent, categoryRead: permitted };
+    const events = await createCalendarAdapter(selected).listEvents('primary', write.start, write.end);
+    assert.equal(events[0].displayColor, permitted ? '#123456' : undefined);
+    assert.equal(requests.length, permitted ? 2 : 1);
+  }
 });
 
 test('Google modifies only the concrete instance with If-Match and no recurrence patch', async () => {
@@ -218,9 +246,13 @@ test('Microsoft online-meeting PATCH preserves the original HTML meeting blob', 
 
 test('repeated online-meeting updates replace only the Context section', () => {
   const { meetingBodyWithContext } = loadProviders(async () => { throw new Error('No network'); });
+  const { makeCalendarDescription } = require('../src/utils/calendar-description.ts');
   const original = '<html><body><div id="meeting-blob">Protected original</div></body></html>';
-  const first = meetingBodyWithContext(original, '--- Context minutes ---\n18:55 First text\n--- End Context minutes ---');
-  const second = meetingBodyWithContext(first, '--- Context minutes ---\n18:56 Changed text\n--- End Context minutes ---');
+  const firstWrite = makeCalendarDescription('Protected original', '18:55 First text');
+  const first = meetingBodyWithContext(original, firstWrite.description, firstWrite.descriptionLog, 'projection');
+  const nextWrite = makeCalendarDescription('Protected original', '18:56 Changed text');
+  const second = meetingBodyWithContext(first, nextWrite.description, nextWrite.descriptionLog, 'projection',
+    { ...firstWrite, projectionId: 'projection' });
   assert.equal((second.match(/<!-- context-minute-ledger:start -->/g) || []).length, 1);
   assert.equal((second.match(/id="meeting-blob"/g) || []).length, 1);
   assert.doesNotMatch(second, /First text/);

@@ -1,4 +1,5 @@
 import { accountFetch } from './accounts';
+import { isDescriptionLog, readCalendarDescription, type DescriptionLog } from '../utils/calendar-description';
 import type {
   AccountCalendar,
   AccountCalendarAdapter,
@@ -19,6 +20,15 @@ const HTML_LOG_START = '<!-- context-minute-ledger:start -->';
 const HTML_LOG_END = '<!-- context-minute-ledger:end -->';
 
 type JsonObject = Record<string, any>;
+
+function descriptionLogMetadata(value: unknown): DescriptionLog | undefined {
+  if (value === undefined) return undefined;
+  let parsed = value;
+  try { if (typeof parsed === 'string') parsed = JSON.parse(parsed); }
+  catch { throw new CalendarProviderError('The calendar description metadata needs review.', 409, 'INVALID_DESCRIPTION_METADATA'); }
+  if (!isDescriptionLog(parsed)) throw new CalendarProviderError('The calendar description metadata needs review.', 409, 'INVALID_DESCRIPTION_METADATA');
+  return parsed;
+}
 
 export class CalendarProviderError extends Error {
   constructor(
@@ -207,6 +217,7 @@ export function normalizeGoogleEvent(raw: JsonObject, calendarId: string): Remot
     calendarId,
     title: typeof raw.summary === 'string' ? raw.summary : 'Untitled event',
     description: typeof raw.description === 'string' ? raw.description : '',
+    descriptionLog: descriptionLogMetadata(properties.contextDescriptionLog),
     start,
     end: googleTime(raw.end, start),
     timeZone: raw.start?.timeZone || 'UTC',
@@ -221,6 +232,7 @@ export function normalizeGoogleEvent(raw: JsonObject, calendarId: string): Remot
     selfOrganizer: typeof raw.organizer?.self === 'boolean' ? raw.organizer.self : undefined,
     canEdit: typeof raw.canEdit === 'boolean' ? raw.canEdit : undefined,
     googleColorId: typeof raw.colorId === 'string' ? raw.colorId : undefined,
+    displayColor: typeof raw.displayColor === 'string' && /^#[0-9a-f]{6}$/i.test(raw.displayColor) ? raw.displayColor : undefined,
     googleEventLabelId: typeof raw.eventLabelId === 'string' ? raw.eventLabelId : undefined,
     sourceOperationId: typeof properties.contextSourceOperationId === 'string' ? properties.contextSourceOperationId : undefined,
     projectionId: typeof properties.contextProjectionId === 'string' ? properties.contextProjectionId : undefined,
@@ -236,7 +248,8 @@ function googleWrite(write: CalendarEventWrite) {
     start: { dateTime: write.start, timeZone: write.timeZone },
     end: { dateTime: write.end, timeZone: write.timeZone },
     extendedProperties: {
-      private: { contextProjectionId: write.projectionId, contextCategoryId: write.categoryId },
+      private: { contextProjectionId: write.projectionId, contextCategoryId: write.categoryId,
+        ...(write.descriptionLog ? { contextDescriptionLog: JSON.stringify(write.descriptionLog) } : {}) },
     },
     ...(write.googleEventLabelId ? { eventLabelId: write.googleEventLabelId }
       : write.googleColorId ? { colorId: write.googleColorId } : {}),
@@ -246,6 +259,23 @@ function googleWrite(write: CalendarEventWrite) {
 function googleAdapter(account: ConnectedAccount): AccountCalendarAdapter {
   const eventsUrl = (calendarId: string) => `${GOOGLE}/calendars/${encoded(calendarId)}/events`;
   const eventUrl = (calendarId: string, id: string) => `${eventsUrl(calendarId)}/${encoded(id)}`;
+  const withDisplayColors = async (events: RemoteCalendarEvent[], calendarId: string) => {
+    const needPalette = events.some((event) => event.googleColorId && !event.googleEventLabelId && !event.displayColor);
+    const needLabels = account.consent.categoryRead && events.some((event) => event.googleEventLabelId && !event.displayColor);
+    const [palette, labels] = await Promise.allSettled([
+      needPalette ? accountFetch(account, `${GOOGLE}/colors`).then(expectJson) : Promise.resolve(null),
+      needLabels ? accountFetch(account, query(`${GOOGLE}/calendars/${encoded(calendarId)}`, { eventLabelVersion: '1' })).then(expectJson) : Promise.resolve(null),
+    ]);
+    const eventColors = palette.status === 'fulfilled' ? palette.value?.event : undefined;
+    const eventLabels = labels.status === 'fulfilled' ? labels.value?.labelProperties?.eventLabels : undefined;
+    return events.map((event) => {
+      const provided = event.googleEventLabelId
+        ? eventLabels?.find((label: JsonObject) => label.id === event.googleEventLabelId)?.backgroundColor
+        : eventColors?.[event.googleColorId ?? '']?.background;
+      return event.displayColor || typeof provided !== 'string' || !/^#[0-9a-f]{6}$/i.test(provided)
+        ? event : { ...event, displayColor: provided };
+    });
+  };
   const adapter: AccountCalendarAdapter = {
     async listCalendars() {
       requireRead(account);
@@ -282,7 +312,7 @@ function googleAdapter(account: ConnectedAccount): AccountCalendarAdapter {
         for (const raw of page.items ?? []) events.push(normalizeGoogleEvent(raw, calendarId));
         pageToken = page.nextPageToken;
       } while (pageToken);
-      return events;
+      return withDisplayColors(events, calendarId);
     },
     async getEvent(calendarId, id) {
       requireRead(account);
@@ -393,19 +423,41 @@ function graphInstant(value: JsonObject | undefined, fallback = '1970-01-01T00:0
   return new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(time) ? time : `${time}Z`).toISOString();
 }
 
-function graphMetadata(raw: JsonObject): { projectionId?: string; categoryId?: string } {
+function graphMetadata(raw: JsonObject): { projectionId?: string; categoryId?: string; descriptionLog?: DescriptionLog } {
   const property = (raw.singleValueExtendedProperties ?? []).find(
     (item: JsonObject) => item.id === META_PROPERTY,
   );
-  try {
-    const metadata = JSON.parse(property?.value ?? '{}');
-    return {
-      projectionId: typeof metadata.projectionId === 'string' ? metadata.projectionId : undefined,
-      categoryId: typeof metadata.categoryId === 'string' ? metadata.categoryId : undefined,
-    };
-  } catch {
-    return {};
+  if (!property) return {};
+  let metadata: JsonObject;
+  try { metadata = JSON.parse(property.value); }
+  catch { throw new CalendarProviderError('The calendar description metadata needs review.', 409, 'INVALID_DESCRIPTION_METADATA'); }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw new CalendarProviderError('The calendar description metadata needs review.', 409, 'INVALID_DESCRIPTION_METADATA');
   }
+  return {
+    projectionId: typeof metadata.projectionId === 'string' ? metadata.projectionId : undefined,
+    categoryId: typeof metadata.categoryId === 'string' ? metadata.categoryId : undefined,
+    descriptionLog: descriptionLogMetadata(metadata.descriptionLog),
+  };
+}
+
+function contextHtmlParts(html: string) {
+  const start = html.indexOf(HTML_LOG_START);
+  const end = html.indexOf(HTML_LOG_END, start);
+  if (start < 0 || end < start || html.indexOf(HTML_LOG_START, start + HTML_LOG_START.length) >= 0 ||
+      html.indexOf(HTML_LOG_END, end + HTML_LOG_END.length) >= 0) return null;
+  const section = html.slice(start + HTML_LOG_START.length, end);
+  const opening = '<pre style="white-space:pre-wrap">';
+  if (!section.startsWith(opening) || !section.endsWith('</pre>')) return null;
+  const encodedLog = section.slice(opening.length, -'</pre>'.length);
+  if (/[<>]/.test(encodedLog)) return null;
+  const names: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  const log = encodedLog.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (whole, entity: string) => {
+    if (!entity.startsWith('#')) return names[entity.toLowerCase()] ?? whole;
+    const code = entity[1]?.toLowerCase() === 'x' ? Number.parseInt(entity.slice(2), 16) : Number.parseInt(entity.slice(1), 10);
+    return Number.isInteger(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
+  return { preservedHtml: html.slice(0, start) + html.slice(end + HTML_LOG_END.length), log };
 }
 
 export function normalizeMicrosoftEvent(raw: JsonObject, calendarId: string): RemoteCalendarEvent {
@@ -413,11 +465,18 @@ export function normalizeMicrosoftEvent(raw: JsonObject, calendarId: string): Re
   const description = typeof raw.body?.content === 'string' ? raw.body.content : '';
   const isHtml = raw.body?.contentType?.toLowerCase() === 'html';
   const isOnlineMeeting = Boolean(raw.isOnlineMeeting || raw.onlineMeeting || raw.onlineMeetingUrl);
+  let plainDescription = isHtml ? calendarHtmlToText(description) : description;
+  if (isHtml && metadata.descriptionLog && metadata.projectionId) {
+    const parts = contextHtmlParts(description);
+    if (!parts) throw new CalendarProviderError('This calendar description needs review before synchronization.', 409, 'INVALID_CONTEXT_HTML_SECTION');
+    const preserved = calendarHtmlToText(parts.preservedHtml);
+    plainDescription = preserved ? `${preserved}\n\n${parts.log}` : parts.log;
+  }
   const start = graphInstant(raw.start);
   return {
     id: String(raw.id), calendarId,
     title: typeof raw.subject === 'string' ? raw.subject : 'Untitled event',
-    description: isHtml ? calendarHtmlToText(description) : description,
+    description: plainDescription,
     start, end: graphInstant(raw.end, start),
     timeZone: raw.originalStartTimeZone || raw.start?.timeZone || 'UTC',
     allDay: Boolean(raw.isAllDay),
@@ -434,6 +493,7 @@ export function normalizeMicrosoftEvent(raw: JsonObject, calendarId: string): Re
     canEdit: typeof raw.canEdit === 'boolean' ? raw.canEdit : undefined,
     microsoftCategories: Array.isArray(raw.categories)
       ? raw.categories.filter((item: unknown): item is string => typeof item === 'string') : undefined,
+    displayColor: typeof raw.displayColor === 'string' && /^#[0-9a-f]{6}$/i.test(raw.displayColor) ? raw.displayColor : undefined,
     sourceOperationId: (raw.singleValueExtendedProperties ?? []).find(
       (item: JsonObject) => item.id === SOURCE_OPERATION_PROPERTY,
     )?.value,
@@ -447,38 +507,41 @@ function escapeHtml(value: string) {
 }
 
 /** Preserve every byte outside our own bounded HTML section, including the Teams meeting blob. */
-export function meetingBodyWithContext(rawHtml: string | undefined, description: string) {
+export function meetingBodyWithContext(rawHtml: string | undefined, description: string, descriptionLog?: DescriptionLog, projectionId?: string,
+  previous?: Pick<RemoteCalendarEvent, 'description' | 'descriptionLog' | 'projectionId'>) {
   if (!rawHtml) {
     throw new CalendarProviderError(
       'The online meeting’s original HTML body is unavailable. Refresh the event before updating it in Context.',
       409, 'MEETING_BODY_REQUIRED',
     );
   }
-  const start = description.indexOf('--- Context minutes ---');
-  const end = description.indexOf('--- End Context minutes ---', start);
-  if (start < 0 || end < start) {
+  const ownership = projectionId ?? 'context-html-legacy';
+  const log = readCalendarDescription({ description, descriptionLog, projectionId: ownership }, ownership).log;
+  if (log == null) {
     throw new CalendarProviderError(
       'The online meeting update needs a complete Context minute section. Refresh the linked activity and retry.',
       409, 'CONTEXT_SECTION_REQUIRED',
     );
   }
-  const log = description.slice(start, end + '--- End Context minutes ---'.length);
   let preserved = rawHtml;
-  while (preserved.includes(HTML_LOG_START)) {
-    const sectionStart = preserved.indexOf(HTML_LOG_START);
-    const sectionEnd = preserved.indexOf(HTML_LOG_END, sectionStart);
-    if (sectionEnd < 0) {
-      throw new CalendarProviderError(
-        'This online meeting has an incomplete Context section. Repair that section in the calendar before retrying.',
-        409, 'INVALID_CONTEXT_HTML_SECTION',
-      );
+  if (preserved.includes(HTML_LOG_START) || preserved.includes(HTML_LOG_END)) {
+    const existing = contextHtmlParts(preserved);
+    if (!existing) throw new CalendarProviderError('The online meeting contains an ambiguous Context section. Review it before updating.',
+      409, 'INVALID_CONTEXT_HTML_SECTION');
+    let owned = false;
+    if (previous?.projectionId === ownership) {
+      const prior = readCalendarDescription(previous, ownership);
+      owned = prior.format === 'clean' ? prior.log === existing.log : prior.format === 'legacy';
     }
-    preserved = preserved.slice(0, sectionStart) + preserved.slice(sectionEnd + HTML_LOG_END.length);
+    if (!owned) {
+      // A previous legacy section is ours only when its exact projection footer proves it.
+      owned = readCalendarDescription({ description: existing.log }, ownership).format === 'legacy';
+    }
+    if (!owned) throw new CalendarProviderError('This meeting contains notes in a reserved section. Review them before updating.',
+      409, 'UNPROVEN_CONTEXT_HTML_SECTION');
+    preserved = existing.preservedHtml;
   }
-  if (preserved.includes(HTML_LOG_END)) {
-    throw new CalendarProviderError('The online meeting contains an incomplete Context section.', 409, 'INVALID_CONTEXT_HTML_SECTION');
-  }
-  const section = `${HTML_LOG_START}<pre style="white-space:pre-wrap">\n\n${escapeHtml(log)}\n</pre>${HTML_LOG_END}`;
+  const section = `${HTML_LOG_START}<pre style="white-space:pre-wrap">${escapeHtml(log)}</pre>${HTML_LOG_END}`;
   const closingBody = preserved.toLowerCase().lastIndexOf('</body>');
   const closingHtml = preserved.toLowerCase().lastIndexOf('</html>');
   const insertion = closingBody >= 0 ? closingBody : closingHtml >= 0 ? closingHtml : preserved.length;
@@ -494,10 +557,19 @@ function graphWrite(write: CalendarEventWrite) {
     end: { dateTime: new Date(write.end).toISOString().replace(/Z$/, ''), timeZone: 'UTC' },
     singleValueExtendedProperties: [{
       id: META_PROPERTY,
-      value: JSON.stringify({ projectionId: write.projectionId, categoryId: write.categoryId }),
+      value: JSON.stringify({ projectionId: write.projectionId, categoryId: write.categoryId,
+        ...(write.descriptionLog ? { descriptionLog: write.descriptionLog } : {}) }),
     }],
     ...(write.microsoftCategories ? { categories: write.microsoftCategories } : {}),
   };
+}
+
+function graphWrittenEvent(raw: JsonObject, calendarId: string, write: CalendarEventWrite) {
+  return normalizeMicrosoftEvent({ ...raw, singleValueExtendedProperties: [
+    ...(raw.singleValueExtendedProperties ?? []).filter((item: JsonObject) => item.id !== META_PROPERTY),
+    { id: META_PROPERTY, value: JSON.stringify({ projectionId: write.projectionId, categoryId: write.categoryId,
+      ...(write.descriptionLog ? { descriptionLog: write.descriptionLog } : {}) }) },
+  ] }, calendarId);
 }
 
 function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
@@ -565,7 +637,7 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transactionId: write.projectionId, ...graphWrite(write) }),
       });
-      const created = normalizeMicrosoftEvent(await expectJson(response), calendarId);
+      const created = graphWrittenEvent(await expectJson(response), calendarId, write);
       // Some Graph deployments omit expanded properties on write responses.
       return { ...created, projectionId: write.projectionId, categoryId: write.categoryId };
     },
@@ -582,14 +654,14 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
       const payload = graphWrite(write);
       if (current.isOnlineMeeting || event.isOnlineMeeting) {
         payload.body = {
-          contentType: 'html', content: meetingBodyWithContext(current.bodyHtml, write.description),
+          contentType: 'html', content: meetingBodyWithContext(current.bodyHtml, write.description, write.descriptionLog, write.projectionId, current),
         };
       }
       const response = await request(eventUrl(event.calendarId, event.id), {
         method: 'PATCH', headers: { 'Content-Type': 'application/json', 'If-Match': event.version },
         body: JSON.stringify(payload),
       });
-      const updated = normalizeMicrosoftEvent(await expectJson(response), event.calendarId);
+      const updated = graphWrittenEvent(await expectJson(response), event.calendarId, write);
       return { ...updated, projectionId: write.projectionId, categoryId: write.categoryId };
     },
     async deleteEvent(event) {

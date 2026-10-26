@@ -73,6 +73,59 @@ const plain = (object) => JSON.parse(JSON.stringify(object));
 const save = (api, minute, text, categoryId = 'study') =>
   api.saveMinuteEntry({ dateKey: day, minuteIndex: minute, text, categoryId });
 
+test('one-phone backup batches never latch a foreign ledger peer', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  await save(api, 20, 'Own note');
+  assert.equal(await api.getHasSharedLedgerPeer(), false);
+  const documents = plain(await api.getSyncDocuments(''));
+  await api.mergeSyncDocuments(documents);
+  assert.equal(await api.getHasSharedLedgerPeer(), false);
+  assert.equal(sqlite.prepare(`SELECT value FROM settings WHERE key = ?`).get('calendar.native.shared-ledger-peer-seen.v1'), undefined);
+});
+
+test('foreign actor evidence latches even for losing same-value documents and survives later local edits and reinitialization', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  await save(api, 21, 'Same note');
+  const original = (await api.getSyncDocuments('minute:'))[0];
+  await api.mergeSyncDocuments([{ ...plain(original), revision: revision(1, 0, 'foreign-device') }]);
+  assert.equal(await api.getHasSharedLedgerPeer(), true);
+  assert.equal(sqlite.prepare(`SELECT value FROM settings WHERE key = ?`).get('calendar.native.shared-ledger-peer-seen.v1').value, 'true');
+  await save(api, 21, 'Local edit after peer');
+  sqlite.exec('DELETE FROM ledger_conflicts');
+  const actor = sqlite.prepare('SELECT device FROM ledger_clock WHERE id = 1').get().device;
+  assert.ok((await api.getSyncDocuments('')).every((document) => document.revision.endsWith(':' + actor)));
+  await api.initializeDatabase();
+  assert.equal(await api.getHasSharedLedgerPeer(), true);
+});
+
+test('the peer getter discovers existing foreign winning documents and conflict-only history during upgrade', async (t) => {
+  for (const historyOnly of [false, true]) {
+    const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+    await save(api, 22, 'Local');
+    const document = (await api.getSyncDocuments('minute:'))[0];
+    if (historyOnly) sqlite.prepare('INSERT INTO ledger_conflicts (key, revision, value_json) VALUES (?, ?, ?)')
+      .run(document.key, revision(1, 0, 'prior-peer-device'), JSON.stringify(document.value));
+    else sqlite.prepare('UPDATE ledger_documents SET revision = ? WHERE key = ?')
+      .run(revision(1, 0, 'prior-peer-device'), document.key);
+    assert.equal(await api.getHasSharedLedgerPeer(), true);
+    assert.equal(sqlite.prepare(`SELECT value FROM settings WHERE key = ?`).get('calendar.native.shared-ledger-peer-seen.v1').value, 'true');
+  }
+});
+
+test('a rejected foreign merge rolls back peer evidence, minute changes and importing state atomically', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  await save(api, 23, 'Original note');
+  const documents = plain(await api.getSyncDocuments(''));
+  await assert.rejects(api.mergeSyncDocuments([
+    { key: minuteKey(24), revision: revision(Date.now() + 1000, 0, 'foreign-device'), value: value(24, 'Must roll back') },
+    { key: 'unrecognized:metadata', revision: revision(Date.now() + 1000, 1, 'foreign-device'), value: {} },
+  ]), /Unrecognized synchronization record/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), documents);
+  assert.equal(await api.getMinuteEntry(day, 24), null);
+  assert.equal(await api.getHasSharedLedgerPeer(), false);
+  assert.equal(sqlite.prepare('SELECT importing FROM ledger_clock WHERE id = 1').get().importing, 0);
+});
+
 test('initialization migrates legacy minutes into the journal without calendar side effects', async (t) => {
   const { api, sqlite } = createRepository(t);
   sqlite.exec(`CREATE TABLE minute_entries (

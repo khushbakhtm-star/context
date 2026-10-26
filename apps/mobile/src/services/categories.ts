@@ -63,6 +63,38 @@ export async function listCategories(includeArchived = true): Promise<ActivityCa
 
 export function activeCategories() { return listCategories(false); }
 
+/** Created only after the user edits a previously unrecorded planned minute.
+ * Source display colors do not expand the manual Google-only color picker. */
+export function ensureSourceColorCategory(input: { color: string; name: string; calendarId: string;
+  provider?: ActivityCategory['provider']; accountId?: string; preferredCategoryId?: string }): Promise<ActivityCategory> {
+  return serialized(async () => {
+    if (!COLOR.test(input.color)) throw new Error('The source event color is unavailable.');
+    const categories = await listCategories();
+    const sameColor = (category: ActivityCategory) => category.color.toUpperCase() === input.color.toUpperCase();
+    const preferred = categories.find((category) => category.id === input.preferredCategoryId && sameColor(category));
+    if (preferred) return preferred;
+    const provider = input.provider ?? 'device';
+    const identity = ['source-color', provider, input.accountId ?? '', input.calendarId, input.color.toUpperCase()];
+    let id = stableId(...identity);
+    const current = categories.find((category) => category.id === id && sameColor(category));
+    if (current) return current;
+    const matching = categories.filter((category) => sameColor(category) && category.provider === provider &&
+      category.accountId === input.accountId && (!category.calendarId || category.calendarId === input.calendarId));
+    if (matching.length === 1) return matching[0]!;
+    // An older source-color entry may have been deliberately customized. Never
+    // recolor that historical activity when recording a new source-colored note.
+    let variant = 0;
+    while (categories.some((category) => category.id === id)) id = stableId(...identity, `original-${++variant}`);
+    const category: ActivityCategory = { id, name: input.name.trim().slice(0, 200) || 'Calendar activity', color: input.color,
+      provider, calendarId: input.calendarId, ...(input.accountId ? { accountId: input.accountId } : {}),
+      providerOriginalColor: input.color, providerOriginalName: input.name.trim().slice(0, 200) || 'Calendar activity',
+      updatedAt: new Date().toISOString() };
+    await writeCategory(category);
+    await listCategories();
+    return category;
+  });
+}
+
 /** New activity choices use only Google-provided hex values. Old records are still
  * available through listCategories for history, reports, rename and archive. */
 export async function listSelectableActivityCategories(): Promise<ActivityCategory[]> {

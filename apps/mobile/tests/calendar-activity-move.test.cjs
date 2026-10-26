@@ -9,9 +9,9 @@ const ts = require('typescript');
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const day = '2026-10-25';
 
-function runtime(t) {
+function runtime(t, overrides = {}) {
   const sqlite = new DatabaseSync(':memory:'); t.after(() => sqlite.close());
-  const events = new Map(); const calls = []; let serial = 0; let failUpdate = null;
+  const events = new Map(); const calls = []; let serial = 0; let failUpdate = null; let failCreateAfterSave = false;
   const nativeDb = {
     async execAsync(sql) { sqlite.exec(sql); },
     async runAsync(sql, ...params) { const result = sqlite.prepare(sql).run(...params); return { changes: result.changes }; },
@@ -24,7 +24,9 @@ function runtime(t) {
     async getEventsAsync(ids, start, end) { return [...events.values()].filter((event) => ids.includes(event.calendarId) &&
       new Date(event.startDate) < end && new Date(event.endDate) > start).map(plain); },
     async createEventAsync(calendarId, details) { const id = `event-${++serial}`; calls.push({ type: 'create', id });
-      events.set(id, { id, calendarId, ...plain(details) }); return id; },
+      events.set(id, { id, calendarId, ...plain(details) });
+      if (failCreateAfterSave) throw new Error('Create response was lost');
+      return id; },
     async updateEventAsync(id, details) { calls.push({ type: 'update', id });
       if (failUpdate === id) throw new Error('Provider temporarily unavailable');
       const event = events.get(id); if (!event) throw Object.assign(new Error('Missing'), { code: 'E_EVENT_NOT_FOUND' });
@@ -47,11 +49,13 @@ function runtime(t) {
         if (name === 'react-native') return { Platform: { OS: 'android' } };
         if (name === 'expo-calendar/legacy') return nativeCalendar;
         if (name === 'expo-calendar') return {};
+        if (name === '../../modules/context-calendar-colors') return { getEventColorsAsync: async () => ({}) };
         if (name.startsWith('@noble/')) return require(name);
         if (!name.startsWith('.')) throw new Error(`Unexpected native activity import ${name}`);
         const target = path.resolve(path.dirname(filename), `${name}.ts`);
         if (target === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, synchronizeAccounts: async () => {} };
-        if (target === source('sync/accounts.ts')) return { accountFetch: async () => { throw Error('Unexpected account call'); } };
+        if (target === source('sync/accounts.ts')) return { getAccounts: async () => overrides.accounts ?? [],
+          accountFetch: async () => { throw Error('Unexpected account call'); } };
         if (target === source('sync/providers.ts')) return { createCalendarAdapter: () => { throw Error('Unexpected account call'); } };
         return load(target);
       },
@@ -60,7 +64,8 @@ function runtime(t) {
   }
   const db = load(source('data/database.ts')); const sheet = load(source('services/spreadsheet.ts'));
   const calendar = load(source('services/calendar.ts'));
-  return { db, sheet, calendar, events, calls, sqlite, set failUpdate(id) { failUpdate = id; } };
+  return { db, sheet, calendar, events, calls, sqlite, set failUpdate(id) { failUpdate = id; },
+    set failCreateAfterSave(value) { failCreateAfterSave = value; } };
 }
 async function namedTwoColorActivity(r) {
   await r.db.initializeDatabase();
@@ -72,6 +77,75 @@ async function namedTwoColorActivity(r) {
   return r.sheet.getMovableActivityGroup(day, 100);
 }
 const ordered = (r) => [...r.events.values()].sort((a, b) => a.startDate.localeCompare(b.startDate));
+
+async function oneMinute(r, text = 'Make coffee') {
+  await r.db.initializeDatabase();
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text, categoryId: 'unaccounted' });
+  return (await r.db.getDaySegments(day))[0];
+}
+
+test('new and bound device projections contain only exact timestamped notes, including literal Context-like user text', async (t) => {
+  const r = runtime(t);
+  await oneMinute(r, 'Unaccounted is a word I typed\nContext block: literal note\nFull minute record available in Context.');
+  await r.calendar.syncActualDay(day, 'personal');
+  const event = ordered(r)[0];
+  assert.equal(event.notes, '1:40 AM  Unaccounted is a word I typed\nContext block: literal note\nFull minute record available in Context.');
+  assert.doesNotMatch(event.notes, /Context projection:/);
+  await r.calendar.syncActualDay(day, 'personal');
+  assert.equal(r.events.size, 1);
+  assert.equal(ordered(r)[0].notes, event.notes);
+});
+
+test('a lost native create response pauses safely and never retries by title, time or description similarity', async (t) => {
+  const r = runtime(t); await oneMinute(r);
+  r.failCreateAfterSave = true;
+  await assert.rejects(r.calendar.syncActualDay(day, 'personal'), /response was lost/);
+  assert.equal(r.events.size, 1);
+  r.failCreateAfterSave = false;
+  await assert.rejects(r.calendar.syncActualDay(day, 'personal'), /uncertain result[\s\S]*account/i);
+  assert.equal(r.events.size, 1);
+  assert.equal(r.calls.filter((call) => call.type === 'create').length, 1);
+});
+
+test('a returned native event ID survives an interrupted binding save and recovers without another create', async (t) => {
+  const r = runtime(t); await oneMinute(r);
+  const save = r.db.saveSyncBinding;
+  r.db.saveSyncBinding = async () => { throw Error('Binding save interrupted'); };
+  await assert.rejects(r.calendar.syncActualDay(day, 'personal'), /Binding save interrupted/);
+  r.db.saveSyncBinding = save;
+  await r.calendar.syncActualDay(day, 'personal');
+  assert.equal(r.events.size, 1);
+  assert.equal(r.calls.filter((call) => call.type === 'create').length, 1);
+  assert.equal((await r.db.getSyncBindings(day))[0].eventId, ordered(r)[0].id);
+});
+
+test('actual shared-ledger peers block only unbound fresh native creates; own backup and bound updates stay available', async (t) => {
+  const accounts = [{ consent: { ledgerStorage: true } }];
+  const r = runtime(t, { accounts }); await oneMinute(r);
+  r.db.getHasSharedLedgerPeer = async () => false;
+  await r.calendar.syncActualDay(day, 'personal');
+  r.db.getHasSharedLedgerPeer = async () => true;
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Changed coffee note', categoryId: 'unaccounted' });
+  await r.calendar.syncActualDay(day, 'personal');
+  assert.equal(r.events.size, 1);
+  assert.match(ordered(r)[0].notes, /Changed coffee note/);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'A new activity', categoryId: 'unaccounted' });
+  await assert.rejects(r.calendar.syncActualDay(day, 'personal'), /shared ledger[\s\S]*account calendar editing/);
+  assert.equal(r.events.size, 1);
+});
+
+test('exact legacy marker recovery remains available for shared ledgers and cleans the old visible scaffolding', async (t) => {
+  const r = runtime(t, { accounts: [{ consent: { ledgerStorage: true } }] });
+  const segment = await oneMinute(r);
+  r.db.getHasSharedLedgerPeer = async () => true;
+  r.events.set('legacy-owned', { id: 'legacy-owned', calendarId: 'personal',
+    startDate: new Date(2026, 9, 25, 1, 40).toISOString(), endDate: new Date(2026, 9, 25, 1, 41).toISOString(),
+    notes: `Unaccounted\n\n1:40 AM Make coffee\nContext block: ${segment.blockId}\nContext projection: ${segment.segmentKey}\nFull minute record available in Context.` });
+  await r.calendar.syncActualDay(day, 'personal');
+  assert.equal(r.events.size, 1);
+  assert.equal(r.calls.some((call) => call.type === 'create'), false);
+  assert.equal(ordered(r)[0].notes, '1:40 AM  Make coffee');
+});
 
 test('overlapping two-color whole move rekeys links atomically without swapping or losing original native event IDs', async (t) => {
   const r = runtime(t); const group = await namedTwoColorActivity(r); const initial = ordered(r);

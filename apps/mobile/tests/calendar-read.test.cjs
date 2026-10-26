@@ -22,7 +22,7 @@ function calendarRuntime(overrides = {}) {
   const state = { platform: 'android', events: [event()],
     calendars: [{ id: 'selected', title: 'Private account calendar', color: '#2952A3',
       allowsModifications: true, isVisible: true, isSynced: true }],
-    modernAvailable: true, modern: null, legacy: null, ...overrides };
+    modernAvailable: true, modern: null, legacy: null, eventColors: {}, ...overrides };
   const calls = { modern: [], legacy: [], active: 0, maximumActive: 0 };
   async function invoke(source, ids, start, end) {
     calls[source].push({ ids: [...ids], start, end });
@@ -53,11 +53,14 @@ function calendarRuntime(overrides = {}) {
       if (name === 'react-native') return { Platform: { OS: state.platform } };
       if (name === 'expo-calendar') return modern;
       if (name === 'expo-calendar/legacy') return legacy;
+      if (name === '../../modules/context-calendar-colors') return { getEventColorsAsync: async () => state.eventColors };
       if (name === '../data/database') return {};
+      if (name === '../sync/accounts') return { getAccounts: async () => [] };
       if (name === '../theme') return { categoryById: () => ({ name: 'Activity' }) };
       if (name === '../utils/time') return timeModule.exports;
       if (name === '../utils/cell-format') return require('../src/utils/cell-format.ts');
       if (name === '../utils/activity-translation') return require('../src/utils/activity-translation.ts');
+      if (name === '../utils/calendar-cell-color') return require('../src/utils/calendar-cell-color.ts');
       throw new Error(`Unexpected calendar read test import: ${name}`);
     },
   }, { filename });
@@ -88,6 +91,18 @@ test('Android uses the modern mapper for only selected calendars, bypassing the 
   assert.equal(diagnostic.calendars[0].timedEvents, 1);
   const encoded = JSON.stringify(diagnostic);
   for (const privateText of [row.title, row.notes, calendars[0].title]) assert.ok(!encoded.includes(privateText));
+});
+
+test('native effective event colors override calendar colors and refresh with each source read', async () => {
+  const native = event();
+  const { api, state, calendars } = calendarRuntime({ events: [native], eventColors: {
+    [native.id]: '#123ABC', [`${native.id}@${new Date(native.startDate).getTime()}`]: '#FEDCBA',
+  } });
+  assert.equal((await api.loadPlannedEventsResult(['selected'], '2026-10-25', calendars)).plans[0].color, '#FEDCBA');
+  state.eventColors = { [native.id]: '#654321' };
+  assert.equal((await api.loadPlannedEventsResult(['selected'], '2026-10-25', calendars)).plans[0].color, '#654321');
+  state.eventColors = {};
+  assert.equal((await api.loadPlannedEventsResult(['selected'], '2026-10-25', calendars)).plans[0].color, calendars[0].color);
 });
 
 test('one selected calendar failing preserves another calendar plans and exposes the failure', async () => {

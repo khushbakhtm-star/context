@@ -1,0 +1,8 @@
+{
+  "name": "context-calendar-colors",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only Android calendar event colors for Context",
+  "license": "MIT",
+  "main": "index.ts"
+}

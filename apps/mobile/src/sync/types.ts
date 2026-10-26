@@ -55,6 +55,8 @@ export type RemoteCalendarEvent = {
   calendarId: string;
   title: string;
   description: string;
+  /** Ownership of a generated suffix, stored in provider-private metadata. */
+  descriptionLog?: import('../utils/calendar-description').DescriptionLog;
   start: string;
   end: string;
   timeZone: string;
@@ -73,6 +75,8 @@ export type RemoteCalendarEvent = {
   selfOrganizer?: boolean;
   canEdit?: boolean;
   googleColorId?: string;
+  /** Exact read-only event/label background supplied by the provider. */
+  displayColor?: string;
   googleEventLabelId?: string;
   microsoftCategories?: string[];
   sourceOperationId?: string;
@@ -81,6 +85,7 @@ export type RemoteCalendarEvent = {
 export type CalendarEventWrite = {
   title: string;
   description: string;
+  descriptionLog?: import('../utils/calendar-description').DescriptionLog;
   start: string;
   end: string;
   timeZone: string;

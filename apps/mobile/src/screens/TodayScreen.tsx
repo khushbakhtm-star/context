@@ -13,7 +13,7 @@ import { CellActionMenu } from '../components/CellActionMenu';
 import { InfoButton } from '../components/InfoButton';
 import { deleteMinuteEntry, getDayEntries, getMinuteEntry, saveMinuteRange } from '../data/database';
 import { flushPendingActuals, loadPlannedEventsResult, openPlannedEvent } from '../services/calendar';
-import { listSelectableActivityCategories } from '../services/categories';
+import { ensureSourceColorCategory, listSelectableActivityCategories } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, subscribeInlineMinuteCommits,
   subscribeInlineMinuteLinkWarnings } from '../services/inline-minutes';
 import { applyCellFormat, clearTextMinuteRange, clearSpreadsheetClipboard, colorMinuteRange, copyMinuteRange, cutMinuteRange, editInlineMinute,
@@ -26,6 +26,7 @@ import { activityTextColor, beginInlineCellTap, isInlineCellTap, trackInlineCell
   type InlineCellTap } from '../utils/minute-interactions';
 import { minuteAtDragPosition, minuteDragGripOffset, minuteDragScrollOffset } from '../utils/minute-range-drag';
 import { analyzeCellSelection } from '../utils/cell-action-policy';
+import { calendarCellColor, calendarColor } from '../utils/calendar-cell-color';
 import { activityGroupDragGrip, activityGroupDropTarget, activityGroupDragScrollOffsets,
   type ActivityGroupDragGrip, type ActivityGroupDropTarget } from '../utils/activity-group-drag';
 import { calendarGridLayout, calendarZoomOffsets, normalizeCalendarZoom, parseCalendarMinute, revealCalendarDay,
@@ -78,6 +79,10 @@ export function TodayScreen({
   const insets = useSafeAreaInsets();
   const { width: windowWidth, fontScale } = useWindowDimensions();
   const clockFormatRef = useRef(clockFormat);
+  const sourceColorJobs = useRef(new Map<string, Promise<void>>());
+  const sourceColorJobEpochs = useRef(new Map<string, number>());
+  const sourceColorEligibility = useRef(new Map<string, { categoryId: string; epoch: number }>());
+  const explicitColorEpochs = useRef(new Map<string, number>());
   clockFormatRef.current = clockFormat;
   const [measuredTimeWidths, setMeasuredTimeWidths] = useState<Record<string, number>>({});
   const timeWidthKey = clockFormat + '|' + fontScale;
@@ -980,12 +985,48 @@ export function TodayScreen({
   }
 
   async function flushDraftsForOptions() {
+    await Promise.all([...sourceColorJobs.current.values()]);
     await inlineMinuteDrafts.flushAll();
     if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
       if (mountedRef.current) setToolbarError('A minute has not saved yet. Retry saving before opening these options.');
       return false;
     }
     return true;
+  }
+
+  function recordExplicitColor(day: string, first: number, last = first) {
+    for (let minute = first; minute <= last; minute++) {
+      const key = inlineMinuteKey(day, minute);
+      explicitColorEpochs.current.set(key, (explicitColorEpochs.current.get(key) ?? 0) + 1);
+    }
+  }
+
+  function inheritNewMinuteColor(day: string, minute: number, plan: PlannedEvent | undefined,
+    initialCategoryId: string, initialRevision: number, hasEntry: boolean) {
+    if (hasEntry || !plan || !calendarColor(plan.color)) return;
+    const key = inlineMinuteKey(day, minute);
+    const epoch = explicitColorEpochs.current.get(key) ?? 0;
+    if (initialRevision === 0) sourceColorEligibility.current.set(key, { categoryId: initialCategoryId, epoch });
+    const eligible = sourceColorEligibility.current.get(key);
+    if (!eligible || eligible.categoryId !== initialCategoryId || eligible.epoch !== epoch || sourceColorJobs.current.has(key)) return;
+    sourceColorJobEpochs.current.set(key, epoch);
+    const job = (async () => {
+      const account = plan.accountEvent ? (await getAccounts()).find((item) => item.id === plan.accountEvent!.accountId) : undefined;
+      const provider = plan.sourceProvider ?? (account?.provider === 'google' || account?.provider === 'microsoft' ? account.provider : 'device');
+      const label = calendars.find((calendar) => calendar.id === plan.calendarId)?.title || plan.title || 'Calendar activity';
+      const category = await ensureSourceColorCategory({ color: plan.color, name: `${label} · ${plan.color}`,
+        calendarId: plan.calendarId, provider, accountId: plan.accountEvent?.accountId, preferredCategoryId: plan.categoryId });
+      const current = inlineMinuteDrafts.get(day, minute);
+      if (!current || !current.text.trim() || current.categoryId !== initialCategoryId ||
+          (explicitColorEpochs.current.get(key) ?? 0) !== epoch) return;
+      editInlineMinute(day, minute, { categoryId: category.id });
+    })().catch(() => {
+      if (mountedRef.current) setActionError('The event color could not be preserved. Your minute text is kept for saving.');
+    }).finally(() => {
+      if (sourceColorJobs.current.get(key) === job) { sourceColorJobs.current.delete(key); sourceColorJobEpochs.current.delete(key); }
+    });
+    sourceColorJobs.current.set(key, job);
+    inlineMinuteDrafts.prepareBeforeSave(key, job);
   }
 
   async function prepareOptions(selection: CalendarMinuteSelection) {
@@ -1257,13 +1298,12 @@ export function TodayScreen({
         index?.plansByMinute.get(minuteIndex)?.[0]?.title ?? '', groupId: groups?.get(minuteIndex)?.blockId };
     }), inlineSelection?.minuteIndex);
   }, [selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute, indexedDays, indexedGroups, draftsByKey, inlineSelection?.minuteIndex]);
-  const menuFillColor = inlineSelection ? categoryById(selectedDraft?.categoryId ?? inlineSelection.entry?.categoryId ??
-    inlineSelection.plan?.categoryId ?? 'unaccounted').color : colors.paper;
-  const menuColorId = selectedDraft?.categoryId ?? inlineSelection?.entry?.categoryId;
-  const menuOpaque = Boolean(inlineSelection && (indexedGroups.get(inlineSelection.dateKey)?.has(inlineSelection.minuteIndex) ||
-    (menuColorId && selectableColorIds.has(menuColorId) &&
-      (inlineSelection.entry || selectedDraft?.text.trim() || selectedDraft?.keepColor))));
-  const menuTextColor = selectedFormat.textColor ?? activityTextColor(menuOpaque ? menuFillColor : undefined, colors.ink);
+  const menuGroup = inlineSelection ? indexedGroups.get(inlineSelection.dateKey)?.get(inlineSelection.minuteIndex) : undefined;
+  const menuFillColor = calendarCellColor({ hasActual: Boolean(inlineSelection?.entry || (selectedDraft && selectedDraft.revision > 0)),
+    actualColor: categoryById(selectedDraft?.categoryId ?? inlineSelection?.entry?.categoryId ?? 'unaccounted').color,
+    groupColor: menuGroup ? categoryById(menuGroup.categoryId).color : undefined,
+    planColor: inlineSelection?.plan?.color }) ?? colors.paper;
+  const menuTextColor = selectedFormat.textColor ?? activityTextColor(menuFillColor, colors.ink);
 
   async function runSpreadsheetTool(work: () => Promise<unknown>) {
     if (toolBusyRef.current) return;
@@ -1327,6 +1367,7 @@ export function TodayScreen({
     if (!range) return;
     if (!rangeTitle.trim()) { setToolbarError('Enter an activity title.'); return; }
     if (!groupHasGoogleColor) { setToolbarError('Choose a Google Calendar color.'); return; }
+    recordExplicitColor(range.dateKey, range.startMinute, range.endMinute);
     const generation = navigationGenerationRef.current;
     const token = selectionTokenRef.current;
     markLocalChange([range.dateKey]);
@@ -1404,6 +1445,7 @@ export function TodayScreen({
     const range = parsedRange();
     const selection = inlineSelectionRef.current;
     if (!range || !selection || !await prepareOptions(selection)) return;
+    recordExplicitColor(range.dateKey, range.startMinute, range.endMinute);
     const token = selectionTokenRef.current;
     const generation = navigationGenerationRef.current;
     markLocalChange([range.dateKey]);
@@ -1574,6 +1616,7 @@ export function TodayScreen({
                 onPress={() => {
                   const current = inlineMinuteDrafts.get(inlineSelection.dateKey, inlineSelection.minuteIndex);
                   if (!current) return;
+                  recordExplicitColor(current.dateKey, current.minuteIndex);
                   markLocalChange([current.dateKey]);
                   editInlineMinute(current.dateKey, current.minuteIndex,
                     { categoryId: item.id, keepColor: !current.text.trim() });
@@ -1666,10 +1709,14 @@ export function TodayScreen({
           </Animated.View>
           {days.map((day) => {
             const plans = dayData[day]?.plans.filter((plan) => plan.allDay) ?? [];
-            return <Pressable key={day} disabled={!plans.length} onPress={() => void openPlan(plans[0]!)}
+            return <View key={day}
               style={[styles.allDayCell, { width: gridLayout.dayWidth }]}>
-              <Text numberOfLines={2} style={styles.allDayText}>{plans.map((plan) => plan.title).join(' · ')}</Text>
-            </Pressable>;
+              {plans.map((plan) => <Pressable key={`${plan.calendarId}:${plan.id}`} accessibilityRole="button"
+                accessibilityLabel={plan.title + ', all day'} onPress={() => void openPlan(plan)}
+                style={[styles.allDayEvent, { backgroundColor: calendarColor(plan.color) ?? colors.panel }]}>
+                <Text numberOfLines={2} style={[styles.allDayText, { color: activityTextColor(plan.color, colors.ink) }]}>{plan.title}</Text>
+              </Pressable>)}
+            </View>;
           })}
         </View>
       ) : null}
@@ -1707,7 +1754,10 @@ export function TodayScreen({
               const plans = index?.plansByMinute.get(minute) ?? [];
               const plan = plans[0];
               const hasDraftValue = draft && (draft.revision > 0 || Boolean(entry));
-              const color = hasDraftValue ? categoryById(draft.categoryId).color : entry ? categoryById(entry.categoryId).color : plan?.color;
+              const sourceColorPending = sourceColorJobs.current.has(inlineMinuteKey(day, minute)) &&
+                sourceColorJobEpochs.current.get(inlineMinuteKey(day, minute)) === (explicitColorEpochs.current.get(inlineMinuteKey(day, minute)) ?? 0);
+              const color = sourceColorPending && plan ? plan.color : hasDraftValue ? categoryById(draft.categoryId).color :
+                entry ? categoryById(entry.categoryId).color : undefined;
               const inline = inlineSelection?.dateKey === day && inlineSelection.minuteIndex === minute;
               const rangeSelected = rangeSelecting && selectedRange?.dateKey === day &&
                 minute >= selectedRange.startMinute && minute <= selectedRange.endMinute;
@@ -1715,10 +1765,8 @@ export function TodayScreen({
               const groupStarts = group?.startMinute === minute;
               const groupColor = group ? categoryById(group.categoryId).color : undefined;
               const previewColor = rangeSelected && rangeColorChosen && groupHasGoogleColor ? categoryById(rangeColorId).color : undefined;
-              const recordedColorId = hasDraftValue ? draft.categoryId : entry?.categoryId;
-              const opaqueRecorded = Boolean(recordedColorId && selectableColorIds.has(recordedColorId) &&
-                (entry || draft?.text.trim() || draft?.keepColor));
-              const solidColor = previewColor ?? (group || opaqueRecorded ? color ?? groupColor : undefined);
+              const solidColor = calendarCellColor({ previewColor, actualColor: color,
+                hasActual: Boolean(hasDraftValue || entry), groupColor, planColor: plan?.color });
               const defaultTextColor = activityTextColor(solidColor, colors.ink);
               const titleTextColor = activityTextColor(solidColor ?? groupColor, colors.ink);
               const cellVisibleWidth = Math.max(1, Math.min(gridLayout.dayWidth, gridLayout.viewportWidth - gridLayout.railWidth));
@@ -1764,8 +1812,7 @@ export function TodayScreen({
                     rangeSelected && minute === selectedRange?.endMinute && styles.rangeLastCell,
                     inline && styles.editingCell]}>
                   <View pointerEvents="none" style={[styles.cellBackground,
-                    solidColor && /^#[0-9a-f]{6}$/i.test(solidColor) ? { backgroundColor: solidColor }
-                      : color && /^#[0-9a-f]{6}$/i.test(color) ? { backgroundColor: color + '30' } : null]} />
+                    solidColor ? { backgroundColor: solidColor } : null]} />
                   {group ? <View pointerEvents="none" style={[styles.activityOutline,
                     { borderColor: titleTextColor + '80' }, minute === group.startMinute && styles.activityFirstCell,
                     minute === group.endMinute && styles.activityLastCell]} /> : null}
@@ -1815,6 +1862,7 @@ export function TodayScreen({
                       markLocalChange([day]);
                       const current = inlineMinuteDrafts.get(day, minute);
                       editInlineMinute(day, minute, { text, keepColor: text.trim() ? false : current?.keepColor ?? false });
+                      if (current) inheritNewMinuteColor(day, minute, plan, current.categoryId, current.revision, Boolean(entry));
                     }}
                     onBlur={() => { void inlineMinuteDrafts.flush(inlineMinuteKey(day, minute)); }}
                     onFocus={() => revealInlineMinute(minute)}
@@ -1956,7 +2004,8 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     allDayRail: { width: railWidth, minHeight: 34, zIndex: 15, justifyContent: 'center', backgroundColor: grid,
       borderRightWidth: 1, borderRightColor: gridLine },
     allDayLabel: { paddingHorizontal: 5, color: colors.muted, fontSize: 10, textAlign: 'right' },
-    allDayCell: { minHeight: 34, paddingHorizontal: 5, justifyContent: 'center', borderRightWidth: 1, borderRightColor: gridLine },
+    allDayCell: { minHeight: 34, borderRightWidth: 1, borderRightColor: gridLine },
+    allDayEvent: { minHeight: 44, paddingHorizontal: 5, paddingVertical: 5, justifyContent: 'center' },
     allDayText: { color: colors.graphite, fontSize: 10 },
     minuteList: { flex: 1, minHeight: 0 },
     minuteViewport: { flex: 1, minHeight: 0 },

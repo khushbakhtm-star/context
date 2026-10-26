@@ -14,6 +14,8 @@ import { addDays, dateKey, localDateAtMinute, minuteIndexForDate, minuteLabel, p
 import { getAccounts } from './accounts';
 import { isActivityGroupId } from '../utils/cell-format';
 import { matchActivityTranslation } from '../utils/activity-translation';
+import { calendarColor, sourceEventColor } from '../utils/calendar-cell-color';
+import { makeCalendarDescription, readCalendarDescription } from '../utils/calendar-description';
 import { clearLedgerKeyCache, decryptBatch, encryptBatch, hashValue, parseProjectedMinutes } from './codec';
 import { createCalendarAdapter } from './providers';
 import { createLedgerStorage } from './storage';
@@ -24,8 +26,6 @@ import type {
 } from './types';
 
 const PASSPHRASE_KEY = 'context.ledger.passphrase.v1';
-const BEGIN_LOG = '--- Context minutes ---';
-const END_LOG = '--- End Context minutes ---';
 export type AccountPreferences = { selectedCalendarIds: string[]; writeCalendarId: string | null };
 let status: AccountSyncStatus = { running: false, lastSyncedAt: null, message: 'Ready to connect', conflicts: 0 };
 const listeners = new Set<(next: AccountSyncStatus) => void>();
@@ -151,7 +151,9 @@ export async function loadAccountPlans(value: string): Promise<PlannedEvent[]> {
         if (event.deleted) continue;
         const category = categoryForEvent(account.id, event);
         plans.push({ id: `${account.id}:${event.id}`, calendarId, title: event.title,
-          notes: event.description, color: category?.color ?? calendar.color,
+          notes: event.description, color: sourceEventColor(calendarColor(event.displayColor) ??
+            calendarColor(category?.providerOriginalColor) ?? calendarColor(category?.color), calendar.color),
+          sourceProvider: account.provider === 'google' ? 'google' : 'microsoft',
           categoryId: category?.id ?? event.categoryId, startDate: new Date(event.start),
           endDate: new Date(event.end), allDay: event.allDay,
           accountEvent: { accountId: account.id, event } });
@@ -304,24 +306,16 @@ export async function linkActualsToAccounts(
   }
 }
 
-function descriptionOutsideLog(description: string) {
-  const start = description.indexOf(BEGIN_LOG);
-  const end = description.indexOf(END_LOG, start);
-  if (start < 0 || end < 0) return description.trim();
-  return `${description.slice(0, start)}${description.slice(end + END_LOG.length)}`.trim();
-}
 function buildWrite(projection: Projection, segment: ActivitySegment): CalendarEventWrite {
-  const preserved = projection.sourceEventId || projection.baseEvent
-    ? descriptionOutsideLog(projection.baseEvent?.description ?? '') : '';
+  const preserved = projection.baseEvent ? readCalendarDescription(projection.baseEvent, projection.id).preserved : '';
   const lines = segment.entries.map((entry) => `${minuteLabel(entry.minuteIndex, true)}  ${entry.text}`);
-  const log = [BEGIN_LOG, `Context category: ${segment.categoryId}`, ...lines,
-    `Context projection: ${projection.id}`, END_LOG].join('\n');
+  const description = makeCalendarDescription(preserved, lines.join('\n'));
   const zone = projection.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const mapping = categoryProviderColor(segment.categoryId,
     projection.accountId.startsWith('google:') ? 'google' : 'microsoft',
     projection.accountId, projection.calendarId);
   return { title: segment.activityTitle ?? projection.title ?? (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
-    description: [preserved, log].filter(Boolean).join('\n\n'),
+    ...description,
     start: zonedMinuteToInstant(segment.dateKey, segment.startMinute, zone),
     end: zonedMinuteToInstant(segment.entries.at(-1)!.dateKey,
       segment.entries.at(-1)!.minuteIndex + 1, zone),
@@ -333,6 +327,7 @@ function buildWrite(projection: Projection, segment: ActivitySegment): CalendarE
 }
 function eventHash(event: RemoteCalendarEvent) {
   return hashValue({ title: event.title, description: event.description, start: event.start,
+    descriptionLog: event.descriptionLog ?? null,
     end: event.end, categoryId: event.categoryId ?? null, deleted: event.deleted,
     googleColorId: event.googleColorId, googleEventLabelId: event.googleEventLabelId,
     microsoftCategories: event.microsoftCategories });
@@ -428,17 +423,21 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
     }
     const importedCategory = categoryForEvent(projection.accountId, event);
     const category = importedCategory?.id ?? event.categoryId ?? projection.baseEvent?.categoryId ?? 'unaccounted';
-    const logStart = event.description.indexOf(BEGIN_LOG);
-    const logEnd = event.description.indexOf(END_LOG, logStart);
-    const body = logStart >= 0 && logEnd >= 0
-      ? event.description.slice(logStart + BEGIN_LOG.length, logEnd) : event.description;
-    const lines = parseProjectedMinutes(body);
+    const parts = readCalendarDescription(event, projection.id);
+    const baseParts = projection.baseEvent ? readCalendarDescription(projection.baseEvent, projection.id) : null;
+    if (baseParts?.format === 'clean' && parts.format === 'original') {
+      throw new Error('The calendar minute-log metadata changed. Review the description before importing it.');
+    }
+    const body = parts.log ?? event.description;
+    // Timestamp prose in an original event is preserved as notes, never inferred to be our generated log.
+    const lines = parts.log == null ? [] : parseProjectedMinutes(body, { legacyMetadata: false });
+    if (parts.format === 'clean' && body.trim() && !/^\d{1,2}:[0-5]\d(?:\s*(?:AM|PM))?[ \t]+/i.test(body)) {
+      throw new Error('This calendar description contains notes before its minute log. Review it before importing.');
+    }
     const oldStart = projection.baseEvent ? new Date(projection.baseEvent.start) : start;
     const shift = Math.round((start.getTime() - oldStart.getTime()) / 60000);
     const lineByMinute = new Map(lines.map((line) => [line.minuteIndex, line.text]));
-    const unchangedLog = projection.baseEvent && body === projection.baseEvent.description
-      .slice(projection.baseEvent.description.indexOf(BEGIN_LOG) + BEGIN_LOG.length,
-        projection.baseEvent.description.indexOf(END_LOG));
+    const unchangedLog = baseParts?.log != null && parts.log != null && body === baseParts.log;
     const seenSlots = new Set<string>();
     for (let offset = 0; offset < count; offset += 1) {
       const instant = new Date(start.getTime() + offset * 60000);

@@ -31,6 +31,32 @@ test('an older save acknowledgement cannot erase text typed during its write', a
   await drafts.flushAll();
 });
 
+test('first-edit source-color preparation preserves fast typing and close without saving a temporary default color', async () => {
+  const ready = deferred<void>(); const calls: InlineMinuteValue[] = [];
+  const drafts = new InlineMinuteDrafts(async (value) => { calls.push({ ...value }); return value.text; }, 60_000);
+  const key = inlineMinuteKey('2026-10-25', 411);
+  drafts.activate({ ...minute(), text: 'Planned activity', categoryId: 'unaccounted' });
+  drafts.edit('2026-10-25', 411, { text: 'First note' });
+  drafts.prepareBeforeSave(key, ready.promise.then(() => drafts.edit('2026-10-25', 411, { categoryId: 'source-color' })));
+  const saving = drafts.flush(key); drafts.close(key);
+  drafts.edit('2026-10-25', 411, { text: 'Latest note while the color loads  ' });
+  await setImmediate(); assert.equal(calls.length, 0);
+  assert.equal(drafts.get('2026-10-25', 411)?.text, 'Latest note while the color loads  ');
+  ready.resolve(); await saving; await setImmediate();
+  assert.deepEqual(calls.map(({ text, categoryId }) => ({ text, categoryId })),
+    [{ text: 'Latest note while the color loads  ', categoryId: 'source-color' }]);
+  assert.equal(drafts.get('2026-10-25', 411), null, 'the closed draft prunes only after its prepared value saves');
+});
+
+test('failed optional color preparation cannot discard the raw minute text', async () => {
+  const calls: InlineMinuteValue[] = [];
+  const drafts = new InlineMinuteDrafts(async (value) => { calls.push({ ...value }); return null; }, 60_000);
+  drafts.activate(minute()); drafts.edit('2026-10-25', 411, { text: 'Keep the thought' });
+  drafts.prepareBeforeSave(inlineMinuteKey('2026-10-25', 411), Promise.reject(new Error('Color metadata unavailable')));
+  assert.equal(await drafts.flush(inlineMinuteKey('2026-10-25', 411)), true);
+  assert.equal(calls[0]!.text, 'Keep the thought');
+});
+
 test('different dates serialize SQLite writes and retain their own coordinates during fast switches', async () => {
   const first = deferred<string>();
   const calls: InlineMinuteValue[] = [];

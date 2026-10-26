@@ -53,10 +53,13 @@ function calendarRuntime(overrides = {}) {
       if (name === 'expo-calendar/legacy') return nativeCalendar;
       if (name === 'expo-calendar') return {};
       if (name === '../data/database') return {};
+      if (name === '../sync/accounts') return { getAccounts: async () => [] };
       if (name === '../theme') return { categoryById: () => ({ name: 'Activity' }) };
       if (name === '../utils/time') return timeModule.exports;
       if (name === '../utils/cell-format') return require('../src/utils/cell-format.ts');
       if (name === '../utils/activity-translation') return require('../src/utils/activity-translation.ts');
+      if (name === '../utils/calendar-cell-color') return require('../src/utils/calendar-cell-color.ts');
+      if (name === '../../modules/context-calendar-colors') return { getEventColorsAsync: async () => ({}) };
       throw new Error(`Unexpected calendar test import: ${name}`);
     },
   }, { filename });

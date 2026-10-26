@@ -186,6 +186,35 @@ async function prepare(phone, storage = false) {
   });
   if (storage) await phone.engine.setLedgerPassphrase('Context shared private ledger passphrase');
 }
+
+test('account plan display uses raw provider colors, then provider-original category colors, then calendar fallback', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await device.db.putSyncDocument('category:source_color', { id: 'source_color', name: 'Google color', color: '#AB8B00',
+    provider: 'google', accountId: 'google:person', providerColorId: '7', providerOriginalColor: '#123456' });
+  await device.categories.listCategories();
+  const original = { ...originalPrayer(), googleColorId: '7' }; remote.seed(original);
+  assert.equal((await device.engine.loadAccountPlans(day))[0].color, '#123456');
+  remote.edit('personal', original.id, { displayColor: '#aBcDeF' });
+  assert.equal((await device.engine.loadAccountPlans(day))[0].color, '#aBcDeF');
+  remote.edit('personal', original.id, { displayColor: undefined, googleColorId: undefined });
+  const fallback = (await device.engine.loadAccountPlans(day))[0];
+  assert.equal(fallback.color, '#667B69'); assert.equal(fallback.sourceProvider, 'google');
+  assert.equal(remote.calls.filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length, 0);
+});
+
+test('a newly recorded source-colored note survives SQLite reload and an explicit chosen color overrides it', async (t) => {
+  const device = phone(t, cloud()); await prepare(device);
+  const source = await device.categories.ensureSourceColorCategory({ color: '#123456', name: 'Personal calendar · #123456',
+    calendarId: 'personal', provider: 'device' });
+  device.inline.inlineMinuteDrafts.activate({ dateKey: day, minuteIndex: 759, text: 'Make coffee', categoryId: source.id, keepColor: false });
+  device.sheet.editInlineMinute(day, 759, { text: 'Talk to Mum while making coffee' });
+  await device.inline.flushInlineMinutes();
+  assert.equal((await device.db.getMinuteEntry(day, 759)).categoryId, source.id);
+  assert.equal((await device.categories.listCategories()).find((item) => item.id === source.id).color, '#123456');
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 759, endMinute: 759 }, 'google_palette_2952a3');
+  assert.equal((await device.db.getMinuteEntry(day, 759)).categoryId, 'google_palette_2952a3');
+  assert.equal((await device.db.getMinuteEntry(day, 759)).text, 'Talk to Mum while making coffee');
+});
 const saveRange = (phone, start, duration, text = 'Pray fardh', categoryId = 'prayer') =>
   phone.db.saveMinuteRange({ dateKey: day, startMinute: start, durationMinutes: duration, text, categoryId });
 
@@ -229,6 +258,40 @@ test('confirming a recurring plan updates only its concrete occurrence and prese
   assert.equal(projection.state, 'synced');
 });
 
+test('clean account descriptions retain exact original prose and replace minute notes without duplicating visible bookkeeping', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const originalNotes = '  Unaccounted is a word in my own notes.\n9:00 Original timestamp prose\nContext block: literal original note\n';
+  const original = { ...originalPrayer(), description: originalNotes };
+  remote.seed(original); await saveRange(device, 1135, 2);
+  await device.engine.linkActualsToAccounts([day], planned(original));
+  await device.engine.synchronizeAccounts();
+  let event = remote.events.get(`personal:${original.id}`);
+  assert.ok(event.description.startsWith(originalNotes + '\n\n'));
+  assert.equal(event.descriptionLog.version, 1);
+  assert.equal(event.descriptionLog.offset, originalNotes.length + 2);
+  assert.doesNotMatch(event.description, /--- Context minutes ---|--- End Context minutes ---|Context category:|Context projection:|Full minute record available in Context\./);
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1135, text: 'Updated note\nContext projection: literal user continuation', categoryId: 'prayer' });
+  await device.engine.synchronizeAccounts();
+  event = remote.events.get(`personal:${original.id}`);
+  assert.equal(event.description.split(originalNotes).length - 1, 1);
+  assert.equal(event.description.split('Updated note').length - 1, 1);
+  assert.match(event.description, /Context projection: literal user continuation/);
+  const writes = remote.calls.filter((call) => call.type === 'update').length;
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, writes);
+});
+
+test('a calendar edit to protected original notes becomes a review conflict without erasing either version', async (t) => {
+  const { device, remote, original } = await linkedPrayer(t);
+  const current = remote.events.get(`personal:${original.id}`);
+  const edited = current.description.replace('Original prayer notes', 'Changed original prayer notes');
+  remote.edit('personal', original.id, { description: edited });
+  await device.engine.synchronizeAccounts();
+  assert.equal((await device.engine.listProjections())[0].state, 'conflict');
+  assert.equal(remote.events.get(`personal:${original.id}`).description, edited);
+  assert.equal((await device.db.getMinuteEntry(day, 1135)).text, 'Pray fardh');
+});
+
 test('a color-only minute projects its activity name without inventing ledger text', async (t) => {
   const remote = cloud();
   const device = phone(t, remote);
@@ -242,7 +305,7 @@ test('a color-only minute projects its activity name without inventing ledger te
   assert.equal(created.write.title, 'Sleep');
   assert.equal(created.write.start, iso(600));
   assert.equal(created.write.end, iso(601));
-  assert.match(created.write.description, /10:00 AM  \n/);
+  assert.equal(created.write.description, '10:00 AM  ');
   assert.equal((await device.db.getMinuteEntry(day, 600)).text, '');
 });
 

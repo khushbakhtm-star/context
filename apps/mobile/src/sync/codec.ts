@@ -4,6 +4,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js';
 
 import type { SyncBatch, SyncDocument } from './types';
+import { isDescriptionLog } from '../utils/calendar-description';
 
 const ITERATIONS = 600_000;
 const MAX_PLAINTEXT_BYTES = 6 * 1024 * 1024;
@@ -111,6 +112,10 @@ export function validateBatch(input: unknown): SyncBatch {
       throw new Error('A ledger record must contain an object or a deletion marker.');
     }
     validateJson(candidate.value);
+    if (candidate.key.startsWith('projection:') && isObject(candidate.value) && isObject(candidate.value.baseEvent) &&
+        candidate.value.baseEvent.descriptionLog !== undefined && !isDescriptionLog(candidate.value.baseEvent.descriptionLog)) {
+      throw new Error('The ledger contains invalid calendar description metadata.');
+    }
   }
   if (utf8ToBytes(JSON.stringify(input)).length > MAX_PLAINTEXT_BYTES) {
     throw new Error('The ledger batch is too large.');
@@ -284,10 +289,10 @@ export async function decryptBatch(text: string, passphrase: string): Promise<Sy
 export type ProjectedMinuteLine = { minuteIndex: number; text: string };
 
 /** Accepts the 24-hour and AM/PM timestamps Context writes, including multiline entries. */
-export function parseProjectedMinutes(description: string): ProjectedMinuteLine[] {
+export function parseProjectedMinutes(description: string, options: { legacyMetadata?: boolean } = {}): ProjectedMinuteLine[] {
   const entries: ProjectedMinuteLine[] = [];
   for (const line of description.split(/\r?\n/)) {
-    if (/^(?:Context (?:block|projection|category):|Full minute record available in Context\.)/.test(line)) {
+    if (options.legacyMetadata !== false && /^(?:Context (?:block|projection|category):|Full minute record available in Context\.)/.test(line)) {
       continue;
     }
     const timestamp = /^\s*(\d{1,2}):([0-5]\d)(?:\s*(AM|PM))?[ \t]+(.*)$/i.exec(line);

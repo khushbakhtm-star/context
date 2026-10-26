@@ -589,6 +589,34 @@ export async function getSetting<T>(key: string, fallback: T): Promise<T> {
   }
 }
 
+const SHARED_LEDGER_PEER_SETTING = 'calendar.native.shared-ledger-peer-seen.v1';
+const LEDGER_REVISION = /^\d{16}:\d{8}:([A-Za-z0-9_-]{8,128})$/;
+
+async function latchSharedLedgerPeer(txn: Pick<SQLite.SQLiteDatabase, 'runAsync'>) {
+  await txn.runAsync(`INSERT INTO settings (key, value, updated_at) VALUES (?, 'true', ?)
+    ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = excluded.updated_at`,
+    SHARED_LEDGER_PEER_SETTING, new Date().toISOString());
+}
+
+/** Positive actor evidence survives later local edits. Native calendar identifiers
+ * stay device-local; this flag never copies or claims another phone's event ID. */
+export async function getHasSharedLedgerPeer(): Promise<boolean> {
+  const db = await database();
+  let shared = false;
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    const saved = await txn.getFirstAsync<{ value: string }>(`SELECT value FROM settings WHERE key = ?`, SHARED_LEDGER_PEER_SETTING);
+    if (saved?.value === 'true') { shared = true; return; }
+    const clock = await txn.getFirstAsync<{ device: string }>(`SELECT device FROM ledger_clock WHERE id = 1`);
+    if (!clock?.device) throw new Error('The private ledger identity is unavailable. Reopen Context before synchronizing.');
+    const evidence = await txn.getFirstAsync<{ present: number }>(`SELECT EXISTS (
+      SELECT 1 FROM ledger_documents WHERE substr(revision, 27) <> ?
+      UNION ALL SELECT 1 FROM ledger_conflicts WHERE substr(revision, 27) <> ?
+    ) AS present`, clock.device, clock.device);
+    if (evidence?.present) { await latchSharedLedgerPeer(txn); shared = true; }
+  });
+  return shared;
+}
+
 export async function setSetting<T>(key: string, value: T) {
   const db = await database();
   await db.runAsync(
@@ -1100,8 +1128,15 @@ export async function mergeSyncDocuments(documents: SyncDocument[]) {
   const db = await database();
   let changed = 0;
   await db.withExclusiveTransactionAsync(async (txn) => {
+    const localClock = await txn.getFirstAsync<{ device: string }>(`SELECT device FROM ledger_clock WHERE id = 1`);
+    if (!localClock?.device) throw new Error('The private ledger identity is unavailable. Reopen Context before synchronizing.');
+    let peerLatched = false;
     await txn.runAsync(`UPDATE ledger_clock SET importing = 1 WHERE id = 1`);
     for (const incoming of documents) {
+      const actor = LEDGER_REVISION.exec(incoming.revision)?.[1];
+      if (!peerLatched && actor && actor !== localClock.device) {
+        await latchSharedLedgerPeer(txn); peerLatched = true;
+      }
       const existing = await txn.getFirstAsync<DocumentRow>(
         `SELECT * FROM ledger_documents WHERE key = ?`, incoming.key,
       );

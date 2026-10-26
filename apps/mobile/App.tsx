@@ -44,6 +44,7 @@ import { DateSelectionPopup } from './src/components/DateSelectionPopup';
 import { MonthOverview } from './src/components/MonthOverview';
 import { CalendarViewIcon } from './src/components/CalendarViewIcon';
 import { CalendarHeaderIcon } from './src/components/CalendarHeaderIcon';
+import { PrintOptionsPopup } from './src/components/PrintOptionsPopup';
 import { CalendarYearScreen } from './src/screens/CalendarYearScreen';
 import { CalendarScheduleScreen } from './src/screens/CalendarScheduleScreen';
 import { AppearanceProvider, useAppTheme } from './src/appearance';
@@ -58,6 +59,8 @@ import { calendarViewDates, calendarViewKind, calendarViewModePageTarget, type C
 import { getAccounts } from './src/sync/accounts';
 import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
+import { printContextSchedule } from './src/services/print';
+import { defaultPrintOptions, normalizePrintOptions, printOptionDates, type ContextPrintOptions, type PrintAction } from './src/utils/print-options';
 import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
 import { redoSpreadsheetEdit, spreadsheetEditor, subscribeSpreadsheetCommits, undoSpreadsheetEdit } from './src/services/spreadsheet';
 import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/ReleaseUpdates';
@@ -72,6 +75,22 @@ const DEFAULT_PREFERENCES: CalendarPreferences = {
   writeCalendarId: null,
   syncActuals: false,
 };
+
+class CalendarTransitionCancelled extends Error {}
+
+/** Cancellation releases the UI while the existing read/save promise finishes safely. */
+function awaitCalendarTransition<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => { signal.removeEventListener('abort', abort); reject(new CalendarTransitionCancelled()); };
+    signal.addEventListener('abort', abort, { once: true });
+    work.then((value) => {
+      signal.removeEventListener('abort', abort);
+      if (signal.aborted) reject(new CalendarTransitionCancelled());
+      else resolve(value);
+    }, (error: unknown) => { signal.removeEventListener('abort', abort); reject(error); });
+    if (signal.aborted) abort();
+  });
+}
 
 export default function App() {
   return (
@@ -91,6 +110,21 @@ function AppController() {
   const [viewMode, setViewMode] = useState<CalendarViewMode>('day');
   const [viewChanging, setViewChanging] = useState(false);
   const viewChangingRef = useRef(false);
+  const controllerMountedRef = useRef(true);
+  const lifecycleEpochRef = useRef(0);
+  const transitionSequenceRef = useRef(0);
+  const activeTransitionRef = useRef<{ sequence: number; controller: AbortController } | null>(null);
+  const [printPreparing, setPrintPreparing] = useState(false);
+  const [printPreparationAction, setPrintPreparationAction] = useState<PrintAction>('print');
+  const [dashboardMetric, setDashboardMetric] = useState<ContextPrintOptions['dashboardMetric']>('recorded');
+  const printAbortRef = useRef<AbortController | null>(null);
+  const [printOptionsInitial, setPrintOptionsInitial] = useState<ContextPrintOptions | null>(null);
+  const [printOptionsOpen, setPrintOptionsOpen] = useState(false);
+  const printOptionsOpenRef = useRef(false);
+  const printOptionsClosingRef = useRef(false);
+  const printOptionsSequence = useRef(0);
+  const printOptionsActionFrame = useRef<number | null>(null);
+  const pendingPrintOptionsAction = useRef<{ sequence: number; epoch: number; action: PrintAction; options: ContextPrintOptions } | null>(null);
   const [selectedDateKeys, setSelectedDateKeys] = useState<string[] | null>(null);
   const [overviewMonth, setOverviewMonth] = useState<string | null>(null);
   const [datePickerOpen, setDatePickerOpen] = useState(false);
@@ -137,6 +171,21 @@ function AppController() {
   }, () => AppState.currentState === 'active'), [refreshCalendars]);
 
   useEffect(() => () => calendarReturnRefresh.cancel(), [calendarReturnRefresh]);
+  useEffect(() => {
+    controllerMountedRef.current = true;
+    return () => {
+      controllerMountedRef.current = false;
+      lifecycleEpochRef.current += 1;
+      activeTransitionRef.current?.controller.abort();
+      activeTransitionRef.current = null;
+      viewChangingRef.current = false;
+      printAbortRef.current?.abort();
+      printAbortRef.current = null;
+      invalidatePrintOptionsAction();
+      printOptionsOpenRef.current = false;
+      printOptionsClosingRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -191,12 +240,17 @@ function AppController() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
+        lifecycleEpochRef.current += 1;
+        activeTransitionRef.current?.controller.abort();
+        printAbortRef.current?.abort();
+        invalidatePrintOptionsAction();
         calendarReturnRefresh.cancel();
         // Commit the current cell before the app leaves the foreground. Pending drafts
         // remain in the inline controller if the local database cannot accept a write.
         if (ready) void flushInlineMinutes().catch(() => {});
         return;
       }
+      if (Platform.OS !== 'ios' && !printOptionsOpenRef.current) printOptionsClosingRef.current = false;
       // Some calendar providers publish a saved event shortly after their editor closes.
       calendarReturnRefresh.start();
       if (ready) void flushInlineMinutes().catch(() => {});
@@ -229,6 +283,7 @@ function AppController() {
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (printAbortRef.current) { printAbortRef.current.abort(); return true; }
       if (viewChangingRef.current) return true;
       if (tab !== 'today') {
         setTab('today');
@@ -347,23 +402,42 @@ function AppController() {
       }).catch(() => undefined);
   }
 
-  async function transitionFromCalendar(change: () => void, failureTitle: string) {
-    if (viewChangingRef.current) return;
+  async function transitionFromCalendar(change: () => void | Promise<void>, failureTitle: string, signal?: AbortSignal) {
+    if (viewChangingRef.current || !controllerMountedRef.current || AppState.currentState !== 'active' || signal?.aborted) return;
+    const epoch = lifecycleEpochRef.current;
+    const sequence = ++transitionSequenceRef.current;
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort();
+    signal?.addEventListener('abort', forwardAbort, { once: true });
+    if (signal?.aborted) controller.abort();
+    activeTransitionRef.current = { sequence, controller };
+    const current = () => controllerMountedRef.current && lifecycleEpochRef.current === epoch &&
+      activeTransitionRef.current?.sequence === sequence && !controller.signal.aborted && AppState.currentState === 'active';
     viewChangingRef.current = true;
     setViewChanging(true);
     Keyboard.dismiss();
     try {
       // Navigation can unmount the minute editor. Keep its draft in place if saving fails.
-      await flushInlineMinutes();
+      await awaitCalendarTransition(flushInlineMinutes(), controller.signal);
+      if (!current()) throw new CalendarTransitionCancelled();
       if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
         throw new Error('Your current minute could not be saved. Try again.');
       }
-      change();
+      await awaitCalendarTransition(Promise.resolve().then(() => {
+        if (!current()) throw new CalendarTransitionCancelled();
+        return change();
+      }), controller.signal);
     } catch (error) {
-      Alert.alert(failureTitle, error instanceof Error ? error.message : 'Save your current minute and try again.');
+      if (!(error instanceof CalendarTransitionCancelled) && current()) {
+        Alert.alert(failureTitle, error instanceof Error ? error.message : 'Save your current minute and try again.');
+      }
     } finally {
-      viewChangingRef.current = false;
-      setViewChanging(false);
+      signal?.removeEventListener('abort', forwardAbort);
+      if (activeTransitionRef.current?.sequence === sequence) {
+        activeTransitionRef.current = null;
+        viewChangingRef.current = false;
+        if (controllerMountedRef.current) setViewChanging(false);
+      }
     }
   }
 
@@ -493,6 +567,92 @@ function AppController() {
   const overviewDates = useMemo(() => calendarViewDates(viewMode, activeDate, selectedDateKeys),
     [viewMode, activeDate, selectedDateKeys]);
 
+  function invalidatePrintOptionsAction() {
+    printOptionsSequence.current += 1;
+    pendingPrintOptionsAction.current = null;
+    if (printOptionsActionFrame.current != null) {
+      cancelAnimationFrame(printOptionsActionFrame.current);
+      printOptionsActionFrame.current = null;
+    }
+  }
+
+  function openPrintOptions() {
+    if (printOptionsClosingRef.current || printOptionsOpenRef.current) return;
+    return transitionFromCalendar(() => {
+      invalidatePrintOptionsAction();
+      setPrintOptionsInitial({ ...defaultPrintOptions(overviewDates, viewMode), dashboardMetric });
+      printOptionsOpenRef.current = true;
+      setPrintOptionsOpen(true);
+    }, 'Could not open print options');
+  }
+
+  function closePrintOptions() {
+    if (!controllerMountedRef.current) return;
+    invalidatePrintOptionsAction();
+    printOptionsClosingRef.current = printOptionsOpenRef.current || printOptionsClosingRef.current;
+    printOptionsOpenRef.current = false;
+    setPrintOptionsOpen(false);
+    if (Platform.OS !== 'ios') {
+      const sequence = printOptionsSequence.current;
+      printOptionsActionFrame.current = requestAnimationFrame(() => {
+        printOptionsActionFrame.current = null;
+        if (controllerMountedRef.current && sequence === printOptionsSequence.current) printOptionsClosingRef.current = false;
+      });
+    }
+  }
+
+  function finishPrintOptionsAction(expectedSequence?: number) {
+    const pending = pendingPrintOptionsAction.current;
+    if (!pending || (expectedSequence != null && pending.sequence !== expectedSequence)) return;
+    pendingPrintOptionsAction.current = null;
+    if (printOptionsActionFrame.current != null) { cancelAnimationFrame(printOptionsActionFrame.current); printOptionsActionFrame.current = null; }
+    if (!controllerMountedRef.current || AppState.currentState !== 'active' || pending.epoch !== lifecycleEpochRef.current ||
+        pending.sequence !== printOptionsSequence.current || viewChangingRef.current) return;
+    printOptionsSequence.current += 1;
+    void printCurrentDates(pending.action, pending.options);
+  }
+
+  function confirmPrintOptions(action: PrintAction, options: ContextPrintOptions) {
+    if (!controllerMountedRef.current || AppState.currentState !== 'active' || viewChangingRef.current ||
+        !printOptionsOpenRef.current || printOptionsClosingRef.current || pendingPrintOptionsAction.current) return;
+    let normalized: ContextPrintOptions;
+    try { normalized = normalizePrintOptions(options); printOptionDates(normalized); }
+    catch (error) {
+      Alert.alert('Check print options', error instanceof Error ? error.message : 'Check the selected dates.');
+      return;
+    }
+    const sequence = ++printOptionsSequence.current;
+    pendingPrintOptionsAction.current = { action, options: normalized, sequence, epoch: lifecycleEpochRef.current };
+    printOptionsOpenRef.current = false;
+    printOptionsClosingRef.current = true;
+    setPrintOptionsOpen(false);
+    if (Platform.OS !== 'ios') printOptionsActionFrame.current = requestAnimationFrame(() => {
+      printOptionsActionFrame.current = null;
+      printOptionsClosingRef.current = false;
+      finishPrintOptionsAction(sequence);
+    });
+  }
+
+  async function printCurrentDates(action: PrintAction, options: ContextPrintOptions) {
+    if (viewChangingRef.current || !controllerMountedRef.current || AppState.currentState !== 'active') return;
+    const controller = new AbortController();
+    printAbortRef.current = controller;
+    if (options.view === 'dashboard') setDashboardMetric(options.dashboardMetric);
+    setPrintPreparationAction(action);
+    setPrintPreparing(true);
+    try {
+      await transitionFromCalendar(async () => {
+        await printContextSchedule({ dates: printOptionDates(options), calendars, preferences, clockFormat,
+          signal: controller.signal, options, action });
+      }, action === 'save' ? 'Could not save PDF' : 'Could not print schedule', controller.signal);
+    } finally {
+      if (printAbortRef.current === controller) {
+        printAbortRef.current = null;
+        if (controllerMountedRef.current) setPrintPreparing(false);
+      }
+    }
+  }
+
   return (
     <AppearanceProvider ready={ready}>
       <ApplicationFrame
@@ -508,9 +668,11 @@ function AppController() {
         ) : (
           <>
             <ReleaseUpdateNotice updates={releaseUpdates} />
+            {printPreparing ? <PrintPreparationNotice action={printPreparationAction} onCancel={() => printAbortRef.current?.abort()} /> : null}
             <View style={{ flex: 1 }} pointerEvents={viewChanging ? 'none' : 'auto'}>
               {tab === 'today' ? <>
                 <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void navigate('search')}
+                  onPrint={() => void openPrintOptions()}
                   onOpenReports={() => void navigate('reports')} onJumpToNow={jumpToCurrentMinute}
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
@@ -552,7 +714,8 @@ function AppController() {
                 />
                 }
               </> : null}
-              {tab === 'reports' ? <ReportsScreen dataVersion={dataVersion} initialDate={activeDate} /> : null}
+              {tab === 'reports' ? <ReportsScreen dataVersion={dataVersion} initialDate={activeDate}
+                metric={dashboardMetric} onMetricChange={setDashboardMetric} /> : null}
               {tab === 'search' ? (
                 <SearchScreen dataVersion={dataVersion} onOpenResult={openSearchResult} />
               ) : null}
@@ -581,6 +744,11 @@ function AppController() {
       <DateSelectionPopup visible={datePickerOpen && ready} selectedDates={selectedDateKeys ??
         calendarViewDates(viewMode === 'year' ? 'day' : viewMode, activeDate)} anchorDate={activeDate}
         onApply={chooseDates} onClose={() => setDatePickerOpen(false)} />
+      {printOptionsInitial ? <PrintOptionsPopup visible={printOptionsOpen && ready} initialOptions={printOptionsInitial}
+        onClose={closePrintOptions} onConfirm={confirmPrintOptions} onDismiss={() => {
+          if (Platform.OS === 'ios') { printOptionsClosingRef.current = false; finishPrintOptionsAction(); }
+          else if (!printOptionsOpenRef.current && !pendingPrintOptionsAction.current) printOptionsClosingRef.current = false;
+        }} /> : null}
     </AppearanceProvider>
   );
 }
@@ -593,9 +761,10 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
   viewMode, viewChanging, onViewModeChange }: {
   onOpenSettings: () => void;
+  onPrint: () => void;
   onOpenSearch: () => void;
   onOpenReports: () => void;
   onJumpToNow: () => void;
@@ -619,13 +788,64 @@ function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToN
   const [viewMenuTop, setViewMenuTop] = useState(48);
   const [viewMenuRight, setViewMenuRight] = useState(8);
   const viewMenuAnchor = useRef<ComponentRef<typeof View>>(null);
+  const viewVisibleRef = useRef(false);
+  const viewClosingRef = useRef(false);
+  const [gearMenuOpen, setGearMenuOpen] = useState(false);
+  const [gearMenuTop, setGearMenuTop] = useState(48);
+  const [gearMenuLeft, setGearMenuLeft] = useState(8);
+  const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print'; sequence: number } | null>(null);
+  const gearVisibleRef = useRef(false);
+  const gearClosingRef = useRef(false);
+  const headerMountedRef = useRef(true);
+  const menuRequestSequence = useRef(0);
+  const gearActionFrame = useRef<number | null>(null);
+  const dispatchingGearAction = useRef(false);
   const { width, height } = useWindowDimensions();
   const [availableWidth, setAvailableWidth] = useState(width);
   const controlWidth = Math.max(40, Math.min(44, availableWidth / 9));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
   const navigationBusy = viewChanging || historyPending || history.busy;
+  const navigationBusyRef = useRef(navigationBusy);
+  navigationBusyRef.current = navigationBusy;
 
-  useEffect(() => { setViewMenuOpen(false); }, [width]);
+  function invalidateMenus(render = true) {
+    menuRequestSequence.current += 1;
+    pendingGearAction.current = null;
+    if (gearActionFrame.current != null) { cancelAnimationFrame(gearActionFrame.current); gearActionFrame.current = null; }
+    dispatchingGearAction.current = false;
+    const closing = gearVisibleRef.current || gearClosingRef.current;
+    const viewClosing = viewVisibleRef.current || viewClosingRef.current;
+    gearVisibleRef.current = false;
+    gearClosingRef.current = render && closing;
+    viewVisibleRef.current = false;
+    viewClosingRef.current = render && viewClosing;
+    if (render && headerMountedRef.current) { setViewMenuOpen(false); setGearMenuOpen(false); }
+    if (render && (closing || viewClosing) && Platform.OS !== 'ios') {
+      const sequence = menuRequestSequence.current;
+      gearActionFrame.current = requestAnimationFrame(() => {
+        gearActionFrame.current = null;
+        if (headerMountedRef.current && sequence === menuRequestSequence.current) {
+          gearClosingRef.current = false; viewClosingRef.current = false;
+        }
+      });
+    }
+  }
+
+  function headerMayNavigate() {
+    return headerMountedRef.current && AppState.currentState === 'active' && !navigationBusyRef.current &&
+      !historyOperation.current && !spreadsheetEditor.snapshot().busy && !dispatchingGearAction.current;
+  }
+
+  useEffect(() => {
+    headerMountedRef.current = true;
+    return () => { headerMountedRef.current = false; invalidateMenus(false); };
+  }, []);
+
+  useEffect(() => { invalidateMenus(); }, [width]);
+  useEffect(() => {
+    if (!navigationBusy) dispatchingGearAction.current = false;
+  }, [navigationBusy]);
 
   useEffect(() => {
     const update = () => setHistory(spreadsheetEditor.snapshot());
@@ -644,17 +864,20 @@ function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToN
       await flushInlineMinutes();
       await (action === 'undo' ? undoSpreadsheetEdit() : redoSpreadsheetEdit());
     } catch (error) {
-      Alert.alert(action === 'undo' ? 'Could not undo edit' : 'Could not redo edit',
-        error instanceof Error ? error.message : 'The edit could not be restored. Try again.');
+      if (headerMountedRef.current && AppState.currentState === 'active') {
+        Alert.alert(action === 'undo' ? 'Could not undo edit' : 'Could not redo edit',
+          error instanceof Error ? error.message : 'The edit could not be restored. Try again.');
+      }
     } finally {
       historyOperation.current = false;
-      setHistoryPending(false);
+      if (headerMountedRef.current) setHistoryPending(false);
     }
   }
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const update = () => {
+      if (!headerMountedRef.current) return;
       if (timer) clearTimeout(timer);
       const value = new Date();
       setCurrent(value);
@@ -665,23 +888,74 @@ function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToN
     update();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') update();
-      else if (timer) { clearTimeout(timer); timer = null; }
+      else {
+        invalidateMenus();
+        if (timer) { clearTimeout(timer); timer = null; }
+      }
     });
     return () => { if (timer) clearTimeout(timer); subscription.remove(); };
   }, []);
 
   const currentDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(current);
   const openPicker = () => {
-    if (navigationBusy || historyOperation.current) return;
-    setViewMenuOpen(false); Keyboard.dismiss(); onOpenDatePicker();
+    if (!headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
+    invalidateMenus(); Keyboard.dismiss(); onOpenDatePicker();
   };
   const openViews = () => {
-    if (navigationBusy || historyOperation.current) return;
+    if (!headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
+    invalidateMenus();
+    const sequence = menuRequestSequence.current;
     Keyboard.dismiss();
     viewMenuAnchor.current?.measureInWindow((x, y, anchorWidth, anchorHeight) => {
+      if (sequence !== menuRequestSequence.current || !headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
       setViewMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 304)));
       setViewMenuRight(Math.max(8, Math.min(width - x - anchorWidth, width - 216)));
+      viewVisibleRef.current = true;
       setViewMenuOpen(true);
+    });
+  };
+
+  const openGear = () => {
+    if (!headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
+    invalidateMenus();
+    const sequence = menuRequestSequence.current;
+    Keyboard.dismiss();
+    gearMenuAnchor.current?.measureInWindow((x, y, _anchorWidth, anchorHeight) => {
+      if (sequence !== menuRequestSequence.current || !headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
+      setGearMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 136)));
+      setGearMenuLeft(Math.max(8, Math.min(x, width - 216)));
+      gearVisibleRef.current = true;
+      setGearMenuOpen(true);
+    });
+  };
+  const finishGearAction = (expectedSequence?: number) => {
+    const pending = pendingGearAction.current;
+    if (!pending || (expectedSequence != null && pending.sequence !== expectedSequence)) return;
+    pendingGearAction.current = null;
+    if (gearActionFrame.current != null) { cancelAnimationFrame(gearActionFrame.current); gearActionFrame.current = null; }
+    if (pending.sequence !== menuRequestSequence.current || !headerMayNavigate()) return;
+    menuRequestSequence.current += 1;
+    dispatchingGearAction.current = true;
+    if (pending.action === 'settings') onOpenSettings();
+    else onPrint();
+    // Also release the local lock when a transition finishes within the same React batch.
+    gearActionFrame.current = requestAnimationFrame(() => {
+      gearActionFrame.current = null;
+      if (headerMountedRef.current && !navigationBusyRef.current) dispatchingGearAction.current = false;
+    });
+  };
+  const chooseGearAction = (action: 'settings' | 'print') => {
+    if (!headerMayNavigate() || !gearVisibleRef.current || gearClosingRef.current || pendingGearAction.current) return;
+    const sequence = ++menuRequestSequence.current;
+    pendingGearAction.current = { action, sequence };
+    gearVisibleRef.current = false;
+    gearClosingRef.current = true;
+    setGearMenuOpen(false);
+    // iOS presents its print controller after the dropdown has fully dismissed.
+    if (Platform.OS !== 'ios') gearActionFrame.current = requestAnimationFrame(() => {
+      gearActionFrame.current = null;
+      gearClosingRef.current = false;
+      finishGearAction(sequence);
     });
   };
 
@@ -689,11 +963,13 @@ function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToN
     contentContainerStyle={styles.calendarHeaderContent} scrollEnabled={availableWidth < controlWidth * 9 - 0.5}
     onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}>
     <View style={[styles.calendarHeader, { minWidth: controlWidth * 9 }]}>
-    <Pressable accessibilityRole="button" accessibilityLabel="Open Settings"
-      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
-      onPress={onOpenSettings} style={controlStyle}>
+    <View ref={gearMenuAnchor} collapsable={false}>
+    <Pressable accessibilityRole="button" accessibilityLabel="Settings and print"
+      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, expanded: gearMenuOpen }}
+      onPress={openGear} style={controlStyle}>
       <CalendarHeaderIcon name="settings" />
     </Pressable>
+    </View>
     <Pressable accessibilityRole="button" accessibilityLabel="Previous calendar view"
       accessibilityState={{ disabled: !canGoPrevious || navigationBusy }} disabled={!canGoPrevious || navigationBusy} onPress={onPrevious}
       style={[controlStyle, (!canGoPrevious || navigationBusy) && styles.disabledCalendarNavigation]}>
@@ -739,18 +1015,41 @@ function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToN
       style={[controlStyle, (!history.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
     </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel="Open Reports"
+    <Pressable accessibilityRole="button" accessibilityLabel="Open Dashboard"
       disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
       onPress={onOpenReports} style={controlStyle}>
       <CalendarHeaderIcon name="reports" />
     </Pressable>
     </View>
   </ScrollView>
+    <Modal visible={gearMenuOpen} transparent animationType="fade" statusBarTranslucent navigationBarTranslucent
+      onRequestClose={() => invalidateMenus()} onDismiss={() => {
+        if (Platform.OS === 'ios') { gearClosingRef.current = false; finishGearAction(); }
+        else if (!gearVisibleRef.current && !pendingGearAction.current) gearClosingRef.current = false;
+      }}>
+      <View style={styles.viewMenuBackdrop}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Close settings and print"
+          onPress={() => invalidateMenus()} style={StyleSheet.absoluteFill} />
+        <View accessibilityViewIsModal style={[styles.viewMenu, { top: gearMenuTop, left: gearMenuLeft,
+          maxHeight: Math.max(44, height - gearMenuTop - 8) }]}>
+          <ScrollView>
+            <Pressable accessibilityRole="button" accessibilityLabel="Open Settings"
+              onPress={() => chooseGearAction('settings')} style={styles.viewOption}>
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Settings</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Print displayed dates"
+              onPress={() => chooseGearAction('print')} style={styles.viewOption}>
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Print</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
     <Modal visible={viewMenuOpen} transparent animationType="fade" statusBarTranslucent navigationBarTranslucent
-      onRequestClose={() => setViewMenuOpen(false)}>
+      onRequestClose={() => invalidateMenus()} onDismiss={() => { viewClosingRef.current = false; }}>
       <View style={styles.viewMenuBackdrop}>
         <Pressable accessibilityRole="button" accessibilityLabel="Close calendar views"
-          onPress={() => setViewMenuOpen(false)} style={StyleSheet.absoluteFill} />
+          onPress={() => invalidateMenus()} style={StyleSheet.absoluteFill} />
         <View accessibilityViewIsModal style={[styles.viewMenu, { top: viewMenuTop, right: viewMenuRight,
           maxHeight: Math.max(44, height - viewMenuTop - 8) }]}>
           <ScrollView>
@@ -758,7 +1057,8 @@ function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToN
               const selected = viewMode === option.mode || (viewMode === 'three-days' && option.mode === 'day');
               return <Pressable key={option.mode} accessibilityRole="button" accessibilityLabel={`${option.label} view`}
                 accessibilityState={{ selected }} onPress={() => {
-                  setViewMenuOpen(false);
+                  if (!headerMayNavigate()) return;
+                  invalidateMenus();
                   void onViewModeChange(option.mode);
                 }} style={[styles.viewOption, selected && styles.viewOptionSelected]}>
                 <CalendarViewIcon mode={option.mode} currentDate={option.mode === 'day' ? current : undefined} />
@@ -775,7 +1075,7 @@ function CalendarHeader({ onOpenSettings, onOpenSearch, onOpenReports, onJumpToN
 }
 
 const SCREEN_TITLES: Record<Tab, string> = {
-  today: 'Day', reports: 'Reports', search: 'Search', settings: 'Settings',
+  today: 'Day', reports: 'Dashboard', search: 'Search', settings: 'Settings',
   accounts: 'Calendar accounts', categories: 'Activity colors',
 };
 
@@ -823,6 +1123,19 @@ function ApplicationFrame({
   );
 }
 
+function PrintPreparationNotice({ action, onCancel }: { action: PrintAction; onCancel: () => void }) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  return <View style={styles.printPreparation}>
+    <ActivityIndicator size="small" color={colors.muted} />
+    <Text accessibilityLiveRegion="polite" style={styles.printPreparationText}>{action === 'save' ? 'Preparing PDF' : 'Preparing print'}</Text>
+    <Pressable accessibilityRole="button" accessibilityLabel={action === 'save' ? 'Cancel PDF preparation' : 'Cancel print preparation'}
+      onPress={onCancel} style={styles.backButton}>
+      <Text style={styles.backText}>Cancel</Text>
+    </Pressable>
+  </View>;
+}
+
 function LoadingState({ error, onRetry }: { error: string | null; onRetry: () => void }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -850,6 +1163,9 @@ function LoadingState({ error, onRetry }: { error: string | null; onRetry: () =>
 const createStyles = (colors: AppColors) => StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.paper },
   screen: { flex: 1 },
+  printPreparation: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.hairline, backgroundColor: colors.paper },
+  printPreparationText: { flex: 1, color: colors.graphite, fontSize: 13 },
   calendarHeaderScroll: { height: 44, flexGrow: 0, flexShrink: 0, backgroundColor: colors.paper },
   calendarHeaderContent: { flexGrow: 1 },
   calendarHeader: { minHeight: 44, flexGrow: 1, flexDirection: 'row', alignItems: 'center',

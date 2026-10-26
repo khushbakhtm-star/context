@@ -52,6 +52,8 @@ export type PlannedEvent = {
   endDate: Date;
   allDay: boolean;
   categoryId?: string;
+  /** Read-only origin for preserving a source event's color on a new minute note. */
+  sourceProvider?: 'google' | 'microsoft' | 'device';
   accountEvent?: {
     accountId: string;
     event: import('./sync/types').RemoteCalendarEvent;

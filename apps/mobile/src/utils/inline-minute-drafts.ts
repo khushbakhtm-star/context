@@ -22,6 +22,7 @@ export class InlineMinuteDrafts<Result> {
   private records = new Map<string, InlineMinuteDraft>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private jobs = new Map<string, Promise<boolean>>();
+  private preparations = new Map<string, Promise<void>>();
   private listeners = new Set<() => void>();
   private commitListeners = new Set<(value: InlineMinuteValue, result: Result) => void>();
   private activeKey: string | null = null;
@@ -36,6 +37,14 @@ export class InlineMinuteDrafts<Result> {
   private notify() { for (const listener of this.listeners) { try { listener(); } catch { /* Observers cannot invalidate a ledger save. */ } } }
   snapshot() { return [...this.records.values()].map((value) => ({ ...value })); }
   get(day: string, minute: number) { const value = this.records.get(inlineMinuteKey(day, minute)); return value ? { ...value } : null; }
+
+  /** A first edit may need local source-color metadata before its first save.
+   * Keep raw typing live, but snapshot the value only after that preparation. */
+  prepareBeforeSave(key: string, preparation: Promise<unknown>) {
+    const ready = preparation.then(() => undefined, () => undefined);
+    this.preparations.set(key, ready);
+    void ready.then(() => { if (this.preparations.get(key) === ready) this.preparations.delete(key); });
+  }
 
   /** Sheet commands share the writer with debounced individual edits. */
   runExclusive<T>(work: () => Promise<T>): Promise<T> {
@@ -100,6 +109,13 @@ export class InlineMinuteDrafts<Result> {
     const timer = this.timers.get(key);
     if (timer) clearTimeout(timer);
     this.timers.delete(key);
+    const preparation = this.preparations.get(key);
+    if (preparation) {
+      await preparation;
+      const preparedTimer = this.timers.get(key);
+      if (preparedTimer) clearTimeout(preparedTimer);
+      this.timers.delete(key);
+    }
     const existing = this.jobs.get(key);
     if (existing) return existing;
     const current = this.records.get(key);

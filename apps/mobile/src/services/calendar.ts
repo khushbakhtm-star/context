@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 import * as Calendar from 'expo-calendar/legacy';
 import * as CalendarRead from 'expo-calendar';
+import { getEventColorsAsync } from '../../modules/context-calendar-colors';
 
 import {
   deleteSyncBinding,
@@ -10,16 +11,21 @@ import {
   getPendingSyncDatesFor,
   getSyncBindings,
   getSyncBindingsForBlock,
+  getSetting,
+  getHasSharedLedgerPeer,
   remapActivitySyncBindings,
   markSyncDateComplete,
   markSyncDateFailed,
   saveSyncBinding,
+  setSetting,
 } from '../data/database';
 import { categoryById } from '../theme';
 import type { ActivitySegment, DeviceCalendar, PlannedEvent, SyncBinding } from '../types';
 import { addDays, dateKey, localDateAtMinute, minuteLabel, parseDateKey } from '../utils/time';
 import { isActivityGroupId } from '../utils/cell-format';
 import { bindingInterval, matchActivityTranslation } from '../utils/activity-translation';
+import { nativeEventColor } from '../utils/calendar-cell-color';
+import { getAccounts } from '../sync/accounts';
 
 function isWeb() {
   return Platform.OS === 'web';
@@ -134,6 +140,9 @@ type ReadEvent = {
   readonly startDate?: unknown;
   readonly endDate?: unknown;
   readonly allDay?: unknown;
+  readonly displayColor?: unknown;
+  readonly eventColor?: unknown;
+  readonly color?: unknown;
 };
 
 function readEventDate(value: unknown) {
@@ -191,6 +200,7 @@ export function loadPlannedEventsResult(
           events = await Calendar.getEventsAsync([calendarId], legacyStart, legacyEnd);
         }
         if (!Array.isArray(events)) throw { code: 'ERR_INVALID_CALENDAR_RESPONSE' };
+        const eventColors = await getEventColorsAsync([calendarId], dayStart.getTime(), dayEnd.getTime());
         status.queriedEvents = events.length;
         for (const event of events) {
           if (!event || typeof event.id !== 'string' || !event.id || event.calendarId !== calendarId) {
@@ -210,7 +220,8 @@ export function loadPlannedEventsResult(
           const plannedEvent: PlannedEvent = { id: event.id, calendarId,
             title: typeof event.title === 'string' && event.title ? event.title : 'Untitled event',
             notes: typeof event.notes === 'string' && event.notes ? event.notes : undefined,
-            color: calendar?.color ?? '#8E8C86', startDate, endDate, allDay: event.allDay === true };
+            color: nativeEventColor(event, startDate, eventColors, calendar?.color), sourceProvider: 'device',
+            startDate, endDate, allDay: event.allDay === true };
           const occurrenceKey = [calendarId, event.id, startDate.getTime(), endDate.getTime()].join(':');
           if (uniqueEvents.has(occurrenceKey)) continue;
           uniqueEvents.set(occurrenceKey, plannedEvent);
@@ -306,28 +317,37 @@ function segmentTitle(segment: ActivitySegment) {
 }
 
 function eventDetails(segment: ActivitySegment) {
-  const category = categoryById(segment.categoryId);
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const lines = segment.entries.map(
     (entry) => `${minuteLabel(entry.minuteIndex, true)}  ${entry.text}`,
   );
-  const marker = `Context block: ${segment.blockId}`;
-  const projectionMarker = `Context projection: ${segment.segmentKey}`;
   return {
     title: segmentTitle(segment),
     startDate: localDateAtMinute(segment.dateKey, segment.startMinute),
     endDate: localDateAtMinute(segment.dateKey, segment.endMinute + 1),
     timeZone,
-    notes: [
-      category.name,
-      '',
-      ...lines,
-      '',
-      marker,
-      projectionMarker,
-      'Full minute record available in Context.',
-    ].join('\n'),
+    notes: lines.join('\n'),
   };
+}
+
+type NativeCreateIntent = { version: 1; calendarId: string; blockId: string; segmentKey: string; eventId: string | null };
+const nativeIntentKey = (calendarId: string, blockId: string) =>
+  `calendar.create-intent:${encodeURIComponent(calendarId)}:${encodeURIComponent(blockId)}`;
+
+async function readNativeCreateIntent(calendarId: string, segment: ActivitySegment) {
+  const value = await getSetting<NativeCreateIntent | null>(nativeIntentKey(calendarId, segment.blockId), null);
+  if (value == null) return null;
+  if (value.version !== 1 || value.calendarId !== calendarId || value.blockId !== segment.blockId ||
+      typeof value.segmentKey !== 'string' || !value.segmentKey ||
+      !(value.eventId === null || typeof value.eventId === 'string' && value.eventId.length > 0)) {
+    throw new Error('An unfinished calendar update needs review before synchronization can continue.');
+  }
+  return value;
+}
+
+async function clearNativeCreateIntent(calendarId: string, segment: ActivitySegment, eventId: string) {
+  const intent = await readNativeCreateIntent(calendarId, segment);
+  if (intent?.eventId === eventId) await setSetting(nativeIntentKey(calendarId, segment.blockId), null);
 }
 
 async function createSegmentEvent(
@@ -363,7 +383,40 @@ async function createSegmentEvent(
     claimedEventIds.add(eventId);
     return eventId;
   }
+  const intentKey = nativeIntentKey(calendarId, segment.blockId);
+  let intent = await readNativeCreateIntent(calendarId, segment);
+  if (intent?.eventId && (await getSyncBindingsForBlock(segment.blockId)).some((binding) =>
+    binding.calendarId === calendarId && binding.eventId === intent!.eventId)) {
+    await setSetting(intentKey, null);
+    intent = null;
+  }
+  if (intent) {
+    if (!intent.eventId || intent.segmentKey !== segment.segmentKey || claimedEventIds.has(intent.eventId)) {
+      throw new Error('A previous device-calendar creation has an uncertain result, so this link is paused to prevent duplicates. Review and link any existing calendar event before using account calendar editing. Enabling editing alone does not reuse an existing device-calendar event.');
+    }
+    if (!await boundEventIsDefinitelyMissing(intent.eventId)) {
+      const recorded = await Calendar.getEventAsync(intent.eventId);
+      if (recorded.calendarId !== calendarId) throw new Error('The unfinished calendar update belongs to a different calendar.');
+      if (!canContinue()) throw new ProjectionCancelledError();
+      const updatedId = await Calendar.updateEventAsync(intent.eventId, eventDetails(segment));
+      const recoveredId = updatedId || intent.eventId;
+      if (recoveredId !== intent.eventId) await setSetting(intentKey, { ...intent, eventId: recoveredId });
+      claimedEventIds.add(recoveredId);
+      return recoveredId;
+    }
+    // This exact returned event ID is confirmed gone; creating a replacement cannot duplicate it.
+    await setSetting(intentKey, null);
+  }
+  if (!canContinue()) throw new ProjectionCancelledError();
+  if ((await getAccounts()).some((account) => account.consent.ledgerStorage) && await getHasSharedLedgerPeer()) {
+    throw new Error('This shared ledger pauses new device-calendar activities to prevent duplicates. Review and link any existing calendar event before using account calendar editing. Enabling editing alone does not reuse an existing device-calendar event.');
+  }
+  const pending: NativeCreateIntent = { version: 1, calendarId, blockId: segment.blockId, segmentKey: segment.segmentKey, eventId: null };
+  await setSetting(intentKey, pending);
+  if (!canContinue()) { await setSetting(intentKey, null); throw new ProjectionCancelledError(); }
   const eventId = await Calendar.createEventAsync(calendarId, eventDetails(segment));
+  if (!eventId) throw new Error('The calendar did not return its event identifier, so this device-calendar link is paused. Review and link any existing calendar event before using account calendar editing; enabling editing alone does not reuse it.');
+  await setSetting(intentKey, { ...pending, eventId });
   claimedEventIds.add(eventId);
   return eventId;
 }
@@ -544,6 +597,7 @@ export async function syncActualDay(
         },
         binding.segmentKey,
       );
+      await clearNativeCreateIntent(calendarId, segment, reconciliation.eventId);
       if (!canContinue()) throw new ProjectionCancelledError();
       if (reconciliation.action === 'created') created += 1;
       else updated += 1;
@@ -561,6 +615,7 @@ export async function syncActualDay(
         calendarId,
         eventId,
       });
+      await clearNativeCreateIntent(calendarId, segment, eventId);
       if (!canContinue()) throw new ProjectionCancelledError();
       created += 1;
     }

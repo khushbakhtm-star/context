@@ -64,6 +64,29 @@ test('categories are not limited to nine, synchronize as documents, and archive 
   assert.equal((await api.listCategories()).find((item) => item.id === category.id).archived, true);
 });
 
+test('a first user-edited plan minute can retain its exact source color through saved metadata without expanding the manual palette', async () => {
+  const { api, docs } = categoriesRuntime();
+  const category = await api.ensureSourceColorCategory({ color: '#123456', name: 'Personal calendar · #123456',
+    calendarId: 'calendar', provider: 'device' });
+  assert.equal(docs.get(`category:${category.id}`).color, '#123456');
+  assert.equal((await api.listCategories()).find((item) => item.id === category.id).color, '#123456');
+  const again = await api.ensureSourceColorCategory({ color: '#123456', name: 'Personal calendar · #123456', calendarId: 'calendar', provider: 'device' });
+  assert.equal(again.id, category.id);
+  assert.equal((await api.listSelectableActivityCategories()).some((item) => item.id === category.id), false);
+});
+
+test('source color inheritance preserves explicit or customized historical category colors', async () => {
+  const { api, docs } = categoriesRuntime();
+  const source = { color: '#123456', name: 'Personal calendar · #123456', calendarId: 'calendar', provider: 'device' };
+  const original = await api.ensureSourceColorCategory(source);
+  const chosen = (await api.listGoogleActivityColors())[0];
+  await api.updateCategory(original.id, { name: 'My chosen activity', color: chosen });
+  const fresh = await api.ensureSourceColorCategory({ ...source, preferredCategoryId: original.id });
+  assert.notEqual(fresh.id, original.id); assert.equal(fresh.color, source.color);
+  assert.equal(docs.get(`category:${original.id}`).color, chosen);
+  assert.equal(docs.get(`category:${original.id}`).name, 'My chosen activity');
+});
+
 test('Google imports the full named label palette and keeps per-calendar label mappings', async () => {
   const labels = Array.from({ length: 200 }, (_, index) => ({ id: `label-${index}`, name: `Focus ${index}`, backgroundColor: '#112233' }));
   const { api } = categoriesRuntime({ calendars: [{ id: 'primary', title: 'My calendar', color: '#445566', providedColor: '#445566' }],

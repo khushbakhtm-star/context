@@ -155,3 +155,16 @@ test('calendar timestamp parser handles AM/PM, 24-hour labels and multiline text
     /duplicate minute timestamps/,
   );
 });
+
+test('clean minute logs retain literal Context-like continuation text and validate synchronized ownership metadata', () => {
+  assert.deepEqual(parseProjectedMinutes('12:39 PM Make coffee\nContext block: a note I typed\nFull minute record available in Context.',
+    { legacyMetadata: false }), [{ minuteIndex: 759, text: 'Make coffee\nContext block: a note I typed\nFull minute record available in Context.' }]);
+  const value = { version: 1, offset: 0, prefixHash: 'a'.repeat(64), logHash: 'b'.repeat(64) };
+  const projection: SyncBatch = { version: 1, id: 'projectionmeta', documents: [{ key: 'projection:one', revision: revision(100),
+    value: { baseEvent: { descriptionLog: value } } }] };
+  assert.deepEqual(validateBatch(projection), projection);
+  for (const invalid of [{ ...value, offset: -1 }, { ...value, prefixHash: 'not-a-hash' }, { ...value, version: 2 }]) {
+    assert.throws(() => validateBatch({ ...projection, documents: [{ ...projection.documents[0],
+      value: { baseEvent: { descriptionLog: invalid } } }] }), /description metadata/);
+  }
+});
