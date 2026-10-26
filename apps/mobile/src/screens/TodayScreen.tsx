@@ -456,6 +456,13 @@ export function TodayScreen({
   }
 
   function beginCellHold(day: string, minute: number, group: boolean, event: GestureResponderEvent) {
+    const selected = inlineSelectionRef.current;
+    if (inlineEditingRef.current && selected?.dateKey === day && selected.minuteIndex === minute) {
+      // The focused native editor owns word selection, caret handles and its
+      // Cut/Copy/Paste menu. A row hold must not unmount that editor.
+      cancelCellHold(); cellTouchRef.current = null; cellActivationRef.current = null;
+      return;
+    }
     if (groupDragRef.current || rangeDragRef.current || menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
     cancelCellHold();
     cellTouchRef.current = beginInlineCellTap(inlineMinuteKey(day, minute),
@@ -1842,11 +1849,11 @@ export function TodayScreen({
                     minute >= spreadsheetState.clipboard.range.startMinute && minute <= spreadsheetState.clipboard.range.endMinute
                     ? <View pointerEvents="none" style={styles.cutCellOutline} /> : null}
                   {editing && draft ? <TextInput ref={inlineInputRef} value={draft.text}
-                    editable={!spreadsheetState.busy && !toolBusy} contextMenuHidden rejectResponderTermination={false}
+                    editable={!spreadsheetState.busy && !toolBusy} contextMenuHidden={false} rejectResponderTermination={false}
                     multiline scrollEnabled returnKeyType="done" submitBehavior="submit"
                     accessibilityLabel={dayLabels.get(day) + ', ' + timeLabel(minute) + (group ? ', ' + group.title : '') + ', minute text'}
                     placeholder="Record" placeholderTextColor={solidColor ? defaultTextColor : colors.muted} selectionColor={colors.currentTime}
-                    accessibilityHint="Edit this minute. Use the keyboard checkmark to save and close the keyboard. Hold for cell actions."
+                    accessibilityHint="Hold to select text and use Cut, Copy or Paste. Use the keyboard checkmark to save and close the keyboard."
                     accessibilityActions={[{ name: 'showMenu', label: 'Selected minute actions' }]}
                     onAccessibilityAction={(event) => {
                       if (event.nativeEvent.actionName === 'showMenu') void openLongPressMenu(day, minute);

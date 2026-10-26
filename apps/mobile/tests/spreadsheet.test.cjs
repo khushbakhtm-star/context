@@ -628,6 +628,37 @@ test('a code-5 Undo failure releases both edit queues and the same pasted cell r
   assert.equal(sheet.spreadsheetEditor.snapshot().busy, false);
 });
 
+test('native partial text Cut/Paste preserves each cell fill, style, activity and independent Undo history', async (t) => {
+  const { api, sheet, inline } = harness(t); await api.initializeDatabase();
+  const sourceText = 'Call Mum to plan doctor appointment'; const destinationText = 'Remember the appointment';
+  await save(api, 100, sourceText); await save(api, 200, destinationText);
+  await sheet.groupMinuteRange(range(100, 101), { title: 'Family', categoryId: 'family' });
+  await sheet.groupMinuteRange(range(200, 201), { title: 'Work', categoryId: 'work' });
+  await sheet.applyCellFormat(range(100), { bold: true, textColor: '#123456' });
+  await sheet.applyCellFormat(range(200), { italic: true, underline: true, textColor: '#654321' });
+  const beforeSource = await api.getMinuteEntry(day, 100); const beforeDestination = await api.getMinuteEntry(day, 200);
+  const beforeFormats = plain([...(await sheet.getDayCellFormats(day))]);
+  // Native text actions use the ordinary inline change path. Only selected
+  // characters cross the system clipboard; sheet metadata is never copied.
+  activate(inline, 100, sourceText, 'family'); sheet.editInlineMinute(day, 100, { text: 'Call to plan doctor appointment' });
+  await inline.flushInlineMinutes();
+  activate(inline, 200, destinationText, 'work'); sheet.editInlineMinute(day, 200, { text: 'Remember Mum the appointment' });
+  await inline.flushInlineMinutes();
+  assert.equal((await api.getMinuteEntry(day, 100)).text, 'Call to plan doctor appointment');
+  assert.equal((await api.getMinuteEntry(day, 200)).text, 'Remember Mum the appointment');
+  for (const before of [beforeSource, beforeDestination]) {
+    const after = await api.getMinuteEntry(day, before.minuteIndex);
+    assert.equal(after.categoryId, before.categoryId); assert.equal(after.blockId, before.blockId);
+  }
+  assert.deepEqual(plain([...(await sheet.getDayCellFormats(day))]), beforeFormats);
+  assert.equal(sheet.getSpreadsheetClipboard(), null, 'native text Copy/Cut must not arm whole-cell Paste');
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 200)).text, destinationText);
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 100)).text, sourceText);
+  await sheet.redoSpreadsheetEdit(); await sheet.redoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 200)).text, 'Remember Mum the appointment');
+  assert.deepEqual(plain([...(await sheet.getDayCellFormats(day))]), beforeFormats);
+});
+
 test('an activity groups distinct minute notes and blank members, retaining identity during inline typing and note clearing', async (t) => {
   const { api, sheet, inline } = harness(t); await api.initializeDatabase();
   await save(api, 600, 'Prepare kettle', 'work'); await save(api, 602, 'Drink tea', 'family');

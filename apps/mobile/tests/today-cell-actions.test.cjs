@@ -98,7 +98,7 @@ function screen(t) {
   const Drafts = load(source('utils/inline-minute-drafts.ts')).InlineMinuteDrafts;
   drafts = new Drafts(async (value) => { if (writeGate) await writeGate;
     if (failure === 'save') throw Error('Save failed');
-    const entry = { ...value, blockId: 'note' }; rows.set(`${value.dateKey}:${value.minuteIndex}`, entry);
+    const entry = { ...value, blockId: rows.get(`${value.dateKey}:${value.minuteIndex}`)?.blockId ?? 'note' }; rows.set(`${value.dateKey}:${value.minuteIndex}`, entry);
     return { ...value, entry, affectedDates: [value.dateKey] }; }, 60000);
   const Today = load(source('screens/TodayScreen.tsx')).TodayScreen;
   const props = { activeDate: day, calendars: [], preferences: { selectedCalendarIds: [], syncActuals: false }, dataVersion: 0,
@@ -137,6 +137,7 @@ test('a held recorded cell dispatches whole-cell Copy, then a held destination d
 test('Cut remains deferred until Paste and Clear flushes pending typing before applying', async (t) => {
   const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Initial note', categoryId: 'work', blockId: 'note' });
   await r.start(); await r.tap(600); await r.tap(600); assert.ok(r.input()); r.input().onChangeText('Latest complete cell'); await r.settle();
+  r.input().onSubmitEditing(); await r.settle();
   await r.hold(600); await r.menu().onCut(); await r.settle(); assert.equal(r.rows.get(`${r.day}:600`).text, 'Latest complete cell');
   await r.tap(601); await r.hold(601); await r.menu().onPaste(); await r.settle();
   assert.equal(r.rows.has(`${r.day}:600`), false); assert.equal(r.rows.get(`${r.day}:601`).text, 'Latest complete cell');
@@ -195,7 +196,8 @@ test('a failed keyboard Save preserves the typed value and editing for retry', a
   const previousDismisses = r.dismisses; r.input().onSubmitEditing(); await r.settle();
   assert.equal(r.input().value, 'An unsaved thought'); assert.equal(r.dismisses, previousDismisses);
   assert.equal(r.drafts.get(r.day, 600).error, true);
-  await r.hold(600); assert.equal(r.input(), undefined, 'a blocked command can leave the raw cell selected without a keyboard');
+  r.input().onAccessibilityAction({ nativeEvent: { actionName: 'showMenu' } }); await r.settle();
+  assert.equal(r.input(), undefined, 'an explicitly requested blocked whole-cell command can leave the raw cell selected without a keyboard');
   await r.tap(600); await r.tap(600);
   assert.equal(r.input().value, 'An unsaved thought', 'the same raw cell remains editable after a failed database save');
   r.input().onChangeText('Revised after the failure'); await r.settle();
@@ -213,4 +215,29 @@ test('a completed old Save cannot close a newer cell keyboard after an asynchron
   assert.equal(r.rows.get(`${r.day}:600`).text, 'Save the old cell');
   assert.ok(r.input(601), 'the latest double-tapped destination stays in edit mode');
   assert.equal(r.dismisses, dismissesBeforeAck, 'the older checkmark cannot dismiss the new editor');
+});
+
+test('editing owns native partial selection and text-only Cut/Paste without opening the whole-cell menu', async (t) => {
+  const r = screen(t);
+  r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Make coffee; talk to Mum', categoryId: 'family', blockId: 'activity_source' });
+  r.rows.set(`${r.day}:601`, { dateKey: r.day, minuteIndex: 601, text: 'Remember: ', categoryId: 'work', blockId: 'activity_destination' });
+  await r.start(); await r.tap(600); await r.tap(600);
+  assert.equal(r.input().contextMenuHidden, false);
+  r.input().onSelectionChange({ nativeEvent: { selection: { start: 13, end: 24 } } });
+  await r.hold(600);
+  assert.ok(r.input(), 'holding edited text must leave the native editor and its selection handles mounted');
+  assert.equal(r.menu(), undefined, 'the row cannot steal a native word-selection hold');
+  const phrase = 'talk to Mum';
+  r.input().onChangeText('Make coffee; '); await r.settle(); // Native Cut reports only the new text value.
+  await r.tap(601); await r.tap(601);
+  assert.equal(r.input(601).contextMenuHidden, false);
+  r.input(601).onChangeText('Remember: ' + phrase); r.input(601).onSubmitEditing(); await r.settle();
+  assert.equal(r.rows.get(`${r.day}:600`).text, 'Make coffee; ');
+  assert.equal(r.rows.get(`${r.day}:601`).text, 'Remember: talk to Mum');
+  assert.equal(r.rows.get(`${r.day}:600`).categoryId, 'family');
+  assert.equal(r.rows.get(`${r.day}:601`).categoryId, 'work');
+  assert.equal(r.rows.get(`${r.day}:600`).blockId, 'activity_source');
+  assert.equal(r.rows.get(`${r.day}:601`).blockId, 'activity_destination');
+  assert.equal(r.calls.length, 0, 'native text actions do not invoke whole-cell Copy/Cut/Paste commands');
+  await r.hold(600); assert.ok(r.menu(), 'whole-cell actions remain available after editing closes');
 });
