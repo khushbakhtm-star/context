@@ -4,6 +4,7 @@ import {
   Alert,
   AppState,
   BackHandler,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
@@ -39,12 +40,16 @@ import { CategoriesScreen } from './src/screens/CategoriesScreen';
 import { ReportsScreen } from './src/screens/ReportsScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { TodayScreen } from './src/screens/TodayScreen';
+import { DateSelectionPopup } from './src/components/DateSelectionPopup';
+import { MonthOverview } from './src/components/MonthOverview';
 import { AppearanceProvider, useAppTheme } from './src/appearance';
 import type { AppColors } from './src/theme';
 import type { CalendarPreferences, DeviceCalendar, SearchResult } from './src/types';
 import { dateKey, minuteIndexForDate } from './src/utils/time';
 import { normalizeCalendarZoom } from './src/utils/calendar-layout';
 import { createCalendarRefreshBurst } from './src/utils/calendar-refresh';
+import { dateSelectionMode, normalizeSelectedDates } from './src/utils/date-selection';
+import { visibleCalendarDates } from './src/utils/calendar-grid';
 import { getAccounts } from './src/sync/accounts';
 import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
@@ -91,6 +96,8 @@ function AppController() {
   const [tab, setTab] = useState<Tab>('today');
   const [menuOpen, setMenuOpen] = useState(false);
   const [dayCount, setDayCount] = useState<DayCount>(1);
+  const [selectedDateKeys, setSelectedDateKeys] = useState<string[] | null>(null);
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
   const [calendarZoom, setCalendarZoom] = useState(1);
   const [calendarViewResetToken, setCalendarViewResetToken] = useState(0);
   const [clockFormat, setClockFormat] = useState<'12h' | '24h'>('12h');
@@ -143,11 +150,12 @@ function AppController() {
       try {
         await initializeDatabase();
         await listCategories();
-        const [savedPreferences, savedDayCount, savedZoom, savedClockFormat] = await Promise.all([
+        const [savedPreferences, savedDayCount, savedZoom, savedClockFormat, savedSelectedDates] = await Promise.all([
           getSetting<CalendarPreferences>('calendar.preferences', DEFAULT_PREFERENCES),
           getSetting<unknown>('calendar.day-count', 1),
           getSetting<unknown>('calendar.zoom', 1),
           getSetting<unknown>('calendar.clock-format', '12h'),
+          getSetting<unknown>('calendar.selected-date-keys', null),
         ]);
         const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
         setAccountCalendarWrites(directWrites);
@@ -157,6 +165,9 @@ function AppController() {
         );
         setPreferences(savedPreferences);
         setDayCount(savedDayCount === 3 || savedDayCount === 7 ? savedDayCount : 1);
+        const normalizedDates = normalizeSelectedDates(savedSelectedDates);
+        setSelectedDateKeys(normalizedDates.length ? normalizedDates : null);
+        if (normalizedDates.length) setActiveDate(normalizedDates[0]!);
         setCalendarZoom(normalizeCalendarZoom(savedZoom));
         setClockFormat(savedClockFormat === '24h' ? '24h' : '12h');
         await refreshCalendars();
@@ -321,11 +332,41 @@ function AppController() {
   }
 
   function changeDayCount(next: DayCount) {
+    setSelectedDateKeys(null);
     setDayCount(next);
     setCalendarViewResetToken((token) => token + 1);
     changeCalendarZoom(1);
     viewWrites.current = viewWrites.current.catch(() => undefined)
-      .then(() => setSetting('calendar.day-count', next)).catch(() => undefined);
+      .then(async () => {
+        await setSetting('calendar.selected-date-keys', null);
+        await setSetting('calendar.day-count', next);
+      }).catch(() => undefined);
+  }
+
+  function chooseDates(value: string[]) {
+    const dates = normalizeSelectedDates(value);
+    if (!dates.length) return;
+    setSelectedDateKeys(dates);
+    setActiveDate(dates[0]!);
+    setFocusRequest(null);
+    setCalendarViewResetToken((token) => token + 1);
+    changeCalendarZoom(1);
+    setDatePickerOpen(false);
+    setTab('today');
+    viewWrites.current = viewWrites.current.catch(() => undefined)
+      .then(() => setSetting('calendar.selected-date-keys', dates)).catch(() => undefined);
+  }
+
+  function openCalendarMinute(day: string, minute: number) {
+    changeDayCount(1);
+    setActiveDate(day);
+    setFocusRequest({ dateKey: day, minuteIndex: minute, token: ++focusSequence.current, openEditor: false });
+    setTab('today');
+  }
+
+  function jumpToCurrentMinute() {
+    const current = new Date();
+    openCalendarMinute(dateKey(current), minuteIndexForDate(current));
   }
 
   function changeCalendarZoom(next: number) {
@@ -391,6 +432,7 @@ function AppController() {
         ready={ready}
         tab={tab}
         dayCount={dayCount}
+        customDatesSelected={selectedDateKeys != null}
         menuOpen={menuOpen}
         onMenuChange={setMenuOpen}
         onNavigate={navigate}
@@ -405,8 +447,17 @@ function AppController() {
           <>
             <ReleaseUpdateNotice updates={releaseUpdates} />
             <View style={{ flex: 1 }}>
-              {tab === 'today' ? (
-                <TodayScreen
+              {tab === 'today' ? <>
+                <CalendarHeader onOpenMenu={() => setMenuOpen(true)} onJumpToNow={jumpToCurrentMinute}
+                  onOpenDatePicker={() => setDatePickerOpen(true)} />
+                {selectedDateKeys && dateSelectionMode(selectedDateKeys) === 'month' ? <MonthOverview
+                  selectedDates={selectedDateKeys}
+                  calendars={calendars}
+                  preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
+                  dataVersion={dataVersion}
+                  clockFormat={clockFormat}
+                  onOpenMinute={openCalendarMinute}
+                /> : <TodayScreen
                   activeDate={activeDate}
                   onDateChange={setActiveDate}
                   calendars={calendars}
@@ -417,15 +468,17 @@ function AppController() {
                   onDataChanged={dataChanged}
                   onOpenSettings={() => setTab('settings')}
                   dayCount={dayCount}
-                  onDayCountChange={changeDayCount}
+                  selectedDates={selectedDateKeys}
+                  dateSelectionOpen={datePickerOpen}
+                  onDayCountChange={() => changeDayCount(1)}
                   zoom={calendarZoom}
                   viewResetToken={calendarViewResetToken}
                   onZoomChange={changeCalendarZoom}
                   clockFormat={clockFormat}
                   onCreatePlan={() => navigate('plan')}
-                  onOpenMenu={() => setMenuOpen(true)}
                 />
-              ) : null}
+                }
+              </> : null}
               {tab === 'reports' ? <ReportsScreen dataVersion={dataVersion} initialDate={activeDate} /> : null}
               {tab === 'search' ? (
                 <SearchScreen dataVersion={dataVersion} onOpenResult={openSearchResult} />
@@ -452,8 +505,64 @@ function AppController() {
           </>
         )}
       </ApplicationFrame>
+      <DateSelectionPopup visible={datePickerOpen && ready} selectedDates={selectedDateKeys ??
+        visibleCalendarDates(activeDate, dayCount)} anchorDate={activeDate}
+        onApply={chooseDates} onClose={() => setDatePickerOpen(false)} />
     </AppearanceProvider>
   );
+}
+
+function CalendarHeader({ onOpenMenu, onJumpToNow, onOpenDatePicker }: {
+  onOpenMenu: () => void;
+  onJumpToNow: () => void;
+  onOpenDatePicker: () => void;
+}) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const [current, setCurrent] = useState(() => new Date());
+  const held = useRef(false);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const update = () => {
+      if (timer) clearTimeout(timer);
+      const value = new Date();
+      setCurrent(value);
+      if (AppState.currentState === 'active') {
+        timer = setTimeout(update, 60_000 - value.getSeconds() * 1_000 - value.getMilliseconds() + 25);
+      }
+    };
+    update();
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') update();
+      else if (timer) { clearTimeout(timer); timer = null; }
+    });
+    return () => { if (timer) clearTimeout(timer); subscription.remove(); };
+  }, []);
+
+  const abbreviatedMonth = new Intl.DateTimeFormat(undefined, { month: 'short' }).format(current).toLocaleUpperCase();
+  const currentDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(current);
+  const openPicker = () => { Keyboard.dismiss(); onOpenDatePicker(); };
+
+  return <View style={styles.calendarHeader}>
+    <Pressable accessibilityRole="button" accessibilityLabel="Open navigation menu"
+      onPress={onOpenMenu} style={styles.menuButton}>
+      <View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} /><View style={styles.calendarMenuLine} />
+    </Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel={`Go to ${currentDate}, current minute`}
+      accessibilityHint="Touch and hold to choose dates"
+      accessibilityActions={[{ name: 'longpress', label: 'Choose dates' }]}
+      onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') { held.current = true; openPicker(); } }}
+      onPressIn={() => { held.current = false; }}
+      onLongPress={() => { held.current = true; openPicker(); }} delayLongPress={450}
+      onPress={() => { if (!held.current) onJumpToNow(); held.current = false; }} style={styles.menuButton}>
+      <View pointerEvents="none" accessible={false} style={styles.calendarGlyph}>
+        <View style={styles.calendarBindings}><View style={styles.calendarBinding} /><View style={styles.calendarBinding} /></View>
+        <Text accessible={false} allowFontScaling={false} numberOfLines={1} style={styles.calendarGlyphMonth}>{abbreviatedMonth}</Text>
+        <Text accessible={false} allowFontScaling={false} style={styles.calendarGlyphDay}>{current.getDate()}</Text>
+      </View>
+    </Pressable>
+  </View>;
 }
 
 const SCREEN_TITLES: Record<Tab, string> = {
@@ -462,11 +571,12 @@ const SCREEN_TITLES: Record<Tab, string> = {
 };
 
 function ApplicationFrame({
-  ready, tab, dayCount, menuOpen, onMenuChange, onNavigate, onReturnToCalendar, children,
+  ready, tab, dayCount, customDatesSelected, menuOpen, onMenuChange, onNavigate, onReturnToCalendar, children,
 }: {
   ready: boolean;
   tab: Tab;
   dayCount: DayCount;
+  customDatesSelected: boolean;
   menuOpen: boolean;
   onMenuChange: (open: boolean) => void;
   onNavigate: (action: NavigationAction) => void;
@@ -551,9 +661,9 @@ function ApplicationFrame({
             </View>
             <ScrollView contentContainerStyle={styles.drawerItems}>
               {NAVIGATION_ITEMS.map((item) => {
-                const selected = item.id === 'week' ? tab === 'today' && dayCount === 7 :
-                  item.id === 'three-days' ? tab === 'today' && dayCount === 3 :
-                    item.id === 'day' ? tab === 'today' && dayCount === 1 : item.id === tab;
+                const selected = item.id === 'week' ? tab === 'today' && !customDatesSelected && dayCount === 7 :
+                  item.id === 'three-days' ? tab === 'today' && !customDatesSelected && dayCount === 3 :
+                    item.id === 'day' ? tab === 'today' && !customDatesSelected && dayCount === 1 : item.id === tab;
                 return (
                   <Pressable
                     key={item.id}
@@ -603,6 +713,15 @@ function LoadingState({ error, onRetry }: { error: string | null; onRetry: () =>
 const createStyles = (colors: AppColors) => StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.paper },
   screen: { flex: 1 },
+  calendarHeader: { minHeight: 44, flexDirection: 'row', alignItems: 'center', backgroundColor: colors.paper },
+  calendarMenuLine: { height: 3, width: 28, marginVertical: 2.5, backgroundColor: colors.graphite },
+  calendarGlyph: { width: 30, height: 32, borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 4,
+    alignItems: 'center', justifyContent: 'center' },
+  calendarBindings: { position: 'absolute', left: 5, right: 5, top: -4, flexDirection: 'row', justifyContent: 'space-between' },
+  calendarBinding: { height: 6, width: 2, backgroundColor: colors.graphite, borderRadius: 1 },
+  calendarGlyphMonth: { width: '100%', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.muted,
+    paddingTop: 1, paddingBottom: 1, textAlign: 'center', color: colors.graphite, fontSize: 7, lineHeight: 9, fontWeight: '700' },
+  calendarGlyphDay: { color: colors.graphite, fontSize: 16, lineHeight: 18, fontWeight: '500' },
   screenHeader: {
     minHeight: 56, flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 10, borderBottomWidth: StyleSheet.hairlineWidth,

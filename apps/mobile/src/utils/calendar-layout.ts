@@ -1,3 +1,5 @@
+import type { CalendarDayCount } from './calendar-grid';
+
 export const CALENDAR_TIME_RAIL = 88;
 export const CALENDAR_BASE_ROW_HEIGHT = 34;
 
@@ -18,8 +20,8 @@ export function parseCalendarMinute(input: string): number | null {
 
 /** measuredBaseTimeWidth is the native text width at 100% zoom, including the
  * user's font scale. A passive time rail adds only one pixel on each side. */
-export function calendarGridLayout(viewport: number, preset: 1 | 3 | 7, value = 1, bufferedDays: number = preset,
-  measuredBaseTimeWidth?: number) {
+export function calendarGridLayout(viewport: number, preset: CalendarDayCount, value = 1, bufferedDays: number = preset,
+  measuredBaseTimeWidth?: number, exactSelection = false) {
   const viewportWidth = Number.isFinite(viewport) && viewport > CALENDAR_TIME_RAIL ? viewport : 360;
   const zoom = normalizeCalendarZoom(value);
   const compact = typeof measuredBaseTimeWidth === 'number' && Number.isFinite(measuredBaseTimeWidth) && measuredBaseTimeWidth > 0;
@@ -31,8 +33,8 @@ export function calendarGridLayout(viewport: number, preset: 1 | 3 | 7, value = 
   const baseDayWidth = preset === 1 ? Math.max(160, baseAvailable) : Math.max(160, baseAvailable / preset);
   const dayWidth = Math.max(80, Math.round(baseDayWidth * zoom));
   const needed = zoom < 1 ? Math.ceil(Math.max(1, viewportWidth - railWidth) / dayWidth) + 1 : preset;
-  const dayCount = Math.min(7, Math.max(preset, needed, bufferedDays));
-  const contentWidth = Math.max(viewportWidth, railWidth + dayCount * dayWidth);
+  const dayCount = exactSelection ? preset : Math.min(7, Math.max(preset, needed, bufferedDays));
+  const contentWidth = exactSelection ? railWidth + dayCount * dayWidth : Math.max(viewportWidth, railWidth + dayCount * dayWidth);
   return { viewportWidth, dayWidth, contentWidth, railWidth, zoom, rowHeight: Math.max(17, Math.round(CALENDAR_BASE_ROW_HEIGHT * zoom)),
     maxOffset: Math.max(0, contentWidth - viewportWidth), dayCount };
 }

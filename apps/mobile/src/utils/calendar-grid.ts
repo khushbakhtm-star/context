@@ -1,7 +1,7 @@
 import type { MinuteEntry, PlannedEvent } from '../types';
 import { addDays, calendarMinuteRange, dateKey, localDateAtMinute, MINUTES_PER_DAY, parseDateKey, startOfWeek } from './time';
 
-export type CalendarDayCount = 1 | 3 | 7;
+export type CalendarDayCount = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 export type CalendarLoadRequest = {
   rangeKey: string;

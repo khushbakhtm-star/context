@@ -55,7 +55,8 @@ type Props = {
   onOpenSettings: () => void;
   dayCount?: CalendarDayCount;
   onDayCountChange?: (count: CalendarDayCount) => void;
-  onOpenMenu?: () => void;
+  selectedDates?: readonly string[] | null;
+  dateSelectionOpen?: boolean;
   planRequest?: number;
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
@@ -66,7 +67,7 @@ type Props = {
 
 export function TodayScreen({
   activeDate, onDateChange, calendars, preferences, dataVersion, focusRequest,
-  onFocusConsumed, onDataChanged, onOpenSettings, dayCount = 1, onDayCountChange, onOpenMenu,
+  onFocusConsumed, onDataChanged, onOpenSettings, dayCount = 1, onDayCountChange, selectedDates, dateSelectionOpen = false,
   zoom = 1, onZoomChange, clockFormat = '12h', onCreatePlan, viewResetToken = 0,
 }: Props) {
   const { colors, resolvedMode } = useAppTheme();
@@ -82,24 +83,27 @@ export function TodayScreen({
   const zoomRef = useRef(liveZoom);
   const onZoomChangeRef = useRef(onZoomChange);
   onZoomChangeRef.current = onZoomChange;
-  const baseDays = useMemo(() => visibleCalendarDates(activeDate, dayCount), [activeDate, dayCount]);
-  const navigationKey = activeDate + '|' + dayCount + '|' + viewResetToken;
+  const explicitDays = useMemo(() => selectedDates?.length ? [...selectedDates] : null, [selectedDates]);
+  const gridDayCount = (explicitDays?.length ?? dayCount) as CalendarDayCount;
+  const baseDays = useMemo(() => explicitDays ?? visibleCalendarDates(activeDate, dayCount), [activeDate, dayCount, explicitDays]);
+  const navigationKey = activeDate + '|' + dayCount + '|' + (explicitDays?.join(',') ?? 'preset') + '|' + viewResetToken;
   const navigationKeyRef = useRef(navigationKey);
   const navigationGenerationRef = useRef(0);
   if (navigationKeyRef.current !== navigationKey) {
     navigationKeyRef.current = navigationKey;
     navigationGenerationRef.current += 1;
   }
-  const dateBufferRef = useRef({ key: navigationKey, count: dayCount as number });
+  const dateBufferRef = useRef({ key: navigationKey, count: gridDayCount as number });
   const gridLayout = useMemo(() => {
-    if (dateBufferRef.current.key !== navigationKey) dateBufferRef.current = { key: navigationKey, count: dayCount };
-    const layout = calendarGridLayout(viewportWidth, dayCount, liveZoom, dateBufferRef.current.count, measuredTimeWidths[timeWidthKey]);
+    if (dateBufferRef.current.key !== navigationKey) dateBufferRef.current = { key: navigationKey, count: gridDayCount };
+    const layout = calendarGridLayout(viewportWidth, gridDayCount, liveZoom, dateBufferRef.current.count,
+      measuredTimeWidths[timeWidthKey], explicitDays != null);
     dateBufferRef.current.count = layout.dayCount;
     return layout;
-  }, [viewportWidth, dayCount, liveZoom, navigationKey, measuredTimeWidths, timeWidthKey]);
+  }, [viewportWidth, gridDayCount, liveZoom, navigationKey, measuredTimeWidths, timeWidthKey, explicitDays]);
   const styles = useMemo(() => createStyles(colors, resolvedMode, gridLayout), [colors, resolvedMode, gridLayout]);
-  const days = useMemo(() => Array.from({ length: gridLayout.dayCount }, (_, index) => dateKey(addDays(baseDays[0]!, index))),
-    [baseDays, gridLayout.dayCount]);
+  const days = useMemo(() => explicitDays ?? Array.from({ length: gridLayout.dayCount }, (_, index) => dateKey(addDays(baseDays[0]!, index))),
+    [baseDays, gridLayout.dayCount, explicitDays]);
   const dayLabels = useMemo(() => new Map(days.map((day) => [day, formatDayHeading(day)])), [days]);
   const rangeKey = days.join('|');
   const rangeRef = useRef(rangeKey);
@@ -546,7 +550,7 @@ export function TodayScreen({
     setPinching(false);
     const requestedZoom = normalizeCalendarZoom(zoom);
     if (zoomRef.current !== requestedZoom) {
-      dateBufferRef.current = { key: navigationKey, count: dayCount };
+      dateBufferRef.current = { key: navigationKey, count: gridDayCount };
       zoomRef.current = requestedZoom; setLiveZoom(requestedZoom);
     }
     const previous = inlineSelectionRef.current;
@@ -667,6 +671,11 @@ export function TodayScreen({
   const hasAllDay = days.some((day) => dayData[day]?.plans.some((plan) => plan.allDay));
 
   useEffect(() => {
+    if (explicitDays) {
+      clockDayRef.current = today;
+      pendingRolloverRef.current = null;
+      return;
+    }
     if (clockDayRef.current !== today) {
       if (activeDate === clockDayRef.current) pendingRolloverRef.current = { from: activeDate, to: today };
       clockDayRef.current = today;
@@ -675,11 +684,11 @@ export function TodayScreen({
     if (!pending) return;
     if (activeDate !== pending.from) { pendingRolloverRef.current = null; return; }
     // Follow the current day after midnight, but finish any dated draft first.
-    if (!editor && !inlineSelection) {
+    if (!editor && !inlineSelection && !dateSelectionOpen) {
       pendingRolloverRef.current = null;
       onDateChange(pending.to);
     }
-  }, [activeDate, today, editor, inlineSelection, onDateChange]);
+  }, [activeDate, today, editor, inlineSelection, onDateChange, explicitDays, dateSelectionOpen]);
 
   const jumpToMinute = useCallback((minute: number) => {
     const generation = navigationGenerationRef.current;
@@ -998,8 +1007,6 @@ export function TodayScreen({
     } catch { setActionError('The calendar plan could not be opened.'); }
   }
 
-  const monthFormat = new Intl.DateTimeFormat(undefined, { month: 'long' });
-  const monthTitle = monthFormat.format(parseDateKey(activeDate));
   const notice = (inlineError ? 'A minute could not be saved. Tap to retry; your draft is kept.' : null) ?? actionError ??
     (inlineLinkWarning ? 'Account synchronization needs a retry. Your minute is saved.' : null) ?? accountWarning ?? projectionWarning ??
     (loadError ? 'Some ledger rows could not refresh. Pull down to retry.' :
@@ -1214,7 +1221,7 @@ export function TodayScreen({
 
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={insets.top} onLayout={(event) => setViewportWidth(event.nativeEvent.layout.width)}>
+      keyboardVerticalOffset={insets.top + 44} onLayout={(event) => setViewportWidth(event.nativeEvent.layout.width)}>
       <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.timeMeasurement}>
         <Text key={measurementKey} style={[styles.minuteTime, styles.timeMeasurementText]} maxFontSizeMultiplier={1.4}
           onTextLayout={(event) => recordTimeLabelWidth(Math.max(0, ...event.nativeEvent.lines.map((line) => line.width)), measurementKey)}>
@@ -1224,19 +1231,9 @@ export function TodayScreen({
       <View ref={gridViewportRef} style={styles.gridViewport} onLayout={measureMinuteViewport} {...pinchResponder.panHandlers}>
       <Animated.ScrollView ref={horizontalRef} horizontal directionalLockEnabled nestedScrollEnabled scrollEnabled={!pinching && !rangeDragging}
         style={styles.horizontalViewport} contentContainerStyle={[styles.horizontalContent, { width: gridLayout.contentWidth }]}
-        keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={dayCount > 1}
+        keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={days.length > 1}
         onScroll={onHorizontalScroll} scrollEventThrottle={16}>
         <View style={[styles.gridContent, { width: gridLayout.contentWidth }]}>
-          <Animated.View style={[styles.topHeader, { width: gridLayout.viewportWidth,
-            transform: [{ translateX: horizontalOffset }] }]}>
-              <Pressable accessibilityRole="button" accessibilityLabel="Open navigation menu"
-                onPress={onOpenMenu ?? onOpenSettings} style={styles.menuButton}>
-                <View style={styles.menuLine} /><View style={styles.menuLine} /><View style={styles.menuLine} />
-              </Pressable>
-              <View style={styles.monthHeading}>
-                <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.65} style={styles.monthTitle}>{monthTitle}</Text>
-              </View>
-          </Animated.View>
           <View style={styles.dateHeader}>
             <Animated.View style={[styles.headerRail, { transform: [{ translateX: horizontalOffset }] }]} />
             {days.map((day) => (
@@ -1668,15 +1665,10 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     horizontalViewport: { flex: 1, backgroundColor: grid },
     horizontalContent: { height: '100%' },
     gridContent: { height: '100%', backgroundColor: grid },
-    topHeader: { height: 44, flexDirection: 'row', alignItems: 'center', zIndex: 22, backgroundColor: colors.paper },
     headerRail: { width: railWidth, height: 66, zIndex: 20, backgroundColor: colors.paper },
-    monthHeading: { flex: 1, minHeight: 44, justifyContent: 'center', paddingHorizontal: 7 },
-    monthTitle: { color: colors.ink, fontSize: 18, fontWeight: '400' },
     floatingControls: { zIndex: 21, backgroundColor: colors.paper },
     dateHeader: { flexDirection: 'row', alignItems: 'center', height: 66,
       borderBottomWidth: 1, borderBottomColor: gridLine, backgroundColor: colors.paper },
-    menuButton: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', gap: 5 },
-    menuLine: { height: 3, width: 28, backgroundColor: colors.graphite },
     dateColumn: { height: 66, alignItems: 'center', justifyContent: 'center' },
     weekday: { color: colors.muted, fontSize: 14, fontWeight: '600' },
     todayWeekday: { color: mode === 'dark' ? '#C4B8E7' : '#8D7FAD' },
