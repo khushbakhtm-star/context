@@ -10,9 +10,9 @@ import struct
 import subprocess
 import zipfile
 
-SOURCE = "cf09982de3b70a1278786572a9d0b49264bc7e46"
-VERSION = "0.1.9"
-CODE = 10
+SOURCE = "511ef11eb879b39e0de1f2dc51539c82fa8bc216"
+VERSION = "0.1.10"
+CODE = 11
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned Wear-phone preview: local publisher signing is separate"
 
@@ -93,7 +93,7 @@ def verify(source, reports, receipt):
         raise ValueError("The frozen lockfile changed during the native build")
     tools = Path(os.environ["ANDROID_HOME"]) / "build-tools/37.0.0"
     original = mobile / "android/app/build/outputs/apk/release/app-release-unsigned.apk"
-    apk = reports / "context-0.1.9-wear-phone-unsigned.apk"
+    apk = reports / "context-0.1.10-wear-phone-unsigned.apk"
     run([tools / "zipalign", "-P", "16", "-f", "4", original, apk])
     run([tools / "zipalign", "-c", "-P", "16", "-v", "4", apk])
     data = apk.read_bytes()
@@ -157,7 +157,7 @@ def main():
         # A failed verifier may have produced an aligned intermediate. Retain diagnostics,
         # but never let upload-artifact expose that APK as a usable unsigned build.
         if args.mode == "verify":
-            (reports / "context-0.1.9-wear-phone-unsigned.apk").unlink(missing_ok=True)
+            (reports / "context-0.1.10-wear-phone-unsigned.apk").unlink(missing_ok=True)
         receipt.update({"status": "failed", "scope": "Not a verified build; never install or publish this output.",
                         "error": str(error)})
         path.write_text(json.dumps(receipt, indent=2) + "\n")
