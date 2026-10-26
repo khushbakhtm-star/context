@@ -13,10 +13,11 @@ use the same app registration and authorize the same storage account to exchange
 4. Create an iOS OAuth client for `com.context.minuteledger`, plus a Web OAuth client in the same
    project. The web client ID identifies the native sign-in configuration; no web client secret is
    shipped in Context.
-5. Set `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` and `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID` in the build
-   environment. The iOS URL scheme must be the reversed iOS client ID (for example,
-   `com.googleusercontent.apps.123-example`). Configure it in the Google Sign-In Expo plugin before
-   rebuilding.
+5. Set the public `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` in EAS's **preview** and **production**
+   environments; iOS builds also need `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`. Use a **Web application**
+   ID for the Web variable, not the Android ID. Make these values available to the local EAS config
+   read and the build worker; do not store them as inaccessible build-only secrets. `app.config.ts`
+   derives the reversed iOS client URL scheme automatically before the native rebuild.
 6. Review Google's OAuth verification requirements before public distribution. Google Calendar
    access and Drive app-data access must be enabled in the consent configuration.
 
@@ -26,8 +27,22 @@ the previous Google connection on that installation; Microsoft can remain connec
 
 Context requests Drive's `drive.appdata` scope only when private ledger storage is enabled. It uses
 `calendar.events` for calendar write access, or `calendar.events.readonly` for read-only access,
-plus `calendar.calendarlist.readonly` to list calendars. These scopes do not grant access to all
-ordinary Drive documents.
+plus `calendar.calendarlist.readonly` to list calendars. Category metadata access additionally
+requests `calendar.calendars.readonly`. Basic identity uses `openid`, `email`, and `profile`.
+These scopes do not grant access to all ordinary Drive documents.
+
+Google-enabled phone builds (`preview`, `wear-phone-preview`, `production`, `google-play`, and
+`apple-app-store`) now fail during app configuration when their required client IDs are missing,
+malformed, placeholders, or contain surrounding whitespace. Android needs the Web ID; iOS needs
+both IDs. Source-only exports, development builds, F-Droid, and the native watch APK remain usable
+without Google credentials. To check another build explicitly, set `CONTEXT_REQUIRE_GOOGLE_OAUTH=1`
+and `EAS_BUILD_PLATFORM=android` or `ios`, then run `node scripts/google-oauth-preflight.cjs` from
+`apps/mobile`. Preview phone profiles use EAS's preview environment; production and its store
+profiles use production. The preflight checks structure, not Cloud registration: verify the actual
+APK signing SHA-1 against its Android OAuth client and test sign-in on the installed build.
+EAS's initial local config read has no built-in build profile or platform and remains usable before
+cloud variables load; the worker validates its actual profile/platform. An explicitly supplied
+`apple-app-store` profile also requires the iOS ID if no platform is supplied.
 
 ## Microsoft registration
 

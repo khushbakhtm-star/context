@@ -1,6 +1,9 @@
 import type { ConfigContext, ExpoConfig } from 'expo/config';
 
+const { assertGoogleOAuthBuildConfiguration } = require('./scripts/google-oauth-preflight.cjs');
+
 export default ({ config }: ConfigContext): ExpoConfig => {
+  assertGoogleOAuthBuildConfiguration(process.env);
   const fdroid = process.env.EXPO_PUBLIC_CONTEXT_DISTRIBUTION === 'fdroid';
   const iosClient = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID;
   const scheme = iosClient?.endsWith('.apps.googleusercontent.com')

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.8",
-  "sourceAndroidVersionCode": 9,
-  "sourceIosBuildNumber": "9",
+  "version": "0.1.9",
+  "sourceAndroidVersionCode": 10,
+  "sourceIosBuildNumber": "10",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Adds an optional Wear OS companion to the Wear-enabled Android edition: scroll each day’s minutes, change dates, and type or dictate current or remembered activities. Watch notes are journaled offline and applied through guarded phone-ledger transactions after explicit Watch consent, with conflict review and durable acknowledgments. The F-Droid source preparation removes the optional Google Wear transport and native watch sources by exact reviewed hashes. Native builds and physical Galaxy Watch7 validation remain pending; store publication and official F-Droid acceptance remain pending."
+  "notes": "Prepare a Wear-enabled phone update with registered Google OAuth client IDs supplied through EAS preview/production environments rather than committed identifiers. A build preflight rejects missing or malformed Google phone configuration while leaving F-Droid and pure-watch builds independent. Native 0.1.9 build verification and real Google sign-in on the phone remain pending; no public sign-in success is claimed. The independently verified F-Droid 0.1.8 candidate stays pinned to 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24. Physical watch validation, store publication and official F-Droid acceptance remain pending."
 }

@@ -18,6 +18,7 @@
     },
     "preview": {
       "extends": "base",
+      "environment": "preview",
       "distribution": "internal",
       "env": {
         "EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL": "standalone"
@@ -43,6 +44,7 @@
     },
     "production": {
       "extends": "base",
+      "environment": "production",
       "distribution": "store",
       "autoIncrement": false,
       "env": {
@@ -81,6 +83,7 @@
     },
     "wear-phone-preview": {
       "extends": "base",
+      "environment": "preview",
       "distribution": "internal",
       "credentialsSource": "remote",
       "autoIncrement": false,

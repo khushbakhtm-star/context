@@ -18,7 +18,12 @@ function appConfig(env) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const module = { exports: {} };
-  vm.runInContext(js, vm.createContext({ module, exports: module.exports, process: { env } }), { filename });
+  vm.runInContext(js, vm.createContext({ module, exports: module.exports, process: { env },
+    require(name) {
+      if (name === './scripts/google-oauth-preflight.cjs') return require('../scripts/google-oauth-preflight.cjs');
+      throw new Error(`Unexpected app config import: ${name}`);
+    },
+  }), { filename });
   return module.exports.default;
 }
 
