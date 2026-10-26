@@ -1,4 +1,4 @@
-# Context 0.1.13/code14: independent recipe checks passed; official review is pending.
+# Context 0.1.14/code15 source candidate; new independent verification is pending.
 # Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
@@ -31,10 +31,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.13
-    versionCode: 14
+  - versionName: 0.1.14
+    versionCode: 15
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: 4c92502370158dfd7422471d17ffff9c5e15f87f
+    commit: a388cc8eeba09664cd6fe0a4dc52da07ab19184f
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -66,11 +66,8 @@ Builds:
     output: android/app/build/outputs/apk/release/app-release-unsigned.apk
 
 MaintainerNotes: |-
-  Independent run 40351936739 passed both jobs for this exact source: lint,
-  source scan (zero errors/warnings), integrated recipe build and APK scan,
-  and independent unsigned assembly plus APK scan. Keep the build disabled
-  pending official inclusion and build-server review. This is not an
-  official F-Droid server build or catalog acceptance.
+  New independent verification of this exact source is pending. Keep the build disabled.
+  Historical 0.1.13 results do not establish this version builds or passes scans.
   The source-input inventory reviews 27 packages, 107 exact removable inputs and
   five source patches, including six unused Print/Sharing publications or archives.
   All Expo Android modules and core compile from source. Optional Google Wear
@@ -84,5 +81,5 @@ MaintainerNotes: |-
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.13
-CurrentVersionCode: 14
+CurrentVersion: 0.1.14
+CurrentVersionCode: 15
