@@ -198,8 +198,9 @@ async function providerJson(account: ConnectedAccount, url: string) {
   return response.json();
 }
 
-export function importAccountCategories(account: ConnectedAccount): Promise<{ added: number; note: string }> {
-  return serialized(async () => {
+export async function importAccountCategories(account: ConnectedAccount): Promise<{ added: number; note: string }> {
+  // Fetch outside the local mutation queue. A slow provider must not prevent a
+  // minute save (or a clipboard command flushing that minute) from preparing its color.
     if (!account.consent.calendarRead || account.provider === 'webdav') {
       throw new Error('Connect an account with calendar reading enabled first.');
     }
@@ -270,8 +271,7 @@ export function importAccountCategories(account: ConnectedAccount): Promise<{ ad
         url = page['@odata.nextLink'] ?? null;
       }
     } else note = 'Calendar colors imported. Enable Outlook category reading to import your named master categories too.';
-    return { added: await importCategories(imported), note };
-  });
+    return serialized(async () => ({ added: await importCategories(imported), note }));
 }
 
 export type ProviderCategoryColor = {

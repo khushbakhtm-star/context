@@ -104,7 +104,12 @@ function cloud() {
 // actual encryption code remain in the exercised path.
 function phone(t, remote, initialAccount = account()) {
   const sqlite = new DatabaseSync(':memory:');
-  t.after(() => sqlite.close());
+  t.after(async () => {
+    await inline.inlineMinuteDrafts.flushAll();
+    await inline.retryInlineMinuteLinks();
+    await engine.synchronizeAccounts();
+    sqlite.close();
+  });
   const secure = new Map();
   const accounts = [plain(initialAccount)];
   const nativeDb = {
@@ -172,9 +177,10 @@ function phone(t, remote, initialAccount = account()) {
   }
   const db = load(path.join(__dirname, '../src/data/database.ts'));
   const engine = load(path.join(__dirname, '../src/sync/engine.ts'));
+  const inline = load(path.join(__dirname, '../src/services/inline-minutes.ts'));
   return { db, engine, accounts, secure, sqlite,
     sheet: load(path.join(__dirname, '../src/services/spreadsheet.ts')),
-    inline: load(path.join(__dirname, '../src/services/inline-minutes.ts')),
+    inline,
     codec: load(path.join(__dirname, '../src/sync/codec.ts')),
     categories: load(path.join(__dirname, '../src/services/categories.ts')) };
 }
@@ -208,7 +214,7 @@ test('a newly recorded source-colored note survives SQLite reload and an explici
     calendarId: 'personal', provider: 'device' });
   device.inline.inlineMinuteDrafts.activate({ dateKey: day, minuteIndex: 759, text: 'Make coffee', categoryId: source.id, keepColor: false });
   device.sheet.editInlineMinute(day, 759, { text: 'Talk to Mum while making coffee' });
-  await device.inline.flushInlineMinutes();
+  await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks();
   assert.equal((await device.db.getMinuteEntry(day, 759)).categoryId, source.id);
   assert.equal((await device.categories.listCategories()).find((item) => item.id === source.id).color, '#123456');
   await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 759, endMinute: 759 }, 'google_palette_2952a3');
@@ -241,6 +247,155 @@ async function linkedPrayer(t, remote = cloud()) {
   return { device, remote, original };
 }
 
+function editFirstPrayerMinute(description, text) {
+  const range = '6:55 PM – 7:05 PM  Pray fardh';
+  assert.ok(description.includes(range), 'the external-edit fixture must change a real compact range');
+  return description.replace(range, `6:55 PM  ${text}\n6:56 PM – 7:05 PM  Pray fardh`);
+}
+
+test('many synchronization requests during a gated read drain in at most two passes and retain the newest local edit', async (t) => {
+  const { device, remote, original } = await linkedPrayer(t);
+  let release; let started;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const reached = new Promise((resolve) => { started = resolve; });
+  let reads = 0;
+  remote.onGet = async () => { reads++; if (reads === 1) { started(); await gate; } };
+  remote.calls.length = 0;
+  const first = device.engine.synchronizeAccounts();
+  await reached;
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1135, text: 'Newest thought during network read', categoryId: 'prayer' });
+  const pending = Array.from({ length: 80 }, () => device.engine.synchronizeAccounts());
+  release();
+  const results = await Promise.all([first, ...pending]);
+  assert.ok(reads >= 1 && reads <= 2, `${reads} provider read passes should be bounded at two`);
+  assert.ok(results.every((result) => !result.running));
+  assert.equal((await device.db.getMinuteEntry(day, 1135)).text, 'Newest thought during network read');
+  assert.ok(remote.events.get(`personal:${original.id}`).description.includes('Newest thought during network read'));
+  remote.onGet = null;
+});
+
+test('simultaneous source-link requests for the same coordinate establish only one projection owner', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const original = originalPrayer(); remote.seed(original); await saveRange(device, 1135, 3);
+  await Promise.all(Array.from({ length: 30 }, () => device.engine.linkActualsToAccounts([day], planned(original),
+    { dateKey: day, minuteIndex: 1135 })));
+  const owners = (await device.engine.listProjections()).filter((projection) => projection.state !== 'deleted');
+  assert.equal(owners.length, 1); assert.equal(owners[0].sourceEventId, original.id);
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1);
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, 1);
+  assert.equal(remote.calls.filter((call) => call.type === 'create').length, 0);
+});
+
+async function useVersionOneProjection(device, remote) {
+  const { makeCalendarDescription, readCalendarDescription } = require('../src/utils/calendar-description.ts');
+  const { minuteLabel } = require('../src/utils/time.ts');
+  const projection = (await device.engine.listProjections())[0];
+  const entries = await device.db.getEntriesForBlock(projection.blockId);
+  const preserved = readCalendarDescription(projection.baseEvent, projection.id).preserved;
+  const legacy = makeCalendarDescription(preserved, entries.map((entry) => `${minuteLabel(entry.minuteIndex, true)}  ${entry.text}`).join('\n'), 1);
+  const acknowledged = { ...remote.calls.filter((call) => call.type === 'update').at(-1).write, ...legacy };
+  delete acknowledged.sourceOperationId;
+  const baseEvent = { ...projection.baseEvent, ...legacy };
+  await device.db.putSyncDocument(`projection:${projection.id}`, { ...projection, baseEvent,
+    baseLocalHash: device.codec.hashValue(acknowledged) });
+  remote.seed(baseEvent);
+  return baseEvent;
+}
+
+test('upgrading an untouched v1 projection imports an external minute edit without a formatter-only conflict', async (t) => {
+  const { device, remote, original } = await linkedPrayer(t);
+  const base = await useVersionOneProjection(device, remote);
+  const updates = remote.calls.filter((call) => call.type === 'update').length;
+  remote.edit('personal', original.id, { description: base.description.replace('Pray fardh', 'Changed in Google Calendar') });
+  const result = await device.engine.synchronizeAccounts();
+  assert.equal(result.conflicts, 0);
+  assert.equal((await device.db.getMinuteEntry(day, 1135)).text, 'Changed in Google Calendar');
+  assert.equal((await device.db.getMinuteEntry(day, 1136)).text, 'Pray fardh');
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, updates);
+});
+
+test('v1 formatter compatibility does not hide a genuine simultaneous local and remote minute edit', async (t) => {
+  const { device, remote, original } = await linkedPrayer(t);
+  const base = await useVersionOneProjection(device, remote);
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1135, text: 'Local edited thought', categoryId: 'prayer' });
+  remote.edit('personal', original.id, { description: base.description.replace('Pray fardh', 'Remote edited thought') });
+  const result = await device.engine.synchronizeAccounts();
+  assert.equal(result.conflicts, 1);
+  assert.equal((await device.db.getMinuteEntry(day, 1135)).text, 'Local edited thought');
+  assert.ok(remote.events.get(`personal:${original.id}`).description.includes('Remote edited thought'));
+});
+
+async function linkedColoredActivity(t) {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const original = { ...originalPrayer(), displayColor: '#112233' }; remote.seed(original);
+  await saveRange(device, 1135, 3, 'Make coffee', 'study');
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1137 }, { title: 'Coffee', categoryId: 'study' });
+  await device.sheet.applyCellFormat({ dateKey: day, startMinute: 1136, endMinute: 1136 }, { bold: true, italic: true });
+  await device.engine.linkActualsToAccounts([day], planned(original));
+  await device.engine.synchronizeAccounts();
+  return { device, remote, original };
+}
+
+test('a provider recolor fills exact linked account minutes without rewriting notes, group formatting or the source', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t);
+  const before = plain(await device.db.getSpreadsheetCells({ dateKey: day, startMinute: 1135, endMinute: 1137 }));
+  const pending = plain(await device.db.getPendingSyncDates()); remote.calls.length = 0;
+  remote.edit('personal', original.id, { displayColor: '#123456' });
+  assert.deepEqual(plain(await device.engine.reconcileLinkedAccountColors([day])), [day]);
+  const after = plain(await device.db.getSpreadsheetCells({ dateKey: day, startMinute: 1135, endMinute: 1137 }));
+  for (let index = 0; index < after.length; index++) {
+    const category = (await device.categories.listCategories()).find((item) => item.id === after[index].entry.categoryId);
+    assert.equal(category.color, '#123456');
+    for (const field of ['id', 'text', 'blockId', 'source', 'createdAt']) assert.equal(after[index].entry[field], before[index].entry[field]);
+    assert.deepEqual(after[index].format, before[index].format);
+  }
+  assert.deepEqual(plain(await device.db.getPendingSyncDates()), pending);
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete', 'updateSeries'].includes(call.type)).length, 0);
+});
+
+test('unchanged account color preserves a local selection and simultaneous color changes retain local cells as a conflict', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t);
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1137 }, 'google_palette_2952a3');
+  const local = plain(await device.db.getDayEntries(day)); remote.calls.length = 0;
+  await device.engine.reconcileLinkedAccountColors([day]);
+  assert.deepEqual(plain(await device.db.getDayEntries(day)), local);
+  remote.edit('personal', original.id, { displayColor: '#123456' });
+  await assert.rejects(device.engine.reconcileLinkedAccountColors([day]), /changed in Context and the calendar/);
+  assert.deepEqual(plain(await device.db.getDayEntries(day)), local);
+  assert.ok((await device.engine.listProjections()).some((projection) => projection.state === 'conflict'));
+  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
+});
+
+test('a color-only account import preserves pending local text for a later authorized write', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t);
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1136, text: 'Talk to Mum about the doctor', categoryId: 'study' });
+  remote.edit('personal', original.id, { displayColor: '#123456' }); remote.calls.length = 0;
+  await device.engine.reconcileLinkedAccountColors([day]);
+  assert.equal((await device.db.getMinuteEntry(day, 1136)).text, 'Talk to Mum about the doctor');
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, 0);
+  assert.ok((await device.engine.listProjections()).some((projection) => projection.state === 'pending'));
+  await device.engine.synchronizeAccounts();
+  assert.ok(remote.calls.some((call) => call.type === 'update' && call.write.description.includes('Talk to Mum about the doctor')));
+});
+
+test('account color import respects consent and the global uncommitted-draft guard', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t);
+  const before = plain(await device.db.getDayEntries(day));
+  remote.edit('personal', original.id, { displayColor: '#123456' });
+  device.accounts[0].consent.importCalendarEdits = false;
+  await device.engine.reconcileLinkedAccountColors([day]);
+  assert.deepEqual(plain(await device.db.getDayEntries(day)), before);
+  device.accounts[0].consent.importCalendarEdits = true;
+  device.engine.configureCalendarColorImports({ canImport: () => false });
+  await assert.rejects(device.engine.reconcileLinkedAccountColors([day]), /being edited/);
+  assert.deepEqual(plain(await device.db.getDayEntries(day)), before);
+  device.engine.configureCalendarColorImports(null);
+  await device.engine.reconcileLinkedAccountColors([day]);
+  assert.notEqual((await device.db.getMinuteEntry(day, 1135)).categoryId, before[0].categoryId);
+});
+
 test('confirming a recurring plan updates only its concrete occurrence and preserves source notes', async (t) => {
   const { device, remote, original } = await linkedPrayer(t);
   const updates = remote.calls.filter((call) => call.type === 'update');
@@ -250,7 +405,7 @@ test('confirming a recurring plan updates only its concrete occurrence and prese
   assert.equal(updates[0].write.start, iso(1135));
   assert.equal(updates[0].write.end, iso(1145));
   assert.match(updates[0].write.description, /Original prayer notes/);
-  assert.match(updates[0].write.description, /6:55 PM  Pray fardh/);
+  assert.match(updates[0].write.description, /6:55 PM – 7:05 PM  Pray fardh/);
   assert.equal(remote.calls.filter((call) => call.type === 'create').length, 0);
   const projection = (await device.engine.listProjections())[0];
   assert.equal(projection.sourceSeriesId, original.seriesId);
@@ -267,7 +422,7 @@ test('clean account descriptions retain exact original prose and replace minute 
   await device.engine.synchronizeAccounts();
   let event = remote.events.get(`personal:${original.id}`);
   assert.ok(event.description.startsWith(originalNotes + '\n\n'));
-  assert.equal(event.descriptionLog.version, 1);
+  assert.equal(event.descriptionLog.version, 2);
   assert.equal(event.descriptionLog.offset, originalNotes.length + 2);
   assert.doesNotMatch(event.description, /--- Context minutes ---|--- End Context minutes ---|Context category:|Context projection:|Full minute record available in Context\./);
   await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1135, text: 'Updated note\nContext projection: literal user continuation', categoryId: 'prayer' });
@@ -516,7 +671,7 @@ test('calendar description edits import into their corresponding minute and titl
   const current = remote.events.get(`personal:${original.id}`);
   remote.edit('personal', original.id, {
     title: 'Maghrib actual',
-    description: current.description.replace('6:55 PM  Pray fardh', '6:55 PM  Begin fardh'),
+    description: editFirstPrayerMinute(current.description, 'Begin fardh'),
   });
   const beforeUpdates = remote.calls.filter((call) => call.type === 'update').length;
   await device.engine.synchronizeAccounts();
@@ -542,7 +697,7 @@ test('concurrent calendar and Context edits pause writes until the Context versi
   await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1135, text: 'Local changed thought', categoryId: 'prayer' });
   const current = remote.events.get(`personal:${original.id}`);
   remote.edit('personal', original.id, {
-    description: current.description.replace('6:55 PM  Pray fardh', '6:55 PM  Calendar changed thought'),
+    description: editFirstPrayerMinute(current.description, 'Calendar changed thought'),
   });
   const beforeUpdates = remote.calls.filter((call) => call.type === 'update').length;
   await device.engine.synchronizeAccounts();
@@ -561,7 +716,7 @@ test('a local edit committed while the provider read awaits is reread before cal
   const { device, remote, original } = await linkedPrayer(t);
   const current = remote.events.get(`personal:${original.id}`);
   remote.edit('personal', original.id, {
-    description: current.description.replace('6:55 PM  Pray fardh', '6:55 PM  Remote correction'),
+    description: editFirstPrayerMinute(current.description, 'Remote correction'),
   });
   remote.onGet = async () => {
     remote.onGet = null;
@@ -595,7 +750,7 @@ test('choosing the calendar conflict version imports the remote text without wri
   await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1135, text: 'Local thought', categoryId: 'prayer' });
   const current = remote.events.get(`personal:${original.id}`);
   remote.edit('personal', original.id, {
-    description: current.description.replace('6:55 PM  Pray fardh', '6:55 PM  Remote thought'),
+    description: editFirstPrayerMinute(current.description, 'Remote thought'),
   });
   await device.engine.synchronizeAccounts();
   const projection = (await device.engine.listProjections())[0];
@@ -625,7 +780,7 @@ test('revoking calendar-edit import while the provider read is in flight stops t
   const { device, remote, original } = await linkedPrayer(t);
   const current = remote.events.get(`personal:${original.id}`);
   remote.edit('personal', original.id, {
-    description: current.description.replace('6:55 PM  Pray fardh', '6:55 PM  Edit after permission revoked'),
+    description: editFirstPrayerMinute(current.description, 'Edit after permission revoked'),
   });
   remote.onGet = async () => { device.accounts[0].consent.importCalendarEdits = false; };
   await device.engine.synchronizeAccounts();
@@ -926,14 +1081,14 @@ test('whole named group moves and Undo reschedule the original approved event ac
     const currentProjection = (await device.engine.listProjections()).find((projection) => projection.sourceEventId === original.id && projection.state !== 'deleted');
     const group = await device.sheet.getMovableActivityGroup(currentProjection.dateKey, currentProjection.startMinute);
     const beforeCalls = remote.calls.length;
-    await device.sheet.moveActivityGroup(group, destination); await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+    await device.sheet.moveActivityGroup(group, destination); await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks(); await device.engine.synchronizeAccounts();
     assert.deepEqual(ids(), [original.id]);
     const saved = [...remote.events.values()][0];
     const start = new Date(`${destination.dateKey}T12:00:00`); start.setHours(Math.floor(destination.startMinute / 60), destination.startMinute % 60, 0, 0);
     assert.equal(saved.start, start.toISOString());
     assert.match(saved.description, /Kettle/); assert.match(saved.description, /Talk to Mum/); assert.match(saved.description, /Pour/); assert.match(saved.description, /Drink/);
     assert.equal(remote.calls.slice(beforeCalls).filter((call) => ['delete', 'create', 'updateSeries'].includes(call.type)).length, 0);
-    await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+    await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks(); await device.engine.synchronizeAccounts();
     assert.deepEqual(ids(), [original.id]); assert.equal([...remote.events.values()][0].start, iso(1135));
   }
 });
@@ -943,7 +1098,7 @@ test('multicolor overlapping and cross-day activity moves preserve every origina
   const original = originalPrayer(); remote.seed(original);
   await explicitGroup(device, 1135, ['A1', 'A2', 'B1', 'B2'], 'Coffee');
   await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1137, endMinute: 1138 }, 'work');
-  await device.inline.flushInlineMinutes();
+  await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks();
   await device.engine.linkActualsToAccounts([day], planned(original), { dateKey: day, minuteIndex: 1135 });
   await device.engine.synchronizeAccounts();
   const initial = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
@@ -953,13 +1108,13 @@ test('multicolor overlapping and cross-day activity moves preserve every origina
     const group = await device.sheet.getMovableActivityGroup(day, 1135);
     const preview = await device.sheet.prepareActivityGroupMove(group, destination);
     await device.sheet.moveActivityGroup(group, destination, { previewToken: preview.token });
-    await device.inline.flushInlineMinutes(); const result = await device.engine.synchronizeAccounts();
+    await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks(); const result = await device.engine.synchronizeAccounts();
     assert.equal(result.message, 'Accounts synchronized');
     const current = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
     assert.deepEqual(current.map((event) => event.id), originalIds);
     assert.match(current[0].description, /A1[\s\S]*A2/); assert.doesNotMatch(current[0].description, /B1/);
     assert.match(current[1].description, /B1[\s\S]*B2/); assert.doesNotMatch(current[1].description, /A1/);
-    await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+    await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks(); await device.engine.synchronizeAccounts();
     const undone = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
     assert.deepEqual(undone.map((event) => event.id), originalIds);
     assert.deepEqual(undone.map((event) => event.start), initial.map((event) => event.start));
@@ -974,7 +1129,7 @@ test('moving a linked activity does not bypass a revoked calendar-write permissi
   const before = remote.calls.length;
   const group = await device.sheet.getMovableActivityGroup(day, 1000);
   await device.sheet.moveActivityGroup(group, { dateKey: '2026-11-08', startMinute: 600 });
-  await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+  await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks(); await device.engine.synchronizeAccounts();
   assert.equal(remote.events.get(`personal:${original.id}`).start, original.start);
   assert.equal(remote.calls.slice(before).filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length, 0);
   device.accounts[0].consent.calendarWrite = true;
@@ -986,14 +1141,14 @@ test('a provider failure after atomic multicolor reanchoring can retry without c
   const remote = cloud(); const device = phone(t, remote); await prepare(device);
   await explicitGroup(device, 1000, ['A1', 'A2', 'B1', 'B2'], 'Coffee');
   await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1002, endMinute: 1003 }, 'work');
-  await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+  await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks(); await device.engine.synchronizeAccounts();
   const initial = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
   assert.equal(initial.length, 2);
   remote.onGet = () => { if (remote.calls.at(-1).id === initial[1].id) throw new Error('Temporary provider failure'); };
   const startCalls = remote.calls.length;
   const group = await device.sheet.getMovableActivityGroup(day, 1000);
   await device.sheet.moveActivityGroup(group, { dateKey: '2026-11-05', startMinute: 700 });
-  await device.inline.flushInlineMinutes();
+  await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks();
   const failed = await device.engine.synchronizeAccounts();
   assert.match(failed.message, /Temporary provider failure/);
   assert.deepEqual([...remote.events.values()].map((event) => event.id).sort(), initial.map((event) => event.id).sort());
@@ -1002,7 +1157,7 @@ test('a provider failure after atomic multicolor reanchoring can retry without c
   const moved = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
   assert.deepEqual(moved.map((event) => event.id), initial.map((event) => event.id));
   assert.match(moved[0].description, /A1[\s\S]*A2/); assert.match(moved[1].description, /B1[\s\S]*B2/);
-  await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+  await device.sheet.undoSpreadsheetEdit(); await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks(); await device.engine.synchronizeAccounts();
   assert.deepEqual([...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start)).map((event) => [event.id, event.start]),
     initial.map((event) => [event.id, event.start]));
   assert.equal(remote.calls.slice(startCalls).filter((call) => ['create', 'delete', 'updateSeries'].includes(call.type)).length, 0);
@@ -1012,7 +1167,7 @@ test('ambiguous moved named-group geometry preserves existing calendar events fo
   const remote = cloud(); const device = phone(t, remote); await prepare(device);
   await explicitGroup(device, 1000, ['A1', 'A2', 'B1', 'B2'], 'Coffee');
   await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1002, endMinute: 1003 }, 'work');
-  await device.inline.flushInlineMinutes(); await device.engine.synchronizeAccounts();
+  await device.inline.flushInlineMinutes(); await device.inline.retryInlineMinuteLinks(); await device.engine.synchronizeAccounts();
   const initial = plain([...remote.events.values()]);
   const group = await device.sheet.getMovableActivityGroup(day, 1000);
   const sourceCells = await device.db.getSpreadsheetCells({ dateKey: day, startMinute: 1000, endMinute: 1003 });

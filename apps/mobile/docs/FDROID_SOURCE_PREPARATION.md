@@ -39,9 +39,23 @@ not offer this Google-dependent watch transport. No broad scanner exclusion is a
 
 ## Reviewed inputs
 
-`fdroid/source-inputs.json` records 25 package identities, npm integrity, 101 exact unused file
+`fdroid/source-inputs.json` records 27 package identities, npm integrity, 107 exact unused file
 removals, and five narrow source patches. Every affected file has a fixed SHA-256; the build never
 generates new trusted hashes for itself. Changed inputs fail and require review.
+
+The current refresh adds only `expo-print` 58.0.7 and `expo-sharing` 58.0.20 to the previously
+reviewed dependency graph. Both are MIT-licensed Expo modules and use the existing source-build
+selection. Their six newly reviewed removals are the two modules' local-Maven AAR/source-JAR
+publications and Print's debug/release Apple XCFramework archives. No new source patch, scanner
+exception, Android SDK change, or proprietary dependency is introduced by this refresh. The
+standalone `context-calendar-colors` module uses Android SDK source APIs and remains included
+when the optional Wear sources are removed.
+
+The 107 entries count reviewed manifest paths, not the number removed on any particular runner.
+A unique temporary-fixture test verifies the six new hashes, removes only copied fixture files,
+and checks that the installed package files remain unchanged. Cold Linux scanning, an integrated
+F-Droid recipe build, and APK scanning of the newly pinned application commit are still required;
+the earlier 0.1.8 verification is not evidence that this refreshed source has passed them.
 
 - Prebuilt Expo local-Maven AAR/JAR publications and core's unused native cache are removed after
   selecting source compilation. Apple XCFramework/Swift-macro files, non-Linux Hermes hosts, and

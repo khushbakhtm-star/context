@@ -1,11 +1,11 @@
 import { useMemo } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { useAppTheme } from '../appearance';
 import type { AppColors } from '../theme';
 
 /** Decorative monochrome symbols; the containing button provides its accessible name. */
-export function CalendarHeaderIcon({ name }: { name: 'settings' | 'search' | 'reports' }) {
+export function CalendarHeaderIcon({ name }: { name: 'settings' | 'search' | 'reports' | 'sync' }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   return <View pointerEvents="none" accessible={false} style={styles.icon}>
@@ -14,6 +14,11 @@ export function CalendarHeaderIcon({ name }: { name: 'settings' | 'search' | 're
       <View style={styles.gearRing}><View style={styles.gearCenter} /></View>
     </> : name === 'search' ? <>
       <View style={styles.searchRing} /><View style={styles.searchHandle} />
+    </> : name === 'sync' ? <>
+      <View style={styles.syncCalendar} />
+      <View style={styles.syncRule} />
+      <View style={[styles.syncRing, { left: 5 }]} /><View style={[styles.syncRing, { left: 16 }]} />
+      <Text allowFontScaling={false} style={styles.syncArrows}>↻</Text>
     </> : <>
       <View style={styles.graphAxes} />
       <View style={[styles.graphBar, { left: 6, height: 7 }]} />
@@ -37,4 +42,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   graphAxes: { position: 'absolute', left: 1, bottom: 1, width: 22, height: 22,
     borderLeftWidth: 1.5, borderBottomWidth: 1.5, borderColor: colors.graphite },
   graphBar: { position: 'absolute', bottom: 4, width: 3, borderRadius: 0.5, backgroundColor: colors.graphite },
+  syncCalendar: { position: 'absolute', left: 1, top: 4, width: 22, height: 19,
+    borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 3 },
+  syncRule: { position: 'absolute', left: 2, top: 9, width: 20, height: 1.5, backgroundColor: colors.graphite },
+  syncRing: { position: 'absolute', top: 1, width: 2, height: 6, borderRadius: 1, backgroundColor: colors.graphite },
+  syncArrows: { position: 'absolute', left: 5, top: 8, color: colors.graphite, fontSize: 18, lineHeight: 18 },
 });

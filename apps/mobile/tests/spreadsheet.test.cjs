@@ -13,8 +13,8 @@ const { setImmediate } = require('node:timers/promises');
 function harness(t) {
   const sqlite = new DatabaseSync(':memory:');
   let onRunAsync;
+  let onLink;
   const linkCalls = [];
-  t.after(() => sqlite.close());
   const native = {
     async execAsync(sql) { sqlite.exec(sql); },
     async runAsync(sql, ...params) { if (onRunAsync) await onRunAsync(sql, params);
@@ -41,7 +41,7 @@ function harness(t) {
         if (name.startsWith('@noble/')) return require(name);
         if (!name.startsWith('.')) throw new Error(`Unexpected sheet import: ${name}`);
         const file = path.resolve(path.dirname(filename), `${name}.ts`);
-        if (file === source('sync/engine.ts')) return { linkActualsToAccounts: async (...args) => { linkCalls.push(args); }, synchronizeAccounts: async () => {} };
+        if (file === source('sync/engine.ts')) return { linkActualsToAccounts: async (...args) => { linkCalls.push(args); if (onLink) await onLink(...args); }, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {} };
         if (file === source('sync/accounts.ts')) return { accountFetch: async () => { throw new Error('Unexpected account request'); } };
         if (file === source('sync/providers.ts')) return { createCalendarAdapter: () => { throw new Error('Unexpected calendar request'); } };
         return load(file);
@@ -53,8 +53,12 @@ function harness(t) {
   const api = load(source('data/database.ts'));
   const sheet = load(source('services/spreadsheet.ts'));
   const inline = load(source('services/inline-minutes.ts'));
-  t.after(async () => { await inline.flushInlineMinutes(); });
-  return { api, sheet, inline, sqlite, load, source, linkCalls, set onRunAsync(callback) { onRunAsync = callback; } };
+  t.after(async () => {
+    try { await inline.flushInlineMinutes(); await inline.retryInlineMinuteLinks(); }
+    finally { sqlite.close(); }
+  });
+  return { api, sheet, inline, sqlite, load, source, linkCalls, set onRunAsync(callback) { onRunAsync = callback; },
+    set onLink(callback) { onLink = callback; } };
 }
 const range = (startMinute, endMinute = startMinute, dateKey = day) => ({ dateKey, startMinute, endMinute });
 async function save(api, minuteIndex, text, categoryId = 'study') {
@@ -63,6 +67,36 @@ async function save(api, minuteIndex, text, categoryId = 'study') {
 function activate(inline, minuteIndex, text, categoryId = 'study') {
   inline.inlineMinuteDrafts.activate({ dateKey: day, minuteIndex, text, categoryId, keepColor: false });
 }
+
+test('local clipboard and Clear acknowledge SQLite while account linking is still pending', async (t) => {
+  const r = harness(t); await r.api.initializeDatabase();
+  await save(r.api, 100, 'Original', 'family'); await r.sheet.applyCellFormat(range(100), { bold: true });
+  let release;
+  const network = new Promise((resolve) => { release = resolve; });
+  r.onLink = () => network;
+  activate(r.inline, 100, 'Original', 'family'); r.sheet.editInlineMinute(day, 100, { text: 'Latest whole cell' });
+  await r.inline.inlineMinuteDrafts.flushAll(); await setImmediate();
+  const accountStarted = r.linkCalls.length > 0;
+  let locallyComplete = false;
+  const editing = (async () => {
+    await r.sheet.copyMinuteRange(range(100));
+    await r.sheet.pasteMinuteRange({ dateKey: day, startMinute: 200 });
+    await r.sheet.clearTextMinuteRange(range(200));
+    await r.sheet.cutMinuteRange(range(100));
+    await r.sheet.pasteMinuteRange({ dateKey: day, startMinute: 300 });
+    locallyComplete = true;
+  })();
+  for (let turn = 0; turn < 3; turn++) await setImmediate();
+  const completedBeforeAccount = locallyComplete;
+  release(); await editing;
+  assert.ok(accountStarted, 'the account boundary is held by an in-flight link request');
+  assert.equal(completedBeforeAccount, true, 'clipboard commands must not wait for an account round trip');
+  assert.equal(await r.api.getMinuteEntry(day, 100), null);
+  assert.equal((await r.api.getMinuteEntry(day, 200)).text, '');
+  assert.equal((await r.api.getMinuteEntry(day, 300)).text, 'Latest whole cell');
+  assert.equal((await r.api.getMinuteEntry(day, 300)).categoryId, 'family');
+  assert.equal((await r.sheet.getDayCellFormats(day)).get(300).bold, true);
+});
 
 test('Copy keeps an internal stable cell snapshot, pastes across dates, and remains available for another Paste', async (t) => {
   const { api, sheet } = harness(t); await api.initializeDatabase();
@@ -465,6 +499,7 @@ test('clear and Undo restore text and formats, while formatting an empty source 
   assert.equal((await api.getMinuteEntry(day, 400)).text, 'Retain');
   assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(400)), { italic: true });
   await inline.flushInlineMinutes();
+  await inline.retryInlineMinuteLinks();
   assert.ok(linkCalls.length > 0);
   assert.ok(linkCalls.every((args) => args[1] === null), 'sheet commands use ordinary permission-gated linking, never select a new source occurrence');
 });
@@ -566,6 +601,33 @@ test('a failed pending text save blocks a range command until the draft can be s
   assert.equal((await api.getMinuteEntry(day, 500)).text, 'Pending actual');
 });
 
+test('a code-5 Undo failure releases both edit queues and the same pasted cell remains editable', async (t) => {
+  const { api, sheet, inline } = harness(t); await api.initializeDatabase();
+  await save(api, 100, 'Copied note', 'family'); await sheet.copyMinuteRange(range(100));
+  await sheet.pasteMinuteRange({ dateKey: day, startMinute: 200 });
+  const apply = api.applySpreadsheetTransaction;
+  let injected = false;
+  api.applySpreadsheetTransaction = async (...args) => {
+    if (!injected) { injected = true; throw Object.assign(new Error('database is locked (code 5)'), { code: 5 }); }
+    return apply(...args);
+  };
+  await assert.rejects(sheet.undoSpreadsheetEdit(), (error) => error.code === 5);
+  api.applySpreadsheetTransaction = apply;
+  assert.equal(sheet.spreadsheetEditor.snapshot().busy, false);
+  assert.equal(sheet.spreadsheetEditor.snapshot().canUndo, true);
+  assert.equal((await api.getMinuteEntry(day, 200)).text, 'Copied note');
+  activate(inline, 200, 'Copied note', 'family');
+  sheet.editInlineMinute(day, 200, { text: 'Edited after the failed Undo' });
+  await inline.flushInlineMinutes();
+  assert.equal((await api.getMinuteEntry(day, 200)).text, 'Edited after the failed Undo');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 200)).text, 'Copied note', 'Undo retries the new typing command first');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal(await api.getMinuteEntry(day, 200), null, 'the original Paste Undo remains available and succeeds');
+  assert.equal((await api.getMinuteEntry(day, 100)).text, 'Copied note');
+  assert.equal(sheet.spreadsheetEditor.snapshot().busy, false);
+});
+
 test('an activity groups distinct minute notes and blank members, retaining identity during inline typing and note clearing', async (t) => {
   const { api, sheet, inline } = harness(t); await api.initializeDatabase();
   await save(api, 600, 'Prepare kettle', 'work'); await save(api, 602, 'Drink tea', 'family');
@@ -627,9 +689,10 @@ test('same-color neighbors stay separate, partial regrouping splits activities, 
   assert.deepEqual(plain(groups.map((group) => [group.startMinute, group.endMinute, group.title])),
     [[700, 700, 'Study'], [701, 703, 'Read paper'], [704, 704, 'Study']]);
   const middleId = groups[1].blockId;
-  await inline.flushInlineMinutes(); const beforeCalls = linkCalls.length;
+  await inline.flushInlineMinutes(); await inline.retryInlineMinuteLinks(); const beforeCalls = linkCalls.length;
   await sheet.groupMinuteRange(range(701, 703), { title: 'Read revised paper', categoryId: 'study' });
   await inline.flushInlineMinutes();
+  await inline.retryInlineMinuteLinks();
   groups = await sheet.getDayActivityGroups(day);
   assert.equal(groups[1].blockId, middleId); assert.equal(groups[1].title, 'Read revised paper');
   assert.ok(linkCalls.length > beforeCalls, 'renaming only the activity must update its calendar event');

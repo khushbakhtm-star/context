@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const ts = require('typescript');
+const { setImmediate: nextTurn } = require('node:timers/promises');
 
 function categoriesRuntime({ calendars = [], handler = async () => new Response('{}') } = {}) {
   const docs = new Map();
@@ -73,6 +74,29 @@ test('a first user-edited plan minute can retain its exact source color through 
   const again = await api.ensureSourceColorCategory({ color: '#123456', name: 'Personal calendar · #123456', calendarId: 'calendar', provider: 'device' });
   assert.equal(again.id, category.id);
   assert.equal((await api.listSelectableActivityCategories()).some((item) => item.id === category.id), false);
+});
+
+test('a stalled account palette request cannot block local first-note color preparation', async () => {
+  let release; let entered;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const requested = new Promise((resolve) => { entered = resolve; });
+  const { api, docs } = categoriesRuntime({ calendars: [{ id: 'primary', title: 'Work', color: '#445566', providedColor: '#445566' }],
+    handler: async () => { entered(); return waiting; } });
+  await api.listCategories();
+  const importing = api.importAccountCategories(account('google', false));
+  await requested;
+  let prepared = false;
+  const local = api.ensureSourceColorCategory({ color: '#123456', name: 'Reading', calendarId: 'primary', provider: 'device' })
+    .then((category) => { prepared = true; return category; });
+  await nextTurn();
+  const completedBeforeNetwork = prepared;
+  // Always release the provider fixture, including on regression, so no test
+  // leaves a pending category queue or relies on an elapsed-time threshold.
+  release(json({ event: { 1: { background: '#778899' } } }));
+  const [, category] = await Promise.all([importing, local]);
+  assert.equal(completedBeforeNetwork, true, 'local save preparation must not acquire a lock held across account HTTP');
+  assert.equal(docs.get(`category:${category.id}`).color, '#123456');
+  assert.ok((await api.listCategories()).some((item) => item.providerColorId === '1'));
 });
 
 test('source color inheritance preserves explicit or customized historical category colors', async () => {

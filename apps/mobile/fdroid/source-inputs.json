@@ -331,6 +331,40 @@
       "patch": []
     },
     {
+      "name": "expo-print",
+      "version": "58.0.7",
+      "npmIntegrity": "sha512-9T4RpQmTXOHzVsBq3l72o4vnOv+lXnRmrX1L9o7z/qJdQmii5/iuuerBQiYAN/OsJ2NQe1/FUGvA/t8vSMpmLg==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-print"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.print/58.0.7/expo.modules.print-58.0.7-sources.jar",
+          "sha256": "93c1db482ec502a5a024bed307e7c754dd34e3b9f0bd0363df585c83e024fe25",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.print/58.0.7/expo.modules.print-58.0.7.aar",
+          "sha256": "2f865cb06e0f910f50256f54c86d9de8db82fe394d52931b719f53b0d6ff70b8",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "prebuilds/output/debug/xcframeworks/ExpoPrint.tar.gz",
+          "sha256": "b868e4cc8cdf00e486c946b03c77cc8380df01f145659587e2ffaeee333286d2",
+          "reason": "Apple XCFramework archive; not used by Android"
+        },
+        {
+          "path": "prebuilds/output/release/xcframeworks/ExpoPrint.tar.gz",
+          "sha256": "864d190f6ca0b20d6e586df41643b3f9a3a7e0a6d970d309d35fd55b30889465",
+          "reason": "Apple XCFramework archive; not used by Android"
+        }
+      ],
+      "patch": []
+    },
+    {
       "name": "expo-secure-store",
       "version": "58.0.2",
       "npmIntegrity": "sha512-VupWWEuQF6IiQ06McSymtn7/tehs8ifThhFwAU4UK8poomZcaa2S0UVt/y7G2XozBdkI3xpiPSx+r0pS2zsuYQ==",
@@ -349,6 +383,30 @@
         {
           "path": "local-maven-repo/host/exp/exponent/expo.modules.securestore/58.0.2/expo.modules.securestore-58.0.2.aar",
           "sha256": "803633f88203f6f8e7ebb6d054b694bb1c1c85de89e852f5c4509cacafb65b3c",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
+      "name": "expo-sharing",
+      "version": "58.0.20",
+      "npmIntegrity": "sha512-FxfBGaiWYNmV12bDbT81TAi08MGN1OdQtz9WLscN3He0We3w9RfIQNAhCSOJLKpcFvbNAXZ4nkOjpO8q3I8LRw==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-sharing"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.sharing/58.0.20/expo.modules.sharing-58.0.20-sources.jar",
+          "sha256": "716b203470647872eba564e609d8dc90be7e180f0537184d535c993557813791",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.sharing/58.0.20/expo.modules.sharing-58.0.20.aar",
+          "sha256": "7ade54f388e80f40531fee0caa4ffc3b8fc78f33576857e39516620eb3db4e20",
           "reason": "unused publication; all Expo Android modules compile from source"
         }
       ],

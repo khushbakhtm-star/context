@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.12",
-  "sourceAndroidVersionCode": 13,
-  "sourceIosBuildNumber": "13",
+  "version": "0.1.13",
+  "sourceAndroidVersionCode": 14,
+  "sourceIosBuildNumber": "14",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare contextual cell actions, text-only Clear, activity moves/Ungroup, direct header controls and Day/Week/Month/Year/Schedule views. Pick or glide a consecutive Range of up to 28 days. The gear opens Settings and configurable PDF Print/Save, including calendar grids, full Schedule notes and Dashboard bars. Dashboard switches recorded/unrecorded time. Imported events fill minute cells using source event colors or calendar fallback. Calendar exports omit technical labels while retaining synchronization metadata separately. Existing write consent and notes remain intact. Earlier 0.1.12 builds were superseded before publication. Native 0.1.12, physical gestures, synchronization changes and actual printing remain unverified until checked. Published phone 0.1.11 and F-Droid/watch 0.1.8 remain actual releases until a verified APK is public. Google OAuth Testing and official store/F-Droid acceptance remain pending."
+  "notes": "Prepare phone 0.1.13: single taps select and popup actions execute once; double taps edit inline, and the keyboard checkmark saves locally. Stable menu geometry prevents keyboard dismissal from cancelling a press. A serialized SQLite writer gate prevents Undo/calendar contention and recovers after failed transactions without consuming history. Clipboard actions await local work only; background synchronization is coalesced and refreshes foreground accounts every 15 seconds. Remove copied banners and automatic minute/range panels. Header Sync refreshes calendars; the gear contains Settings, Print, Search and Dashboard. Linked source color edits preserve notes, groups and formatting. Calendar descriptions compact identical adjacent notes with version-two metadata and v1 baseline compatibility. Published phone 0.1.12 remains current until separate native verification and publication. F-Droid/watch 0.1.8 remain existing releases; physical Android gestures, official catalog acceptance and store review are not verified."
 }

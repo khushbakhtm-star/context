@@ -6,6 +6,45 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
+## Preparing the 0.1.13 refresh
+
+The next candidate is **0.1.13 / Android code 14**. Its application source commit must be
+finalized before the verification controller and disabled metadata are retargeted together.
+Until that controller update, the tracked recipe and workflow still identify the verified
+0.1.8 source below; they must not combine a newer version number with the old source hash.
+
+The refreshed dependency inventory reviews 27 packages, 107 exact removable inputs and five
+source patches. Print and Sharing add six reviewed unused inputs; their Android modules still
+compile from source. The independent Android calendar-color module uses Android SDK APIs and
+remains in the FOSS build. These local preparation checks are not fresh scanner or APK results.
+
+After the application commit is public:
+
+1. Set `CONTEXT_SOURCE_COMMIT` in `.github/workflows/fdroid-verify.yml` and the single build's
+   `commit` in `fdroid/metadata/com.context.minuteledger.yml` to that same full immutable hash.
+   Set the metadata version/code and CurrentVersion fields to 0.1.13/14, keep `disable`, and
+   replace old verification claims with a pending receipt. Keep the accepted scanner exception
+   and toolchain pins unchanged unless new diagnostics establish a necessary change.
+2. Commit the controller separately, push it, and dispatch **F-Droid independent source
+   verification** at that controller ref. A `codex/fdroid-*` branch push also starts both jobs.
+   This workflow needs no Expo quota and has no signing or publication step.
+3. Require success from both `metadata` and `native`. Inspect the structured source findings
+   in addition to process exits: fdroidserver 2.4.5 source mode can return zero despite errors.
+   Check the integrated build/APK scanner, independent assembly/APK scanner, code-14 package
+   identity, actual input audit and Wear-pruning receipt. Retain the provenance and exact logs.
+4. The native diagnostics contain an unsigned FOSS APK. Download and hash its actual bytes,
+   align and sign a separate preview copy with the established publisher key, then verify its
+   package/version/code, certificate continuity and signature. An official F-Droid release
+   requires F-Droid's own review, build, signing and catalog publication.
+5. Update this receipt and the existing [packaging request](https://gitlab.com/fdroid/rfp/-/work_items/4667)
+   with only the results actually observed. Request maintainer guidance or submit a tested
+   fdroiddata merge request as appropriate; do not open a duplicate packaging request.
+
+Both diagnostic artifacts are uploaded even on failure. The expected names are
+`context-fdroid-metadata-diagnostics` and `context-fdroid-native-diagnostics`; their `results.json`,
+`provenance.json`, logs, source scanner summary and input/removal audits identify their scope.
+An unsigned artifact or successful GitHub run does not establish an official F-Droid listing.
+
 ## Verified 0.1.8 editions and exact source provenance
 
 The [0.1.8 public release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.8)

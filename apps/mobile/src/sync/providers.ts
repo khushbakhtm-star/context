@@ -320,7 +320,7 @@ function googleAdapter(account: ConnectedAccount): AccountCalendarAdapter {
       if (response.status === 404 || response.status === 410) return null;
       const event = normalizeGoogleEvent(await expectJson(response), calendarId);
       if (event.isSeriesMaster) requireOccurrence(event);
-      return event;
+      return (await withDisplayColors([event], calendarId))[0]!;
     },
     async createEvent(calendarId, write) {
       requireWrite(account);
@@ -341,7 +341,7 @@ function googleAdapter(account: ConnectedAccount): AccountCalendarAdapter {
         if (recovered && !recovered.deleted && recovered.projectionId === write.projectionId) return recovered;
         throw new CalendarConflictError();
       }
-      return normalizeGoogleEvent(await expectJson(response), calendarId);
+      return (await withDisplayColors([normalizeGoogleEvent(await expectJson(response), calendarId)], calendarId))[0]!;
     },
     async updateEvent(event, write) {
       requireWrite(account);
@@ -359,7 +359,7 @@ function googleAdapter(account: ConnectedAccount): AccountCalendarAdapter {
         headers: { 'Content-Type': 'application/json', 'If-Match': event.version },
         body: JSON.stringify(googleWrite(write)),
       });
-      return normalizeGoogleEvent(await expectJson(response), event.calendarId);
+      return (await withDisplayColors([normalizeGoogleEvent(await expectJson(response), event.calendarId)], event.calendarId))[0]!;
     },
     async deleteEvent(event) {
       requireWrite(account);
@@ -601,7 +601,9 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
       }));
       return items.map((item) => ({
         id: String(item.id), title: String(item.name || 'Calendar'),
-        color: item.hexColor || '#8E8C86', writable: Boolean(item.canEdit),
+        color: item.hexColor || '#8E8C86',
+        providedColor: typeof item.hexColor === 'string' && /^#[0-9a-f]{6}$/i.test(item.hexColor) ? item.hexColor : undefined,
+        writable: Boolean(item.canEdit),
       }));
     },
     async listEvents(calendarId, start, end) {

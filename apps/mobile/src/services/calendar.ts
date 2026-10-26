@@ -17,15 +17,21 @@ import {
   markSyncDateComplete,
   markSyncDateFailed,
   saveSyncBinding,
+  recolorExpectedMinuteEntries,
   setSetting,
 } from '../data/database';
 import { categoryById } from '../theme';
-import type { ActivitySegment, DeviceCalendar, PlannedEvent, SyncBinding } from '../types';
+import type { ActivitySegment, CalendarPreferences, DeviceCalendar, PlannedEvent, SyncBinding } from '../types';
 import { addDays, dateKey, localDateAtMinute, minuteLabel, parseDateKey } from '../utils/time';
 import { isActivityGroupId } from '../utils/cell-format';
 import { bindingInterval, matchActivityTranslation } from '../utils/activity-translation';
-import { nativeEventColor } from '../utils/calendar-cell-color';
+import { calendarColor, nativeEventColor } from '../utils/calendar-cell-color';
+import { formatCalendarMinuteLog } from '../utils/calendar-minute-log';
 import { getAccounts } from '../sync/accounts';
+import { ensureSourceColorCategory, listCategories } from './categories';
+import { hashValue } from '../sync/codec';
+import { localActivityColorHash, notifyCalendarColorImported, reconcileLinkedAccountColors,
+  requireCalendarColorImportCurrent } from '../sync/engine';
 
 function isWeb() {
   return Platform.OS === 'web';
@@ -110,6 +116,7 @@ export class CalendarReadError extends Error {
 
 let calendarReadChain: Promise<void> = Promise.resolve();
 let calendarReadDiagnostics: CalendarReadDiagnostics | null = null;
+const verifiedNativeEventColors = new WeakMap<PlannedEvent, boolean>();
 
 /** Metadata only: no event titles, descriptions, attendees, or account labels are retained. */
 export function getCalendarReadDiagnostics(): CalendarReadDiagnostics | null {
@@ -222,6 +229,9 @@ export function loadPlannedEventsResult(
             notes: typeof event.notes === 'string' && event.notes ? event.notes : undefined,
             color: nativeEventColor(event, startDate, eventColors, calendar?.color), sourceProvider: 'device',
             startDate, endDate, allDay: event.allDay === true };
+          verifiedNativeEventColors.set(plannedEvent, Boolean(
+            calendarColor(eventColors[`${event.id}@${startDate.getTime()}`]) ?? calendarColor(eventColors[event.id]) ??
+            calendarColor(event.displayColor) ?? calendarColor(event.eventColor) ?? calendarColor(event.color)));
           const occurrenceKey = [calendarId, event.id, startDate.getTime(), endDate.getTime()].join(':');
           if (uniqueEvents.has(occurrenceKey)) continue;
           uniqueEvents.set(occurrenceKey, plannedEvent);
@@ -258,6 +268,83 @@ export async function loadPlannedEvents(calendarIds: string[], value: string, ca
 }
 
 export const checkCalendarConnection = loadPlannedEventsResult;
+
+type NativeColorReceipt = { version: 1; calendarId: string; eventId: string; remoteColor: string; localColorHash: string };
+const nativeColorReceiptKey = (calendarId: string, eventId: string) =>
+  `calendar.color-receipt.device.${encodeURIComponent(calendarId)}.${encodeURIComponent(eventId)}`;
+let nativeColorChain: Promise<void> = Promise.resolve();
+
+/** The caller explicitly reconciles known private bindings after a successful source
+ * read. Listing calendar plans, including Print's reads, remains strictly read-only. */
+export function reconcileLinkedNativeColors(value: string, plans: readonly PlannedEvent[], calendars: readonly DeviceCalendar[]): Promise<string[]> {
+  const work = async () => {
+    const changed = new Set<string>();
+    await listCategories();
+    for (const binding of await getSyncBindings(value)) {
+      const plan = plans.find((item) => item.id === binding.eventId && item.calendarId === binding.calendarId && !item.allDay);
+      const calendar = calendars.find((item) => item.id === binding.calendarId);
+      if (!plan || !calendar || !verifiedNativeEventColors.get(plan)) continue;
+      const color = calendarColor(plan.color)?.toUpperCase();
+      if (!color) continue;
+      const interval = bindingInterval(binding.segmentKey, binding.blockId);
+      if (!interval) throw new Error('A linked activity needs review before importing its calendar color.');
+      const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === interval.dateKey &&
+        entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute);
+      if (!entries.length) continue;
+      const key = nativeColorReceiptKey(binding.calendarId, binding.eventId);
+      const receipt = await getSetting<NativeColorReceipt | null>(key, null);
+      if (receipt && (receipt.version !== 1 || receipt.calendarId !== binding.calendarId || receipt.eventId !== binding.eventId ||
+          !calendarColor(receipt.remoteColor) || !/^[a-f0-9]{64}$/.test(receipt.localColorHash))) {
+        throw new Error('A linked calendar color receipt needs review before synchronization.');
+      }
+      const localColorHash = localActivityColorHash(entries);
+      const sameColor = entries.every((entry) => categoryById(entry.categoryId).color.toUpperCase() === color);
+      const bootstrapExplicitColor = !receipt && entries.every((entry) => entry.categoryId === 'unaccounted') &&
+        calendarColor(calendar.color)?.toUpperCase() !== color;
+      if ((!receipt && !bootstrapExplicitColor) || receipt?.remoteColor.toUpperCase() === color) {
+        if (!receipt) await setSetting(key, { version: 1, calendarId: binding.calendarId, eventId: binding.eventId,
+          remoteColor: color, localColorHash } satisfies NativeColorReceipt);
+        continue;
+      }
+      if (receipt && receipt.localColorHash !== localColorHash && !sameColor) {
+        throw new Error('The activity color changed in Context and the calendar. Review both colors before synchronizing.');
+      }
+      const category = await ensureSourceColorCategory({ color, name: plan.title, provider: 'device', calendarId: binding.calendarId,
+        preferredCategoryId: sameColor ? entries[0]!.categoryId : undefined });
+      const next = entries.map((entry) => ({ ...entry, categoryId: category.id }));
+      const guard = () => requireCalendarColorImportCurrent(entries);
+      guard();
+      if (await getCalendarPermissionStatus() !== 'granted') throw new Error('Calendar access changed. Retry after allowing calendar reading.');
+      // Recheck exact ownership after the source/category awaits, before SQLite commit.
+      const current = (await getSyncBindings(value)).find((item) => item.segmentKey === binding.segmentKey);
+      if (!current || hashValue(current) !== hashValue(binding)) throw new Error('The calendar link changed. Refresh before importing its color.');
+      const affected = await recolorExpectedMinuteEntries(entries, category.id, { key, value: {
+        version: 1, calendarId: binding.calendarId, eventId: binding.eventId, remoteColor: color,
+        localColorHash: localActivityColorHash(next) } satisfies NativeColorReceipt }, guard);
+      for (const day of affected) changed.add(day);
+      notifyCalendarColorImported(next);
+    }
+    return [...changed];
+  };
+  const job = nativeColorChain.then(work, work);
+  nativeColorChain = job.then(() => undefined, () => undefined);
+  return job;
+}
+
+/** Explicit foreground import; no source event is created, changed or deleted. */
+export async function reconcileLinkedCalendarColors(dates: readonly string[], calendars: readonly DeviceCalendar[],
+  preferences: CalendarPreferences): Promise<string[]> {
+  const changed = new Set<string>();
+  if (dates.length > 366) throw new Error('Choose at most one year when refreshing linked calendar colors.');
+  for (const value of [...new Set(dates)]) {
+    if (!preferences.selectedCalendarIds.length) break;
+    const result = await loadPlannedEventsResult(preferences.selectedCalendarIds, value, [...calendars]);
+    if (result.failures.length) throw new CalendarReadError(result.plans, result.failures);
+    for (const day of await reconcileLinkedNativeColors(value, result.plans, calendars)) changed.add(day);
+  }
+  for (const day of await reconcileLinkedAccountColors(dates)) changed.add(day);
+  return [...changed];
+}
 
 export class CalendarPlanConnectionError extends Error {
   constructor(readonly reason: 'permission' | 'selection' | 'unavailable') {
@@ -318,15 +405,12 @@ function segmentTitle(segment: ActivitySegment) {
 
 function eventDetails(segment: ActivitySegment) {
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const lines = segment.entries.map(
-    (entry) => `${minuteLabel(entry.minuteIndex, true)}  ${entry.text}`,
-  );
   return {
     title: segmentTitle(segment),
     startDate: localDateAtMinute(segment.dateKey, segment.startMinute),
     endDate: localDateAtMinute(segment.dateKey, segment.endMinute + 1),
     timeZone,
-    notes: lines.join('\n'),
+    notes: formatCalendarMinuteLog(segment.entries),
   };
 }
 
@@ -707,6 +791,13 @@ async function flushPendingActualsOnce(
   for (const item of pending) {
     if (!canContinue()) break;
     try {
+      if ((await getSyncBindings(item.dateKey)).some((binding) => binding.calendarId === calendarId)) {
+        const calendars = await listDeviceCalendars();
+        const read = await loadPlannedEventsResult([calendarId], item.dateKey, calendars);
+        if (read.failures.length) throw new CalendarReadError(read.plans, read.failures);
+        await reconcileLinkedNativeColors(item.dateKey, read.plans, calendars);
+      }
+      if (!canContinue()) throw new ProjectionCancelledError();
       await syncActualDay(item.dateKey, calendarId, canContinue);
       if (!canContinue()) throw new ProjectionCancelledError();
       await markSyncDateComplete(item.dateKey, item.updatedAt);

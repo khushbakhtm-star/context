@@ -56,8 +56,10 @@ function calendarRuntime(overrides = {}) {
       if (name === '../../modules/context-calendar-colors') return { getEventColorsAsync: async () => state.eventColors };
       if (name === '../data/database') return {};
       if (name === '../sync/accounts') return { getAccounts: async () => [] };
+      if (name === './categories' || name === '../sync/engine' || name === '../sync/codec') return {};
       if (name === '../theme') return { categoryById: () => ({ name: 'Activity' }) };
       if (name === '../utils/time') return timeModule.exports;
+      if (name === '../utils/calendar-minute-log') return require('../src/utils/calendar-minute-log.ts');
       if (name === '../utils/cell-format') return require('../src/utils/cell-format.ts');
       if (name === '../utils/activity-translation') return require('../src/utils/activity-translation.ts');
       if (name === '../utils/calendar-cell-color') return require('../src/utils/calendar-cell-color.ts');

@@ -5,11 +5,12 @@ import type { ActivitySegment, MinuteEntry, SearchResult, SyncBinding } from '..
 import { addDays, dateKey } from '../utils/time';
 import type { SyncDocument } from '../sync/types';
 import { CELL_FORMAT_PREFIX, cellFormatDocument, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, validateMinuteCellRange, type CellFormat } from '../utils/cell-format';
+import { serializeSQLiteWrites } from './sqlite-write-gate';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 function database() {
-  databasePromise ??= SQLite.openDatabaseAsync('context.db').catch((error) => {
+  databasePromise ??= SQLite.openDatabaseAsync('context.db').then(serializeSQLiteWrites).catch((error) => {
     databasePromise = null;
     throw error;
   });
@@ -244,6 +245,67 @@ export async function getMinuteEntry(value: string, minuteIndex: number) {
     minuteIndex,
   );
   return row ? mapMinuteRow(row) : null;
+}
+
+/** Import only a source color into the reviewed existing minutes. The ordinary
+ * minute trigger journals private-ledger updates; no calendar/link outbox is queued. */
+export async function recolorExpectedMinuteEntries(expected: readonly MinuteEntry[], nextCategoryId: string,
+  localReceipt?: { key: string; value: unknown }, requireCurrent?: () => void): Promise<string[]> {
+  if (!Array.isArray(expected) || !expected.length || expected.length > 1440 ||
+      typeof nextCategoryId !== 'string' || !/^[A-Za-z0-9_.:-]{1,200}$/.test(nextCategoryId)) {
+    throw new Error('Choose a valid existing activity before importing its color.');
+  }
+  const members = expected.map((entry) => {
+    if (!entry || typeof entry !== 'object') throw new Error('Invalid calendar color snapshot.');
+    validateMinuteCellRange({ dateKey: entry.dateKey, startMinute: entry.minuteIndex, endMinute: entry.minuteIndex });
+    if (['id', 'text', 'categoryId', 'blockId', 'createdAt', 'updatedAt'].some((key) =>
+      typeof entry[key as keyof MinuteEntry] !== 'string') || !entry.id || !entry.blockId ||
+        !['manual', 'inherited-plan', 'imported'].includes(entry.source)) throw new Error('Invalid calendar color snapshot.');
+    // Copy before the first await so a caller cannot change the reviewed values in flight.
+    return { id: entry.id, dateKey: entry.dateKey, minuteIndex: entry.minuteIndex, text: entry.text,
+      categoryId: entry.categoryId, blockId: entry.blockId, source: entry.source,
+      createdAt: entry.createdAt, updatedAt: entry.updatedAt } satisfies MinuteEntry;
+  });
+  if (new Set(members.map((entry) => `${entry.dateKey}:${entry.minuteIndex}`)).size !== members.length) {
+    throw new Error('The calendar color snapshot contains duplicate minutes.');
+  }
+  let receipt: { key: string; json: string } | null = null;
+  if (localReceipt) {
+    let json: string | undefined;
+    try { json = JSON.stringify(localReceipt.value); } catch { throw new Error('Invalid calendar color receipt.'); }
+    if (typeof localReceipt.key !== 'string' || !/^calendar\.color-receipt\.[\x21-\x7e]{1,900}$/.test(localReceipt.key) ||
+        !localReceipt.value || typeof localReceipt.value !== 'object' || Array.isArray(localReceipt.value) ||
+        !json || json.length > 4096) throw new Error('Invalid calendar color receipt.');
+    receipt = { key: localReceipt.key, json };
+  }
+  const db = await database();
+  const now = new Date().toISOString();
+  const affectedDates = new Set<string>();
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    requireCurrent?.();
+    for (const before of members) {
+      const row = await txn.getFirstAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ? AND minute_index = ?`,
+        before.dateKey, before.minuteIndex);
+      if (!row || canonicalValue(mapMinuteRow(row)) !== canonicalValue(before)) {
+        throw new Error('A recorded minute changed before its calendar color could be imported. Retry after reviewing it.');
+      }
+    }
+    for (const before of members) {
+      requireCurrent?.();
+      if (before.categoryId === nextCategoryId) continue;
+      const result = await txn.runAsync(`UPDATE minute_entries SET category_id = ?, updated_at = ?
+        WHERE date_key = ? AND minute_index = ? AND id = ? AND text = ? AND category_id = ?
+          AND block_id = ? AND source = ? AND created_at = ? AND updated_at = ?`,
+        nextCategoryId, now, before.dateKey, before.minuteIndex, before.id, before.text, before.categoryId,
+        before.blockId, before.source, before.createdAt, before.updatedAt);
+      if (result.changes !== 1) throw new Error('A recorded minute changed during calendar color import. Review it before retrying.');
+      affectedDates.add(before.dateKey);
+    }
+    if (receipt) await txn.runAsync(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, receipt.key, receipt.json, now);
+    requireCurrent?.();
+  });
+  return [...affectedDates].sort();
 }
 
 export async function saveMinuteEntry(input: {

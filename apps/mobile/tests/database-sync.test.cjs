@@ -73,6 +73,93 @@ const plain = (object) => JSON.parse(JSON.stringify(object));
 const save = (api, minute, text, categoryId = 'study') =>
   api.saveMinuteEntry({ dateKey: day, minuteIndex: minute, text, categoryId });
 
+test('source color import preserves minute identity, notes, groups, source and formatting while journaling only private-ledger changes', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  const sourceEntries = [value(100, 'Exact note\n  Keep spaces  ', { blockId: 'activity_color', source: 'imported' }),
+    value(101, '', { blockId: 'activity_color', source: 'inherited-plan' })];
+  await api.mergeSyncDocuments(sourceEntries.map((entry, index) => ({ key: minuteKey(entry.minuteIndex), revision: revision(100, index), value: entry })));
+  const formatKey = `category:minuteFormat:${day}:100`;
+  await api.putSyncDocument(formatKey, { kind: 'minuteFormat', format: { bold: true, underline: true, textColor: '#ABCDEF',
+    activityGroup: { id: 'activity_color', title: 'Coffee' } } });
+  await api.saveSyncBinding({ segmentKey: 'activity_color:100:101', blockId: 'activity_color', dateKey: day, calendarId: 'device', eventId: 'native-12' });
+  sqlite.prepare('INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at) VALUES (?, 3, ?, ?)').run(day, 'existing pending write', 'before');
+  sqlite.prepare('INSERT INTO inline_minute_link_outbox VALUES (?, ?, ?, ?)').run(day, 100, JSON.stringify([day]), 'prior-link-token');
+  const queues = plain({ native: sqlite.prepare('SELECT * FROM sync_outbox').all(), inline: sqlite.prepare('SELECT * FROM inline_minute_link_outbox').all() });
+  const bindings = plain(await api.getSyncBindings(day));
+  const before = plain(await api.getDayEntries(day));
+  const formats = plain(await api.getSyncDocuments('category:minuteFormat:'));
+  const revisions = new Map((await api.getSyncDocuments('minute:')).map((item) => [item.key, item.revision]));
+  const receipt = { key: 'calendar.color-receipt.device.device.native-12', value: { version: 1, calendarId: 'device', eventId: 'native-12',
+    remoteColor: '#123456', localColorHash: 'a'.repeat(64) } };
+  assert.deepEqual(plain(await api.recolorExpectedMinuteEntries(before, 'source_color_new', receipt)), [day]);
+  const after = plain(await api.getDayEntries(day));
+  for (let index = 0; index < before.length; index++) {
+    const { categoryId: _category, updatedAt: _updated, ...identity } = before[index];
+    const { categoryId, updatedAt, ...changedIdentity } = after[index];
+    assert.deepEqual(changedIdentity, identity);
+    assert.equal(categoryId, 'source_color_new'); assert.notEqual(updatedAt, before[index].updatedAt);
+  }
+  assert.deepEqual(plain(await api.getSyncDocuments('category:minuteFormat:')), formats);
+  assert.deepEqual(plain(await api.getSyncBindings(day)), bindings);
+  assert.deepEqual(plain({ native: sqlite.prepare('SELECT * FROM sync_outbox').all(), inline: sqlite.prepare('SELECT * FROM inline_minute_link_outbox').all() }), queues);
+  for (const document of await api.getSyncDocuments('minute:')) {
+    assert.notEqual(document.revision, revisions.get(document.key));
+    assert.equal(document.value.categoryId, 'source_color_new');
+    assert.equal(sqlite.prepare('SELECT local_pending FROM ledger_documents WHERE key = ?').get(document.key).local_pending, 1);
+  }
+  assert.deepEqual(plain(await api.getSetting(receipt.key, null)), receipt.value);
+  const settled = plain(await api.getSyncDocuments('minute:'));
+  assert.deepEqual(plain(await api.recolorExpectedMinuteEntries(after, 'source_color_new', { ...receipt,
+    value: { ...receipt.value, remoteColor: '#654321' } })), []);
+  assert.deepEqual(plain(await api.getSyncDocuments('minute:')), settled, 'no-op color import must not create another revision');
+  assert.equal((await api.getSetting(receipt.key, null)).remoteColor, '#654321');
+});
+
+test('source color imports reject every stale minute snapshot field before acknowledging or changing any reviewed row', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  await save(api, 100, 'First'); await save(api, 101, 'Second');
+  const before = plain(await api.getDayEntries(day)); const documents = plain(await api.getSyncDocuments(''));
+  const altered = { id: 'different-id', text: 'A concurrent note', categoryId: 'work', blockId: 'another-block', source: 'imported',
+    createdAt: '2026-10-24T00:00:00.000Z', updatedAt: '2026-10-26T00:00:00.000Z', dateKey: '2026-10-26', minuteIndex: 102 };
+  for (const [field, different] of Object.entries(altered)) {
+    const snapshot = plain(before); snapshot[1][field] = different;
+    await assert.rejects(api.recolorExpectedMinuteEntries(snapshot, 'new_source_color', { key: 'calendar.color-receipt.test.stale', value: {} }),
+      /changed|snapshot|valid|duplicate/);
+    assert.deepEqual(plain(await api.getDayEntries(day)), before);
+    assert.deepEqual(plain(await api.getSyncDocuments('')), documents);
+  }
+  assert.equal(await api.getSetting('calendar.color-receipt.test.stale', null), null);
+  await assert.rejects(api.recolorExpectedMinuteEntries([before[0], before[0]], 'new_source_color'), /duplicate/);
+  await assert.rejects(api.recolorExpectedMinuteEntries(before, 'new_source_color', { key: 'wear.receipt.wrong', value: {} }), /receipt/);
+  assert.equal(sqlite.prepare('SELECT importing FROM ledger_clock').get().importing, 0);
+});
+
+test('source color import rolls back minute revisions and receipts on a late raw-draft guard or receipt failure', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  await save(api, 100, 'First'); await save(api, 101, 'Second');
+  const before = plain(await api.getDayEntries(day)); const documents = plain(await api.getSyncDocuments(''));
+  const clock = plain(sqlite.prepare('SELECT * FROM ledger_clock').get());
+  const receipt = { key: 'calendar.color-receipt.test.late', value: { version: 1 } };
+  await assert.rejects(api.recolorExpectedMinuteEntries(before, 'new_source_color', receipt, () => {
+    if (sqlite.prepare('SELECT 1 FROM minute_entries WHERE category_id = ?').get('new_source_color')) throw Error('A raw draft changed during lookup');
+  }), /raw draft changed/);
+  assert.deepEqual(plain(await api.getDayEntries(day)), before);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), documents);
+  assert.deepEqual(plain(sqlite.prepare('SELECT * FROM ledger_clock').get()), clock);
+  assert.equal(await api.getSetting(receipt.key, null), null);
+  await assert.rejects(api.recolorExpectedMinuteEntries(before, 'new_source_color', receipt, () => {
+    if (sqlite.prepare('SELECT 1 FROM settings WHERE key = ?').get(receipt.key)) throw Error('A final draft changed');
+  }), /final draft changed/);
+  assert.deepEqual(plain(await api.getDayEntries(day)), before);
+  assert.equal(await api.getSetting(receipt.key, null), null);
+  sqlite.exec(`CREATE TRIGGER reject_color_receipt BEFORE INSERT ON settings WHEN NEW.key LIKE 'calendar.color-receipt.%'
+    BEGIN SELECT RAISE(ABORT, 'Color receipt write failed'); END;`);
+  await assert.rejects(api.recolorExpectedMinuteEntries(before, 'new_source_color', receipt), /receipt write failed/);
+  assert.deepEqual(plain(await api.getDayEntries(day)), before);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), documents);
+  assert.deepEqual(plain(sqlite.prepare('SELECT * FROM ledger_clock').get()), clock);
+});
+
 test('one-phone backup batches never latch a foreign ledger peer', async (t) => {
   const { api, sqlite } = createRepository(t); await api.initializeDatabase();
   await save(api, 20, 'Own note');

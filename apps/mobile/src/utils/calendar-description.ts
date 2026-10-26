@@ -2,7 +2,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 
 export type DescriptionLog = {
-  version: 1;
+  version: 1 | 2;
   offset: number;
   prefixHash: string;
   logHash: string;
@@ -20,7 +20,7 @@ export function isDescriptionLog(value: unknown): value is DescriptionLog {
   const fields = Object.keys(value);
   if (fields.length !== 4 || fields.some((key) => !['version', 'offset', 'prefixHash', 'logHash'].includes(key))) return false;
   const candidate = value as Record<string, unknown>;
-  return candidate.version === 1 && typeof candidate.offset === 'number' &&
+  return (candidate.version === 1 || candidate.version === 2) && typeof candidate.offset === 'number' &&
     Number.isSafeInteger(candidate.offset) && candidate.offset >= 0 && candidate.offset <= MAX_OFFSET &&
     typeof candidate.prefixHash === 'string' && /^[a-f0-9]{64}$/.test(candidate.prefixHash) &&
     typeof candidate.logHash === 'string' && /^[a-f0-9]{64}$/.test(candidate.logHash);
@@ -28,14 +28,14 @@ export function isDescriptionLog(value: unknown): value is DescriptionLog {
 
 /** Ownership lives in provider metadata; the visible description contains only the
  * original text followed by timestamped notes. Original whitespace is significant. */
-export function makeCalendarDescription(preserved: string, minuteLog: string): {
+export function makeCalendarDescription(preserved: string, minuteLog: string, version: 1 | 2 = 1): {
   description: string; descriptionLog: DescriptionLog;
 } {
   const offset = preserved.length ? preserved.length + 2 : 0;
   if (offset > MAX_OFFSET) throw new Error('This calendar description is too long to synchronize safely.');
   return {
     description: preserved.length ? `${preserved}\n\n${minuteLog}` : minuteLog,
-    descriptionLog: { version: 1, offset, prefixHash: hash(preserved), logHash: hash(minuteLog) },
+    descriptionLog: { version, offset, prefixHash: hash(preserved), logHash: hash(minuteLog) },
   };
 }
 

@@ -32,6 +32,7 @@ import {
   flushPendingActuals,
   getCalendarPermissionStatus,
   listDeviceCalendars,
+  reconcileLinkedCalendarColors,
   requestCalendarAccess,
 } from './src/services/calendar';
 import { SearchScreen } from './src/screens/SearchScreen';
@@ -57,7 +58,7 @@ import { isDateKey, normalizeSelectedDates } from './src/utils/date-selection';
 import type { CalendarNavigationTarget } from './src/utils/calendar-navigation';
 import { calendarViewDates, calendarViewKind, calendarViewModePageTarget, type CalendarViewMode } from './src/utils/calendar-view-mode';
 import { getAccounts } from './src/sync/accounts';
-import { subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
+import { configureCalendarColorImports, requestAccountSynchronization, subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
 import { printContextSchedule } from './src/services/print';
 import { defaultPrintOptions, normalizePrintOptions, printOptionDates, type ContextPrintOptions, type PrintAction } from './src/utils/print-options';
@@ -65,6 +66,8 @@ import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscri
 import { redoSpreadsheetEdit, spreadsheetEditor, subscribeSpreadsheetCommits, undoSpreadsheetEdit } from './src/services/spreadsheet';
 import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/ReleaseUpdates';
 import { useWearBridge } from './src/wear/useWearBridge';
+import { calendarColorDraftObserver } from './src/utils/calendar-color-drafts';
+import { createCoalescedDateWork } from './src/utils/coalesced-date-work';
 
 type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
 type DayCount = 1 | 3 | 7;
@@ -102,6 +105,8 @@ export default function App() {
 
 function AppController() {
   const [ready, setReady] = useState(false);
+  const readyRef = useRef(ready);
+  readyRef.current = ready;
   const releaseUpdates = useReleaseUpdates(ready);
   const [initializationError, setInitializationError] = useState<string | null>(null);
   const [initializationAttempt, setInitializationAttempt] = useState(0);
@@ -118,6 +123,15 @@ function AppController() {
   const [printPreparationAction, setPrintPreparationAction] = useState<PrintAction>('print');
   const [dashboardMetric, setDashboardMetric] = useState<ContextPrintOptions['dashboardMetric']>('recorded');
   const printAbortRef = useRef<AbortController | null>(null);
+  const [manualSyncing, setManualSyncing] = useState(false);
+  const [manualSyncError, setManualSyncError] = useState<string | null>(null);
+  const manualSyncAbortRef = useRef<AbortController | null>(null);
+  const calendarColorContextRef = useRef<{ dates: string[]; calendars: DeviceCalendar[]; preferences: CalendarPreferences }>({
+    dates: [], calendars: [], preferences: DEFAULT_PREFERENCES,
+  });
+  const colorDraftObserver = useMemo(() => calendarColorDraftObserver(inlineMinuteDrafts,
+    () => controllerMountedRef.current && readyRef.current && AppState.currentState === 'active',
+    () => { if (controllerMountedRef.current) setDataVersion((version) => version + 1); }), []);
   const [printOptionsInitial, setPrintOptionsInitial] = useState<ContextPrintOptions | null>(null);
   const [printOptionsOpen, setPrintOptionsOpen] = useState(false);
   const printOptionsOpenRef = useRef(false);
@@ -139,12 +153,20 @@ function AppController() {
   const [calendars, setCalendars] = useState<DeviceCalendar[]>([]);
   const [preferences, setPreferences] = useState<CalendarPreferences>(DEFAULT_PREFERENCES);
   const [accountCalendarWrites, setAccountCalendarWrites] = useState(false);
-  const inlineProjectionChain = useRef<Promise<void>>(Promise.resolve());
+  const accountRefreshSequence = useRef(0);
   const planOpenRef = useRef(false);
   const calendarProjectionConfigRef = useRef({ ready, syncActuals: preferences.syncActuals,
     writeCalendarId: preferences.writeCalendarId, accountCalendarWrites });
   calendarProjectionConfigRef.current = { ready, syncActuals: preferences.syncActuals,
     writeCalendarId: preferences.writeCalendarId, accountCalendarWrites };
+  const nativeProjectionWork = useMemo(() => createCoalescedDateWork(async (dates) => {
+    const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
+    const current = calendarProjectionConfigRef.current;
+    if (!controllerMountedRef.current || AppState.currentState !== 'active' || !current.ready || directWrites ||
+        current.accountCalendarWrites || !current.syncActuals || !current.writeCalendarId) return;
+    const result = await flushPendingActuals(current.writeCalendarId, dates);
+    if (result.failed) throw new Error('Calendar projection remains queued.');
+  }, () => controllerMountedRef.current && readyRef.current && AppState.currentState === 'active'), []);
   const [focusRequest, setFocusRequest] = useState<{
     dateKey: string;
     minuteIndex: number;
@@ -157,20 +179,37 @@ function AppController() {
 
   const refreshCalendars = useCallback(async () => {
     const status = await getCalendarPermissionStatus().catch(() => 'unavailable');
+    if (!controllerMountedRef.current) return [] as DeviceCalendar[];
     setPermissionStatus(status);
     if (status === 'granted') {
       const available = await listDeviceCalendars().catch(() => []);
-      setCalendars(available);
+      if (controllerMountedRef.current) setCalendars(available);
+      return available;
     } else {
       setCalendars([]);
+      return [] as DeviceCalendar[];
     }
   }, []);
 
   const calendarReturnRefresh = useMemo(() => createCalendarRefreshBurst(() => {
-    void refreshCalendars().then(() => setDataVersion((version) => version + 1));
+    const epoch = lifecycleEpochRef.current;
+    void refreshCalendars().then(async (available) => {
+      if (!controllerMountedRef.current || epoch !== lifecycleEpochRef.current || AppState.currentState !== 'active') return;
+      const current = calendarColorContextRef.current;
+      try {
+        if (readyRef.current) await reconcileLinkedCalendarColors(current.dates, available, current.preferences);
+      } catch { /* Keep raw drafts and retry on the next foreground/manual refresh. */ }
+      if (controllerMountedRef.current && epoch === lifecycleEpochRef.current && AppState.currentState === 'active') {
+        setDataVersion((version) => version + 1);
+      }
+    }).catch(() => { /* Calendar reads can retry without interrupting entry. */ });
   }, () => AppState.currentState === 'active'), [refreshCalendars]);
 
   useEffect(() => () => calendarReturnRefresh.cancel(), [calendarReturnRefresh]);
+  useEffect(() => {
+    nativeProjectionWork.resume();
+    return () => nativeProjectionWork.suspend();
+  }, [nativeProjectionWork]);
   useEffect(() => {
     controllerMountedRef.current = true;
     return () => {
@@ -181,11 +220,20 @@ function AppController() {
       viewChangingRef.current = false;
       printAbortRef.current?.abort();
       printAbortRef.current = null;
+      manualSyncAbortRef.current?.abort();
+      manualSyncAbortRef.current = null;
       invalidatePrintOptionsAction();
       printOptionsOpenRef.current = false;
       printOptionsClosingRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    configureCalendarColorImports(colorDraftObserver);
+    // An in-flight source read must retain a closed guard after unmount rather than
+    // dropping the observer and accidentally permitting its late database write.
+    return () => configureCalendarColorImports({ canImport: () => false });
+  }, [colorDraftObserver]);
 
   useEffect(() => {
     let mounted = true;
@@ -243,8 +291,10 @@ function AppController() {
         lifecycleEpochRef.current += 1;
         activeTransitionRef.current?.controller.abort();
         printAbortRef.current?.abort();
+        manualSyncAbortRef.current?.abort();
         invalidatePrintOptionsAction();
         calendarReturnRefresh.cancel();
+        nativeProjectionWork.suspend();
         // Commit the current cell before the app leaves the foreground. Pending drafts
         // remain in the inline controller if the local database cannot accept a write.
         if (ready) void flushInlineMinutes().catch(() => {});
@@ -253,14 +303,16 @@ function AppController() {
       if (Platform.OS !== 'ios' && !printOptionsOpenRef.current) printOptionsClosingRef.current = false;
       // Some calendar providers publish a saved event shortly after their editor closes.
       calendarReturnRefresh.start();
-      if (ready) void flushInlineMinutes().catch(() => {});
-      void synchronizeAccounts();
-      if (preferences.syncActuals && preferences.writeCalendarId && !accountCalendarWrites) {
-        void flushPendingActuals(preferences.writeCalendarId);
-      }
+      nativeProjectionWork.resume();
+      const epoch = lifecycleEpochRef.current;
+      if (ready) void flushInlineMinutes().then(() => {
+        if (!controllerMountedRef.current || epoch !== lifecycleEpochRef.current || AppState.currentState !== 'active') return;
+        requestAccountSynchronization();
+        nativeProjectionWork.request(calendarColorContextRef.current.dates);
+      }).catch(() => {});
     });
     return () => subscription.remove();
-  }, [accountCalendarWrites, preferences.syncActuals, preferences.writeCalendarId, ready, calendarReturnRefresh]);
+  }, [ready, calendarReturnRefresh, nativeProjectionWork]);
 
   useEffect(() => {
     if (!ready || accountCalendarWrites || !preferences.syncActuals || !preferences.writeCalendarId) return;
@@ -269,17 +321,40 @@ function AppController() {
 
   useEffect(() => {
     if (!ready) return;
+    let cancelled = false;
     const unsubscribe = subscribeAccountSync((next) => {
       if (!next.running) {
-        void listCategories().then(() => setDataVersion((version) => version + 1));
+        void listCategories().then(() => {
+          if (!cancelled && controllerMountedRef.current) setDataVersion((version) => version + 1);
+        }).catch(() => { /* Categories can refresh on the next pass. */ });
       }
     });
-    void synchronizeAccounts();
-    const timer = setInterval(() => {
-      if (AppState.currentState === 'active') void synchronizeAccounts();
-    }, 45000);
-    return () => { unsubscribe(); clearInterval(timer); };
-  }, [ready]);
+    let polling = false;
+    const poll = async () => {
+      if (polling || cancelled || AppState.currentState !== 'active') return;
+      polling = true;
+      const epoch = lifecycleEpochRef.current;
+      const currentPass = () => !cancelled && controllerMountedRef.current && readyRef.current &&
+        epoch === lifecycleEpochRef.current && AppState.currentState === 'active';
+      try {
+        const current = calendarColorContextRef.current;
+        // Read source color changes before projecting local entries back out.
+        try { await reconcileLinkedCalendarColors(current.dates, current.calendars, current.preferences); }
+        catch { /* A source read failure must not block unrelated account work. */ }
+        if (!currentPass()) return;
+        try { await retryInlineMinuteLinks({ synchronize: false }); }
+        catch { /* Durable link tickets remain queued independently. */ }
+        if (!currentPass()) return;
+        try { await synchronizeAccounts(); }
+        catch { /* Accounts can retry independently of device-calendar reads. */ }
+        if (currentPass()) nativeProjectionWork.resume();
+      }
+      finally { polling = false; }
+    };
+    void poll();
+    const timer = setInterval(() => { void poll(); }, 15000);
+    return () => { cancelled = true; unsubscribe(); clearInterval(timer); };
+  }, [ready, nativeProjectionWork]);
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -295,8 +370,11 @@ function AppController() {
   }, [tab]);
 
   const dataChanged = useCallback(() => {
+    if (!controllerMountedRef.current) return;
     setDataVersion((version) => version + 1);
+    const sequence = ++accountRefreshSequence.current;
     void getAccounts().then((accounts) => {
+      if (!controllerMountedRef.current || sequence !== accountRefreshSequence.current) return;
       const directWrites = accounts.some((account) => account.consent.calendarWrite);
       setAccountCalendarWrites(directWrites);
       const current = calendarProjectionConfigRef.current;
@@ -304,34 +382,26 @@ function AppController() {
         current.syncActuals && !directWrites ? current.writeCalendarId : null,
       );
     }).catch(() => { /* Keep the current projection settings; account refresh can retry. */ });
-    void synchronizeAccounts();
+    requestAccountSynchronization();
   }, []);
 
   const watchDataChanged = useCallback((days: string[]) => {
     dataChanged();
     const current = calendarProjectionConfigRef.current;
     if (current.ready && current.syncActuals && current.writeCalendarId && !current.accountCalendarWrites) {
-      void flushPendingActuals(current.writeCalendarId, days);
+      nativeProjectionWork.request(days);
     }
-  }, [dataChanged]);
+  }, [dataChanged, nativeProjectionWork]);
   useWearBridge(ready, watchDataChanged);
 
   useEffect(() => {
     if (!ready) return;
-    void retryInlineMinuteLinks().catch(() => {});
     // This listener lives above Today so a write that finishes after opening Reports
     // still refreshes the app and queues the affected dates for the chosen calendar.
     const handleCommit = (affectedDates: string[], textChanged = true) => {
       dataChanged();
       if (!textChanged) return;
-      const project = async () => {
-        const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
-        const current = calendarProjectionConfigRef.current;
-        if (!current.ready || directWrites || current.accountCalendarWrites || !current.syncActuals || !current.writeCalendarId) return;
-        await flushPendingActuals(current.writeCalendarId, affectedDates);
-      };
-      inlineProjectionChain.current = inlineProjectionChain.current.then(project, project)
-        .catch(() => { /* SQLite's durable calendar outbox keeps this work for retry. */ });
+      nativeProjectionWork.request(affectedDates);
     };
     const unsubscribe = subscribeInlineMinuteCommits(({ affectedDates }) => handleCommit(affectedDates));
     const unsubscribeSpreadsheet = subscribeSpreadsheetCommits(({ affectedDates, textChanged }) => handleCommit(affectedDates, textChanged));
@@ -340,7 +410,7 @@ function AppController() {
       unsubscribeSpreadsheet();
       void flushInlineMinutes().catch(() => {});
     };
-  }, [dataChanged, ready]);
+  }, [dataChanged, ready, nativeProjectionWork]);
 
   async function askForCalendarAccess() {
     const granted = await requestCalendarAccess();
@@ -402,7 +472,8 @@ function AppController() {
       }).catch(() => undefined);
   }
 
-  async function transitionFromCalendar(change: () => void | Promise<void>, failureTitle: string, signal?: AbortSignal) {
+  async function transitionFromCalendar(change: () => void | Promise<void>, failureTitle: string, signal?: AbortSignal,
+    onFailure?: (message: string) => void) {
     if (viewChangingRef.current || !controllerMountedRef.current || AppState.currentState !== 'active' || signal?.aborted) return;
     const epoch = lifecycleEpochRef.current;
     const sequence = ++transitionSequenceRef.current;
@@ -429,7 +500,9 @@ function AppController() {
       }), controller.signal);
     } catch (error) {
       if (!(error instanceof CalendarTransitionCancelled) && current()) {
-        Alert.alert(failureTitle, error instanceof Error ? error.message : 'Save your current minute and try again.');
+        const message = error instanceof Error ? error.message : 'Save your current minute and try again.';
+        if (onFailure) onFailure(message);
+        else Alert.alert(failureTitle, message);
       }
     } finally {
       signal?.removeEventListener('abort', forwardAbort);
@@ -566,6 +639,57 @@ function AppController() {
   const viewKind = calendarViewKind(viewMode, selectedDateKeys);
   const overviewDates = useMemo(() => calendarViewDates(viewMode, activeDate, selectedDateKeys),
     [viewMode, activeDate, selectedDateKeys]);
+  calendarColorContextRef.current = { dates: overviewDates, calendars, preferences };
+
+  async function synchronizeCalendar() {
+    if (!ready || viewChangingRef.current || manualSyncAbortRef.current || !controllerMountedRef.current || AppState.currentState !== 'active') return;
+    const controller = new AbortController();
+    const epoch = lifecycleEpochRef.current;
+    manualSyncAbortRef.current = controller;
+    setManualSyncing(true);
+    setManualSyncError(null);
+    const requireCurrent = () => {
+      if (controller.signal.aborted || !controllerMountedRef.current || lifecycleEpochRef.current !== epoch || AppState.currentState !== 'active') {
+        throw new CalendarTransitionCancelled();
+      }
+    };
+    try {
+      await transitionFromCalendar(async () => {
+        requireCurrent();
+        const available = await refreshCalendars();
+        requireCurrent();
+        const current = calendarColorContextRef.current;
+        await reconcileLinkedCalendarColors(current.dates, available, current.preferences);
+        requireCurrent();
+        await retryInlineMinuteLinks({ synchronize: false });
+        requireCurrent();
+        const accountResult = await synchronizeAccounts();
+        requireCurrent();
+        const messages: string[] = [];
+        if (accountResult.message && accountResult.message !== 'Accounts synchronized' && accountResult.message !== 'Ready to connect' &&
+            accountResult.message !== 'Connect an account to sync your phones') messages.push(accountResult.message);
+        if (accountResult.conflicts) messages.push('Review calendar conflicts in Settings → Calendar accounts.');
+        const config = calendarProjectionConfigRef.current;
+        const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
+        requireCurrent();
+        if (config.syncActuals && config.writeCalendarId && !config.accountCalendarWrites && !directWrites) {
+          const result = await flushPendingActuals(config.writeCalendarId);
+          requireCurrent();
+          if (result.failed) messages.push('Some calendar updates need review. Check calendar synchronization in Settings.');
+        }
+        await refreshCalendars();
+        requireCurrent();
+        setDataVersion((version) => version + 1);
+        colorDraftObserver.consumeSkipped();
+        if (messages.length) throw new Error([...new Set(messages)].join('\n'));
+      }, 'Could not synchronize calendar', controller.signal, (message) => setManualSyncError(message));
+    } finally {
+      if (manualSyncAbortRef.current === controller) {
+        manualSyncAbortRef.current = null;
+        if (controllerMountedRef.current) setManualSyncing(false);
+      }
+    }
+  }
 
   function invalidatePrintOptionsAction() {
     printOptionsSequence.current += 1;
@@ -673,6 +797,7 @@ function AppController() {
               {tab === 'today' ? <>
                 <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void navigate('search')}
                   onPrint={() => void openPrintOptions()}
+                  onSync={() => void synchronizeCalendar()} syncing={manualSyncing} syncError={manualSyncError}
                   onOpenReports={() => void navigate('reports')} onJumpToNow={jumpToCurrentMinute}
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
@@ -726,7 +851,7 @@ function AppController() {
                   calendars={calendars}
                   preferences={preferences}
                   onRequestAccess={askForCalendarAccess}
-                  onRefreshCalendars={refreshCalendars}
+                  onRefreshCalendars={async () => { await refreshCalendars(); }}
                   onChange={changePreferences}
                   onOpenAccounts={() => setTab('accounts')}
                   onOpenCategories={() => setTab('categories')}
@@ -761,12 +886,15 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onSync, syncing, syncError, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
   viewMode, viewChanging, onViewModeChange }: {
   onOpenSettings: () => void;
   onPrint: () => void;
   onOpenSearch: () => void;
   onOpenReports: () => void;
+  onSync: () => void;
+  syncing: boolean;
+  syncError: string | null;
   onJumpToNow: () => void;
   onOpenDatePicker: () => void;
   canGoPrevious: boolean;
@@ -794,7 +922,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const [gearMenuTop, setGearMenuTop] = useState(48);
   const [gearMenuLeft, setGearMenuLeft] = useState(8);
   const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
-  const pendingGearAction = useRef<{ action: 'settings' | 'print'; sequence: number } | null>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'search' | 'reports'; sequence: number } | null>(null);
   const gearVisibleRef = useRef(false);
   const gearClosingRef = useRef(false);
   const headerMountedRef = useRef(true);
@@ -803,9 +931,9 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const dispatchingGearAction = useRef(false);
   const { width, height } = useWindowDimensions();
   const [availableWidth, setAvailableWidth] = useState(width);
-  const controlWidth = Math.max(40, Math.min(44, availableWidth / 9));
+  const controlWidth = Math.max(40, Math.min(44, availableWidth / 8));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
-  const navigationBusy = viewChanging || historyPending || history.busy;
+  const navigationBusy = viewChanging || syncing || historyPending || history.busy;
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
 
@@ -922,7 +1050,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     Keyboard.dismiss();
     gearMenuAnchor.current?.measureInWindow((x, y, _anchorWidth, anchorHeight) => {
       if (sequence !== menuRequestSequence.current || !headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
-      setGearMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 136)));
+      setGearMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 248)));
       setGearMenuLeft(Math.max(8, Math.min(x, width - 216)));
       gearVisibleRef.current = true;
       setGearMenuOpen(true);
@@ -937,14 +1065,16 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     menuRequestSequence.current += 1;
     dispatchingGearAction.current = true;
     if (pending.action === 'settings') onOpenSettings();
-    else onPrint();
+    else if (pending.action === 'print') onPrint();
+    else if (pending.action === 'search') onOpenSearch();
+    else onOpenReports();
     // Also release the local lock when a transition finishes within the same React batch.
     gearActionFrame.current = requestAnimationFrame(() => {
       gearActionFrame.current = null;
       if (headerMountedRef.current && !navigationBusyRef.current) dispatchingGearAction.current = false;
     });
   };
-  const chooseGearAction = (action: 'settings' | 'print') => {
+  const chooseGearAction = (action: 'settings' | 'print' | 'search' | 'reports') => {
     if (!headerMayNavigate() || !gearVisibleRef.current || gearClosingRef.current || pendingGearAction.current) return;
     const sequence = ++menuRequestSequence.current;
     pendingGearAction.current = { action, sequence };
@@ -960,11 +1090,11 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   };
 
   return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
-    contentContainerStyle={styles.calendarHeaderContent} scrollEnabled={availableWidth < controlWidth * 9 - 0.5}
+    contentContainerStyle={styles.calendarHeaderContent} scrollEnabled={availableWidth < controlWidth * 8 - 0.5}
     onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}>
-    <View style={[styles.calendarHeader, { minWidth: controlWidth * 9 }]}>
+    <View style={[styles.calendarHeader, { minWidth: controlWidth * 8 }]}>
     <View ref={gearMenuAnchor} collapsable={false}>
-    <Pressable accessibilityRole="button" accessibilityLabel="Settings and print"
+    <Pressable accessibilityRole="button" accessibilityLabel="Settings, print, search and dashboard"
       disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, expanded: gearMenuOpen }}
       onPress={openGear} style={controlStyle}>
       <CalendarHeaderIcon name="settings" />
@@ -998,11 +1128,6 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       style={[controlStyle, (!canGoNext || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>›</Text>
     </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel="Open Search"
-      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
-      onPress={onOpenSearch} style={controlStyle}>
-      <CalendarHeaderIcon name="search" />
-    </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Undo Context edit"
       accessibilityState={{ disabled: !history.canUndo || navigationBusy }}
       disabled={!history.canUndo || navigationBusy} onPress={() => void changeHistory('undo')}
@@ -1015,10 +1140,17 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       style={[controlStyle, (!history.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
     </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel="Open Dashboard"
-      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy }}
-      onPress={onOpenReports} style={controlStyle}>
-      <CalendarHeaderIcon name="reports" />
+    <Pressable accessibilityRole="button" accessibilityLabel={syncing ? 'Synchronizing calendars' : syncError ? 'Calendar sync needs attention. Tap to retry' : 'Sync attached calendars'}
+      accessibilityHint={syncError ? 'Touch and hold for sync details' : undefined}
+      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, busy: syncing }}
+      onLongPress={() => { if (syncError) Alert.alert('Calendar synchronization', syncError); }}
+      accessibilityActions={syncError ? [{ name: 'longpress', label: 'Show sync details' }] : []}
+      onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress' && syncError) Alert.alert('Calendar synchronization', syncError); }}
+      onPress={onSync} style={controlStyle}>
+      {syncing ? <ActivityIndicator size="small" color={colors.graphite} /> : <>
+        <CalendarHeaderIcon name="sync" />
+        {syncError ? <Text allowFontScaling={false} style={styles.syncInfo}>ⓘ</Text> : null}
+      </>}
     </Pressable>
     </View>
   </ScrollView>
@@ -1028,7 +1160,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
         else if (!gearVisibleRef.current && !pendingGearAction.current) gearClosingRef.current = false;
       }}>
       <View style={styles.viewMenuBackdrop}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Close settings and print"
+        <Pressable accessibilityRole="button" accessibilityLabel="Close calendar actions"
           onPress={() => invalidateMenus()} style={StyleSheet.absoluteFill} />
         <View accessibilityViewIsModal style={[styles.viewMenu, { top: gearMenuTop, left: gearMenuLeft,
           maxHeight: Math.max(44, height - gearMenuTop - 8) }]}>
@@ -1040,6 +1172,14 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
             <Pressable accessibilityRole="button" accessibilityLabel="Print displayed dates"
               onPress={() => chooseGearAction('print')} style={styles.viewOption}>
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Print</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Open Search"
+              onPress={() => chooseGearAction('search')} style={styles.viewOption}>
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Search</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Open Dashboard"
+              onPress={() => chooseGearAction('reports')} style={styles.viewOption}>
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Dashboard</Text>
             </Pressable>
           </ScrollView>
         </View>
@@ -1172,6 +1312,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     justifyContent: 'space-between', backgroundColor: colors.paper },
   calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
   historyArrow: { color: colors.graphite, fontSize: 27, lineHeight: 34 },
+  syncInfo: { position: 'absolute', bottom: 1, right: 1, color: colors.muted, fontSize: 12 },
   viewDropdownArrow: { color: colors.graphite, fontSize: 12, lineHeight: 20 },
   disabledCalendarNavigation: { opacity: 0.3 },
   viewMenuBackdrop: { flex: 1 },

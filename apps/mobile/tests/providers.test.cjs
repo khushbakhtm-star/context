@@ -90,6 +90,19 @@ test('Google standard event colors use the exact provider palette without requir
   assert.equal(requests.length, 2); assert.ok(requests[1].endsWith('/colors'));
 });
 
+test('Google exact-event reads resolve its current provider color for linked actual imports without source writes', async () => {
+  const requests = [];
+  const { createCalendarAdapter } = loadProviders(async (_account, url, init = {}) => {
+    requests.push({ url, method: init.method ?? 'GET' });
+    if (url.endsWith('/colors')) return json({ event: { 7: { background: '#aB12CD' } } });
+    return json({ id: 'instance', colorId: '7', start: { dateTime: write.start }, end: { dateTime: write.end } });
+  });
+  const result = await createCalendarAdapter(account('google')).getEvent('primary', 'instance');
+  assert.equal(result.displayColor, '#aB12CD');
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every((request) => request.method === 'GET'));
+});
+
 test('Google named event label colors require existing category consent and take precedence over standard color IDs', async () => {
   for (const permitted of [false, true]) {
     const requests = [];

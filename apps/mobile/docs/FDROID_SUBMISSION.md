@@ -4,6 +4,12 @@ The owner authorized a public MIT source release and a request for F-Droid revie
 contains an upstream listing and a disabled build candidate. It is not an accepted F-Droid listing,
 and the source release does not itself install an APK.
 
+The existing public request is [Context RFP 4667](https://gitlab.com/fdroid/rfp/-/work_items/4667).
+Use that request for further evidence rather than creating another. The last verified FOSS
+candidate is 0.1.8/code 9; 0.1.13/code 14 is being prepared for a new source-pinned build and
+scanner run. See [`FDROID_VERIFICATION.md`](FDROID_VERIFICATION.md) for the refresh gates and
+the exact historical receipts. A newer phone preview alone is not a verified F-Droid update.
+
 ## Prepared material
 
 - `fastlane/metadata/android/en-US/` at the repository root contains the title, descriptions,

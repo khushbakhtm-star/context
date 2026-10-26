@@ -15,6 +15,7 @@ export type CellActionMenuProps = {
   onClear?: () => void;
   onGroup?: () => void;
   onUngroup?: () => void;
+  onEvent?: () => void;
   onPaste?: () => void;
   canPaste?: boolean;
   onClose: () => void;
@@ -31,11 +32,12 @@ export type CellActionMenuProps = {
   error?: string | null;
   maxHeight?: number;
   onHeightChange?: (height: number) => void;
+  onTouchActiveChange?: (active: boolean) => void;
 };
 
-export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGroup, onUngroup, onPaste,
+export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGroup, onUngroup, onEvent, onPaste,
   canPaste = Boolean(onPaste), onClose, format = {}, textColor, fillColor, colorChoices = [], selectedColorId,
-  onToggleBold, onToggleItalic, onToggleUnderline, onTextColor, onCellColor, error, maxHeight, onHeightChange,
+  onToggleBold, onToggleItalic, onToggleUnderline, onTextColor, onCellColor, error, maxHeight, onHeightChange, onTouchActiveChange,
 }: CellActionMenuProps) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -47,12 +49,13 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGro
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (busy) return true;
       if (palette) setPalette(null);
       else onClose();
       return true;
     });
     return () => subscription.remove();
-  }, [onClose, palette]);
+  }, [onClose, palette, busy]);
 
   function showPalette(value: 'text' | 'cell') {
     Keyboard.dismiss();
@@ -74,17 +77,20 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGro
     ...(onAutoFill ? [{ label: 'AutoFill', accessibilityLabel: 'Auto fill selected minute cells', onPress: onAutoFill, disabled: busy }] : []),
     ...(onGroup ? [{ label: 'Group', accessibilityLabel: 'Group selected minute cells', onPress: onGroup, disabled: busy }] : []),
     ...(onUngroup ? [{ label: 'Ungroup', accessibilityLabel: 'Ungroup selected minute cells', onPress: onUngroup, disabled: busy }] : []),
+    ...(onEvent ? [{ label: 'Event', accessibilityLabel: 'Open source calendar event details', onPress: onEvent, disabled: busy }] : []),
   ];
   const hasFormatting = Boolean(onToggleBold || onToggleItalic || onToggleUnderline || onTextColor || onCellColor);
 
   return (
-    <View accessibilityRole="toolbar" accessibilityLabel="Selected minute actions"
-      onAccessibilityEscape={() => { if (palette) setPalette(null); else onClose(); }}
+    <View accessibilityRole="toolbar" accessibilityLabel="Selected minute actions" accessibilityState={{ busy }}
+      onTouchStart={() => onTouchActiveChange?.(true)} onTouchEnd={() => onTouchActiveChange?.(false)}
+      onTouchCancel={() => onTouchActiveChange?.(false)}
+      onAccessibilityEscape={() => { if (busy) return; if (palette) setPalette(null); else onClose(); }}
       onLayout={(event) => onHeightChange?.(event.nativeEvent.layout.height)}
       style={[styles.bar, { maxHeight: menuMaxHeight }, palette && styles.expanded]}>
-      <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="always" bounces={false} style={styles.verticalScroll}>
+      <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="always" keyboardDismissMode="none" bounces={false} style={styles.verticalScroll}>
       <ScrollView horizontal nestedScrollEnabled keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false}
-        bounces={false} style={styles.scroll} contentContainerStyle={styles.actions}>
+        keyboardDismissMode="none" bounces={false} style={styles.scroll} contentContainerStyle={styles.actions}>
         {actions.map((action) => (
           <Pressable key={action.label} accessibilityRole="button" accessibilityLabel={action.accessibilityLabel}
             accessibilityState={{ disabled: action.disabled }} disabled={action.disabled} onPress={action.onPress}

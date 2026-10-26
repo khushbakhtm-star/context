@@ -49,7 +49,7 @@ test('clean metadata allows remote tail edits but rejects prefix, separator and 
   assert.throws(() => readCalendarDescription({ ...event,
     description: event.description.replace('\n\n', '\n ') }, id), /Review it before synchronizing/);
   for (const changes of [{ offset: 1 }, { offset: event.description.length + 1 },
-    { offset: 0 }, { prefixHash: '0'.repeat(64) }, { version: 2 }, { logHash: 'bad' }]) {
+    { offset: 0 }, { prefixHash: '0'.repeat(64) }, { version: 3 }, { logHash: 'bad' }]) {
     assert.throws(() => readCalendarDescription({ ...event,
       descriptionLog: { ...event.descriptionLog, ...changes } as DescriptionLog }, id), /Review it before synchronizing/);
   }

@@ -163,7 +163,7 @@ test('clean minute logs retain literal Context-like continuation text and valida
   const projection: SyncBatch = { version: 1, id: 'projectionmeta', documents: [{ key: 'projection:one', revision: revision(100),
     value: { baseEvent: { descriptionLog: value } } }] };
   assert.deepEqual(validateBatch(projection), projection);
-  for (const invalid of [{ ...value, offset: -1 }, { ...value, prefixHash: 'not-a-hash' }, { ...value, version: 2 }]) {
+  for (const invalid of [{ ...value, offset: -1 }, { ...value, prefixHash: 'not-a-hash' }, { ...value, version: 3 }]) {
     assert.throws(() => validateBatch({ ...projection, documents: [{ ...projection.documents[0],
       value: { baseEvent: { descriptionLog: invalid } } }] }), /description metadata/);
   }

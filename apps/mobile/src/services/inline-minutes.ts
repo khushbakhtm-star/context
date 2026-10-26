@@ -1,5 +1,5 @@
 import { acknowledgeInlineMinuteLink, deleteMinuteEntry, getMinuteEntry, getPendingInlineMinuteLinks, saveMinuteRange } from '../data/database';
-import { linkActualsToAccounts, synchronizeAccounts } from '../sync/engine';
+import { linkActualsToAccounts, requestAccountSynchronization } from '../sync/engine';
 import type { MinuteEntry } from '../types';
 import { InlineMinuteDrafts, type InlineMinuteValue } from '../utils/inline-minute-drafts';
 import { isActivityGroupId } from '../utils/cell-format';
@@ -28,7 +28,9 @@ export const inlineMinuteDrafts = new InlineMinuteDrafts<InlineMinuteCommit>(asy
 
 // A calendar/account failure must not turn an acknowledged SQLite save into a failed draft.
 // Source replacement is never inferred from an inline tap; existing bindings retain ownership.
-let accountWork: Promise<void> = Promise.resolve();
+let accountWork: Promise<void> | null = null;
+let linkRequested = false;
+let networkRequested = false;
 let linkWarning = false;
 const warningListeners = new Set<(failed: boolean) => void>();
 function updateLinkWarning(failed: boolean) {
@@ -43,12 +45,16 @@ export function subscribeInlineMinuteLinkWarnings(listener: (failed: boolean) =>
 
 /** The exact inline coordinate is queued in the same SQLite transaction as its text.
  * A crash or account-link failure leaves that ticket for startup/foreground retry. */
-export function retryInlineMinuteLinks(): Promise<void> {
+export function retryInlineMinuteLinks(options: { synchronize?: boolean } = {}): Promise<void> {
+  linkRequested = true;
+  networkRequested ||= options.synchronize !== false;
+  if (accountWork) return accountWork;
   const project = async () => {
     try {
       let failed = false;
       let more = true;
       while (more) {
+        linkRequested = false;
         const pending = await getPendingInlineMinuteLinks();
         for (const ticket of pending) {
           try {
@@ -57,13 +63,16 @@ export function retryInlineMinuteLinks(): Promise<void> {
             await acknowledgeInlineMinuteLink(ticket);
           } catch { failed = true; }
         }
-        more = !failed && pending.length === 100;
+        more = !failed && (pending.length === 100 || linkRequested);
       }
       updateLinkWarning(failed);
-      void synchronizeAccounts();
+      if (networkRequested) requestAccountSynchronization();
     } catch { updateLinkWarning(true); }
+    finally { networkRequested = false; }
   };
-  accountWork = accountWork.then(project, project);
+  // Many commits can arrive during one pass. They share the same drain instead
+  // of appending another complete projection/network pass for every caller.
+  accountWork = Promise.resolve().then(project).finally(() => { accountWork = null; });
   return accountWork;
 }
 inlineMinuteDrafts.subscribeCommits(() => { void retryInlineMinuteLinks(); });
@@ -74,5 +83,6 @@ export function subscribeInlineMinuteCommits(listener: (commit: InlineMinuteComm
 
 export async function flushInlineMinutes(): Promise<void> {
   await inlineMinuteDrafts.flushAll();
-  await retryInlineMinuteLinks();
+  // Local acknowledgement is the editing boundary. The durable account-link
+  // queue retries independently; navigation and clipboard never await the cloud.
 }

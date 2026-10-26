@@ -21,6 +21,7 @@ function runtime(t, overrides = {}) {
       try { await work(nativeDb); sqlite.exec('COMMIT'); } catch (error) { sqlite.exec('ROLLBACK'); throw error; } },
   };
   const nativeCalendar = {
+    async getCalendarPermissionsAsync() { return { status: overrides.permission ?? 'granted' }; },
     async getEventsAsync(ids, start, end) { return [...events.values()].filter((event) => ids.includes(event.calendarId) &&
       new Date(event.startDate) < end && new Date(event.endDate) > start).map(plain); },
     async createEventAsync(calendarId, details) { const id = `event-${++serial}`; calls.push({ type: 'create', id });
@@ -53,7 +54,10 @@ function runtime(t, overrides = {}) {
         if (name.startsWith('@noble/')) return require(name);
         if (!name.startsWith('.')) throw new Error(`Unexpected native activity import ${name}`);
         const target = path.resolve(path.dirname(filename), `${name}.ts`);
-        if (target === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, synchronizeAccounts: async () => {} };
+        if (target === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {},
+          requireCalendarColorImportCurrent(entries) { overrides.colorGuard?.(entries); }, notifyCalendarColorImported() {},
+          localActivityColorHash(entries) { return load(source('sync/codec.ts')).hashValue([...new Set(entries.map((entry) =>
+            `${entry.categoryId}:${load(source('theme.ts')).categoryById(entry.categoryId).color.toUpperCase()}`))].sort()); } };
         if (target === source('sync/accounts.ts')) return { getAccounts: async () => overrides.accounts ?? [],
           accountFetch: async () => { throw Error('Unexpected account call'); } };
         if (target === source('sync/providers.ts')) return { createCalendarAdapter: () => { throw Error('Unexpected account call'); } };
@@ -65,6 +69,7 @@ function runtime(t, overrides = {}) {
   const db = load(source('data/database.ts')); const sheet = load(source('services/spreadsheet.ts'));
   const calendar = load(source('services/calendar.ts'));
   return { db, sheet, calendar, events, calls, sqlite, set failUpdate(id) { failUpdate = id; },
+    categories: load(source('services/categories.ts')),
     set failCreateAfterSave(value) { failCreateAfterSave = value; } };
 }
 async function namedTwoColorActivity(r) {
@@ -84,12 +89,75 @@ async function oneMinute(r, text = 'Make coffee') {
   return (await r.db.getDaySegments(day))[0];
 }
 
+async function nativeColorPlans(r, color) {
+  const calendar = { id: 'personal', title: 'Personal', color: '#2952A3', allowsModifications: true, sourceName: 'Device', isPrimary: true };
+  for (const event of r.events.values()) event.displayColor = color;
+  return { calendar, plans: (await r.calendar.loadPlannedEventsResult(['personal'], day, [calendar])).plans };
+}
+
+test('known native event recolor fills linked minutes only and preserves notes, identity, grouping and formatting without source writes', async (t) => {
+  const r = runtime(t); await r.db.initializeDatabase();
+  await r.db.saveMinuteRange({ dateKey: day, startMinute: 100, durationMinutes: 3, text: 'Make coffee', categoryId: 'study' });
+  await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 102 }, { title: 'Coffee', categoryId: 'study' });
+  await r.sheet.applyCellFormat({ dateKey: day, startMinute: 101, endMinute: 101 }, { bold: true, underline: true });
+  await r.calendar.syncActualDay(day, 'personal');
+  const seed = await nativeColorPlans(r, '#2952A3');
+  await r.calendar.reconcileLinkedNativeColors(day, seed.plans, [seed.calendar]);
+  const before = plain(await r.db.getSpreadsheetCells({ dateKey: day, startMinute: 100, endMinute: 102 }));
+  const pending = plain(await r.db.getPendingSyncDates()); r.calls.length = 0;
+  const read = await nativeColorPlans(r, '#123456');
+  assert.deepEqual(plain(await r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar])), [day]);
+  const after = plain(await r.db.getSpreadsheetCells({ dateKey: day, startMinute: 100, endMinute: 102 }));
+  for (let index = 0; index < before.length; index++) {
+    const old = before[index]; const next = after[index];
+    assert.equal((await r.categories.listCategories()).find((item) => item.id === next.entry.categoryId).color, '#123456');
+    for (const field of ['id', 'text', 'blockId', 'source', 'createdAt']) assert.equal(next.entry[field], old.entry[field]);
+    assert.deepEqual(next.format, old.format);
+  }
+  assert.deepEqual(plain(await r.db.getPendingSyncDates()), pending);
+  assert.equal(r.calls.length, 0);
+  const unrelated = { ...read.plans[0], id: 'same-title-time-unowned', color: '#654321' };
+  await r.calendar.reconcileLinkedNativeColors(day, [unrelated], [read.calendar]);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, after[0].entry.categoryId);
+  for (const event of r.events.values()) delete event.displayColor;
+  const fallbackOnly = await r.calendar.loadPlannedEventsResult(['personal'], day, [read.calendar]);
+  await r.calendar.reconcileLinkedNativeColors(day, fallbackOnly.plans, [read.calendar]);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, after[0].entry.categoryId,
+    'An unavailable exact color read must not turn calendar-default display fallback into an imported recolor');
+});
+
+test('native unchanged source color preserves local choice; simultaneous remote/local color edits require review', async (t) => {
+  const r = runtime(t); await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+  const seed = await nativeColorPlans(r, '#2952A3');
+  await r.calendar.reconcileLinkedNativeColors(day, seed.plans, [seed.calendar]);
+  await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'google_palette_2952a3');
+  const selected = (await r.db.getMinuteEntry(day, 100)).categoryId;
+  await r.calendar.reconcileLinkedNativeColors(day, seed.plans, [seed.calendar]);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, selected);
+  const read = await nativeColorPlans(r, '#123456');
+  await assert.rejects(r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar]), /changed in Context and the calendar/);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, selected);
+});
+
+test('native first-read explicit source color can classify an unaccounted note, but a dirty raw draft blocks recoloring', async (t) => {
+  let blocked = false;
+  const r = runtime(t, { colorGuard() { if (blocked) throw new Error('Finish raw draft'); } });
+  await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+  const read = await nativeColorPlans(r, '#123456'); blocked = true;
+  await assert.rejects(r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar]), /Finish raw draft/);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, 'unaccounted');
+  blocked = false;
+  await r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar]);
+  assert.equal((await r.categories.listCategories()).find((category) => category.id ===
+    (r.sqlite.prepare('SELECT category_id FROM minute_entries WHERE minute_index=100').get().category_id)).color, '#123456');
+});
+
 test('new and bound device projections contain only exact timestamped notes, including literal Context-like user text', async (t) => {
   const r = runtime(t);
   await oneMinute(r, 'Unaccounted is a word I typed\nContext block: literal note\nFull minute record available in Context.');
   await r.calendar.syncActualDay(day, 'personal');
   const event = ordered(r)[0];
-  assert.equal(event.notes, '1:40 AM  Unaccounted is a word I typed\nContext block: literal note\nFull minute record available in Context.');
+  assert.equal(event.notes, '1:40 AM  Unaccounted is a word I typed\n    Context block: literal note\n    Full minute record available in Context.');
   assert.doesNotMatch(event.notes, /Context projection:/);
   await r.calendar.syncActualDay(day, 'personal');
   assert.equal(r.events.size, 1);

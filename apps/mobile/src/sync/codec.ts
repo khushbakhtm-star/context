@@ -2,6 +2,7 @@ import { gcm } from '@noble/ciphers/aes.js';
 import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js';
+import { parseCalendarMinuteLog } from '../utils/calendar-minute-log';
 
 import type { SyncBatch, SyncDocument } from './types';
 import { isDescriptionLog } from '../utils/calendar-description';
@@ -289,7 +290,8 @@ export async function decryptBatch(text: string, passphrase: string): Promise<Sy
 export type ProjectedMinuteLine = { minuteIndex: number; text: string };
 
 /** Accepts the 24-hour and AM/PM timestamps Context writes, including multiline entries. */
-export function parseProjectedMinutes(description: string, options: { legacyMetadata?: boolean } = {}): ProjectedMinuteLine[] {
+export function parseProjectedMinutes(description: string, options: { legacyMetadata?: boolean; ranges?: boolean } = {}): ProjectedMinuteLine[] {
+  if (options.ranges) return parseCalendarMinuteLog(description);
   const entries: ProjectedMinuteLine[] = [];
   for (const line of description.split(/\r?\n/)) {
     if (options.legacyMetadata !== false && /^(?:Context (?:block|projection|category):|Full minute record available in Context\.)/.test(line)) {
