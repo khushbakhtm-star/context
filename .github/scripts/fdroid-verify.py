@@ -273,6 +273,53 @@ def record_wear_pruning(diag, mobile, report_name):
     (diag.reports / report_name).write_text(json.dumps({"count": len(removed), "removed": removed}, indent=2) + "\n")
 
 
+def collect_native_build_evidence(diag, mobile, scope):
+    """Retain bounded source-to-DEX evidence from the actual generated release tree.
+
+    No APK changes or keep rules: R8 may rename modules, so consumers must use the
+    exact mapping to resolve names and then inspect actual APK class definitions.
+    """
+    if scope not in ("native", "integrated"):
+        raise ValueError("Unexpected native evidence scope")
+    mobile = mobile.resolve()
+    destination = diag.reports / f"{scope}-build-evidence"
+    destination.mkdir(parents=True, exist_ok=True)
+    candidates = [(Path("android/app/build/outputs/mapping/release") / name, 64 * 1024 * 1024)
+                  for name in ("mapping.txt", "configuration.txt", "seeds.txt", "usage.txt")]
+    generated = Path("build/generated/expo/src/main/java/expo/modules/ExpoModulesPackageList.kt")
+    candidates.extend([(Path("node_modules/expo/android") / generated, 2 * 1024 * 1024),
+                       (Path("android/app") / generated, 2 * 1024 * 1024)])
+    files, missing = [], []
+    total = 0
+    for relative, limit in candidates:
+        file = mobile / relative
+        if not file.exists():
+            missing.append(relative.as_posix())
+            continue
+        resolved = file.resolve()
+        if not resolved.is_relative_to(mobile) or not resolved.is_file():
+            raise ValueError("Native evidence path leaves the actual source checkout")
+        size = resolved.stat().st_size
+        total += size
+        if size > limit or total > 128 * 1024 * 1024:
+            raise ValueError("Native build evidence exceeds its bounded diagnostic budget")
+        data = resolved.read_bytes()
+        if len(data) != size or b"\0" in data:
+            raise ValueError("Native build evidence is not stable plain text")
+        data.decode("utf-8")
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        files.append({"path": relative.as_posix(), "bytes": size,
+                      "sha256": hashlib.sha256(data).hexdigest()})
+    receipt = {"schemaVersion": 1, "sourceCommit": source_pin(), "scope": scope,
+               "files": files, "missing": missing,
+               "mappingPresent": any(item["path"].endswith("/mapping.txt") for item in files),
+               "notice": "Read-only files from this actual build tree; mapping and generated source alone do not prove APK class definitions or runtime behavior."}
+    (destination / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
 def native_checks(diag, source):
     mobile = source / "apps/mobile"
     env = os.environ
@@ -353,6 +400,13 @@ def main():
         print(f"Diagnostic tooling error: {error}", file=sys.stderr, flush=True)
         return 1
     finally:
+        try:
+            mobile = (diag.root / "integrated-check/build" / APP_ID / "apps/mobile"
+                      if args.mode == "metadata" else args.source.resolve() / "apps/mobile")
+            collect_native_build_evidence(diag, mobile, "integrated" if args.mode == "metadata" else "native")
+        except Exception as error:
+            (diag.reports / "native-evidence-error.txt").write_text(f"{type(error).__name__}: {error}\n")
+            diag.results.append({"name": "native-evidence-collection", "exitCode": 1, "successful": False})
         diag.signature_evidence()
         diag.save()
     return 0 if diag.results and all(result["successful"] for result in diag.results) else 1
