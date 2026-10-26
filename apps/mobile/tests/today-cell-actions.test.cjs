@@ -7,7 +7,7 @@ const ts = require('typescript');
 
 // Exercise the production screen's event callbacks without a native device.
 // Native views are inert elements; state/effects advance deterministically between events.
-function screen(t) {
+function screen(t, options = {}) {
   const day = '2026-10-25'; let now = 10000; let hook = 0; let dirty = true; let tree;
   const slots = []; const effects = []; const timers = new Map(); let timerId = 0;
   const calls = []; const pastePreviews = []; const listeners = new Set(); const rows = new Map(); const modules = new Map();
@@ -45,7 +45,7 @@ function screen(t) {
   let drafts;
   const sheet = { spreadsheetEditor: { snapshot: () => ({ busy: false, formatVersion: 0, canUndo: false, canRedo: false, clipboard }),
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } },
-    getDayCellFormats: async () => new Map(), getDayActivityGroups: async () => [],
+    getDayCellFormats: options.readFormats ?? (async () => new Map()), getDayActivityGroups: options.readGroups ?? (async () => []),
     editInlineMinute: (...args) => drafts.edit(...args), getSpreadsheetClipboard: () => clipboard,
     copyMinuteRange: (range) => capture('copy', range), cutMinuteRange: (range) => capture('cut', range),
     clearTextMinuteRange: async (range) => { command('clear', range); for (let minute = range.startMinute; minute <= range.endMinute; minute++) {
@@ -81,16 +81,19 @@ function screen(t) {
         if (resolved.endsWith('/components/CellActionMenu') || resolved.endsWith('\\components\\CellActionMenu')) return { CellActionMenu: 'CellActionMenu' };
         if (resolved.endsWith('/components/CellColorPalette') || resolved.endsWith('\\components\\CellColorPalette')) return { CellColorPalette: 'CellColorPalette' };
         if (resolved.endsWith('/components/MinuteEditor') || resolved.endsWith('\\components\\MinuteEditor')) return { MinuteEditor: 'MinuteEditor' };
-        if (resolved === source('data/database')) return { getDayEntries: async (date) => [...rows.values()].filter((row) => row.dateKey === date).map((row) => ({ ...row })),
+        if (resolved === source('data/database')) return { getDayEntries: options.readEntries ?? (async (date) => [...rows.values()].filter((row) => row.dateKey === date).map((row) => ({ ...row }))),
           getMinuteEntry: async (date, minute) => rows.get(`${date}:${minute}`) ? { ...rows.get(`${date}:${minute}`) } : null };
-        if (resolved === source('services/calendar')) return { loadPlannedEventsResult: async () => ({ plans: [], failures: [] }), reconcileLinkedNativeColors: async () => [], flushPendingActuals: async () => ({}) };
+        if (resolved === source('services/calendar')) return { loadPlannedEventsResult: options.readNative ?? (async () => ({ plans: [], failures: [] })),
+          reconcileLinkedNativeColors: options.reconcileColors ?? (async () => []), flushPendingActuals: async () => ({}) };
         if (resolved === source('services/categories')) return { listSelectableActivityCategories: async () => [] };
         if (resolved === source('services/inline-minutes')) return { inlineMinuteDrafts: drafts,
           flushInlineMinutes: () => drafts.flushAll(), retryInlineMinuteLinks: async () => {}, subscribeInlineMinuteCommits: (listener) => drafts.subscribeCommits((_value, result) => listener(result)),
           subscribeInlineMinuteLinkWarnings: () => () => {} };
         if (resolved === source('services/spreadsheet')) return sheet;
         if (resolved === source('sync/accounts')) return { getAccounts: async () => [] };
-        if (resolved === source('sync/engine')) return { loadAccountPlans: async () => [], linkActualsToAccounts: async () => {}, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {} };
+        if (resolved === source('sync/engine')) return { loadCachedAccountPlans: options.readCached ?? (async () => []),
+          loadAccountPlansResult: options.readAccount ?? (async () => ({ plans: [], failures: [], fromCache: false })),
+          linkActualsToAccounts: async () => {}, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {} };
         if (!name.startsWith('.')) throw Error(`Unexpected Today test import ${name}`);
         return load(`${resolved}.ts`);
       } }), { filename });
@@ -103,7 +106,7 @@ function screen(t) {
     return { ...value, entry, affectedDates: [value.dateKey] }; }, 60000);
   const Today = load(source('screens/TodayScreen.tsx')).TodayScreen;
   const props = { activeDate: day, calendars: [], preferences: { selectedCalendarIds: [], syncActuals: false }, dataVersion: 0,
-    focusRequest: null, onFocusConsumed() {}, onDataChanged() {}, onDateChange() {}, onOpenSettings() {} };
+    focusRequest: null, onFocusConsumed() {}, onDataChanged() {}, onDateChange() {}, onOpenSettings() {}, ...options.props };
   function render() { hook = 0; dirty = false; tree = Today(props); while (effects.length) effects.shift()(); }
   async function settle() { for (let round = 0; round < 80; round++) { await Promise.resolve(); if (dirty) render(); } }
   function find(node, type) { if (!node || typeof node !== 'object') return null; if (node.type === type) return node;
@@ -150,10 +153,95 @@ function screen(t) {
       handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
     },
     menu: () => find(tree, 'CellActionMenu')?.props, menuPosition, menuAncestors, measureViewport,
+    text: (minute, date = day) => find(cell(minute, date), 'Text')?.props.children,
+    async refresh() { const pending = find(tree, 'FlatList').props.refreshControl.props.onRefresh(); await settle(); return pending; },
+    async navigate(date) { props.activeDate = date; dirty = true; await settle(); },
     input: (minute = 600) => find(cell(minute), 'TextInput')?.props,
     get dismisses() { return dismisses; }, set failure(value) { failure = value; },
     set writeGate(value) { writeGate = value; }, advance(ms) { now += ms; }, cell, get tree() { return tree; } };
 }
+
+function plan(id, minute, account = false) {
+  return { id, calendarId: account ? 'account-calendar' : 'native', title: id,
+    startDate: new Date(2026, 9, 25, Math.floor(minute / 60), minute % 60),
+    endDate: new Date(2026, 9, 25, Math.floor(minute / 60), minute % 60 + 1),
+    ...(account ? { accountEvent: { accountId: 'account', event: {} } } : {}) };
+}
+
+test('saved notes and cached plans paint while both live providers remain pending', async (t) => {
+  const never = new Promise(() => {}); let nativeReads = 0; let accountReads = 0;
+  const r = screen(t, { readNative: () => { nativeReads++; return never; },
+    readAccount: () => { accountReads++; return never; }, readCached: async () => [plan('Cached event', 601, true)] });
+  r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Saved offline note', categoryId: 'work', blockId: 'note' });
+  await r.start();
+  assert.ok(nativeReads && accountReads, 'the live reads really started and remain unresolved');
+  assert.equal(r.text(600), 'Saved offline note'); assert.equal(r.text(601), 'Cached event');
+  await r.refresh(); assert.equal(r.text(600), 'Saved offline note', 'foreground refresh also finishes without those providers');
+});
+
+test('notes do not wait for local formatting/group reads or another displayed date', async (t) => {
+  const never = new Promise(() => {}); const day = '2026-10-25';
+  const r = screen(t, { props: { dayCount: 3 }, readFormats: () => never, readGroups: () => never,
+    readEntries: (date) => date === '2026-10-26' ? never : Promise.resolve([{ dateKey: date, minuteIndex: 600,
+      text: date === day ? 'First day saved' : 'Third day saved', categoryId: 'work', blockId: 'note' }]) });
+  await r.start();
+  assert.equal(r.text(600), 'First day saved'); assert.equal(r.text(600, '2026-10-27'), 'Third day saved');
+});
+
+test('native plans display before slow color reconciliation without hiding saved text', async (t) => {
+  const never = new Promise(() => {}); let colorReads = 0;
+  const r = screen(t, { readNative: async () => ({ plans: [plan('Native event', 601)], failures: [] }),
+    reconcileColors: () => { colorReads++; return never; } });
+  r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Local text', categoryId: 'work', blockId: 'note' });
+  await r.start(); assert.ok(colorReads); assert.equal(r.text(600), 'Local text'); assert.equal(r.text(601), 'Native event');
+});
+
+test('offline refresh retains known calendar plans and current local notes', async (t) => {
+  let offline = false; const cached = plan('Account cached', 602, true);
+  const r = screen(t, { props: { preferences: { selectedCalendarIds: ['native'], syncActuals: false } },
+    readCached: async () => [cached],
+    readNative: async () => offline ? { plans: [], failures: [{ calendarId: 'native', code: 'offline' }] }
+      : { plans: [plan('Native cached', 601)], failures: [] },
+    readAccount: async () => ({ plans: [cached], failures: offline ? [{ accountId: 'account', code: 'timeout' }] : [], fromCache: offline }) });
+  r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Local text', categoryId: 'work', blockId: 'note' });
+  await r.start(); offline = true; await r.refresh(); await r.settle();
+  assert.equal(r.text(600), 'Local text'); assert.equal(r.text(601), 'Native cached'); assert.equal(r.text(602), 'Account cached');
+});
+
+test('late provider and color reloads cannot replace a newer inline edit', async (t) => {
+  let resolve; const native = new Promise((done) => { resolve = done; });
+  const r = screen(t, { readNative: () => native, reconcileColors: async () => ['2026-10-25'] });
+  r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Original', categoryId: 'work', blockId: 'note' });
+  await r.start(); await r.tap(600); await r.tap(600); r.input().onChangeText('Latest offline edit'); await r.settle();
+  resolve({ plans: [plan('Old remote title', 600)], failures: [] }); await r.settle();
+  assert.equal(r.input().value, 'Latest offline edit'); r.input().onSubmitEditing(); await r.settle();
+  assert.equal(r.text(600), 'Latest offline edit');
+});
+
+test('revoked native access removes cached plans while keeping saved local notes', async (t) => {
+  for (const throws of [false, true]) {
+    let revoked = false;
+    const r = screen(t, { props: { preferences: { selectedCalendarIds: ['native'], syncActuals: false } },
+      readNative: async () => {
+        if (!revoked) return { plans: [plan('Private native plan', 601)], failures: [] };
+        if (throws) throw { code: 'ERR_CALENDAR_PERMISSION_DENIED' };
+        return { plans: [], failures: [{ calendarId: 'native', code: 'ERR_MISSING_CALENDAR_PERMISSION' }] };
+      } });
+    r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Local note kept', categoryId: 'work', blockId: 'note' });
+    await r.start(); assert.equal(r.text(601), 'Private native plan'); revoked = true;
+    await r.refresh(); await r.settle();
+    assert.notEqual(r.text(601), 'Private native plan'); assert.equal(r.text(600), 'Local note kept');
+  }
+});
+
+test('a delayed previous date provider cannot paint into the newly selected date', async (t) => {
+  let resolve; let oldColors = 0; const old = new Promise((done) => { resolve = done; });
+  const r = screen(t, { readNative: (_ids, day) => day === '2026-10-25' ? old : Promise.resolve({ plans: [], failures: [] }),
+    reconcileColors: async (day) => { if (day === '2026-10-25') oldColors++; return []; } });
+  r.rows.set('2026-10-26:600', { dateKey: '2026-10-26', minuteIndex: 600, text: 'New day note', categoryId: 'work', blockId: 'note' });
+  await r.start(); await r.navigate('2026-10-26'); resolve({ plans: [plan('Previous day event', 600)], failures: [] }); await r.settle();
+  assert.equal(r.text(600, '2026-10-26'), 'New day note'); assert.equal(oldColors, 0);
+});
 
 test('a held recorded cell dispatches whole-cell Copy, then a held destination dispatches Paste', async (t) => {
   const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Read Context answer', categoryId: 'work', blockId: 'note' });

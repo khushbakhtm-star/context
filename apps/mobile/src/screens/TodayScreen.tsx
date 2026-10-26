@@ -33,7 +33,7 @@ import { activityGroupDragGrip, activityGroupDropTarget, activityGroupDragScroll
 import { calendarGridLayout, calendarZoomOffsets, normalizeCalendarZoom, revealCalendarDay,
   type CalendarZoomAnchor } from '../utils/calendar-layout';
 import { getAccounts } from '../sync/accounts';
-import { linkActualsToAccounts, loadAccountPlans, synchronizeAccounts } from '../sync/engine';
+import { linkActualsToAccounts, loadCachedAccountPlans, loadAccountPlansResult, synchronizeAccounts } from '../sync/engine';
 import type { CalendarPreferences, DeviceCalendar, MinuteEntry, PlannedEvent } from '../types';
 import {
   calendarEntriesAreCurrent, calendarLoadIsCurrent, calendarSelectionIsCurrent, indexCalendarDay,
@@ -48,8 +48,16 @@ const MINUTE_ITEMS = Array.from({ length: MINUTES_PER_DAY }, (_, index) => index
 
 type FocusRequest = { dateKey: string; minuteIndex: number; token: number; openEditor?: boolean } | null;
 type DayData = { entries: MinuteEntry[]; plans: PlannedEvent[]; calendarReadError: boolean;
+  nativeReadError?: boolean; accountReadError?: boolean; colorReadError?: boolean;
   formats?: Map<number, CellFormat>; formatReadError?: boolean; groups?: ActivityGroup[]; groupReadError?: boolean };
 type CellCommandSelection = { selection: CalendarMinuteSelection; range: MinuteCellRange; generation: number };
+function calendarAccessDenied(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { code?: unknown; status?: unknown };
+  return value.status === 401 || value.status === 403 ||
+    typeof value.code === 'string' && /permission|denied|unauthori[sz]ed/i.test(value.code);
+}
+
 type Props = {
   activeDate: string;
   onDateChange: (value: string) => void;
@@ -780,50 +788,101 @@ export function TodayScreen({
     const requestedRange = rangeKey;
     const requestedDays = [...days];
     const epochs = new Map(requestedDays.map((day) => [day, localEpochsRef.current.get(day) ?? 0]));
-    const requestedFormatVersion = spreadsheetEditor.snapshot().formatVersion;
     const token = ++loadTokenRef.current;
     const request = { rangeKey: requestedRange, token, entryEpochs: epochs };
     const currentLoadState = () => ({ mounted: mountedRef.current, rangeKey: rangeRef.current,
       token: loadTokenRef.current });
-    const results = await Promise.allSettled(requestedDays.map(async (day) => {
-      const [planResults, formats] = await Promise.all([
-        Promise.allSettled([loadPlannedEventsResult(preferences.selectedCalendarIds, day, calendars), loadAccountPlans(day)]),
-        getDayCellFormats(day).catch(() => null),
-      ]);
-      const native = planResults[0];
-      let colorReadError = false;
-      if (calendarLoadIsCurrent(request, currentLoadState()) && native?.status === 'fulfilled' &&
-          !Array.isArray(native.value) && native.value.failures.length === 0) {
-        try { await reconcileLinkedNativeColors(day, native.value.plans, calendars); }
-        catch { colorReadError = true; }
-      }
-      const [entries, groups] = await Promise.all([getDayEntries(day), getDayActivityGroups(day).catch(() => null)]);
-      return { day, entries, plans: planResults.flatMap((result) => result.status === 'fulfilled'
-        ? Array.isArray(result.value) ? result.value : result.value.plans : []),
-        calendarReadError: colorReadError || planResults.some((result) => result.status === 'rejected' ||
-          (!Array.isArray(result.value) && result.value.failures.length > 0)), formats, groups };
-    }));
-    if (!calendarLoadIsCurrent(request, currentLoadState())) return false;
+    const isCurrent = () => calendarLoadIsCurrent(request, currentLoadState());
+    const selectedNativeIds = new Set(preferences.selectedCalendarIds);
+    const ledgerErrors = new Set<string>();
+    const patchDay = (day: string, change: (data: DayData) => DayData) => {
+      if (!isCurrent()) return;
+      setDayData((previous) => {
+        if (!isCurrent()) return previous;
+        const changed = change(previous[day] ?? { entries: [], plans: [], calendarReadError: false });
+        return { ...previous, [day]: { ...changed,
+          calendarReadError: Boolean(changed.nativeReadError || changed.accountReadError || changed.colorReadError) } };
+      });
+    };
     setDayData((previous) => {
-      if (!calendarLoadIsCurrent(request, currentLoadState())) return previous;
-      const next: Record<string, DayData> = {};
-      for (const day of requestedDays) if (previous[day]) next[day] = previous[day]!;
-      for (const result of results) {
-        if (result.status !== 'fulfilled') continue;
-        const value = result.value;
-        const entriesStillCurrent = calendarEntriesAreCurrent(value.day, request, localEpochsRef.current);
-        next[value.day] = { entries: entriesStillCurrent ? value.entries : previous[value.day]?.entries ?? [],
-          plans: value.plans, calendarReadError: value.calendarReadError,
-          formats: value.formats && requestedFormatVersion === spreadsheetEditor.snapshot().formatVersion
-            ? value.formats : previous[value.day]?.formats,
-          formatReadError: value.formats == null,
-          groups: value.groups && entriesStillCurrent && requestedFormatVersion === spreadsheetEditor.snapshot().formatVersion
-            ? value.groups : previous[value.day]?.groups,
-          groupReadError: value.groups == null };
-      }
-      return next;
+      if (!isCurrent()) return previous;
+      return Object.fromEntries(requestedDays.filter((day) => previous[day]).map((day) => [day, {
+        ...previous[day]!, plans: previous[day]!.plans.filter((plan) => plan.accountEvent || selectedNativeIds.has(plan.calendarId)),
+      }]));
     });
-    setLoadError(results.some((result) => result.status === 'rejected'));
+    const showPlans = (day: string, source: 'native' | 'account', plans: PlannedEvent[], failed: boolean,
+      failedNativeIds = new Set<string>()) => patchDay(day, (data) => {
+      const other = data.plans.filter((plan) => source === 'native' ? Boolean(plan.accountEvent) : !plan.accountEvent);
+      const retained = source === 'native' ? data.plans.filter((plan) => !plan.accountEvent &&
+        selectedNativeIds.has(plan.calendarId) && failedNativeIds.has(plan.calendarId)) : [];
+      return { ...data, plans: [...other, ...plans, ...retained],
+        ...(source === 'native' ? { nativeReadError: failed } : { accountReadError: failed }) };
+    });
+    const readLocal = async (day: string) => {
+      const epoch = localEpochsRef.current.get(day) ?? 0;
+      const localRequest = { ...request, entryEpochs: new Map([[day, epoch]]) };
+      const formatVersion = spreadsheetEditor.snapshot().formatVersion;
+      // Publish the SQLite notes as soon as they arrive. Neither another day's
+      // load, metadata, a provider request nor color reconciliation can hold them.
+      const entries = getDayEntries(day).then((values) => {
+        if (!isCurrent() || !calendarEntriesAreCurrent(day, localRequest, localEpochsRef.current)) return;
+        ledgerErrors.delete(day);
+        patchDay(day, (data) => calendarEntriesAreCurrent(day, localRequest, localEpochsRef.current)
+          ? { ...data, entries: values } : data);
+      }).catch(() => {
+        if (isCurrent() && calendarEntriesAreCurrent(day, localRequest, localEpochsRef.current)) ledgerErrors.add(day);
+      });
+      const metadata = Promise.allSettled([getDayCellFormats(day), getDayActivityGroups(day)]).then(([formats, groups]) => {
+        patchDay(day, (data) => {
+          if (formatVersion !== spreadsheetEditor.snapshot().formatVersion ||
+              !calendarEntriesAreCurrent(day, localRequest, localEpochsRef.current)) return data;
+          return { ...data, formats: formats.status === 'fulfilled' ? formats.value : data.formats,
+            formatReadError: formats.status === 'rejected', groups: groups.status === 'fulfilled' ? groups.value : data.groups,
+            groupReadError: groups.status === 'rejected' };
+        });
+      });
+      await Promise.allSettled([entries, metadata]);
+    };
+    const localReads = requestedDays.map((day) => {
+      const local = readLocal(day);
+      // The account cache is a local read; live provider work starts afterwards,
+      // but does not form part of the foreground load/refresh acknowledgement.
+      void (async () => {
+        try { showPlans(day, 'account', await loadCachedAccountPlans(day), false); }
+        catch { patchDay(day, (data) => ({ ...data, accountReadError: true })); }
+        await local;
+        if (!isCurrent()) return;
+        try {
+          const result = await loadAccountPlansResult(day);
+          showPlans(day, 'account', result.plans, result.failures.length > 0);
+        } catch { patchDay(day, (data) => ({ ...data, accountReadError: true })); }
+      })();
+      void (async () => {
+        await local;
+        if (!isCurrent()) return;
+        try {
+          const result = await loadPlannedEventsResult(preferences.selectedCalendarIds, day, calendars);
+          if (!isCurrent()) return;
+          showPlans(day, 'native', result.plans, result.failures.length > 0,
+            new Set(result.failures.filter((failure) => !calendarAccessDenied(failure)).map((failure) => failure.calendarId)));
+          if (result.failures.length) return;
+          try {
+            const changed = await reconcileLinkedNativeColors(day, result.plans, calendars);
+            if (!isCurrent()) return;
+            patchDay(day, (data) => ({ ...data, colorReadError: false }));
+            if (changed.length) {
+              markLocalChange(changed);
+              await Promise.allSettled(changed.filter((value) => requestedDays.includes(value)).map(readLocal));
+              if (isCurrent()) setLoadError(ledgerErrors.size > 0);
+            }
+          } catch { patchDay(day, (data) => ({ ...data, colorReadError: true })); }
+        } catch (error) { showPlans(day, 'native', [], true, calendarAccessDenied(error) ? new Set() : selectedNativeIds); }
+      })();
+      return local;
+    });
+    await Promise.allSettled(localReads);
+    if (!isCurrent()) return false;
+    setLoadError(ledgerErrors.size > 0);
     return true;
   }, [rangeKey, days, calendars, preferences.selectedCalendarIds, spreadsheetState.formatVersion]);
 
@@ -1278,6 +1337,7 @@ export function TodayScreen({
       setDayData((previous) => {
         if (!visibleDaysRef.current.includes(value) || (localEpochsRef.current.get(value) ?? 0) !== epoch) return previous;
         return { ...previous, [value]: {
+          ...previous[value],
           entries, plans: previous[value]?.plans ?? [], calendarReadError: previous[value]?.calendarReadError ?? false,
           formats: previous[value]?.formats, formatReadError: previous[value]?.formatReadError,
           groups: groups && formatVersion === spreadsheetEditor.snapshot().formatVersion ? groups : previous[value]?.groups,

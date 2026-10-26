@@ -1,0 +1,1 @@
+Load saved ledger rows independently of optional calendar and account requests, keeping local notes available while a source is slow or offline. Preserve existing permissions, formatting, groups and clipboard behavior.

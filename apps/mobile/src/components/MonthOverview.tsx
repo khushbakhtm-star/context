@@ -4,9 +4,9 @@ import { AppState, FlatList, Pressable, StyleSheet, Text, View } from 'react-nat
 import { useAppTheme } from '../appearance';
 import { getDaySegments } from '../data/database';
 import { loadPlannedEventsResult } from '../services/calendar';
-import { loadAccountPlans } from '../sync/engine';
+import { loadAccountPlansResult, loadCachedAccountPlans } from '../sync/engine';
 import type { AppColors } from '../theme';
-import type { CalendarPreferences, DeviceCalendar } from '../types';
+import type { ActivitySegment, CalendarPreferences, DeviceCalendar, PlannedEvent } from '../types';
 import { isDateKey, monthDateCells, normalizeSelectedDates } from '../utils/date-selection';
 import { monthAgendaItems, type MonthAgendaItem } from '../utils/month-agenda';
 import { addDays, dateKey, formatDayHeading, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
@@ -24,7 +24,17 @@ type Props = {
   onOpenMinute: (day: string, minute: number) => void;
   onVisibleMonthChange?: (month: string) => void;
 };
-type DayState = { items: MonthAgendaItem[]; failed: boolean };
+type DaySources = { sourceKey: string; segments: ActivitySegment[]; devicePlans: PlannedEvent[]; accountPlans: PlannedEvent[];
+  localReady: boolean; deviceReady: boolean; accountReady: boolean; accountFresh: boolean;
+  localFailed: boolean; deviceFailed: boolean; accountFailed: boolean };
+type DayState = DaySources & { items: MonthAgendaItem[]; failed: boolean };
+
+function accessDenied(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { code?: unknown; status?: unknown };
+  return value.status === 401 || value.status === 403 ||
+    typeof value.code === 'string' && /permission|denied|unauthori[sz]ed/i.test(value.code);
+}
 
 export function MonthOverview({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, clockFormat, onOpenMinute,
   onVisibleMonthChange }: Props) {
@@ -76,48 +86,80 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
 
   useEffect(() => {
     let cancelled = false;
-    let running = 0;
-    const queue: string[] = [];
+    const pools = Array.from({ length: 4 }, () => ({ running: 0, queue: [] as (() => Promise<void>)[] }));
     const queued = new Set<string>();
-    setData({});
-    async function readDay(day: string) {
-      const results = await Promise.allSettled([
-        getDaySegments(day), loadPlannedEventsResult(preferences.selectedCalendarIds, day, calendars), loadAccountPlans(day),
-      ]);
-      const [actualResult, deviceResult, accountResult] = results;
-      const segments = actualResult.status === 'fulfilled' ? actualResult.value : [];
-      const plans = [
-        ...(deviceResult.status === 'fulfilled' ? deviceResult.value.plans : []),
-        ...(accountResult.status === 'fulfilled' ? accountResult.value : []),
-      ];
-      const failed = results.some((result) => result.status === 'rejected') ||
-        (deviceResult.status === 'fulfilled' && deviceResult.value.failures.length > 0);
-      if (!cancelled) setData((current) => cancelled ? current : {
-        ...current, [day]: { items: monthAgendaItems(day, segments, plans), failed },
+    const sourceKey = `${calendarKey}|${preferenceKey}`;
+    const compose = (day: string, value: DaySources): DayState => ({ ...value,
+      items: monthAgendaItems(day, value.segments, [...value.devicePlans, ...value.accountPlans]),
+      failed: value.localFailed || value.deviceFailed || value.accountFailed });
+    const initial = (previous?: DayState): DaySources => ({ sourceKey, segments: previous?.segments ?? [],
+      devicePlans: previous?.sourceKey === sourceKey ? previous.devicePlans : [],
+      accountPlans: previous?.sourceKey === sourceKey ? previous.accountPlans : [],
+      localReady: false, deviceReady: false, accountReady: false, accountFresh: false,
+      localFailed: previous?.localFailed ?? false,
+      deviceFailed: previous?.sourceKey === sourceKey && previous.deviceFailed || false,
+      accountFailed: previous?.sourceKey === sourceKey && previous.accountFailed || false });
+    setData((current) => cancelled ? current : Object.fromEntries(days.map((day) => [day, compose(day, initial(current[day]))])));
+    function update(day: string, patch: Partial<DaySources> | ((previous: DayState) => Partial<DaySources>)) {
+      if (cancelled) return;
+      setData((current) => {
+        if (cancelled) return current;
+        const previous = current[day] ?? compose(day, initial());
+        return { ...current, [day]: compose(day, { ...previous, ...(typeof patch === 'function' ? patch(previous) : patch) }) };
       });
     }
-    function pump() {
-      while (!cancelled && running < 2 && queue.length) {
-        const day = queue.shift()!;
-        running += 1;
-        void readDay(day).catch(() => {
-          if (!cancelled) setData((current) => ({ ...current, [day]: { items: [], failed: true } }));
-        }).finally(() => { running -= 1; pump(); });
+    function pump(index: number) {
+      const pool = pools[index]!;
+      while (!cancelled && pool.running < 2 && pool.queue.length) {
+        const read = pool.queue.shift()!;
+        pool.running += 1;
+        void read().catch(() => {}).finally(() => { pool.running -= 1; pump(index); });
       }
+    }
+    function enqueueDay(day: string) {
+      // Independent bounded readers: neither a phone provider nor an account
+      // request can hold the local-ledger or local-cache queue behind it.
+      pools[0]!.queue.push(async () => {
+        try { update(day, { segments: await getDaySegments(day), localReady: true, localFailed: false }); }
+        catch { update(day, { localReady: true, localFailed: true }); }
+      });
+      pools[1]!.queue.push(async () => {
+        try {
+          const plans = await loadCachedAccountPlans(day);
+          update(day, (previous) => previous.accountFresh ? {} : { accountPlans: plans });
+        } catch { /* A cache error must not erase local notes or a fresh provider result. */ }
+      });
+      pools[2]!.queue.push(async () => {
+        try {
+          const result = await loadPlannedEventsResult(preferences.selectedCalendarIds, day, calendars);
+          const unavailable = new Set(result.failures.filter((failure) => !accessDenied(failure)).map((failure) => failure.calendarId));
+          update(day, (previous) => ({ deviceReady: true, deviceFailed: result.failures.length > 0,
+            devicePlans: [...result.plans, ...previous.devicePlans.filter((plan) => unavailable.has(plan.calendarId))] }));
+        } catch (error) { update(day, (previous) => ({ deviceReady: true, deviceFailed: true,
+          devicePlans: accessDenied(error) ? [] : previous.devicePlans })); }
+      });
+      pools[3]!.queue.push(async () => {
+        try {
+          const result = await loadAccountPlansResult(day);
+          update(day, { accountPlans: result.plans, accountReady: true, accountFresh: true, accountFailed: result.failures.length > 0 });
+        } catch (error) { update(day, (previous) => ({ accountReady: true, accountFailed: true,
+          accountFresh: accessDenied(error) || previous.accountFresh,
+          accountPlans: accessDenied(error) ? [] : previous.accountPlans })); }
+      });
     }
     const enqueueMonths = (requested: string[]) => {
       if (cancelled) return;
       const requestedSet = new Set(requested);
       for (const day of days) {
         if (!requestedSet.has(day.slice(0, 7)) || queued.has(day)) continue;
-        queued.add(day); queue.push(day);
+        queued.add(day); enqueueDay(day);
       }
-      pump();
+      pools.forEach((_pool, index) => pump(index));
     };
     requestMonths.current = enqueueMonths;
     const visible = visibleMonths.current.filter((month) => months.includes(month));
     enqueueMonths(visible.length ? visible : months.slice(0, 1));
-    return () => { cancelled = true; queue.length = 0; };
+    return () => { cancelled = true; pools.forEach((pool) => { pool.queue.length = 0; }); };
   }, [daysKey, calendarKey, preferenceKey, dataVersion, retry]);
 
   const weekdays = useMemo(() => Array.from({ length: 7 }, (_, index) =>
@@ -181,7 +223,8 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
                   onPress={() => openDay(cell.dateKey)} style={styles.more}>
                   <Text style={styles.moreText}>+{items.length - 3}</Text>
                 </Pressable> : null}
-                {active && !state ? <Text accessibilityLabel={`Loading ${heading}`} style={styles.pending}>…</Text> : null}
+                {active && !items.length && (!state || !state.localReady || !state.deviceReady || !state.accountReady)
+                  ? <Text accessibilityLabel={`Loading ${heading}`} style={styles.pending}>…</Text> : null}
                 {state?.failed ? <Text accessibilityLabel={`Some events unavailable on ${heading}`} style={styles.failed}>!</Text> : null}
                 <Pressable accessibilityRole="button" accessibilityLabel={`Open minutes for ${heading}`} disabled={!isDateKey(cell.dateKey)}
                   onPress={() => openDay(cell.dateKey)} style={styles.daySpace} />

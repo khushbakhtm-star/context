@@ -10,7 +10,7 @@ const ts = require('typescript');
 function screenHarness(t, kind, options = {}) {
   const sourceRoot = path.join(__dirname, '../src');
   const slots = [], effects = [], timers = new Map(), modules = new Map();
-  const calls = [], reads = [], opened = [], pendingReads = new Map();
+  const calls = [], reads = [], nativeReads = [], cachedReads = [], accountReads = [], opened = [], pendingReads = new Map();
   let hook = 0, dirty = false, tree, timerId = 0, now = 0;
   let dimensions = { width: 390, height: 844, fontScale: 1 };
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
@@ -47,6 +47,7 @@ function screenHarness(t, kind, options = {}) {
   const resolvedSource = (relative) => path.join(sourceRoot, relative);
   function readSegments(day) {
     reads.push(day);
+    if (options.segments) return Promise.resolve(options.segments(day));
     if (!options.gatedReads) return Promise.resolve([]);
     return new Promise((resolve) => pendingReads.set(day, resolve));
   }
@@ -68,10 +69,14 @@ function screenHarness(t, kind, options = {}) {
         if (resolved === resolvedSource('appearance')) return { useAppTheme: () => ({ colors: {} }) };
         if (resolved === resolvedSource('components/InfoButton')) return { InfoButton: 'InfoButton' };
         if (resolved === resolvedSource('data/database')) return { getDaySegments: readSegments };
-        if (resolved === resolvedSource('services/calendar')) return { loadPlannedEventsResult: async (_ids, day) => ({
-          plans: options.plans?.(day) ?? [], failures: [],
-        }) };
-        if (resolved === resolvedSource('sync/engine')) return { loadAccountPlans: async () => [] };
+        if (resolved === resolvedSource('services/calendar')) return { loadPlannedEventsResult: async (ids, day) => {
+          nativeReads.push(day); return options.device?.(day, ids) ?? { plans: options.plans?.(day) ?? [], failures: [] };
+        } };
+        if (resolved === resolvedSource('sync/engine')) return {
+          loadCachedAccountPlans: async (day) => { cachedReads.push(day); return options.cached?.(day) ?? []; },
+          loadAccountPlansResult: async (day) => { accountReads.push(day);
+            return options.accounts?.(day) ?? { plans: [], failures: [], fromCache: false }; },
+        };
         if (!name.startsWith('.')) throw Error(`Unexpected overview test import: ${name}`);
         return load(fs.existsSync(`${resolved}.ts`) ? `${resolved}.ts` : `${resolved}.tsx`);
       },
@@ -98,7 +103,7 @@ function screenHarness(t, kind, options = {}) {
     for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.callback(); } }
   t.after(() => { for (const slot of slots) slot?.cleanup?.(); timers.clear(); });
   render();
-  return { props, calls, reads, opened, pendingReads, render, settle, advance, nodes, find,
+  return { props, calls, reads, nativeReads, cachedReads, accountReads, opened, pendingReads, render, settle, advance, nodes, find,
     list: () => find('FlatList'), get tree() { return tree; },
     setDimensions(value) { dimensions = { ...dimensions, ...value }; dirty = true; render(); },
     setProps(value) { Object.assign(props, value); render(); },
@@ -218,4 +223,133 @@ test('Schedule Now targets day 25, retries an unmeasured row, and retains top an
   assert.equal(r.list().props.maintainVisibleContentPosition.minIndexForVisible, 0,
     'native list is asked to preserve the visible top row while event heights change');
   assert.ok(r.reads.length <= 12, 'fixtures do not fetch every date in the month');
+});
+
+const deferred = () => { let resolve; let reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject }; };
+function segment(day, title, minute = 600) {
+  const entry = { id: `entry:${day}:${minute}`, dateKey: day, minuteIndex: minute, text: title,
+    categoryId: 'family', blockId: `block:${day}:${minute}`, source: 'manual', createdAt: '', updatedAt: '' };
+  return { dateKey: day, startMinute: minute, endMinute: minute, categoryId: 'family', entries: [entry],
+    blockId: entry.blockId, segmentKey: `segment:${day}:${minute}` };
+}
+function plan(day, title, minute = 540, calendarId = 'device') {
+  const startDate = new Date(`${day}T00:00:00`); startDate.setMinutes(minute);
+  return { id: title, calendarId, title, color: '#123456', allDay: false,
+    startDate, endDate: new Date(startDate.getTime() + 60_000) };
+}
+function dayTree(r, kind, day) { return r.list().props.renderItem({ item: kind === 'month' ? day.slice(0, 7) : day }); }
+function hasText(r, node, text) { return r.nodes(node).some((value) => value.type === 'Text' && value.props.children === text); }
+
+test('Month and Schedule paint all requested local notes while both provider queues remain blocked', async (t) => {
+  const days = Array.from({ length: 8 }, (_, index) => `2026-10-${String(index + 1).padStart(2, '0')}`);
+  for (const kind of ['month', 'schedule']) {
+    const native = deferred(), account = deferred();
+    const r = screenHarness(t, kind, { props: { activeDate: days[0], selectedDates: days, focusRequest: null },
+      segments: (day) => [segment(day, `Local ${day}`)],
+      device: () => native.promise, accounts: () => account.promise });
+    r.list().props.onViewableItemsChanged({ viewableItems: [{ item: kind === 'month' ? '2026-10' : days.at(-1) }] });
+    await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, days.at(-1)), `Local ${days.at(-1)}`), kind);
+    assert.ok(r.reads.includes(days.at(-1)), 'pending providers cannot occupy the local-reader queue');
+    assert.equal(r.nativeReads.length, 2, 'native provider concurrency remains bounded independently');
+    assert.equal(r.accountReads.length, 2, 'remote account concurrency remains bounded independently');
+    assert.ok(r.cachedReads.includes(days.at(-1)), 'local account-cache reads do not queue behind remote requests');
+  }
+});
+
+test('an independent successful native result appears before a delayed account read and preserves actual minutes', async (t) => {
+  const day = '2026-10-25';
+  for (const kind of ['month', 'schedule']) {
+    const account = deferred();
+    const r = screenHarness(t, kind, { props: { selectedDates: [day], focusRequest: null },
+      segments: () => [segment(day, 'Recorded now')],
+      device: () => ({ plans: [plan(day, 'Phone calendar')], failures: [] }), accounts: () => account.promise });
+    await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Recorded now'), kind);
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Phone calendar'), kind);
+    account.reject(new Error('Offline')); await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Recorded now'));
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Phone calendar'));
+    assert.ok(hasText(r, r.tree, 'Some events could not load'));
+  }
+});
+
+test('same-screen refresh retains known plans while showing new local notes, then honors authoritative empty results', async (t) => {
+  const day = '2026-10-25';
+  for (const kind of ['month', 'schedule']) {
+    let phase = 0; const native = deferred(), account = deferred();
+    const devicePlan = plan(day, 'Known phone plan'); const accountPlan = plan(day, 'Known account plan', 550, 'account');
+    const r = screenHarness(t, kind, { props: { selectedDates: [day], focusRequest: null },
+      segments: () => [segment(day, phase ? 'Latest local note' : 'Old local note')],
+      cached: () => phase === 1 ? [accountPlan] : [],
+      device: () => phase === 1 ? native.promise : { plans: phase === 0 ? [devicePlan] : [], failures: [] },
+      accounts: () => phase === 1 ? account.promise : { plans: phase === 0 ? [accountPlan] : [], failures: [], fromCache: false } });
+    await r.settle();
+    phase = 1; r.setProps({ dataVersion: 1 }); await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Latest local note'));
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Known phone plan'));
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Known account plan'));
+    native.resolve({ plans: [], failures: [{ calendarId: 'device', code: 'ERR_CALENDAR_READ_FAILED' }] });
+    account.resolve({ plans: [accountPlan], failures: [{ accountId: 'account', code: 'timeout' }], fromCache: true });
+    await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Known phone plan'));
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Known account plan'));
+    phase = 2; r.setProps({ dataVersion: 2 }); await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Latest local note'));
+    assert.equal(hasText(r, dayTree(r, kind, day), 'Known phone plan'), false);
+    assert.equal(hasText(r, dayTree(r, kind, day), 'Known account plan'), false);
+  }
+});
+
+test('late old-view providers and ledger reads cannot overwrite a newer navigation or local edit refresh', async (t) => {
+  const first = '2026-10-25', second = '2026-11-01';
+  for (const kind of ['month', 'schedule']) {
+    const local = deferred(), native = deferred(), account = deferred(); let phase = 0;
+    const r = screenHarness(t, kind, { props: { activeDate: first, selectedDates: [first], focusRequest: null },
+      segments: (day) => phase === 0 ? local.promise : [segment(day, 'Latest saved note')],
+      device: (day) => phase === 0 ? native.promise : { plans: [plan(day, 'Current phone plan')], failures: [] },
+      accounts: () => phase === 0 ? account.promise : { plans: [], failures: [], fromCache: false } });
+    phase = 1; r.setProps({ activeDate: second, selectedDates: [second], dataVersion: 1 }); await r.settle();
+    local.resolve([segment(first, 'Stale local note')]); native.resolve({ plans: [plan(first, 'Stale phone plan')], failures: [] });
+    account.resolve({ plans: [plan(first, 'Stale account plan')], failures: [], fromCache: false }); await r.settle();
+    const tree = dayTree(r, kind, second);
+    assert.ok(hasText(r, tree, 'Latest saved note')); assert.ok(hasText(r, tree, 'Current phone plan'));
+    assert.equal(hasText(r, tree, 'Stale local note'), false); assert.equal(hasText(r, tree, 'Stale phone plan'), false);
+    assert.equal(hasText(r, tree, 'Stale account plan'), false);
+  }
+});
+
+test('a delayed initial account cache cannot replace the newer successful account result', async (t) => {
+  const day = '2026-10-25';
+  for (const kind of ['month', 'schedule']) {
+    const cached = deferred();
+    const r = screenHarness(t, kind, { props: { selectedDates: [day], focusRequest: null }, cached: () => cached.promise,
+      accounts: () => ({ plans: [plan(day, 'Fresh account event')], failures: [], fromCache: false }) });
+    await r.settle(); assert.ok(hasText(r, dayTree(r, kind, day), 'Fresh account event'));
+    cached.resolve([plan(day, 'Stale cached event')]); await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Fresh account event'));
+    assert.equal(hasText(r, dayTree(r, kind, day), 'Stale cached event'), false);
+  }
+});
+
+test('changed calendar selection and permission failures clear cached plans without hiding local notes', async (t) => {
+  const day = '2026-10-25';
+  for (const kind of ['month', 'schedule']) {
+    let phase = 0; const pending = deferred();
+    const r = screenHarness(t, kind, { props: { selectedDates: [day], focusRequest: null, preferences: { selectedCalendarIds: ['a'] } },
+      segments: () => [segment(day, 'Keep local note')],
+      device: () => phase === 0 ? { plans: [plan(day, 'Selected phone event', 540, 'a')], failures: [] }
+        : phase === 1 ? pending.promise : { plans: [], failures: [{ calendarId: 'a', code: 'ERR_MISSING_CALENDAR_PERMISSION' }] } });
+    await r.settle(); assert.ok(hasText(r, dayTree(r, kind, day), 'Selected phone event'));
+    phase = 1; r.setProps({ preferences: { selectedCalendarIds: ['b'] } }); await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Keep local note'));
+    assert.equal(hasText(r, dayTree(r, kind, day), 'Selected phone event'), false);
+    phase = 0; r.setProps({ preferences: { selectedCalendarIds: ['a'] } }); await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Selected phone event'));
+    phase = 2; r.setProps({ dataVersion: 1 }); await r.settle();
+    assert.ok(hasText(r, dayTree(r, kind, day), 'Keep local note'));
+    assert.equal(hasText(r, dayTree(r, kind, day), 'Selected phone event'), false);
+    assert.ok(hasText(r, r.tree, 'Some events could not load'));
+  }
 });

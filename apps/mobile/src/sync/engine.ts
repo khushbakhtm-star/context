@@ -17,6 +17,8 @@ import { matchActivityTranslation } from '../utils/activity-translation';
 import { calendarColor, sourceEventColor } from '../utils/calendar-cell-color';
 import { formatCalendarMinuteLog } from '../utils/calendar-minute-log';
 import { makeCalendarDescription, readCalendarDescription } from '../utils/calendar-description';
+import { ACCOUNT_PLAN_READ_LEASE_MS, accountPlanReadDeadline, accountPlanScope, accountPlanScopeIdentity,
+  decodeAccountPlanCache, encodeAccountPlanCache, type AccountPlanScope } from '../utils/account-plan-cache';
 import { clearLedgerKeyCache, decryptBatch, encryptBatch, hashValue, parseProjectedMinutes } from './codec';
 import { createCalendarAdapter } from './providers';
 import { createLedgerStorage } from './storage';
@@ -158,32 +160,119 @@ async function storageSync(account: ConnectedAccount, passphrase: string) {
   }
 }
 
-export async function loadAccountPlans(value: string): Promise<PlannedEvent[]> {
-  const plans: PlannedEvent[] = [];
-  const start = localDateAtMinute(value, 0).toISOString();
-  const end = localDateAtMinute(dateKey(addDays(value, 1)), 0).toISOString();
+export type AccountPlansResult = { plans: PlannedEvent[];
+  failures: { accountId: string; code: 'unavailable' | 'timeout' }[]; fromCache: boolean };
+type AccountPlanRead = { startedAt: number; job: Promise<PlannedEvent[] | null> };
+const accountPlanReads = new Map<string, AccountPlanRead>();
+const accountPlanCacheKey = (scope: AccountPlanScope) => `calendar.plan-cache.v1.${hashValue(accountPlanScopeIdentity(scope))}`;
+
+async function currentAccountPlanScopes(value: string): Promise<{ account: ConnectedAccount; scope: AccountPlanScope }[]> {
+  const scopes: { account: ConnectedAccount; scope: AccountPlanScope }[] = [];
   for (const account of await getAccounts()) {
-    if (!account.consent.calendarRead) continue;
-    const adapter = createCalendarAdapter(account);
+    if (!account.consent.calendarRead || (account.provider !== 'google' && account.provider !== 'microsoft')) continue;
     const preferences = await getAccountPreferences(account.id);
+    const scope = accountPlanScope(account, value, preferences.selectedCalendarIds);
+    if (scope) scopes.push({ account, scope });
+  }
+  return scopes;
+}
+
+async function accountPlanScopeIsCurrent(scope: AccountPlanScope): Promise<boolean> {
+  return (await currentAccountPlanScopes(scope.dateKey)).some((item) =>
+    accountPlanScopeIdentity(item.scope) === accountPlanScopeIdentity(scope));
+}
+
+async function readCachedAccountScope(scope: AccountPlanScope): Promise<PlannedEvent[] | null> {
+  const saved = await getSetting<unknown>(accountPlanCacheKey(scope), null);
+  if (!await accountPlanScopeIsCurrent(scope)) return null;
+  return decodeAccountPlanCache(saved, scope);
+}
+
+/** Strictly local, permission-scoped display cache; no adapter/token/provider calls. */
+export async function loadCachedAccountPlans(value: string): Promise<PlannedEvent[]> {
+  const cached = await Promise.all((await currentAccountPlanScopes(value)).map(async ({ scope }) =>
+    ({ scope, plans: await readCachedAccountScope(scope) })));
+  const current = new Set((await currentAccountPlanScopes(value)).map(({ scope }) => accountPlanScopeIdentity(scope)));
+  return cached.flatMap(({ scope, plans }) => current.has(accountPlanScopeIdentity(scope)) ? plans ?? [] : []);
+}
+
+function loadRemoteAccountScope(account: ConnectedAccount, scope: AccountPlanScope): Promise<PlannedEvent[] | null> {
+  const key = accountPlanScopeIdentity(scope);
+  const existing = accountPlanReads.get(key);
+  const age = existing ? Date.now() - existing.startedAt : 0;
+  if (existing && age >= 0 && age < ACCOUNT_PLAN_READ_LEASE_MS) return existing.job;
+  const record: AccountPlanRead = { startedAt: Date.now(), job: Promise.resolve(null) };
+  accountPlanReads.set(key, record);
+  const requireCurrentRead = () => {
+    if (accountPlanReads.get(key) !== record) throw new Error('ACCOUNT_PLAN_READ_SUPERSEDED');
+  };
+  const job = (async () => {
+    if (!await accountPlanScopeIsCurrent(scope)) return null;
+    requireCurrentRead();
+    const adapter = createCalendarAdapter(account);
     const calendars = await adapter.listCalendars();
-    for (const calendarId of preferences.selectedCalendarIds) {
+    requireCurrentRead();
+    const plans: PlannedEvent[] = [];
+    for (const calendarId of scope.calendarIds) {
+      if (!await accountPlanScopeIsCurrent(scope)) return null;
+      requireCurrentRead();
       const calendar = calendars.find((item) => item.id === calendarId);
       if (!calendar) continue;
-      for (const event of await adapter.listEvents(calendarId, start, end)) {
-        if (event.deleted) continue;
+      const events = await adapter.listEvents(calendarId, scope.start, scope.end);
+      requireCurrentRead();
+      for (const event of events) {
+        if (event.deleted || event.calendarId !== calendarId) continue;
         const category = categoryForEvent(account.id, event);
         plans.push({ id: `${account.id}:${event.id}`, calendarId, title: event.title,
           notes: event.description, color: sourceEventColor(calendarColor(event.displayColor) ??
             calendarColor(category?.providerOriginalColor) ?? calendarColor(category?.color), calendar.color),
-          sourceProvider: account.provider === 'google' ? 'google' : 'microsoft',
-          categoryId: category?.id ?? event.categoryId, startDate: new Date(event.start),
-          endDate: new Date(event.end), allDay: event.allDay,
+          sourceProvider: scope.provider, categoryId: category?.id ?? event.categoryId,
+          startDate: new Date(event.start), endDate: new Date(event.end), allDay: event.allDay,
           accountEvent: { accountId: account.id, event } });
       }
     }
-  }
-  return plans;
+    if (!await accountPlanScopeIsCurrent(scope)) return null;
+    requireCurrentRead();
+    // Cache only a complete successful selected-calendar scope. A failed refresh
+    // never overwrites its last good snapshot or creates ledger/outbox documents.
+    const snapshot = encodeAccountPlanCache(scope, plans);
+    if (snapshot) await setSetting(accountPlanCacheKey(scope), snapshot);
+    if (!await accountPlanScopeIsCurrent(scope)) return null;
+    requireCurrentRead();
+    return plans;
+  })();
+  record.job = job;
+  const finish = () => { if (accountPlanReads.get(key) === record) accountPlanReads.delete(key); };
+  void job.then(finish, finish);
+  return job;
+}
+
+/** Remote refresh has a caller deadline and reuses in-flight account/day/scope
+ * work even after a timeout. Failures return only that scope's last good cache. */
+export async function loadAccountPlansResult(value: string): Promise<AccountPlansResult> {
+  const results = await Promise.all((await currentAccountPlanScopes(value)).map(async ({ account, scope }) => {
+    try { return { scope, plans: await accountPlanReadDeadline(loadRemoteAccountScope(account, scope)),
+      failure: null, fromCache: false }; }
+    catch (error) {
+      return { scope, plans: await readCachedAccountScope(scope), fromCache: true,
+        failure: { accountId: account.id, code: error instanceof Error && error.message === 'ACCOUNT_PLAN_READ_TIMEOUT'
+          ? 'timeout' as const : 'unavailable' as const } };
+    }
+  }));
+  const current = new Set((await currentAccountPlanScopes(value)).map(({ scope }) => accountPlanScopeIdentity(scope)));
+  const active = results.filter(({ scope }) => current.has(accountPlanScopeIdentity(scope)));
+  return { plans: active.flatMap(({ plans }) => plans ?? []),
+    failures: active.flatMap(({ failure }) => failure ? [failure] : []),
+    fromCache: active.some((result) => result.fromCache && result.plans !== null) };
+}
+
+/** Compatibility for existing callers; source reads remain read-only. */
+export async function loadAccountPlans(value: string): Promise<PlannedEvent[]> {
+  const result = await loadAccountPlansResult(value);
+  // Strict callers such as Print must not silently treat an offline cache as a
+  // complete current source read. Screens explicitly consume the result API.
+  if (result.failures.length) throw new Error('Some account calendar plans could not load. Retry before continuing.');
+  return result.plans;
 }
 
 function categoryForEvent(accountId: string, event: RemoteCalendarEvent) {

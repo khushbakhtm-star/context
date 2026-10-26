@@ -5,9 +5,9 @@ import { useAppTheme } from '../appearance';
 import { InfoButton } from '../components/InfoButton';
 import { getDaySegments } from '../data/database';
 import { loadPlannedEventsResult } from '../services/calendar';
-import { loadAccountPlans } from '../sync/engine';
+import { loadAccountPlansResult, loadCachedAccountPlans } from '../sync/engine';
 import type { AppColors } from '../theme';
-import type { CalendarPreferences, DeviceCalendar } from '../types';
+import type { ActivitySegment, CalendarPreferences, DeviceCalendar, PlannedEvent } from '../types';
 import { calendarViewDates } from '../utils/calendar-view-mode';
 import { isDateKey } from '../utils/date-selection';
 import { scheduleAgendaItems, scheduleDescription, scheduleTimeRange, type ScheduleAgendaItem } from '../utils/schedule-agenda';
@@ -25,7 +25,17 @@ type Props = {
   onOpenMinute: (day: string, minute: number) => void;
   onVisibleMonthChange?: (month: string) => void;
 };
-type DayState = { items: ScheduleAgendaItem[]; failed: boolean };
+type DaySources = { sourceKey: string; segments: ActivitySegment[]; devicePlans: PlannedEvent[]; accountPlans: PlannedEvent[];
+  localReady: boolean; deviceReady: boolean; accountReady: boolean; accountFresh: boolean;
+  localFailed: boolean; deviceFailed: boolean; accountFailed: boolean };
+type DayState = DaySources & { items: ScheduleAgendaItem[]; failed: boolean };
+
+function accessDenied(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { code?: unknown; status?: unknown };
+  return value.status === 401 || value.status === 403 ||
+    typeof value.code === 'string' && /permission|denied|unauthori[sz]ed/i.test(value.code);
+}
 
 export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, clockFormat,
   onOpenMinute, onVisibleMonthChange }: Props) {
@@ -58,33 +68,65 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
 
   useEffect(() => {
     let cancelled = false;
-    let running = 0;
-    const queue: string[] = [];
+    const pools = Array.from({ length: 4 }, () => ({ running: 0, queue: [] as (() => Promise<void>)[] }));
     const queued = new Set<string>();
     const positions = new Map(days.map((day, index) => [day, index]));
-    setData({});
-    async function readDay(day: string) {
-      const results = await Promise.allSettled([
-        getDaySegments(day), loadPlannedEventsResult(preferences.selectedCalendarIds, day, calendars), loadAccountPlans(day),
-      ]);
-      const [actual, device, accounts] = results;
-      const segments = actual.status === 'fulfilled' ? actual.value : [];
-      const plans = [...(device.status === 'fulfilled' ? device.value.plans : []),
-        ...(accounts.status === 'fulfilled' ? accounts.value : [])];
-      const failed = results.some((result) => result.status === 'rejected') ||
-        (device.status === 'fulfilled' && device.value.failures.length > 0);
-      if (!cancelled) setData((current) => cancelled ? current : {
-        ...current, [day]: { items: scheduleAgendaItems(day, segments, plans), failed },
+    const sourceKey = `${calendarKey}|${preferenceKey}`;
+    const compose = (day: string, value: DaySources): DayState => ({ ...value,
+      items: scheduleAgendaItems(day, value.segments, [...value.devicePlans, ...value.accountPlans]),
+      failed: value.localFailed || value.deviceFailed || value.accountFailed });
+    const initial = (previous?: DayState): DaySources => ({ sourceKey, segments: previous?.segments ?? [],
+      devicePlans: previous?.sourceKey === sourceKey ? previous.devicePlans : [],
+      accountPlans: previous?.sourceKey === sourceKey ? previous.accountPlans : [],
+      localReady: false, deviceReady: false, accountReady: false, accountFresh: false,
+      localFailed: previous?.localFailed ?? false,
+      deviceFailed: previous?.sourceKey === sourceKey && previous.deviceFailed || false,
+      accountFailed: previous?.sourceKey === sourceKey && previous.accountFailed || false });
+    setData((current) => cancelled ? current : Object.fromEntries(days.map((day) => [day, compose(day, initial(current[day]))])));
+    function update(day: string, patch: Partial<DaySources> | ((previous: DayState) => Partial<DaySources>)) {
+      if (cancelled) return;
+      setData((current) => {
+        if (cancelled) return current;
+        const previous = current[day] ?? compose(day, initial());
+        return { ...current, [day]: compose(day, { ...previous, ...(typeof patch === 'function' ? patch(previous) : patch) }) };
       });
     }
-    function pump() {
-      while (!cancelled && running < 2 && queue.length) {
-        const day = queue.shift()!;
-        running += 1;
-        void readDay(day).catch(() => {
-          if (!cancelled) setData((current) => ({ ...current, [day]: { items: [], failed: true } }));
-        }).finally(() => { running -= 1; pump(); });
+    function pump(index: number) {
+      const pool = pools[index]!;
+      while (!cancelled && pool.running < 2 && pool.queue.length) {
+        const read = pool.queue.shift()!;
+        pool.running += 1;
+        void read().catch(() => {}).finally(() => { pool.running -= 1; pump(index); });
       }
+    }
+    function enqueueDay(day: string) {
+      pools[0]!.queue.push(async () => {
+        try { update(day, { segments: await getDaySegments(day), localReady: true, localFailed: false }); }
+        catch { update(day, { localReady: true, localFailed: true }); }
+      });
+      pools[1]!.queue.push(async () => {
+        try {
+          const plans = await loadCachedAccountPlans(day);
+          update(day, (previous) => previous.accountFresh ? {} : { accountPlans: plans });
+        } catch { /* A cache error must not erase local notes or a fresh provider result. */ }
+      });
+      pools[2]!.queue.push(async () => {
+        try {
+          const result = await loadPlannedEventsResult(preferences.selectedCalendarIds, day, calendars);
+          const unavailable = new Set(result.failures.filter((failure) => !accessDenied(failure)).map((failure) => failure.calendarId));
+          update(day, (previous) => ({ deviceReady: true, deviceFailed: result.failures.length > 0,
+            devicePlans: [...result.plans, ...previous.devicePlans.filter((plan) => unavailable.has(plan.calendarId))] }));
+        } catch (error) { update(day, (previous) => ({ deviceReady: true, deviceFailed: true,
+          devicePlans: accessDenied(error) ? [] : previous.devicePlans })); }
+      });
+      pools[3]!.queue.push(async () => {
+        try {
+          const result = await loadAccountPlansResult(day);
+          update(day, { accountPlans: result.plans, accountReady: true, accountFresh: true, accountFailed: result.failures.length > 0 });
+        } catch (error) { update(day, (previous) => ({ accountReady: true, accountFailed: true,
+          accountFresh: accessDenied(error) || previous.accountFresh,
+          accountPlans: accessDenied(error) ? [] : previous.accountPlans })); }
+      });
     }
     const enqueueDays = (requested: string[]) => {
       if (cancelled) return;
@@ -97,13 +139,13 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
           if (neighbor) nearby.add(neighbor);
         }
       }
-      for (const day of nearby) if (!queued.has(day)) { queued.add(day); queue.push(day); }
-      pump();
+      for (const day of nearby) if (!queued.has(day)) { queued.add(day); enqueueDay(day); }
+      pools.forEach((_pool, index) => pump(index));
     };
     requestDays.current = enqueueDays;
     const visible = visibleDays.current.filter((day) => positions.has(day));
     enqueueDays(visible.length ? visible : days.slice(0, 3));
-    return () => { cancelled = true; queue.length = 0; };
+    return () => { cancelled = true; pools.forEach((pool) => { pool.queue.length = 0; }); };
   }, [daysKey, calendarKey, preferenceKey, dataVersion, retry]);
 
   const failed = Object.values(data).some((day) => day.failed);
@@ -132,7 +174,8 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
           <Pressable accessibilityRole="button" accessibilityLabel={`Open ${heading}`} onPress={() => openDay(day)} style={styles.dayHeading}>
             <Text accessibilityRole="header" style={styles.dayTitle}>{heading}</Text>
           </Pressable>
-          {!state ? <View style={styles.loading} accessibilityLabel={`Loading ${formatDayHeading(day)}`}>
+          {(!state || !state.items.length && (!state.localReady || !state.deviceReady || !state.accountReady))
+          ? <View style={styles.loading} accessibilityLabel={`Loading ${formatDayHeading(day)}`}>
             <ActivityIndicator size="small" color={colors.muted} />
           </View> : state.items.length ? state.items.map((item) => {
             const time = scheduleTimeRange(item, clockFormat);
