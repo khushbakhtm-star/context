@@ -1,4 +1,4 @@
-# Context 0.1.13/code14 source candidate; new independent verification is pending.
+# Context 0.1.13/code14: independent recipe checks passed; official review is pending.
 # Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
@@ -66,8 +66,11 @@ Builds:
     output: android/app/build/outputs/apk/release/app-release-unsigned.apk
 
 MaintainerNotes: |-
-  New independent verification of this exact source is pending. Keep the build disabled.
-  Historical 0.1.8 results do not establish this version builds or passes scans.
+  Independent run 40351936739 passed both jobs for this exact source: lint,
+  source scan (zero errors/warnings), integrated recipe build and APK scan,
+  and independent unsigned assembly plus APK scan. Keep the build disabled
+  pending official inclusion and build-server review. This is not an
+  official F-Droid server build or catalog acceptance.
   The source-input inventory reviews 27 packages, 107 exact removable inputs and
   five source patches, including six unused Print/Sharing publications or archives.
   All Expo Android modules and core compile from source. Optional Google Wear

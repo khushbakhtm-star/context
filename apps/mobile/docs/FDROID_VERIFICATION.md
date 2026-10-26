@@ -6,23 +6,84 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
-## Preparing the 0.1.13 refresh
+## Verified 0.1.13 FOSS source candidate
 
-The next candidate is **0.1.13 / Android code 14**. Its application source commit must be
-finalized before the verification controller and disabled metadata are retargeted together.
-Until that controller update, the tracked recipe and workflow still identify the verified
-0.1.8 source below; they must not combine a newer version number with the old source hash.
+[Final independent run 40351936739](https://github.com/khushbakhtm-star/context/actions/runs/40351936739)
+passed both jobs against application source `4c92502370158dfd7422471d17ffff9c5e15f87f`, using
+FOSS controller `9e942ea8929dca7c0031857ebc2bee3d4cf04fe4`. The controller adds read-only collection
+of actual R8 mapping/configuration/seeds and generated module registration; it does not change
+the application source or add keep rules. Superseded runs are not evidence for this candidate.
 
-The refreshed dependency inventory reviews 27 packages, 107 exact removable inputs and five
-source patches. Print and Sharing add six reviewed unused inputs; their Android modules still
-compile from source. The independent Android calendar-color module uses Android SDK APIs and
-remains in the FOSS build. These local preparation checks are not fresh scanner or APK results.
+The downloaded metadata artifact and native artifact were checked locally against GitHub's
+reported byte lengths and ZIP SHA-256 values, followed by ZIP CRC, exact source/version/code,
+actual check results, reviewed input hashes and optional Wear-source removal verification.
 
-After the application commit is public:
+| Actual check | Observed result |
+| --- | --- |
+| Metadata lint | Exit 0 |
+| Structured source scanner | **0 errors, 0 warnings, 7 informational entries** |
+| Integrated F-Droid recipe and APK scan | Exit 0; built 0.1.13 from the exact application commit above |
+| Independent unsigned assembly | Exit 0; `BUILD SUCCESSFUL in 12m 53s` |
+| Independent APK identity | `com.context.minuteledger` / 0.1.13 / code 14; minimum SDK 24, target SDK 36 |
+| Unsigned signature check | Expected exit 1 |
+| Independent APK binary scanner | Exit 0 |
+| Actual source sanitation in each job | 106 removed inputs, 5 source patches, 21 exact optional Wear-source removals |
+
+The reviewed inventory contains **27 packages and 107 removable paths**. The Windows-only
+`@expo/modules-macros-win32-x64/ExpoModulesMacros.exe` input is absent on Linux, explaining the
+106 actual removals. Print and Sharing add six reviewed unused publications/archives and compile
+their Android modules from source. The SDK-only calendar-color bridge remains in the FOSS build.
+The documented, hash-verified official Linux Hermes compiler is the sole scanner exception.
+
+| Downloaded diagnostic artifact | ZIP bytes | Locally verified ZIP SHA-256 |
+| --- | ---: | --- |
+| [Metadata 12665516746](https://github.com/khushbakhtm-star/context/actions/runs/40351936739/artifacts/12665516746) | 4,481,311 | `10ab16d438d1cb9124ad51610739a8f6f1f7f23952d066145c937d05153cc2ab` |
+| [Native 12665575835](https://github.com/khushbakhtm-star/context/actions/runs/40351936739/artifacts/12665575835) | 37,189,547 | `486a2bc648e0e8f156b59e1cec62eaefc2041eb9e43783142b0720c5abefcc07` |
+
+The [durable build-evidence bundle](https://github.com/khushbakhtm-star/context/releases/download/v0.1.13/context-0.1.13-foss-build-evidence.zip)
+is **7,683,399 bytes**, ZIP SHA-256
+`794dc675595f7e92d1ade49e21782e587014eafc9d42b920de34a182a95cf46b`.
+Its explicit 23-entry allowlist preserves 95,375,892 uncompressed bytes of exact native/integrated
+R8 mapping, configuration, seeds and generated module registration, plus public provenance,
+sanitation/scanner receipts and a per-file hash manifest. ZIP CRC and all manifest hashes were
+independently checked. It contains no APK, usage/log output, credentials, personal ledger or
+desktop/private paths. Public ephemeral GitHub runner location comments remain unchanged in the
+configuration files; command paths are omitted from the public check-result summaries.
+
+The native artifact's exact R8 mapping resolves these required modules to actual definitions in
+the inspected APK. The checks parse DEX `class_defs`, table bounds and checksums; JavaScript or
+DEX string presence alone is not used to establish native module presence.
+
+| Original required module | Actual mapped class definition | APK DEX |
+| --- | --- | --- |
+| `expo.modules.print.PrintModule` | `Lkz1;` | `classes.dex` |
+| `expo.modules.sharing.SharingModule` | `Ljo2;` | `classes.dex` |
+| `expo.modules.contextcalendarcolors.ContextCalendarColorsModule` | `Lqx;` | `classes.dex` |
+
+The actual unsigned FOSS APK is **78,006,692 bytes**, SHA-256
+`97f669f4c8523574674f380dc15baabb1a1591429f0d566f0367f9ab976632f5`.
+The locally verified publisher-signed preview is **78,106,471 bytes**, SHA-256
+`3d2cf466e1a6e436c0adf2351c0ca33f0981fa02131c7d120c07a287772bdc41`.
+Official `apksigner` v2/v3 verification, 16 KiB ZIP alignment, custom v2 protected-content checks
+and original publisher-certificate continuity passed. The certificate SHA-256 is
+`44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772`.
+The signed APK has exactly the unsigned protected entry set and bytes, including runtime
+`META-INF/services` content; only newly generated signature files are added.
+
+This source edition omits native Google sign-in and the Google-dependent Wear transport while
+retaining Android calendar access. These checks do not establish physical phone behavior,
+byte-for-byte reproducibility across independent machines, official F-Droid server provisioning,
+inclusion-policy eligibility, maintainer acceptance, F-Droid signing or catalog publication.
+The disabled metadata remains a review candidate in the existing
+[packaging request](https://gitlab.com/fdroid/rfp/-/work_items/4667).
+
+## Refreshing later FOSS candidates
+
+After a later application commit is public:
 
 1. Set `CONTEXT_SOURCE_COMMIT` in `.github/workflows/fdroid-verify.yml` and the single build's
    `commit` in `fdroid/metadata/com.context.minuteledger.yml` to that same full immutable hash.
-   Set the metadata version/code and CurrentVersion fields to 0.1.13/14, keep `disable`, and
+   Set the metadata version/code and CurrentVersion fields to that release's exact values, keep `disable`, and
    replace old verification claims with a pending receipt. Keep the accepted scanner exception
    and toolchain pins unchanged unless new diagnostics establish a necessary change.
 2. Commit the controller separately, push it, and dispatch **F-Droid independent source
@@ -30,7 +91,7 @@ After the application commit is public:
    This workflow needs no Expo quota and has no signing or publication step.
 3. Require success from both `metadata` and `native`. Inspect the structured source findings
    in addition to process exits: fdroidserver 2.4.5 source mode can return zero despite errors.
-   Check the integrated build/APK scanner, independent assembly/APK scanner, code-14 package
+   Check the integrated build/APK scanner, independent assembly/APK scanner, exact package
    identity, actual input audit and Wear-pruning receipt. Retain the provenance and exact logs.
 4. The native diagnostics contain an unsigned FOSS APK. Download and hash its actual bytes,
    align and sign a separate preview copy with the established publisher key, then verify its

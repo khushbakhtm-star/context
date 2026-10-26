@@ -1,13 +1,42 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
-phone 0.1.13 (build 14), published on 2026-10-26 at 15:49:06 UTC. The FOSS phone and watch remain at
-0.1.8, published on 2026-10-25 at 23:54:13 UTC. Official store entries remain absent pending actual
+phone 0.1.13 (build 14), published on 2026-10-26 at 15:49:06 UTC. The FOSS phone 0.1.13 (build 14) was available by 2026-10-26 at 16:14:42 UTC.
+The watch remains at 0.1.8, published on 2026-10-25 at 23:54:13 UTC. Official store entries remain absent pending actual
 availability. A source tag alone, unpublished upload, review submission, or queued release must not
 add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Published 0.1.13 FOSS phone update
+
+[Download the 0.1.13 FOSS phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.13/context-0.1.13-foss-preview.apk)
+from the [public release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.13); the added FOSS files were available by **2026-10-26 at 16:14:42 UTC**.
+Choose **Update** and keep Context installed to retain its ledger. This is the publisher-signed
+FOSS phone edition, code **14**, without native Google account sign-in or the optional Wear transport.
+For a paired Galaxy Watch7 or native Google sign-in, retain the Wear-enabled phone edition below.
+The existing watch 0.1.8 binary is unchanged; this APK belongs on a phone, not the watch.
+
+The [independent F-Droid build and scans](https://github.com/khushbakhtm-star/context/actions/runs/40351936739)
+used application source [`4c92502370158dfd7422471d17ffff9c5e15f87f`](https://github.com/khushbakhtm-star/context/commit/4c92502370158dfd7422471d17ffff9c5e15f87f)
+and controller `9e942ea8929dca7c0031857ebc2bee3d4cf04fe4`. The structured source scan reported **zero errors and zero warnings**;
+integrated recipe assembly and both APK scans passed. Audits matched **106 removed inputs, five source
+patches and 21 Wear removals**. R8 mappings verified actual Print, Sharing and calendar-color class
+definitions. Official APK signatures, the original publisher certificate, 16 KiB alignment and
+unchanged source-built protected content passed separately after publisher signing.
+
+Public release **424447225**, FOSS APK asset **678708182**: **78,106,471 bytes**,
+SHA-256 `3d2cf466e1a6e436c0adf2351c0ca33f0981fa02131c7d120c07a287772bdc41`. All twelve public release assets match their locally verified files by size and digest.
+The [permanent evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.13/context-0.1.13-foss-build-evidence.zip)
+contains 23 checked files: **7,683,399 bytes**, SHA-256 `794dc675595f7e92d1ade49e21782e587014eafc9d42b920de34a182a95cf46b`.
+It preserves source/native audits and mapping evidence independently of expiring Actions artifacts.
+
+Use the FOSS Obtainium filter in [Android updates](ANDROID_UPDATES.md) to stay on this phone edition.
+This publisher preview and independent scan success do **not** establish official F-Droid catalog
+acceptance. [Request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667) still needs maintainer review.
+Physical phone, calendar, printing and two-phone behavior remain unverified for this binary;
+no new watch or iOS binary is announced.
 
 ## Published 0.1.13 Wear-phone update
 

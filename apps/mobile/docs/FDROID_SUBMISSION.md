@@ -5,15 +5,16 @@ contains an upstream listing and a disabled build candidate. It is not an accept
 and the source release does not itself install an APK.
 
 The existing public request is [Context RFP 4667](https://gitlab.com/fdroid/rfp/-/work_items/4667).
-Use that request for further evidence rather than creating another. The last verified FOSS
-candidate is 0.1.8/code 9; 0.1.13/code 14 is being prepared for a new source-pinned build and
-scanner run. See [`FDROID_VERIFICATION.md`](FDROID_VERIFICATION.md) for the refresh gates and
-the exact historical receipts. A newer phone preview alone is not a verified F-Droid update.
+Use that request for further evidence rather than creating another. The current verified FOSS
+candidate is 0.1.13/code 14. Both independent build/scanner jobs passed, the publisher-signed
+FOSS preview and durable evidence are public, and the existing request now records those results.
+See [`FDROID_VERIFICATION.md`](FDROID_VERIFICATION.md) for the exact receipts and historical checks.
+Official inclusion, server-toolchain approval, signing and catalog publication remain pending.
 
 ## Prepared material
 
 - `fastlane/metadata/android/en-US/` at the repository root contains the title, descriptions,
-  version-code-1 changelog, and a byte-for-byte copy of the approved Context logo.
+  version-code changelogs, and a byte-for-byte copy of the approved Context logo.
 - `apps/mobile/fdroid/com.context.minuteledger.yml.template` declares MIT, current `Calendar & Agenda`
   and `Time Tracker` categories, and `NonFreeNet` for optional Microsoft services.
 - `apps/mobile/fdroid/prepare-submission.cjs` checks the local listing and can generate a candidate
@@ -30,8 +31,9 @@ not a substitute for testing the app.
 Publish the source, license, approved assets, lockfile, and listing in a real public repository.
 Use a source-only prerelease while native verification remains pending. Do not upload private
 ledger exports, credentials, account tokens, keystores, or generated working folders. Confirm that
-the released source has the same `0.1.0` / `1` version values as the metadata, then tag that exact
-release commit `v0.1.0`.
+the released source has the same version/code values as the metadata, then tag that exact
+application commit. The verified current source is `v0.1.13` / Android code `14`; later releases
+must increase their version and build numbers.
 
 From the repository root, check the listing:
 

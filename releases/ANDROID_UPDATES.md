@@ -2,7 +2,9 @@
 
 ## Fix “installed 0.1.9, latest 0.1.8”
 
-The original setup follows the FOSS phone edition, whose latest published APK is 0.1.8 (version code 9). The installed 0.1.9 uses the Wear-enabled phone edition (code 10). An Android error showing **10 → 9** means the selected APK would downgrade the app. Change the existing Obtainium entry to follow **0.1.13 (code 14)** instead:
+The original setup followed the FOSS phone edition when its latest APK was 0.1.8 (version code 9). The installed 0.1.9 was the Wear-enabled phone edition (code 10). The **10 → 9** error meant the selected APK would downgrade the app. Both phone editions now offer **0.1.13 (code 14)**.
+
+For an S23 paired with a Galaxy Watch7, or for native Google account sign-in, keep the Wear-enabled phone route and update its existing Obtainium entry using these steps:
 
 1. Open **Obtainium → Context** and confirm its source URL is `https://github.com/khushbakhtm-star/context`.
 2. Tap the **pencil** (additional options).
@@ -34,7 +36,7 @@ For manual setup, use the same repository URL, enable prereleases and choose the
 ^context-[0-9]+\.[0-9]+\.[0-9]+-foss-preview\.apk$
 ```
 
-The FOSS route currently selects 0.1.8. It does not offer the newer Wear-enabled phone releases or install the watch APK. Context's previews come from [the publisher's GitHub releases](https://github.com/khushbakhtm-star/context/releases). Official F-Droid inclusion remains pending; no custom Context F-Droid repository has been published.
+The FOSS route now selects **0.1.13 (code 14)**. It omits native Google account sign-in and the optional Wear transport. Use the Wear-enabled phone route for a paired watch or native Google sign-in. Neither phone filter installs the separate watch APK. Context's previews come from [the publisher's GitHub releases](https://github.com/khushbakhtm-star/context/releases). Official F-Droid inclusion remains pending; no custom Context F-Droid repository has been published.
 
 ## Receive future updates
 
