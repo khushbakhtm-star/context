@@ -1,13 +1,48 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
-phone 0.1.12 (build 13), published on 2026-10-26 at 13:15:49 UTC. The FOSS phone and watch remain at
+phone 0.1.13 (build 14), published on 2026-10-26 at 15:49:06 UTC. The FOSS phone and watch remain at
 0.1.8, published on 2026-10-25 at 23:54:13 UTC. Official store entries remain absent pending actual
 availability. A source tag alone, unpublished upload, review submission, or queued release must not
 add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Published 0.1.13 Wear-phone update
+
+[Download the 0.1.13 phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.13/context-0.1.13-wear-phone-preview.apk)
+from the [published release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.13), available since **2026-10-26 at 15:49:06 UTC**.
+Choose **Update** over the installed Context and keep the app installed to retain its ledger.
+This is the Wear-enabled phone edition, code **14**; the existing watch 0.1.8 remains compatible.
+
+Tap once to select and double-tap to edit inline. Hold edited text for native partial Cut/Copy/Paste;
+the keyboard checkmark saves locally and closes editing. After Done, hold a cell for whole-cell
+clipboard actions, AutoFill, grouping, colors and formatting. Automatic minute/range popups and the
+copied banner are removed. Clipboard commands acknowledge local work independently of account
+requests; serialized SQLite writes and one-press command handling improve Undo/redo reliability.
+Header **Sync** refreshes attached calendars; Settings, Print, Search and Dashboard are under the gear.
+Foreground checks run roughly every 15 seconds while active, subject to permissions and provider
+delays. Linked event-color imports preserve minute notes, activity membership and formatting;
+competing local/calendar changes require review.
+
+Consecutive identical notes use compact calendar time ranges while individual ledger minutes remain
+editable. Update both participating Android phones to 0.1.13 before sharing version-two calendar
+descriptions; older clients refuse this newer compact format. Existing source-event permissions remain required.
+
+Application source is [`4c92502370158dfd7422471d17ffff9c5e15f87f`](https://github.com/khushbakhtm-star/context/commit/4c92502370158dfd7422471d17ffff9c5e15f87f).
+TypeScript and **481 tests** passed. The [unsigned Android build](https://github.com/khushbakhtm-star/context/actions/runs/40350456395)
+used controller `8f04e9ae663f3e4888ac642c5d1276c6b79721ce`; publisher signing stayed local. The
+[exact source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40353051174) passed at that application source.
+Public release **424447225**, APK asset **678637991**, matches the verified local signed APK.
+All six attached assets match their locally verified files by size and digest.
+The signed APK is **78,818,418 bytes**, SHA-256 `b5c5c448ed4349a464001418ddb34b1642ae905883fa03eb6d871ec2a96181e3`.
+
+Attached receipts verify native identity, Google/Wear configuration, actual Print/Sharing/calendar-color
+class definitions, 61 packaged UI markers, official APK signatures, publisher-certificate continuity
+and 16 KiB alignment. These checks do not establish physical gestures, Undo, calendar synchronization
+or printing; **physical 0.1.13 validation remains pending**. No new FOSS, watch or iOS binary is
+announced here. Google OAuth remains in Testing; official stores and F-Droid catalog acceptance remain pending.
 
 ## Published 0.1.12 Wear-phone update
 

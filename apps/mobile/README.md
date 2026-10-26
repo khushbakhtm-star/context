@@ -5,66 +5,83 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
 
 ## Everyday use
 
-- Tap a minute cell on Today to type or dictate directly in the grid. Text saves after a short pause,
-  when leaving the cell, and when the app leaves the foreground. Neighboring entries stay visible.
-- Tap the active minute cell again to open its color/details popup. An explicitly colored minute
-  can stay blank and still count toward its activity's time totals. Choose **Details** in the popup
-  for ranges spanning midnight and advanced calendar-source controls. Holding or dragging text
-  inside the active input retains normal text selection.
-- The bottom editing bar applies bold, italic, and text color to a cell or selected minute range.
-  The **+** control selects a range for grouping, filling, or clearing. Formatting an empty cell does not record
-  an activity or add time to reports. Activity color and text color remain separate controls.
-- Tap a cell, then drag its small corner handle up or down within the same day. The grid scrolls
-  when the handle reaches its top or bottom edge. Releasing opens a compact floating
-  **Cut / Copy / Auto fill / Clear** menu while the grid stays visible. The selected range includes
-  both endpoints, and the original cell remains the source even when dragging upward. Choose
-  **Group** in that menu for the activity title/color and editable range times.
-- Hold a cell for the floating actions. Choose **Cut** or **Copy**, navigate to another day or minute,
-  tap the destination, then choose **Paste**. Context asks for **Replace** confirmation if the
-  destination contains entries or formatting. Cut leaves the source intact until Paste moves the
-  cells together in one transaction; **Undo** restores both source and destination within the session.
-  This clipboard stays inside Context and is cleared when the app process ends. Each pasted minute
-  remains independently editable. Record a minute before moving it; an untouched calendar plan is
-  edited through its calendar details.
-- To choose a range without dragging, hold an inactive cell and tap its last minute in the same day.
-  The editing bar's **+** also opens range actions with editable times.
-- With no minute selected, **+** requires calendar read access and at least one available calendar
-  checked under **Settings → Calendar connection → Calendars used for plans**. If either is missing,
-  Context guides you to Settings; it does not choose calendars for you. The phone calendar's new-event
-  form then opens with its own date picker. Save the event in one of those checked calendars so it
-  appears in Context. Plans refresh after the editor closes, when returning to Context, and while Today
-  remains visible; the phone calendar provider may take time to synchronize. With a minute selected,
-  the editing bar's **+** opens range actions.
+- In the **Day** grid, tap a minute cell once to select it. Double-tap the cell to edit its existing
+  text or enter a new note directly in the grid; the phone keyboard can also provide dictation.
+  Neighboring entries stay visible. Text saves after a short pause, when leaving the cell, and when
+  the app leaves the foreground. The keyboard checkmark saves the latest text and closes the
+  keyboard while retaining the selected cell. A failed save keeps the draft available for retry.
+- While editing, hold the text to use the phone's selection handles and native **Cut / Copy / Paste**
+  actions on part of the text. Double-tap another cell to edit it, place the caret, then use native
+  **Paste**. These actions transfer text only; each cell keeps its own activity, fill, and formatting.
+  Close editing with the keyboard checkmark before holding a cell for whole-cell actions.
+- Hold a selected cell outside text editing to open the compact cell-action menu. Blank selections
+  offer **Cut / Copy / Paste**. Text selections also offer **Clear** and formatting controls for
+  **Bold**, **Italic**, **Underline**, text color, and activity fill. Available range actions depend on
+  the selection's contents; grouped minutes also offer **Ungroup**. Buttons execute with one press.
+- To select several minutes, tap the source cell and drag its small corner handle up or down within
+  that day. The grid scrolls at its top and bottom edges. Releasing opens the cell-action menu while
+  keeping the grid visible. Both endpoints are included. **AutoFill** is available when the range
+  contains one distinct nonblank text, with optional blank cells; it fills from a populated source
+  even when that source is below the other selected minutes. Different notes can be grouped without
+  being overwritten by AutoFill.
+- **AutoFill** copies the source minute's text, activity color, and cell formatting into the selected
+  minutes. Each minute remains independently editable. **Undo** restores the previous target values.
+  Activity fill and text color are separate controls; formatting an empty cell alone does not record
+  time. **Clear** removes minute text while retaining its fill, formatting, and group membership.
+- Choose **Group** for a selected range, enter its activity title in the compact inline bar, choose a
+  fill with the circle, and press **Group**. Every minute keeps its own note, including distinct notes
+  within the same activity. Blank group members count toward the activity's time. **Ungroup** removes
+  the selected minutes from that activity; any remaining portions above and below become separate
+  groups. Hold a grouped cell longer, then drag to move the complete activity to another minute or
+  day, preserving its minute notes and formatting.
+- Whole-cell **Cut / Copy** captures the selected cells' text, activity fills, and formatting. Select a
+  destination and hold it for **Paste**. There is no copied/cut notification banner. Context asks for
+  **Replace** confirmation if destination cells contain entries or formatting. Cut leaves its source
+  intact until Paste moves the cells in one transaction; **Undo** restores source and destination
+  together. This whole-cell clipboard stays inside Context, supports repeated Copy/Paste, and clears
+  when the app process ends. It is separate from the phone's text clipboard. Record a minute before
+  moving it; an untouched calendar plan is edited through its explicit **Event** action.
+- A cell with a source calendar plan offers **Event** in its whole-cell menu. This deliberately opens
+  the detailed editor for source-event and recurring-series controls, including ranges crossing
+  midnight. Selecting or double-tapping a cell does not open an automatic color/details or range
+  popup, and there is no bottom editing toolbar.
+- The top row contains the gear, previous arrow, current month/day icon, view dropdown, next arrow,
+  **Undo**, **Redo**, and **Sync**. The date icon always shows today's date; tap it to return to the
+  current minute, or hold it to choose dates. **Pick** selects individual days; **Range** selects a
+  continuous span of up to 28 days. Up to seven selected days show minute columns; larger selections
+  use a calendar overview. The dropdown offers **Day / Week / Month / Year / Schedule**.
+- Pinch to zoom the minute rows and day columns. Wider columns scroll horizontally while the time
+  rail remains fixed. Zoom is remembered separately on each phone. Choose **12-hour** or **24-hour**
+  only in **Settings**; the minute column fits the selected time labels, such as `13:11`. Light,
+  dark, and system appearance are also available in Settings.
+- The gear opens **Settings**, **Print**, **Search**, and **Dashboard**. Explanations in Settings and
+  account controls are available through their information icons. **Dashboard** shows recorded time
+  by activity color for a day, week, month, or year, with minute/hour totals and percentages. Its
+  **Recorded / Unrecorded** toggle distinguishes recorded activity from the remaining civil-minute
+  slots; future slots are unrecorded too. Calendar plans alone are not recorded ledger time.
+- **Print** lets you choose dates, view, orientation, and colors, with additional schedule or
+  Dashboard options. **Save PDF** opens the phone's PDF sharing/saving flow; **Print** opens the system
+  print dialog. Full minute notes can be included without depending on a calendar provider's
+  description limit. Context does not automatically select or contact a printer.
+- When no cell is selected, the floating **+** opens the phone calendar's new-event form. It requires
+  read access and an available calendar checked under
+  **Settings → Calendar connection → Calendars used for plans**. If either is missing, Context guides
+  you to Settings without selecting a calendar for you. Save into a checked calendar so its event
+  appears in Context. Plans refresh after the editor closes, on returning to Context, while the grid
+  remains open, and through the top **Sync** control. The phone's calendar provider may need time to
+  synchronize.
 - If plans are missing, use **Settings → Calendar connection → Check connection** for the selected
-  date. It shows per-calendar event counts or error codes; the calendar list also shows available
-  visibility and synchronization flags. Results stay local and omit event titles and descriptions.
-  The Android reader handles calendar failures separately so one failed calendar does not discard
-  other readable plans. The reported S23 visibility problem still needs physical-phone verification.
-- To make one activity from several cells, tap a minute, choose **+**, set the first and last minute,
-  enter an activity title, choose its color, and tap **Group**. The last minute is included. Every
-  cell keeps its own note and remains editable directly in the grid. Blank grouped minutes also
-  count toward the activity's time. Group members use a solid activity-color fill and a title badge;
-  open **+** from a member to edit the group. Tapping the title area follows the same inline-entry
-  behavior as the rest of the cell.
-- **Auto fill** copies the original source cell's exact text to every selected minute, including both
-  endpoints, without requiring a color choice. It uses that source's activity color and formatting;
-  choosing another Google color changes the activity color. Each copied minute remains independently
-  editable, and **Undo** restores the target cells' previous contents within the editing session.
-  With a blank source, enter text or explicitly choose a color. A color-only fill preserves existing
-  target notes. **Group** gives the range one activity title and color while retaining each note.
+  date. Local diagnostics show per-calendar counts or error codes without event titles or
+  descriptions. One unreadable calendar does not discard other readable plans. Linked calendar color
+  changes can fill the corresponding actual minutes on refresh without replacing their notes;
+  unsaved local text and simultaneous local/calendar changes are held for review.
 - Activity/group color choices use [documented Google Calendar hex colors](https://developers.google.com/apps-script/reference/calendar/color)
   plus exact colors imported from connected [Google palettes](https://developers.google.com/workspace/calendar/api/v3/reference/colors)
   and [calendar labels](https://developers.google.com/workspace/calendar/api/guides/labels). This offline fallback
   does not claim to enumerate the current 24-color event picker. Arbitrary new activity hex values are unavailable.
-  Historical activity colors remain intact, and text formatting retains its separate palette.
-- Tap today's date number in the header to return to the current minute in today's column.
-- Choose **Today** or **Day** to return to one full day across the screen, resetting the previous
-  zoomed column layout. You can zoom again afterward.
-- Choose **12-hour** or **24-hour** in the calendar header's view menu. The preference is saved
-  on this phone. The minute column measures the selected time label and uses minimal padding;
-  for example, the 24-hour display shows `13:11` without an AM/PM suffix.
-- Pinch to zoom both axes, or use the zoom controls in the header's view menu. Wider day columns
-  scroll horizontally while minute labels remain fixed. Zoom is remembered separately on each phone.
+  Displayed plans use their provider's event color when available, otherwise the calendar color;
+  this does not expand the manual activity picker. Historical activity colors remain intact, and
+  text formatting retains its separate palette.
 - Undo and redo restore Context entries and cell formatting within the running editing session.
   Changes already sent to calendars, especially invitation cancellations, may need separate review.
 - Connect accounts under **Settings → Accounts & phone synchronization**.
@@ -74,8 +91,6 @@ encrypted ledger synchronization, and a device-calendar bridge for other calenda
 - Manage any number of activity categories under Settings. Import Google event colors/custom labels,
   Outlook master categories, or device-calendar colors; create, rename, recolor, or archive your own.
   Provider mappings use that calendar's available palette/labels rather than inventing unsupported colors.
-- The Reports tab filters one category or all categories for a chosen day, week, month, or year.
-  The Week tab keeps the chronological view.
 - When confirming an original account-calendar plan, the editor's **Replace this plan occurrence**
   switch links the saved activity to that one event instance. Other days of a recurring series keep
   their original schedule. Turning the switch off records a separate actual activity.
@@ -101,6 +116,10 @@ acknowledgments, immutable upload files, and retained alternatives allow the pho
 without reviving deleted minutes. This version does not promise background delivery while the app
 is terminated. Do not use different passphrases for the same ledger; changing keys requires a future
 explicit migration workflow.
+
+Calendar descriptions can compact consecutive identical notes into time ranges while the private
+ledger keeps every minute editable. Update both participating Android phones to 0.1.13 before
+exchanging version-two calendar descriptions; older clients refuse this newer compact format.
 
 The storage implementations are Google Drive's private app-data area, Microsoft's OneDrive app
 folder, and an existing dedicated HTTPS WebDAV folder. Storage access does not require granting

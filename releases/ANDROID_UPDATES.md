@@ -2,7 +2,7 @@
 
 ## Fix “installed 0.1.9, latest 0.1.8”
 
-The original setup follows the FOSS phone edition, whose latest published APK is 0.1.8 (version code 9). The installed 0.1.9 uses the Wear-enabled phone edition (code 10). An Android error showing **10 → 9** means the selected APK would downgrade the app. Change the existing Obtainium entry to follow **0.1.12 (code 13)** instead:
+The original setup follows the FOSS phone edition, whose latest published APK is 0.1.8 (version code 9). The installed 0.1.9 uses the Wear-enabled phone edition (code 10). An Android error showing **10 → 9** means the selected APK would downgrade the app. Change the existing Obtainium entry to follow **0.1.13 (code 14)** instead:
 
 1. Open **Obtainium → Context** and confirm its source URL is `https://github.com/khushbakhtm-star/context`.
 2. Tap the **pencil** (additional options).
@@ -13,7 +13,7 @@ The original setup follows the FOSS phone edition, whose latest published APK is
    ^context-[0-9]+\.[0-9]+\.[0-9]+-wear-phone-preview\.apk$
    ```
 
-5. Return to Context’s details to apply the options, then refresh and tap **Update**. Dismiss the keyboard first if needed. It should offer **0.1.12**.
+5. Return to Context’s details to apply the options, then refresh and tap **Update**. Dismiss the keyboard first if needed. It should offer **0.1.13**.
 
 Keep Context installed so its ledger stays on the phone. Change the existing entry; do not add a duplicate entry for the same app or uninstall Context.
 
