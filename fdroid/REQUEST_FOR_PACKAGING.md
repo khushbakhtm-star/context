@@ -5,17 +5,17 @@
 - Source: https://github.com/khushbakhtm-star/context
 - Issue tracker: https://github.com/khushbakhtm-star/context/issues
 - Releases: https://github.com/khushbakhtm-star/context/releases
-- Candidate: 0.1.7 (Android version code 8)
-- Immutable source: d7cf4d61b7b7e175c18d91693027bde33fef8490
-- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.7
-- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.7/context-0.1.7-foss-preview.apk
-- Preview APK SHA-256: `67e36f7b84ed0366a36e9c25e3baf8c57b44cfc8e690290061ad771551dd131c`
-- Publication: 2026-10-25 at 22:46:20 UTC; signed APK size 77,672,804 bytes
+- Candidate: 0.1.8 FOSS phone (Android version code 9)
+- Immutable source: 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24
+- Published source tag and Android preview: https://github.com/khushbakhtm-star/context/releases/tag/v0.1.8
+- Signed preview APK: https://github.com/khushbakhtm-star/context/releases/download/v0.1.8/context-0.1.8-foss-preview.apk
+- Preview APK SHA-256: `b10b831c2d880921a511d5106d1b5ebb1ff6345aecbbd6ef7826520e1cd4bfb7`
+- Publication: 2026-10-25 at 23:54:13 UTC; signed FOSS APK size 77,716,460 bytes
 - License: MIT
 - Summary: Capture your day minute by minute alongside your calendars
 
 This is a new public project requesting packaging review and an inclusion-policy
-assessment. It is not an accepted F-Droid app. The 0.1.7 source tag and signed
+assessment. It is not an accepted F-Droid app. The 0.1.8 source tag and signed FOSS
 Android preview are public. Both cold-build verification jobs passed; the older
 0.1.0 release is not the remediated source candidate.
 
@@ -63,18 +63,27 @@ zoom. Drag endpoint mapping accounts for the captured grip offset.
 The Android reader uses current overlap semantics, serializes per-calendar reads,
 and preserves readable calendars when another fails. Settings' local Check connection
 results show counts/error codes and available visibility/synchronization flags,
-without event titles or descriptions. The user reported 0.1.6 still blank on an S23
-with the same calendar checked; successful physical visibility on 0.1.7 is not yet
-confirmed. These diagnostics and build checks do not establish that the problem is fixed.
+without event titles or descriptions. The user initially reported 0.1.6 still blank on an S23. In a later 0.1.7 test,
+Check connection returned eight timed events and those events then appeared in Today;
+the user confirmed the reported blank-calendar issue was resolved. This is that
+specific phone observation, not physical verification of 0.1.8 or its watch companion.
 
-The F-Droid edition omits Google's native sign-in SDK and the Expo development
-client. It has no direct Google account sign-in. Calendars supplied to Android by
+The F-Droid edition omits Google's native sign-in SDK, the Expo development
+client, and the optional Google Play services Wear transport/native watch project. It has no direct Google account sign-in. Calendars supplied to Android by
 another installed application can still be used through device-calendar access.
 Optional Microsoft calendar/OneDrive support uses proprietary services and needs
 a publisher-configured Microsoft registration, which is not configured in this
 release. NonFreeNet is disclosed. The ledger, device calendars, and HTTPS WebDAV
 storage work without a Microsoft account. Synchronization runs while Context is
 open or returning to the foreground; terminated-app delivery is not claimed.
+
+The separately distributed Wear-enabled phone and Wear OS APKs are optional editions,
+not F-Droid candidate binaries. Source preparation verifies and removes 21 mandatory
+Wear source inputs before autolinking/scanning; both final independent CI jobs assert
+that removal. The FOSS APK has no Wear listener, transport/API or forbidden native
+markers. The publisher-signed Wear pair shares a package and signing certificate;
+an eventual official F-Droid signer is different and cannot supply this Data Layer
+pairing. Physical Galaxy Watch7 validation remains pending.
 
 ## Packaging remediation and evidence
 
@@ -96,7 +105,27 @@ The recipe provisions hash-verified Node 24.19.0 and Gradle 9.4.1, with
 Corepack 0.36.0/pnpm 11.25.0 and OpenJDK 17. It uses system Gradle after F-Droid
 removes wrappers. Required Android SDK packages are recorded in the metadata.
 
-## Latest 0.1.7 verification
+## Latest 0.1.8 verification
+
+- Final phone/FOSS source: `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24`; final [independent CI 40245685971](https://github.com/khushbakhtm-star/context/actions/runs/40245685971) completed successfully with controller `994a269bbe1f861d9dcb318aa871a57a11efa0d5`.
+- [Exact final tested recipe](https://github.com/khushbakhtm-star/context/blob/994a269bbe1f861d9dcb318aa871a57a11efa0d5/fdroid/metadata/com.context.minuteledger.yml); the candidate remains disabled for official maintainer review.
+- Both CI jobs explicitly assert removal of the 21 mandatory hash-reviewed Wear source inputs. Earlier releases' dependency-cleanup counts are not substituted for this run.
+- Decoded final metadata job logs show lint exit 0, source scanner exit 0 with zero errors/zero warnings, and successful normal integrated F-Droid build of final 7d292 / 0.1.8 plus APK scanning.
+- Decoded native job logs show unsigned assembly exit 0 (`BUILD SUCCESSFUL in 12m 26s`), actual package/version/code 0.1.8/9, expected unsigned-signature exit 1 and binary-scanner exit 0.
+- [Metadata artifact 12618753467](https://github.com/khushbakhtm-star/context/actions/runs/40245685971/artifacts/12618753467) is API-reported as 49,411 bytes, ZIP SHA-256 `d3c88eddb6367e63a97df1460c287428bf10c6ec5fdf8176d4c6e29120fdd113`; [native artifact 12619260247](https://github.com/khushbakhtm-star/context/actions/runs/40245685971/artifacts/12619260247) is API-reported as 32,608,379 bytes, ZIP SHA-256 `2c4ad9ca878864c0901e022a439faa708a254e184f03f89bd331d1c1fda75d0a`. These archives were not independently downloaded and hashed locally; verified decoded logs support the check results. No actual unsigned-APK checksum or dependency-cleanup totals are inferred from earlier versions.
+- The [exact v0.1.8 tag workflow 40246819174](https://github.com/khushbakhtm-star/context/actions/runs/40246819174) completed successfully at final source `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24`.
+
+- The published FOSS phone APK is `com.context.minuteledger` / 0.1.8 / code 9, with embedded F-Droid distribution. Its size/SHA-256 are recorded above; Wear listener/API and Google Wear/native-forbidden markers are absent.
+- All three published APKs passed ZIP/native-manifest checks and custom APK v2 signature, certificate public-key binding, algorithm-list and protected-content digest verification. They share certificate SHA-256 `44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772`, matching 0.1.7.
+- These checks are distinct from official Android `apksigner`; v1/v3/v4 and full official signature verification were not performed locally. Native assembly/inspection do not establish physical watch compatibility.
+- The source tag is final phone/FOSS source. The watch was built from `d84fcacbd0484954f5c715b8976c37ba70e9c2fc`; the reviewed final diff leaves watch compilation inputs unchanged. That actual build provenance remains explicit.
+- See [verification diagnostics](../apps/mobile/docs/FDROID_VERIFICATION.md) for per-edition hashes, build identities and the final CI evidence.
+
+The candidate remains disabled pending official F-Droid packager review. Public GitHub
+preview availability does not establish official catalog publication or physical
+Galaxy Watch7 validation.
+
+## Historical 0.1.7 verification
 
 - TypeScript, all 226 app tests, five release guards, and upstream listing validation passed.
 - [Cold Linux verification](https://github.com/khushbakhtm-star/context/actions/runs/40240522368) passed both jobs for source `d7cf4d61b7b7e175c18d91693027bde33fef8490`, version 0.1.7, code 8.
@@ -225,3 +254,8 @@ The [v0.1.6 tagged-source workflow](https://github.com/khushbakhtm-star/context/
 The [v0.1.7 tagged-source workflow](https://github.com/khushbakhtm-star/context/actions/runs/40241739878)
 passed at phone source `d7cf4d61b7b7e175c18d91693027bde33fef8490`. This receipt does not claim
 an official store/F-Droid publication or a successful physical S23 calendar-import test.
+
+The [0.1.8 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.8) was published
+on 2026-10-25 at 23:54:13 UTC; the tag and all three asset sizes/digests were verified. Its exact-tag
+workflow completed successfully at final source 7d292, as recorded above. The earlier 0.1.7 S23-unconfirmed statement
+is preserved as its then-current receipt; the later human confirmation appears above.

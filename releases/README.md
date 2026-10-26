@@ -1,8 +1,8 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Android standalone
-preview 0.1.7 (build 8), published on 2026-10-25 at 22:46:20 UTC. Official store entries remain absent
-pending actual availability. A source tag alone, unpublished upload, review submission, or queued
+previews 0.1.8 (phone build 9), published on 2026-10-25 at 23:54:13 UTC. Official store entries remain
+absent pending actual availability. A source tag alone, unpublished upload, review submission, or queued
 release must not add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
@@ -10,31 +10,43 @@ When a rollout is limited, keep the entry out until availability matches the fee
 
 ## Install the Android preview update
 
-Open the [0.1.7 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.7), expand
-**Assets**, and download `context-0.1.7-foss-preview.apk`. Open the downloaded APK and choose
-**Update** over the existing Context installation. Keep Context installed to preserve its ledger.
-The new preview uses the same application ID and signing certificate as the verified 0.1.6 preview,
-with version code 8.
+Open the [0.1.8 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.8), expand
+**Assets**, and choose the APK for the device and edition:
 
-Cell actions now float over the grid: **Cut / Copy / Auto fill / Clear**, with **Paste** available
-after copying or cutting. Hold a cell, choose Cut or Copy, navigate to another day/minute, then tap
-the destination and Paste. Occupied destinations require Replace confirmation. Cut moves source and
-destination together, and session Undo restores both. The clipboard stays inside Context.
+| APK | Install on | Included features |
+| --- | --- | --- |
+| [context-0.1.8-foss-preview.apk](https://github.com/khushbakhtm-star/context/releases/download/v0.1.8/context-0.1.8-foss-preview.apk) | Android phone | Ledger/calendars; excludes the optional Google Wear transport |
+| [context-0.1.8-wear-phone-preview.apk](https://github.com/khushbakhtm-star/context/releases/download/v0.1.8/context-0.1.8-wear-phone-preview.apk) | Android phone paired with a Wear OS watch | Ledger/calendars plus the optional native watch bridge |
+| [context-0.1.8-wear-preview.apk](https://github.com/khushbakhtm-star/context/releases/download/v0.1.8/context-0.1.8-wear-preview.apk) | Wear OS watch | Native watch companion; requires the matching Wear-enabled phone app |
 
-Drag a cell's corner handle up or down in the same date column; release opens the floating actions.
-Auto fill retains the original recorded source text, activity color and formatting unless you choose
-another Google activity color. Each copied minute remains editable. **Today / Day** restores one
-full day across the screen even after zooming.
+Choose one phone edition, open its downloaded APK, and choose **Update** over Context 0.1.7.
+Keep Context installed to preserve its ledger. Both phone editions use the existing application ID,
+compatible publisher certificate and increasing version code 9; the watch uses code 100009.
+The watch APK belongs on the watch. Follow the separate [watch setup](../apps/mobile/wear-support/README.md)
+for wireless installation. Open the Wear-enabled phone app and explicitly enable **Settings → Paired
+watch** access. The native watch app offers a minute list, date navigation, typing/dictation and an
+offline note journal. Phone ledger changes apply when Context runs; conflicts retain both versions
+for review. Physical Galaxy Watch7 validation remains pending.
 
-Android calendar reading now isolates failures per calendar and includes local **Settings → Calendar
-connection → Check connection** counts/errors and available visibility/synchronization flags.
-Android opens the event editor as a separate calendar-app task; return to Context to refresh plans.
-The reported S23 problem—checked calendar events still missing—has not been confirmed resolved on
-the phone. Physical verification is pending; build and scan success do not establish that result.
+The user later confirmed the phone 0.1.7 calendar result on the S23: Check connection showed eight
+timed events, and the events then appeared in Today. This resolves that reported blank-calendar
+test. It does not establish physical 0.1.8 or paired-watch validation.
 
-For an ongoing **Update** button, follow the one-time [Obtainium setup](ANDROID_UPDATES.md).
-Official F-Droid inclusion remains pending at [request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667);
-this GitHub preview does not create an official F-Droid catalog entry. Apple distribution also remains pending.
+The existing [Obtainium setup](ANDROID_UPDATES.md) selects only `-foss-preview.apk` phone assets.
+For a Wear-enabled phone, configure its APK filter to select only:
+
+```text
+^context-[0-9]+\.[0-9]+\.[0-9]+-wear-phone-preview\.apk$
+```
+
+Keep prereleases enabled. This avoids selecting either the watch APK or the FOSS phone edition as
+a Wear-phone update. Context's release checks distinguish `standalone` and `standalone-wear` phone
+channels; a release in one channel does not announce an update in the other.
+
+Official F-Droid inclusion remains pending at [request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667).
+These publisher-signed GitHub previews are not official F-Droid, Google Play or Apple store listings.
+The F-Droid edition omits the optional Google Wear transport and watch project; an eventual official
+F-Droid signer also differs from this publisher-signed watch's required same-signer phone companion.
 
 ## Update notices
 
@@ -55,10 +67,11 @@ The default feed is the publisher's public `releases/latest.json` on the `main` 
 [`khushbakhtm-star/context`](https://github.com/khushbakhtm-star/context). A fork can override
 `EXPO_PUBLIC_CONTEXT_RELEASE_MANIFEST_URL` with its own public HTTPS JSON URL and rebuild;
 an explicit empty value disables the feed. The build profile sets `EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL` to one of
-`google-play`, `apple-app-store`, `fdroid`, or `standalone`. A preview APK is `standalone`, even if it
+`google-play`, `apple-app-store`, `fdroid`, `standalone`, or `standalone-wear`. A FOSS preview APK is `standalone`, even if it
 uses the FOSS dependencies; it cannot be updated by an F-Droid signing key. A clean F-Droid source
 build defaults to `fdroid` through its distribution variable. Other unlabelled builds default to
-`standalone` rather than guessing which store signed them.
+`standalone` rather than guessing which store signed them. The Wear-enabled phone uses embedded
+`store` distribution with the separate `standalone-wear` update channel; those are distinct settings.
 
 Apple builds additionally require `EXPO_PUBLIC_CONTEXT_APP_STORE_ID`, the actual numeric app ID
 created in App Store Connect. Standalone builds trust the publisher's GitHub releases page by default;
@@ -79,7 +92,7 @@ The root contains `schemaVersion: 1` and a `releases` array (at most 100 entries
 | Field | Required value |
 | --- | --- |
 | `platform` | `android` or `ios` |
-| `channel` | `google-play`, `apple-app-store`, `fdroid`, or `standalone` |
+| `channel` | `google-play`, `apple-app-store`, `fdroid`, `standalone`, or `standalone-wear` |
 | `applicationId` | Exact installed Android application ID or iOS bundle ID |
 | `version` | Numeric `major.minor.patch`, such as `0.1.1` |
 | `buildNumber` | Android positive integer version code; iOS positive numeric build string, optionally dotted |

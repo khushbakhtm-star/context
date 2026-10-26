@@ -1,4 +1,5 @@
-# Context 0.1.8 candidate; independent verification is pending for this exact source.
+# Independently verified Context 0.1.8 source candidate; official inclusion is pending.
+# Exact tested recipe: controller 994a269bbe1f861d9dcb318aa871a57a11efa0d5.
 # The Google-dependent Wear companion is excluded from this source build.
 # Disabled source-build candidate, not a submitted F-Droid listing.
 # Generate a release-specific candidate with prepare-submission.cjs after publishing the source.
@@ -36,7 +37,7 @@ Repo: "https://github.com/khushbakhtm-star/context"
 Builds:
   - versionName: 0.1.8
     versionCode: 9
-    disable: Pinned build-server toolchain, dependency scan, and native verification are pending
+    disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
     commit: 7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24
     subdir: apps/mobile
     sudo:
@@ -70,7 +71,12 @@ Builds:
 
 MaintainerNotes: |-
   The upstream fastlane listing is at repository-root fastlane/metadata/android/en-US.
-  This exact new source candidate awaits independent source/build/APK checks.
+  Independent GitHub Ubuntu verification passed for this exact source.
+  Run https://github.com/khushbakhtm-star/context/actions/runs/40245685971
+  passed metadata lint, source scan (0 errors, 0 warnings), the integrated
+  F-Droid recipe and APK scan, and independent unsigned assembly and APK scan.
+  The tested recipe is pinned to controller 994a269bbe1f861d9dcb318aa871a57a11efa0d5;
+  this receipt changes comments and review status only, not the tested recipe.
   Optional Wear SDK and native watch sources are removed by 21 exact reviewed
   file hashes before scanning; CI retains and checks the complete removal receipt.
   The F-Droid edition provides no Google Wear transport. Prior verified results
@@ -84,8 +90,9 @@ MaintainerNotes: |-
   All Expo Android modules and core compile from source. Install Referrer is patched
   out of the transitive expo-application module; identity constants remain available.
   The sole scanignore is the policy-permitted official Linux Hermes compiler.
-  Native phone validation, public maintenance history or an applicable inclusion
-  exception, and release-tag verification are pending. No screenshots are supplied
+  The exact v0.1.8 tag and tagged-source workflow 40246819174 were verified.
+  Physical 0.1.8 phone/watch checks and public maintenance history or an applicable
+  inclusion exception remain pending. No screenshots are supplied
   until genuine captures of the native app are available.
 
 AutoUpdateMode: None

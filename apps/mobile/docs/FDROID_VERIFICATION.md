@@ -6,7 +6,121 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
-## Verified phone 0.1.7 outcome
+## Verified 0.1.8 editions and exact source provenance
+
+The [0.1.8 public release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.8)
+was published on 2026-10-25 at **23:54:13 UTC** (release 423736509). The public tag resolves to
+`7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24`, the final source used for the published phone/FOSS
+builds. The watch build used `d84fcacbd0484954f5c715b8976c37ba70e9c2fc`; a reviewed Git diff
+confirms its watch compilation inputs are unchanged in the final tag. The actual watch build
+source is kept explicit rather than attributed to another revision. Earlier ca49 candidate builds
+and their CI are not substituted for the final phone/FOSS release.
+
+[Final independent CI 40245685971](https://github.com/khushbakhtm-star/context/actions/runs/40245685971)
+completed **SUCCESS** against final source `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24`, controlled by
+`994a269bbe1f861d9dcb318aa871a57a11efa0d5`. Both jobs explicitly assert that the 21 mandatory
+hash-reviewed optional Wear source inputs are removed before FOSS autolinking/scanning. Earlier
+releases' dependency-cleanup/scanner counts are not used as findings for this run.
+
+### Exact final FOSS CI checks and artifact scope
+
+The decoded logs for metadata job `121326637622` and native job `121326637769` were read for
+that final run. They record the following actual results:
+
+| Check | Observed result |
+| --- | --- |
+| Metadata lint | Exit 0 |
+| Structured source scanner | Exit 0; report contains **0 errors and 0 warnings** |
+| Normal integrated F-Droid build | Exit 0; built final source `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24` / 0.1.8; integrated APK scan passed |
+| Independent unsigned assembly | Exit 0; `BUILD SUCCESSFUL in 12m 26s` |
+| Independent native package identity | `com.context.minuteledger` / 0.1.8 / code 9 |
+| Independent unsigned signature check | Expected exit 1 |
+| Independent APK binary scanner | Exit 0 |
+| Mandatory Wear-source pruning | Both jobs assert all 21 required inputs are removed |
+
+GitHub's API reports these diagnostic archive sizes and SHA-256 digests:
+
+- [Metadata artifact 12618753467](https://github.com/khushbakhtm-star/context/actions/runs/40245685971/artifacts/12618753467): 49,411 bytes; API-reported ZIP SHA-256 `d3c88eddb6367e63a97df1460c287428bf10c6ec5fdf8176d4c6e29120fdd113`.
+- [Native artifact 12619260247](https://github.com/khushbakhtm-star/context/actions/runs/40245685971/artifacts/12619260247): 32,608,379 bytes; API-reported ZIP SHA-256 `2c4ad9ca878864c0901e022a439faa708a254e184f03f89bd331d1c1fda75d0a`.
+
+Those archive digests were **not independently verified by a local download**. Critical check
+results above were verified from the decoded job logs. No actual unsigned-APK SHA-256, source
+informational-entry count, or old 100-removal/five-patch baseline is claimed for this run. Archive
+ZIP digests are not APK digests. The separately downloaded signed APK checks below have their own
+local verification scope.
+
+The [exact v0.1.8 tag workflow 40246819174](https://github.com/khushbakhtm-star/context/actions/runs/40246819174)
+completed **SUCCESS** at final source `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24`. This does not
+establish an official store/F-Droid publication or physical watch validation.
+
+### Published APK identities and hashes
+
+All three APKs have package `com.context.minuteledger`, version 0.1.8 and publisher certificate
+SHA-256 `44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772`, matching 0.1.7.
+The phone APKs use native code 9; the watch uses native code 100009 and declares the required
+`android.hardware.type.watch` feature with a phone companion. The verified minimum SDK is 24 for
+both phone editions and 30 for the watch; all three target SDK 36.
+
+| Published asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| [FOSS phone](https://github.com/khushbakhtm-star/context/releases/download/v0.1.8/context-0.1.8-foss-preview.apk), asset 676456994 | 77,716,460 | `b10b831c2d880921a511d5106d1b5ebb1ff6345aecbbd6ef7826520e1cd4bfb7` |
+| [Wear-enabled phone](https://github.com/khushbakhtm-star/context/releases/download/v0.1.8/context-0.1.8-wear-phone-preview.apk), asset 676456851 | 78,425,067 | `b0bf558a37bef8ad0f5f01033c4b68f476482c571fe6193b9e3fb211aa416ba6` |
+| [Wear OS watch](https://github.com/khushbakhtm-star/context/releases/download/v0.1.8/context-0.1.8-wear-preview.apk), asset 676456980 | 5,847,126 | `4ff818bc7ae11a173b9643bc31fd7b95a884f2cc8c9e03b5fb73d8c51d901d1f` |
+
+Public asset sizes/digests were checked against the actual inspected APKs. ZIP CRC/native manifest
+checks passed. Custom APK Signature Scheme v2 verification passed signed-data signatures,
+certificate/public-key binding, algorithm-list consistency and protected-content digests for all
+three. This is stronger evidence than certificate continuity alone, but remains distinct from
+Android's official `apksigner`; local v1/v3/v4 and full official signature verification were not
+performed. Installation/device compatibility and runtime behavior are separate checks.
+
+### Actual native builds and packaged feature checks
+
+| Edition / actual source | EAS build | Finished (UTC, 2026-10-25) | Observed native evidence |
+| --- | --- | --- | --- |
+| Wear phone / final `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24` | `52359721-3d51-4931-a95f-33828caae032` | 23:47:00.068 | Native bridge compiled, R8 and release assembly passed; build 8m 17s |
+| FOSS phone / final `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24` | `6ea17de5-467e-41da-b718-4fa1d28cb835` | 23:47:59.377 | Finished APK passed the FOSS identity and absence checks below |
+| Wear watch / `d84fcacbd0484954f5c715b8976c37ba70e9c2fc` | `8bc35262-7b03-420f-a71b-ce1224770328` | 23:36:26.684 | Native `:wear:test :wear:assembleRelease` passed; build 2m 36s |
+
+The Wear-phone native manifest contains the exported listener with its expected Data Layer filter.
+Stable exported ContextWear module/method literals remain in DEX, with verified R8 renaming of the
+original helper/module classes. Its Expo bundle is 2,165,592 bytes, SHA-256
+`77c8f91af59111ea9f2ee86f68df5af19af5c9e8d0301dd75d85274985c59c23`; the requested consent,
+sync, conflict-review and `standalone-wear` markers are present. Embedded distribution `store`
+is expected for this edition; its separately compiled update channel is `standalone-wear`.
+
+The FOSS APK embeds distribution `fdroid` and has no ContextWear listener, Wear module/API literals,
+Google Wear transport, native Google sign-in, Install Referrer or development-launcher markers in
+the inspected DEX. Its publisher-signed preview channel remains `standalone`; embedded distribution
+and update channel are distinct. The native watch has its expected launcher/activity/service,
+Data Layer receiver filter and implementation markers. It is a native watch APK without an Expo
+JavaScript bundle. These presence/absence checks establish packaged contents, not physical watch
+behavior.
+
+The optional Wear phone/watch pair depends on Google Play services. The F-Droid source preparation
+removes its exact reviewed source files; it does not retain that transport through a scanner
+exception. FOSS users retain the ledger/calendar features. An eventual official F-Droid-signed
+phone has a different signer and cannot pair with this publisher-signed watch under the Data
+Layer's same-package/same-signer requirement.
+
+### Later human phone observation and physical-watch limit
+
+The earlier 0.1.7 receipt recorded S23 calendar visibility as unconfirmed at that time. The user
+later ran Check connection, reported **eight timed events**, then confirmed those events appeared
+in Today. This resolves that reported 0.1.7 blank-calendar test on the S23. Preserve the original
+receipt as its historical state; do not transfer this observation to an unperformed 0.1.8 or
+Galaxy Watch7 physical test.
+
+Watch access defaults off and requires explicit paired-watch consent. The watch can journal notes
+offline; the native phone inbox can retain them while the app is closed, and JavaScript applies
+guarded ledger transactions when Context runs. Conflicts retain alternatives for review. Native
+unit/assembly, protocol tests, marker checks and signatures do not verify typing/dictation, bezel
+scrolling, reconnection, midnight/date navigation or paired-device conflict handling on hardware.
+**Physical Galaxy Watch7 validation remains pending.** Official F-Droid build-server provisioning,
+signing, inclusion/acceptance and catalog publication also remain pending. No byte-for-byte
+reproducibility or official store availability is established by these publisher-signed previews.
+
+## Historical verified phone 0.1.7 outcome
 
 [Run 40240522368](https://github.com/khushbakhtm-star/context/actions/runs/40240522368) passed both jobs
 for **Context phone 0.1.7, Android version code 8**:
@@ -337,7 +451,7 @@ fdroiddata configuration tree. It runs:
 
 ```sh
 fdroid lint com.context.minuteledger
-fdroid scanner --force --exit-code --json com.context.minuteledger:8
+fdroid scanner --force --exit-code --json com.context.minuteledger:9
 ```
 
 Scanner `--force` includes disabled builds. It does not suppress scanner findings. The scanner
@@ -352,7 +466,7 @@ A second scratch repository removes only the recipe's `disable` value, verifies 
 command resolves to hash-verified Gradle 9.4.1, and runs a normal integrated attempt:
 
 ```sh
-fdroid build --test --stop --scan-binary com.context.minuteledger:8
+fdroid build --test --stop --scan-binary com.context.minuteledger:9
 ```
 
 The candidate and template stay disabled. The ephemeral copy and its full diff are artifacts.
@@ -449,7 +563,9 @@ tests after each justified packaging change.
 
 | Tool or input | Pinned source |
 | --- | --- |
-| Latest verified app source | Public commit `d7cf4d61b7b7e175c18d91693027bde33fef8490` (0.1.7/code 8) |
+| Latest verified FOSS/phone source | Public commit `7d2921c526bf619c0d0aa12b4d6e80f8bf71dc24` (0.1.8/code 9) |
+| Published watch build source | Public commit `d84fcacbd0484954f5c715b8976c37ba70e9c2fc` (0.1.8/code 100009; reviewed watch inputs unchanged in final tag) |
+| Prior verified app source | Public commit `d7cf4d61b7b7e175c18d91693027bde33fef8490` (0.1.7/code 8) |
 | Prior verified app source | Public commit `36d94201013d51e41dc0ad4b3814c5ff6d736b7f` (0.1.6/code 7) |
 | Prior verified app source | Public commit `87cc9df388e4350a51e5e6fc07bcf7a19447c600` (0.1.5/code 6) |
 | Prior verified app source | Public commit `95050ec1956ee78ee1fbf98bf6df8c6c3067cbe9` (0.1.4/code 5) |
