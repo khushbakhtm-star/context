@@ -400,7 +400,12 @@ def main():
             raise ValueError("Refusing to replace an existing watch receipt")
         receipt = prepare(source, reports)
     else:
-        receipt = verify(source, reports, json.loads(receipt_file.read_text()))
+        try:
+            receipt = verify(source, reports, json.loads(receipt_file.read_text()))
+        except BaseException:
+            # upload-artifact retains diagnostics on failure, never an unverified APK.
+            (reports / f"context-{VERSION}-wear-unsigned.apk").unlink(missing_ok=True)
+            raise
     receipt_file.write_text(json.dumps(receipt, indent=2) + "\n")
     print(f"Context watch evidence: {receipt['status']} ({SOURCE})")
 
