@@ -17,9 +17,9 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 
-SOURCE = "142f2113a1638b78ee7a068196478e6b30ec9441"
-VERSION = "0.1.9"
-CODE = 100010
+SOURCE = "2019b79e0f1f23583b6322d5ce3259dd1ffe6dfe"
+VERSION = "0.1.10"
+CODE = 100011
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned watch preview: local publisher signing is separate"
 CERTIFICATE = "44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772"
@@ -28,6 +28,7 @@ MODULES = {
     "tile": "Lcom/context/minuteledger/wear/ContextTileService;",
     "tileLayout": "Lcom/context/minuteledger/wear/ContextTileLayout;",
     "transport": "Lcom/context/minuteledger/wear/WatchDataService;",
+    "dictationPolicy": "Lcom/context/minuteledger/wear/DictationSavePolicy;",
 }
 
 
@@ -257,7 +258,8 @@ def verify(source, reports, receipt):
     test_reports.mkdir(exist_ok=True)
     required_suites = {"com.context.minuteledger.wear.ContextTileLayoutTest",
                        "com.context.minuteledger.wear.JVMLaunchPolicyTest",
-                       "com.context.minuteledger.wear.JVMSpeechSessionGuardTest"}
+                       "com.context.minuteledger.wear.JVMSpeechSessionGuardTest",
+                       "com.context.minuteledger.wear.JVMDictationSavePolicyTest"}
     completed_suites = set()
     for index, file in enumerate(test_files):
         suite = ET.fromstring(file.read_bytes())
@@ -270,7 +272,7 @@ def verify(source, reports, receipt):
             completed_suites.add(suite.get("name"))
         (test_reports / f"{index}-{file.name}").write_bytes(file.read_bytes())
     if not required_suites <= completed_suites:
-        raise ValueError("Required Tile, launch or dictation guard JVM tests did not run")
+        raise ValueError("Required Tile, launch, speech guard or dictation-save policy JVM tests did not run")
     tests["requiredSuitesVerified"] = sorted(completed_suites)
     if tests["cases"] <= tests["skipped"] or tests["failures"] or tests["errors"]:
         raise ValueError("Watch JVM tests failed or no test actually ran")
