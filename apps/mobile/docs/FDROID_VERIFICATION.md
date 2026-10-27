@@ -6,6 +6,50 @@ Manual workflow dispatch is also available after the workflow exists on the defa
 It checks the reviewed full `CONTEXT_SOURCE_COMMIT`, matching the candidate's commit, version,
 and Android code to that checkout. A branch or tag cannot silently change the source.
 
+## Verified 0.1.18 FOSS source candidate
+
+[Independent run 40510171114](https://github.com/khushbakhtm-star/context/actions/runs/40510171114)
+passed metadata/integrated and native jobs against application source
+`39ef515e053ec9af23ce6a92b7c4290c33f6d220`, using controller
+`f185f43da5b0030c016f8347fb3208ea98f46fff`. The candidate remains disabled
+pending official maintainer/toolchain review. Source tests passed: TypeScript and 671 tests,
+including 48 focused UI/navigation checks within that same full run.
+
+The current source adds uniform Settings, collapsed unchecked calendar choices, matching back
+arrows, uncluttered Month titles/fills, a fitted Year overview with vertical pinch reflow,
+and date/minute-preserving view changes. The optional proprietary Wear transport and Tile
+sources are excluded from the FOSS build by exact hashes.
+
+Both actual sanitation audits recorded **108 removed inputs, five source patches and 31
+optional Wear-file removals**. The reviewed inventory remains 28 packages/109 removable paths;
+one Windows-only file is absent on Linux. Structured fdroidserver 2.4.5 source findings report
+**zero errors, zero warnings and seven informational entries**. No new scanner exception was
+added. Native Print, Sharing, Clipboard and calendar-color class definitions were verified
+through the exact R8 mapping. Both downloaded artifact lengths, SHA-256 and ZIP CRC passed.
+
+The independently assembled unsigned APK is **78,123,996 bytes**, SHA-256
+`10d2ab0f2c25fb686def4cfaf60e27b75f30e6aa6961bc6fa43e702a8806add0`.
+The signed FOSS APK is **78,225,311 bytes**, SHA-256
+`754dc2f499c012562e5385376c1dfca4bae47a48fe4ee48a3731c9bcc4af560d`.
+Official v2/v3 signatures, original publisher-certificate continuity, 16 KiB alignment and
+all 1,176 protected ZIP entry bytes passed independent checks. Public receipts remove only
+private desktop path prefixes; original receipts remain local.
+
+The permanent 23-entry evidence ZIP is **7,724,762 bytes**, SHA-256
+`dcabdd6e9e52ccd32506432955a1d814a663c16c0d0fd70bcc6b7c5c705ac6f6`.
+The [public 0.1.18 release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.18)
+contains both publisher-signed phone editions and all twelve verified files. Their public
+asset sizes/digests match the local checks. The [exact source-tag workflow 40516124674](https://github.com/khushbakhtm-star/context/actions/runs/40516124674) passed at the source above.
+[Permanent evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.18/context-0.1.18-foss-build-evidence.zip),
+[native receipt](https://github.com/khushbakhtm-star/context/releases/download/v0.1.18/context-0.1.18-fdroid-native-verification.json),
+[metadata receipt](https://github.com/khushbakhtm-star/context/releases/download/v0.1.18/context-0.1.18-fdroid-metadata-verification.json) and
+[signed-package receipt](https://github.com/khushbakhtm-star/context/releases/download/v0.1.18/context-0.1.18-foss-apk-verification.json) retain the provenance beyond expiring CI artifacts.
+
+These are source/package checks, not physical gestures, live calendars, printing, two-phone
+synchronization, independent-machine byte reproducibility or official catalog approval.
+The existing [packaging request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667)
+remains the review route. Watch and iOS/store distribution have separate release requirements.
+
 ## Verified 0.1.17 FOSS source candidate
 
 [Final independent run 40490567930](https://github.com/khushbakhtm-star/context/actions/runs/40490567930)
