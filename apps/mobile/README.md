@@ -15,19 +15,28 @@ An account refresh has a ten-second caller deadline. Matching callers share its 
 for a sixty-second lease; a later retry can replace a stuck request after the lease. Superseded
 results are rejected, and old cleanup cannot remove the replacement request.
 
-- In the **Day** grid, tap a minute cell once to select it. Double-tap the cell to edit its existing
-  text or enter a new note directly in the grid; the phone keyboard can also provide dictation.
-  Neighboring entries stay visible. Text saves after a short pause, when leaving the cell, and when
-  the app leaves the foreground. The keyboard checkmark saves the latest text and closes the
-  keyboard while retaining the selected cell. A failed save keeps the draft available for retry.
-- While editing, hold the text to use the phone's selection handles and native **Cut / Copy / Paste**
-  actions on part of the text. Double-tap another cell to edit it, place the caret, then use native
+Account write permission alone does not select an actuals destination or disable the existing
+phone-calendar writer. A configured direct-account destination takes that route; source-specific
+account projections retain ownership of their exact activity blocks. Native and account imports
+must not compete to recolor the same owned activity. Source-event note updates retain its title and
+provider color unless a deliberate title or mapped color change is requested. Overlapping account
+and phone plans use a stable display order instead of changing with request completion order.
+
+- In the **Day** grid, tap a minute cell once to select it and reveal its bottom text box. Tap that
+  box to type or dictate; the box and selected cell mirror the latest text while neighboring entries
+  remain visible. Double-tapping a cell focuses this same box. Text saves after a short pause,
+  when leaving the cell, and when the app leaves the foreground. The first checkmark saves the
+  latest draft, closes the keyboard and replaces the box with **Bold**, **Italic**, **Underline**,
+  text-color and fill-color controls. The second checkmark closes those controls while keeping the
+  cell selected. A failed save keeps the draft available for retry.
+- While editing in the bottom box, hold the text to use the phone's selection handles and native
+  **Cut / Copy / Paste** actions on part of the text. Edit another cell, place the caret, then use native
   **Paste**. These actions transfer text only; each cell keeps its own activity, fill, and formatting.
   Close editing with the keyboard checkmark before holding a cell for whole-cell actions.
 - Hold a selected cell outside text editing to open the compact cell-action menu. Blank selections
-  offer **Cut / Copy / Paste**. Text selections also offer **Clear** and formatting controls for
-  **Bold**, **Italic**, **Underline**, text color, and activity fill. Available range actions depend on
-  the selection's contents; grouped minutes also offer **Ungroup**. Menu actions use one completed
+  offer **Cut / Copy / Paste**. **Clear**, **AutoFill**, **Group** and **Ungroup** appear only when
+  relevant to the selection; formatting controls appear after saving the bottom text box. The menu
+  fits its visible actions instead of filling unused width. Menu actions use one completed
   tap even while the grid was scrolling or the keyboard was open. You can tap another minute cell
   without first dismissing the menu; holding or scrolling across a command does not execute it.
 - To select several minutes, tap the source cell and drag its small corner handle up or down within
@@ -40,12 +49,19 @@ results are rejected, and old cleanup cannot remove the replacement request.
   minutes. Each minute remains independently editable. **Undo** restores the previous target values.
   Activity fill and text color are separate controls; formatting an empty cell alone does not record
   time. **Clear** removes minute text while retaining its fill, formatting, and group membership.
+  Both color palettes start with **Reset**. Text Reset restores the default text color while keeping
+  the words. Fill Reset removes the fill without erasing words or group membership.
 - Choose **Group** for a selected range, enter its activity title in the compact inline bar, choose a
   fill with the circle, and press **Group**. Every minute keeps its own note, including distinct notes
   within the same activity. Blank group members count toward the activity's time. **Ungroup** removes
   the selected minutes from that activity; any remaining portions above and below become separate
   groups. Hold a grouped cell longer, then drag to move the complete activity to another minute or
   day, preserving its minute notes and formatting.
+- Hold a recorded cell or selected minute range longer, then drag its preview to another minute or
+  visible date. The source stays intact until a successful drop. Occupied destinations require
+  **Replace** confirmation, and one **Undo** restores both locations. Moving part of a named group
+  detaches that portion and splits the remaining portions; moving a complete group retains its
+  existing approved calendar-event identity. Moving cells does not replace the clipboard.
 - Copying one whole cell into a selected multi-minute range repeats its text, activity fill, and
   formatting into every selected minute. Each minute remains editable. Occupied targets require
   **Replace** confirmation, and **Undo** restores the complete paste together. This range-fill
@@ -54,13 +70,23 @@ results are rejected, and old cleanup cannot remove the replacement request.
   destination and hold it for **Paste**. There is no copied/cut notification banner. Context asks for
   **Replace** confirmation if destination cells contain entries or formatting. Cut leaves its source
   intact until Paste moves the cells in one transaction; **Undo** restores source and destination
-  together. This whole-cell clipboard stays inside Context, supports repeated Copy/Paste, and clears
-  when the app process ends. It is separate from the phone's text clipboard. Record a minute before
+  together. Rich whole-cell snapshots stay inside Context and clear when the app process ends;
+  Copy/Cut also places a plain-text version on the phone clipboard. Record a minute before
   moving it; an untouched calendar plan is edited through its explicit **Event** action.
-- A cell with a source calendar plan offers **Event** in its whole-cell menu. This deliberately opens
+- Copy a rectangular cell selection in Google Sheets or Excel, select its top-left destination in
+  Context, hold the cell, and choose **Paste**. Each source row fills the next minute; each source
+  column fills the next consecutive date. Tabs, quoted multiline notes and blank cells keep their
+  positions. A single source cell repeats through a selected minute range. External paste transfers
+  text, retaining the destination's Context fill, formatting and group membership; spreadsheet
+  formulas are not evaluated and spreadsheet formatting is not imported. Pasting into existing
+  entries asks for **Replace**, and one **Undo** restores the complete rectangle across dates.
+  Choose an earlier starting minute if the rows would extend past midnight. Clipboard access occurs
+  when choosing **Paste**, without background clipboard polling. Native text-editor Paste still
+  inserts text into the cell being edited. If iOS asks, allow Paste for Context.
+- A cell with a source calendar plan offers **Event** in its fill-color panel. This deliberately opens
   the detailed editor for source-event and recurring-series controls, including ranges crossing
   midnight. Selecting or double-tapping a cell does not open an automatic color/details or range
-  popup, and there is no bottom editing toolbar.
+  popup. The bottom entry and formatting bars close after their respective checkmarks.
 - The top row contains the three-bar menu, previous arrow, current-view calendar icon, next arrow,
   **Undo**, **Redo**, and the two-arrow **Sync** icon. The calendar icon matches **Day**, **Week**,
   **Month**, **Year**, or **Schedule**. Tap it once to return to now without changing that view or
@@ -70,14 +96,17 @@ results are rejected, and old cleanup cannot remove the replacement request.
   triangle button. Hold it to choose dates. **Pick** selects individual days; **Range** selects a
   continuous span of up to 28 days. Up to seven selected days show minute columns; larger selections
   use a calendar overview. Going to now clears a custom date selection so today can be displayed.
-- Pinch to zoom the minute rows and day columns. Wider columns scroll horizontally while the time
-  rail remains fixed. Zoom is remembered separately on each phone. Choose **12-hour** or **24-hour**
+- Pinch changes only minute-row height. **Day** always fits one day and **Week** fits all seven days;
+  column widths and the time rail remain fixed. Swipe horizontally to the previous or next day,
+  week, month or year for the chosen view. Zoom is remembered separately on each phone.
+  Choose **12-hour** or **24-hour**
   only in **Settings**; the minute column fits the selected time labels, such as `13:11`. Light,
   dark, and system appearance are also available in Settings.
 - The three-bar menu opens **Dashboard**, **Print**, **Search**, and **Settings**, in that order.
   These four entries have matching monochrome icons.
   Explanations in Settings and account controls are available through their information icons.
-  Hold **Sync** to read any synchronization error; the icon has no added information badge.
+  Calendar-load warnings appear as a small exclamation mark on **Sync**. Tap to retry or hold for
+  details. Settings has a back arrow to return to the calendar.
   **Dashboard** shows recorded time
   by activity color for a day, week, month, or year, with minute/hour totals and percentages. Its
   **Recorded / Unrecorded** toggle distinguishes recorded activity from the remaining civil-minute

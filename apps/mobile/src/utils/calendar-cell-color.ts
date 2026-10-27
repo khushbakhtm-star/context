@@ -14,9 +14,9 @@ export function nativeEventColor(event: { id?: unknown; startDate?: unknown; dis
     calendarColor(event.displayColor) ?? calendarColor(event.eventColor) ?? calendarColor(event.color), calendarFallback);
 }
 
-export function calendarCellColor({ previewColor, actualColor, hasActual, groupColor, planColor }: {
-  previewColor?: string; actualColor?: string; hasActual: boolean; groupColor?: string; planColor?: string;
+export function calendarCellColor({ previewColor, actualColor, hasActual, groupColor, planColor, noFill }: {
+  previewColor?: string; actualColor?: string; hasActual: boolean; groupColor?: string; planColor?: string; noFill?: boolean;
 }) {
-  return calendarColor(previewColor) ?? (hasActual ? calendarColor(actualColor) : undefined) ??
-    calendarColor(groupColor) ?? calendarColor(planColor);
+  return calendarColor(previewColor) ?? (noFill ? undefined : (hasActual ? calendarColor(actualColor) : undefined) ??
+    calendarColor(groupColor) ?? calendarColor(planColor));
 }

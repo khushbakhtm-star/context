@@ -108,6 +108,7 @@ export async function initializeDatabase() {
       minute_index INTEGER NOT NULL CHECK (minute_index >= 0 AND minute_index < 1440),
       affected_dates_json TEXT NOT NULL,
       token TEXT NOT NULL,
+      requires_account_writer INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY(date_key, minute_index)
     );
 
@@ -197,6 +198,12 @@ export async function initializeDatabase() {
     END;
   `);
 
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    const columns = await txn.getAllAsync<{ name: string }>('PRAGMA table_info(inline_minute_link_outbox)');
+    if (!columns.some((column) => column.name === 'requires_account_writer')) {
+      await txn.runAsync('ALTER TABLE inline_minute_link_outbox ADD COLUMN requires_account_writer INTEGER NOT NULL DEFAULT 0');
+    }
+  });
   // Seed older installations without changing their content or creating fake calendar writes.
   await db.runAsync(`INSERT OR IGNORE INTO ledger_documents (key, revision, value_json)
     SELECT 'minute:' || date_key || ':' || minute_index,
@@ -498,33 +505,37 @@ export type PendingInlineMinuteLink = {
   minuteIndex: number;
   affectedDates: string[];
   token: string;
+  requiresAccountWriter?: true;
 };
 
 async function queueInlineMinuteLink(txn: Pick<SQLite.SQLiteDatabase, 'runAsync' | 'getFirstAsync'>,
-  value: string, minuteIndex: number, affectedDates: string[]) {
-  const pending = await txn.getFirstAsync<{ affected_dates_json: string }>(
-    `SELECT affected_dates_json FROM inline_minute_link_outbox WHERE date_key = ? AND minute_index = ?`,
+  value: string, minuteIndex: number, affectedDates: string[], requiresAccountWriter = false) {
+  const pending = await txn.getFirstAsync<{ affected_dates_json: string; requires_account_writer: number }>(
+    `SELECT affected_dates_json, requires_account_writer FROM inline_minute_link_outbox WHERE date_key = ? AND minute_index = ?`,
     value, minuteIndex,
   );
   // A second edit must retain every date touched by the earlier unacknowledged block merge.
   const dates = [...new Set<string>([...(pending ? JSON.parse(pending.affected_dates_json) as string[] : []),
     ...affectedDates])];
   await txn.runAsync(`INSERT INTO inline_minute_link_outbox
-    (date_key, minute_index, affected_dates_json, token) VALUES (?, ?, ?, ?)
+    (date_key, minute_index, affected_dates_json, token, requires_account_writer) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(date_key, minute_index) DO UPDATE SET
-      affected_dates_json = excluded.affected_dates_json, token = excluded.token`,
-    value, minuteIndex, JSON.stringify(dates), makeId('inline_link'));
+      affected_dates_json = excluded.affected_dates_json, token = excluded.token,
+      requires_account_writer = excluded.requires_account_writer`,
+    value, minuteIndex, JSON.stringify(dates), makeId('inline_link'), requiresAccountWriter || pending?.requires_account_writer === 1 ? 1 : 0);
 }
 
-/** Only explicit inline edits enter this queue; historical device-calendar outbox rows are not replayed. */
+/** Exact local edits and winning verified peer minute imports enter this queue.
+ * Historical device-calendar outbox rows are never replayed as account intents. */
 export async function getPendingInlineMinuteLinks(limit = 100): Promise<PendingInlineMinuteLink[]> {
   const db = await database();
   const rows = await db.getAllAsync<{
-    date_key: string; minute_index: number; affected_dates_json: string; token: string;
-  }>(`SELECT date_key, minute_index, affected_dates_json, token FROM inline_minute_link_outbox
-    ORDER BY rowid LIMIT ?`, Math.max(1, Math.min(500, Math.trunc(limit) || 100)));
+    date_key: string; minute_index: number; affected_dates_json: string; token: string; requires_account_writer: number;
+  }>(`SELECT date_key, minute_index, affected_dates_json, token, requires_account_writer FROM inline_minute_link_outbox
+    ORDER BY requires_account_writer, rowid LIMIT ?`, Math.max(1, Math.min(500, Math.trunc(limit) || 100)));
   return rows.map((row) => ({ dateKey: row.date_key, minuteIndex: row.minute_index,
-    affectedDates: JSON.parse(row.affected_dates_json) as string[], token: row.token }));
+    affectedDates: JSON.parse(row.affected_dates_json) as string[], token: row.token,
+    ...(row.requires_account_writer === 1 ? { requiresAccountWriter: true as const } : {}) }));
 }
 
 /** Acknowledging an older attempt cannot remove a newer edit queued at the same minute. */
@@ -533,6 +544,25 @@ export async function acknowledgeInlineMinuteLink(item: Pick<PendingInlineMinute
   const result = await db.runAsync(`DELETE FROM inline_minute_link_outbox
     WHERE date_key = ? AND minute_index = ? AND token = ?`, item.dateKey, item.minuteIndex, item.token);
   return result.changes > 0;
+}
+
+/** Rotate an unrouteable imported ticket behind other peer work without
+ * acknowledging it or changing its token. A newer coalesced edit wins the guard. */
+export async function deferInlineMinuteLink(item: Pick<PendingInlineMinuteLink, 'dateKey' | 'minuteIndex' | 'token'>) {
+  const db = await database(); let deferred = false;
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    const current = await txn.getFirstAsync<{ affected_dates_json: string; requires_account_writer: number }>(
+      `SELECT affected_dates_json, requires_account_writer FROM inline_minute_link_outbox
+        WHERE date_key = ? AND minute_index = ? AND token = ?`, item.dateKey, item.minuteIndex, item.token);
+    if (!current || current.requires_account_writer !== 1) return;
+    await txn.runAsync(`DELETE FROM inline_minute_link_outbox WHERE date_key = ? AND minute_index = ? AND token = ?`,
+      item.dateKey, item.minuteIndex, item.token);
+    await txn.runAsync(`INSERT INTO inline_minute_link_outbox
+      (date_key, minute_index, affected_dates_json, token, requires_account_writer) VALUES (?, ?, ?, ?, 1)`,
+      item.dateKey, item.minuteIndex, current.affected_dates_json, item.token);
+    deferred = true;
+  });
+  return deferred;
 }
 
 export async function getDaySegments(value: string): Promise<ActivitySegment[]> {
@@ -1012,8 +1042,8 @@ export async function applySpreadsheetCells(day: string, target: SpreadsheetCell
   return applySpreadsheetTransaction([{ day, target, expected }], options);
 }
 
-/** Every coordinate is checked before either date is changed. Cut/Paste and its Undo
- * therefore share one SQLite transaction, including ledger and calendar outboxes. */
+/** Every coordinate is checked before any date is changed. Bounded spreadsheet
+ * pastes and Undo share one transaction, including ledger and calendar outboxes. */
 export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[],
   options: { textChanged: boolean; formatChanged: boolean; canApply?: () => boolean;
     localReceipt?: { key: string; value: Record<string, unknown> } }, guards: SpreadsheetGuard[] = [],
@@ -1027,7 +1057,8 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
       throw new Error('Invalid spreadsheet cell range.');
     }
   };
-  if (!changes.length || changes.length > 2 || new Set(changes.map((change) => change.day)).size !== changes.length) {
+  if (!changes.length || changes.length > 31 || new Set(changes.map((change) => change.day)).size !== changes.length ||
+      changes.reduce((count, change) => count + change.target.length, 0) > 10_000) {
     throw new Error('Invalid spreadsheet transaction.');
   }
   for (const change of changes) {
@@ -1062,7 +1093,7 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
       byDay.set(day, new Map(rows.map((row) => [row.minute_index, row])));
     }
     const semantic = (entry: SpreadsheetCellContent | null) => entry ?
-      canonicalValue({ text: entry.text.trim(), categoryId: entry.categoryId }) : 'null';
+      canonicalValue({ text: entry.text, categoryId: entry.categoryId }) : 'null';
     const check = async (day: string, before: SpreadsheetCellState, strict: boolean) => {
       const row = byDay.get(day)!.get(before.minuteIndex);
       if (options.textChanged && (semantic(row ? mapMinuteRow(row) : null) !== semantic(before.entry) ||
@@ -1111,7 +1142,7 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
               VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?)
               ON CONFLICT(date_key, minute_index) DO UPDATE SET text = excluded.text,
                 category_id = excluded.category_id, block_id = excluded.block_id, source = 'manual', updated_at = excluded.updated_at`,
-              row?.id ?? cell.entry.id ?? makeId('minute'), day, cell.minuteIndex, cell.entry.text.trim(), cell.entry.categoryId,
+              row?.id ?? cell.entry.id ?? makeId('minute'), day, cell.minuteIndex, cell.entry.text, cell.entry.categoryId,
               cell.entry.blockId ?? row?.block_id ?? makeId('block'), cell.entry.createdAt ?? row?.created_at ?? now, now);
           }
           await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
@@ -1244,6 +1275,10 @@ export async function mergeSyncDocuments(documents: SyncDocument[]) {
             value.text as string, value.categoryId as string, value.blockId as string,
             value.createdAt as string, value.updatedAt as string);
         }
+        // A peer/browser edit needs the same permission-gated account-link pass
+        // as an inline save. Keep the ticket atomic with the winning import;
+        // importing suppresses ordinary journal triggers and native outboxes.
+        await queueInlineMinuteLink(txn, coordinate.date, coordinate.minute, [coordinate.date], true);
       } else if (!incoming.key.startsWith('projection:') && !incoming.key.startsWith('category:')) {
         throw new Error('Unrecognized synchronization record.');
       }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, Keyboard, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { useAppTheme } from '../appearance';
@@ -29,20 +29,28 @@ export type CellActionMenuProps = {
   onToggleUnderline?: () => void;
   onTextColor?: (color: string | null) => void;
   onCellColor?: (id: string) => void;
+  onResetCellColor?: () => void;
   error?: string | null;
   maxHeight?: number;
+  maxWidth?: number;
+  width?: number;
+  onWidthChange?: (width: number) => void;
   onHeightChange?: (height: number) => void;
   onTouchActiveChange?: (active: boolean) => void;
 };
 
 export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGroup, onUngroup, onEvent, onPaste,
   canPaste = Boolean(onPaste), onClose, format = {}, textColor, fillColor, colorChoices = [], selectedColorId,
-  onToggleBold, onToggleItalic, onToggleUnderline, onTextColor, onCellColor, error, maxHeight, onHeightChange, onTouchActiveChange,
+  onToggleBold, onToggleItalic, onToggleUnderline, onTextColor, onCellColor, onResetCellColor, error, maxHeight, maxWidth, width,
+  onWidthChange, onHeightChange, onTouchActiveChange,
 }: CellActionMenuProps) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const { height } = useWindowDimensions();
+  const { height, width: windowWidth } = useWindowDimensions();
   const [palette, setPalette] = useState<'text' | 'cell' | null>(null);
+  const [actionsWidth, setActionsWidth] = useState<number | null>(null);
+  const [formatWidth, setFormatWidth] = useState<number | null>(null);
+  const hasShown = useRef(false);
   const currentTextColor = format.textColor ?? textColor ?? colors.ink;
   const currentFillColor = fillColor ?? colors.calendarCell;
   const menuMaxHeight = Math.max(80, Math.min(360, height * 0.48, maxHeight ?? Number.POSITIVE_INFINITY));
@@ -80,17 +88,28 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGro
     ...(onEvent ? [{ label: 'Event', accessibilityLabel: 'Open source calendar event details', onPress: onEvent, disabled: busy }] : []),
   ];
   const hasFormatting = Boolean(onToggleBold || onToggleItalic || onToggleUnderline || onTextColor || onCellColor);
+  const menuMaxWidth = Math.max(1, Math.min(440, (windowWidth ?? 456) - 16, maxWidth ?? Number.POSITIVE_INFINITY));
+  const measured = actionsWidth !== null && (!hasFormatting || formatWidth !== null);
+  const desiredWidth = !measured || palette ? menuMaxWidth : Math.min(menuMaxWidth,
+    Math.max(48, actionsWidth!, hasFormatting ? formatWidth! : 0) + StyleSheet.hairlineWidth * 2);
+  useEffect(() => { if (measured) onWidthChange?.(desiredWidth); }, [measured, desiredWidth, onWidthChange]);
+  const actualWidth = !measured && !hasShown.current ? menuMaxWidth : Math.min(menuMaxWidth, width ?? desiredWidth);
+  if (measured && (width === undefined || Math.abs(actualWidth - desiredWidth) <= 1)) hasShown.current = true;
+  const visible = hasShown.current;
 
   return (
     <View accessibilityRole="toolbar" accessibilityLabel="Selected minute actions" accessibilityState={{ busy }}
+      pointerEvents={visible ? 'auto' : 'none'}
       onTouchStart={() => onTouchActiveChange?.(true)} onTouchEnd={() => onTouchActiveChange?.(false)}
       onTouchCancel={() => onTouchActiveChange?.(false)}
       onAccessibilityEscape={() => { if (busy) return; if (palette) setPalette(null); else onClose(); }}
       onLayout={(event) => onHeightChange?.(event.nativeEvent.layout.height)}
-      style={[styles.bar, { maxHeight: menuMaxHeight }, palette && styles.expanded]}>
+      style={[styles.bar, { maxHeight: menuMaxHeight, width: actualWidth, opacity: visible ? 1 : 0 }, palette && styles.expanded]}>
       <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="always" keyboardDismissMode="none" bounces={false} style={styles.verticalScroll}>
       <ScrollView horizontal nestedScrollEnabled keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false}
-        keyboardDismissMode="none" bounces={false} style={styles.scroll} contentContainerStyle={styles.actions}>
+        keyboardDismissMode="none" bounces={false} style={styles.scroll} contentContainerStyle={styles.actions}
+        onContentSizeChange={(width) => { if (Number.isFinite(width) && width > 0)
+          setActionsWidth((previous) => previous !== null && Math.abs(previous - width) < 0.5 ? previous : width); }}>
         {actions.map((action) => (
           <Pressable key={action.label} accessibilityRole="button" accessibilityLabel={action.accessibilityLabel}
             accessibilityState={{ disabled: action.disabled }} disabled={action.disabled} onPress={action.onPress}
@@ -99,7 +118,11 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGro
           </Pressable>
         ))}
       </ScrollView>
-      {hasFormatting ? <View style={styles.formatTools}>
+      {hasFormatting ? <ScrollView horizontal nestedScrollEnabled keyboardShouldPersistTaps="always"
+        keyboardDismissMode="none" showsHorizontalScrollIndicator={false} bounces={false} style={styles.formatScroll}
+        contentContainerStyle={styles.formatTools}
+        onContentSizeChange={(width) => { if (Number.isFinite(width) && width > 0)
+          setFormatWidth((previous) => previous !== null && Math.abs(previous - width) < 0.5 ? previous : width); }}>
         {onToggleBold ? <Pressable accessibilityRole="button" accessibilityLabel="Bold"
           accessibilityState={{ selected: Boolean(format.bold), disabled: busy }} disabled={busy} onPress={onToggleBold}
           style={[styles.tool, format.bold && styles.selected, busy && styles.disabled]}>
@@ -126,10 +149,11 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGro
           onPress={() => showPalette('cell')} style={[styles.tool, palette === 'cell' && styles.selected, busy && styles.disabled]}>
           <View style={[styles.fillColorDot, { backgroundColor: currentFillColor }]} />
         </Pressable> : null}
-      </View> : null}
+      </ScrollView> : null}
       {palette ? <CellColorPalette key={palette} mode={palette} busy={busy} textColor={currentTextColor}
         explicitTextColor={format.textColor} selectedColorId={selectedColorId} colorChoices={colorChoices}
         onTextColor={chooseTextColor} onCellColor={(id) => { onCellColor?.(id); setPalette(null); }}
+        onResetCellColor={() => { onResetCellColor?.(); setPalette(null); }}
         onClose={() => setPalette(null)} /> : null}
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       </ScrollView>
@@ -139,7 +163,7 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGro
 
 const createStyles = (colors: AppColors) => StyleSheet.create({
   bar: {
-    width: '100%', flexShrink: 1, maxWidth: '100%', minHeight: 48,
+    flexShrink: 1, minHeight: 48,
     borderRadius: 24, overflow: 'hidden', backgroundColor: colors.panel,
     borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline,
     elevation: 4,
@@ -147,13 +171,14 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   expanded: { borderRadius: 16 },
   verticalScroll: { flexGrow: 0, flexShrink: 1 },
   scroll: { flexGrow: 0 },
-  actions: { minHeight: 48, paddingHorizontal: 8, alignItems: 'center' },
+  actions: { minHeight: 48, paddingHorizontal: 8, alignItems: 'center', alignSelf: 'flex-start', flexGrow: 0 },
   action: { minHeight: 48, paddingHorizontal: 13, alignItems: 'center', justifyContent: 'center', borderRadius: 20 },
   pressed: { backgroundColor: colors.hairline },
   disabled: { opacity: 0.45 },
   label: { color: colors.ink, fontSize: 15, fontWeight: '400' },
-  formatTools: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', paddingHorizontal: 6, paddingBottom: 4,
-    borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, gap: 2 },
+  formatScroll: { flexGrow: 0, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
+  formatTools: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', flexGrow: 0,
+    paddingHorizontal: 6, paddingBottom: 4, gap: 2 },
   tool: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
   toolText: { fontSize: 23, lineHeight: 27, color: colors.ink },
   bold: { fontWeight: '800' },

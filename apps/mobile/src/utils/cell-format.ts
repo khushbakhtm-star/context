@@ -3,7 +3,7 @@
  * value deliberately has no category id/name/color, and new category queries exclude it. */
 export const CELL_FORMAT_PREFIX = 'category:minuteFormat:';
 export type ActivityGroupLabel = { id: string; title: string };
-export type CellFormat = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string; activityGroup?: ActivityGroupLabel };
+export type CellFormat = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string; noFill?: true; activityGroup?: ActivityGroupLabel };
 export type MinuteCellRange = { dateKey: string; startMinute: number; endMinute: number };
 
 export function isActivityGroupId(value: unknown): value is string {
@@ -25,6 +25,7 @@ export function normalizeCellFormat(value: unknown): CellFormat {
   if (source.bold === true) result.bold = true;
   if (source.italic === true) result.italic = true;
   if (source.underline === true) result.underline = true;
+  if (source.noFill === true) result.noFill = true;
   if (typeof source.textColor === 'string' && /^#[0-9a-f]{6}$/i.test(source.textColor)) {
     result.textColor = source.textColor.toUpperCase();
   }

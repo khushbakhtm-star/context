@@ -9,8 +9,10 @@ const ts = require('typescript');
 // Native views are inert elements; state/effects advance deterministically between events.
 function screen(t, options = {}) {
   const day = '2026-10-25'; let now = 10000; let hook = 0; let dirty = true; let tree;
-  const slots = []; const effects = []; const timers = new Map(); let timerId = 0;
-  const calls = []; const pastePreviews = []; const listeners = new Set(); const rows = new Map(); const modules = new Map();
+  const slots = []; const effects = []; const timers = new Map(); const animationFrames = new Map(); let timerId = 0;
+  const calls = []; const pastePreviews = []; const externalPreviews = []; const alerts = [];
+  const listeners = new Set(); const appStateListeners = new Set(); const rows = new Map(); const modules = new Map();
+  let systemReads = 0; let systemCopies = 0;
   let clipboard = null; let failure = null; let writeGate = null; let dismisses = 0;
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
   const react = {
@@ -37,8 +39,10 @@ function screen(t, options = {}) {
       add: (left, right) => ({ get value() { return left.value + right.value; } }) },
     PanResponder: { create: (handlers) => ({ panHandlers: handlers }) },
     Keyboard: { dismiss() { dismisses++; }, addListener: () => ({ remove() {} }) },
-    AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
-    Alert: { alert(_title, _text, buttons) { buttons.find((button) => button.text === 'Replace')?.onPress(); } },
+    AppState: { currentState: 'active', addEventListener: (_event, listener) => {
+      appStateListeners.add(listener); return { remove() { appStateListeners.delete(listener); } }; } },
+    Alert: { alert(title, text, buttons) { alerts.push({ title, text });
+      buttons.find((button) => button.text === (options.confirmReplace === false ? 'Cancel' : 'Replace'))?.onPress(); } },
     Linking: { openURL: async () => {} } };
   const source = (relative) => path.join(__dirname, '../src', relative);
   const emit = () => listeners.forEach((listener) => listener());
@@ -47,10 +51,39 @@ function screen(t, options = {}) {
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } },
     getDayCellFormats: options.readFormats ?? (async () => new Map()), getDayActivityGroups: options.readGroups ?? (async () => []),
     editInlineMinute: (...args) => drafts.edit(...args), getSpreadsheetClipboard: () => clipboard,
+    resetMinuteFill: async (range) => command('reset-fill', range),
+    applyCellFormat: async (range, patch) => command('format', { ...range, patch }),
+    colorMinuteRange: async (range, categoryId) => command('color', { ...range, categoryId }),
+    ungroupMinuteRange: async (range) => command('ungroup', range),
+    groupMinuteRange: async (range, group) => command('group', { ...range, ...group }),
+    cancelMinuteRangeMove() {},
+    getMovableActivityGroup: options.readMovableGroup ?? (async () => null),
+    prepareActivityGroupMove: async (source, destination) => { command('prepare-group-move', { source, destination });
+      return { token: 'group-move-preview', occupiedCount: options.moveOccupied ?? 0 }; },
+    moveActivityGroup: async (source, destination, applyOptions) => command('move-group', { source, destination, ...applyOptions }),
+    prepareMinuteRangeMove: async (source, destination, prepareOptions) => {
+      command('prepare-range-move', { source, destination, ...prepareOptions });
+      return { token: prepareOptions?.sourceToken ? 'move-drop-preview' : 'move-source-preview', occupiedCount: options.moveOccupied ?? 0 };
+    },
+    moveMinuteRange: async (source, destination, applyOptions) => command('move-range', { source, destination, ...applyOptions }),
     copyMinuteRange: (range) => capture('copy', range), cutMinuteRange: (range) => capture('cut', range),
     clearTextMinuteRange: async (range) => { command('clear', range); for (let minute = range.startMinute; minute <= range.endMinute; minute++) {
       const row = rows.get(`${range.dateKey}:${minute}`); if (row) { row.text = ''; drafts.rebaseCommitted([{ ...row, keepColor: true }]); } } },
-    prepareMinutePaste: async (range) => { pastePreviews.push({ ...range }); return { ...range, token: 'preview', occupiedCount: 0 }; },
+    prepareMinutePaste: async (range) => { pastePreviews.push({ ...range }); return {
+      range: { ...range, endMinute: range.endMinute ?? range.startMinute }, token: 'preview', occupiedCount: 0, mode: clipboard.mode }; },
+    prepareExternalMinutePaste: async (text, destination) => {
+      externalPreviews.push({ text, ...destination });
+      if (failure === 'prepare-external') throw Error('External Paste could not be prepared');
+      return options.externalPreview ?? { token: 'external-preview', rows: 1, columns: 1, occupiedCount: 0,
+        ranges: [{ ...destination, endMinute: destination.endMinute ?? destination.startMinute }] };
+    },
+    pasteExternalMinuteRange: async (text, destination, applyOptions) => {
+      command('paste-external', { text, ...destination, ...applyOptions });
+      for (const entry of options.externalRows ?? []) {
+        rows.set(`${entry.dateKey}:${entry.minuteIndex}`, { ...entry });
+        drafts.rebaseCommitted([{ ...entry, keepColor: false }]);
+      }
+    },
     pasteMinuteRange: async (destination) => { command('paste', destination); for (let offset = 0; offset < clipboard.cells.length; offset++) {
       const source = clipboard.cells[offset]; const minuteIndex = destination.startMinute + offset;
       rows.set(`${destination.dateKey}:${minuteIndex}`, { ...source, dateKey: destination.dateKey, minuteIndex });
@@ -70,7 +103,8 @@ function screen(t, options = {}) {
     vm.runInContext(code, vm.createContext({ module, exports: module.exports, console, Date: ClockDate, Intl, Math, Map, Set,
       Promise, Error, Number, JSON, setTimeout: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, at: now + delay }); return id; },
       clearTimeout: (id) => timers.delete(id), setInterval: () => ++timerId, clearInterval() {},
-      requestAnimationFrame: () => ++timerId, cancelAnimationFrame() {},
+      requestAnimationFrame: (callback) => { const id = ++timerId; animationFrames.set(id, callback); return id; },
+      cancelAnimationFrame: (id) => animationFrames.delete(id),
       require(name) {
         if (name === 'react') return react;
         if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
@@ -85,11 +119,20 @@ function screen(t, options = {}) {
           getMinuteEntry: async (date, minute) => rows.get(`${date}:${minute}`) ? { ...rows.get(`${date}:${minute}`) } : null };
         if (resolved === source('services/calendar')) return { loadPlannedEventsResult: options.readNative ?? (async () => ({ plans: [], failures: [] })),
           reconcileLinkedNativeColors: options.reconcileColors ?? (async () => []), flushPendingActuals: async () => ({}) };
-        if (resolved === source('services/categories')) return { listSelectableActivityCategories: async () => [] };
+        if (resolved === source('services/categories')) return { listSelectableActivityCategories: async () => options.colors ?? [] };
         if (resolved === source('services/inline-minutes')) return { inlineMinuteDrafts: drafts,
           flushInlineMinutes: () => drafts.flushAll(), retryInlineMinuteLinks: async () => {}, subscribeInlineMinuteCommits: (listener) => drafts.subscribeCommits((_value, result) => listener(result)),
           subscribeInlineMinuteLinkWarnings: () => () => {} };
         if (resolved === source('services/spreadsheet')) return sheet;
+        if (resolved === source('services/system-cell-clipboard')) return {
+          copySpreadsheetCellsToSystem: async () => { systemCopies++; },
+          readSpreadsheetPasteSource: async () => {
+            systemReads++;
+            if (options.readPasteSource) return options.readPasteSource();
+            if (clipboard) return { kind: 'internal' };
+            throw Error('Copy some cell text before pasting.');
+          },
+        };
         if (resolved === source('sync/accounts')) return { getAccounts: async () => [] };
         if (resolved === source('sync/engine')) return { loadCachedAccountPlans: options.readCached ?? (async () => []),
           loadAccountPlansResult: options.readAccount ?? (async () => ({ plans: [], failures: [], fromCache: false })),
@@ -111,6 +154,9 @@ function screen(t, options = {}) {
   async function settle() { for (let round = 0; round < 80; round++) { await Promise.resolve(); if (dirty) render(); } }
   function find(node, type) { if (!node || typeof node !== 'object') return null; if (node.type === type) return node;
     for (const child of [node.props?.children].flat(Infinity)) { const result = find(child, type); if (result) return result; } return null; }
+  function labelled(node, label) { if (!node || typeof node !== 'object') return null;
+    if (node.props?.accessibilityLabel === label) return node;
+    for (const child of [node.props?.children].flat(Infinity)) { const result = labelled(child, label); if (result) return result; } return null; }
   function cell(minute, date = day) { const row = find(tree, 'FlatList').props.renderItem({ item: minute });
     return row.props.children[1].find((value) => value.props.accessibilityLabel?.startsWith(load(source('utils/time.ts')).formatDayHeading(date))) ?? row.props.children[1][0]; }
   function event() { return { nativeEvent: { pageX: 150, pageY: 400, touches: [{ pageX: 150, pageY: 400 }] } }; }
@@ -144,8 +190,11 @@ function screen(t, options = {}) {
   async function hold(minute) { const target = cell(minute); target.props.onPressIn(); target.props.onTouchStart(event());
     now += 460; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); }
     await settle(); target.props.onTouchEnd(event()); target.props.onPress(event()); await settle(); }
-  t.after(() => { for (const slot of slots) slot?.cleanup?.(); timers.clear(); });
-  return { day, calls, pastePreviews, rows, drafts, async start() { render(); await settle(); }, tap, hold, settle,
+  let disposed = false;
+  function unmount() { if (disposed) return; disposed = true;
+    for (const slot of slots) slot?.cleanup?.(); timers.clear(); animationFrames.clear(); }
+  t.after(unmount);
+  return { day, calls, pastePreviews, externalPreviews, alerts, rows, drafts, async start() { render(); await settle(); }, tap, hold, settle,
     async selectThrough(minute) {
       function handle(node) { if (!node || typeof node !== 'object') return null;
         if (node.props?.accessibilityLabel === 'Drag to select minutes for Auto fill') return node;
@@ -153,11 +202,35 @@ function screen(t, options = {}) {
       handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
     },
     menu: () => find(tree, 'CellActionMenu')?.props, menuPosition, menuAncestors, measureViewport,
+    palette: () => find(tree, 'CellColorPalette')?.props,
+    menuBox: () => { const style = menuAncestors()?.at(-1)?.props.style[1];
+      return style ? { width: style.width, left: style.left.value } : null; },
+    async beginMove(minute, { date = day, x = 150, y = 400 } = {}) {
+      measureViewport();
+      const list = find(tree, 'FlatList'); const rowHeight = list.props.getItemLayout(null, minute).length;
+      list.props.onScroll({ nativeEvent: { contentOffset: { x: 0, y: (minute + 0.5) * rowHeight - (y - 146) } } });
+      const target = cell(minute, date); const touch = { nativeEvent: { pageX: x, pageY: y, touches: [{ pageX: x, pageY: y }] } };
+      const parent = () => { const screen = tree.props.children; return [screen.props.children].flat(Infinity).find((node) => node?.props?.onPanResponderGrant)?.props; };
+      parent().onStartShouldSetPanResponderCapture(touch); target.props.onPressIn(); target.props.onTouchStart(touch);
+      for (const duration of [460, 650]) { now += duration;
+        for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); }
+        await settle(); }
+      const responder = parent(); const claimed = responder.onMoveShouldSetPanResponderCapture(touch, { dx: 1, dy: 1, numberActiveTouches: 1 });
+      if (claimed) responder.onPanResponderGrant(touch);
+      await settle(); return { responder, rowHeight, claimed, x, y };
+    },
+    async flushAnimationFrames() { const pending = [...animationFrames.values()]; animationFrames.clear();
+      pending.forEach((callback) => callback()); await settle(); },
     text: (minute, date = day) => find(cell(minute, date), 'Text')?.props.children,
     async refresh() { const pending = find(tree, 'FlatList').props.refreshControl.props.onRefresh(); await settle(); return pending; },
     async navigate(date) { props.activeDate = date; dirty = true; await settle(); },
-    input: (minute = 600) => find(cell(minute), 'TextInput')?.props,
-    get dismisses() { return dismisses; }, set failure(value) { failure = value; },
+    async background() { native.AppState.currentState = 'background'; for (const listener of appStateListeners) listener('background'); await settle(); },
+    input: (minute = 600, date = day) => labelled(tree,
+      load(source('utils/time.ts')).formatDayHeading(date) + ', ' + load(source('utils/time.ts')).minuteLabel(minute, true) + ', minute text')?.props,
+    bar: (mode) => labelled(tree, mode === 'format' ? 'Minute formatting bar' : 'Minute text entry bar')?.props,
+    action: (label) => labelled(tree, label)?.props,
+    get systemReads() { return systemReads; }, get systemCopies() { return systemCopies; },
+    unmount, get dismisses() { return dismisses; }, set failure(value) { failure = value; },
     set writeGate(value) { writeGate = value; }, advance(ms) { now += ms; }, cell, get tree() { return tree; } };
 }
 
@@ -167,6 +240,46 @@ function plan(id, minute, account = false) {
     endDate: new Date(2026, 9, 25, Math.floor(minute / 60), minute % 60 + 1),
     ...(account ? { accountEvent: { accountId: 'account', event: {} } } : {}) };
 }
+
+test('calendar source failures report to Sync without an inline banner and clear on recovery and unmount', async (t) => {
+  let nativeFailed = true, accountFailed = true; const warnings = [];
+  const h = screen(t, {
+    props: { preferences: { selectedCalendarIds: ['native'], syncActuals: false },
+      onSyncWarningChange: (message) => warnings.push(message) },
+    readNative: async () => ({ plans: [], failures: nativeFailed ? [{ calendarId: 'native', code: 'ERR_CALENDAR_UNAVAILABLE' }] : [] }),
+    readAccount: async () => ({ plans: [], failures: accountFailed ? [{ accountId: 'google:person', code: 'unavailable' }] : [], fromCache: false }),
+  });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Saved minute remains visible', categoryId: 'study', blockId: 'saved' });
+  await h.start();
+  assert.match(warnings.at(-1), /Phone-calendar events could not refresh/);
+  assert.match(warnings.at(-1), /Account-calendar events could not refresh/);
+  const allText = (node) => !node || typeof node !== 'object' ? '' :
+    [typeof node.props?.children === 'string' ? node.props.children : '',
+      ...[node.props?.children].flat(Infinity).filter((child) => child && typeof child === 'object').map(allText)].join(' ');
+  assert.doesNotMatch(allText(h.tree), /Some calendar plans could not load|Pull down to retry|Phone-calendar events could not refresh|Account-calendar events could not refresh/);
+  assert.equal(h.text(600), 'Saved minute remains visible');
+  nativeFailed = false; await h.refresh(); await h.settle();
+  assert.match(warnings.at(-1), /Account-calendar events could not refresh/);
+  assert.doesNotMatch(warnings.at(-1), /Phone-calendar events could not refresh/);
+  accountFailed = false; await h.refresh(); await h.settle(); assert.equal(warnings.at(-1), null);
+  accountFailed = true; await h.refresh(); await h.settle(); assert.ok(warnings.at(-1));
+  h.unmount(); assert.equal(warnings.at(-1), null);
+});
+
+test('a blank colored cell exposes fill Reset while a plain blank keeps only clipboard actions', async (t) => {
+  const colored = screen(t); colored.rows.set(`${colored.day}:600`, { dateKey: colored.day, minuteIndex: 600,
+    text: '', categoryId: 'family', blockId: 'colored' });
+  await colored.start(); await colored.hold(600);
+  assert.equal(colored.menu().onCellColor, undefined); assert.equal(colored.menu().onResetCellColor, undefined);
+  assert.equal(colored.menu().onClear, undefined); colored.menu().onClose(); await colored.settle();
+  colored.action('Save minute text and show formatting').onPress(); await colored.settle();
+  colored.action('Choose cell color').onPress(); await colored.settle(); colored.palette().onResetCellColor(); await colored.settle();
+  assert.deepEqual(colored.calls.map((call) => [call.action, call.startMinute, call.endMinute]), [['reset-fill', 600, 600]]);
+  const blank = screen(t); await blank.start(); await blank.hold(600);
+  assert.equal(blank.menu().onCellColor, undefined); assert.equal(blank.menu().onResetCellColor, undefined);
+  assert.equal(typeof blank.menu().onCut, 'function'); assert.equal(typeof blank.menu().onCopy, 'function');
+  assert.equal(typeof blank.menu().onPaste, 'function');
+});
 
 test('saved notes and cached plans paint while both live providers remain pending', async (t) => {
   const never = new Promise(() => {}); let nativeReads = 0; let accountReads = 0;
@@ -208,6 +321,27 @@ test('offline refresh retains known calendar plans and current local notes', asy
   assert.equal(r.text(600), 'Local text'); assert.equal(r.text(601), 'Native cached'); assert.equal(r.text(602), 'Account cached');
 });
 
+test('Basil source color stays stable when native and account refreshes finish in different orders', async (t) => {
+  let finishNative; let finishAccount;
+  const nativePlan = { ...plan('Pray', 629), color: '#0B8043' };
+  const accountPlan = { ...plan('Pray', 629, true), color: '#51B749' };
+  const r = screen(t, { props: { preferences: { selectedCalendarIds: ['native'], syncActuals: false } },
+    readCached: async () => [accountPlan],
+    readNative: () => new Promise((done) => { finishNative = done; }),
+    readAccount: () => new Promise((done) => { finishAccount = done; }) });
+  const fill = () => r.cell(629).props.children[0].props.style.filter(Boolean)
+    .filter((style) => style.backgroundColor).at(-1)?.backgroundColor;
+  await r.start(); assert.equal(r.text(629), 'Pray'); assert.equal(fill(), '#51B749');
+  finishNative({ plans: [nativePlan], failures: [] }); await r.settle();
+  assert.equal(fill(), '#51B749');
+  finishAccount({ plans: [accountPlan], failures: [], fromCache: false }); await r.settle();
+  assert.equal(fill(), '#51B749'); assert.equal(r.text(629), 'Pray');
+  await r.refresh();
+  finishAccount({ plans: [accountPlan], failures: [], fromCache: false }); await r.settle();
+  finishNative({ plans: [nativePlan], failures: [] }); await r.settle();
+  assert.equal(fill(), '#51B749'); assert.equal(r.text(629), 'Pray');
+});
+
 test('late provider and color reloads cannot replace a newer inline edit', async (t) => {
   let resolve; const native = new Promise((done) => { resolve = done; });
   const r = screen(t, { readNative: () => native, reconcileColors: async () => ['2026-10-25'] });
@@ -243,6 +377,104 @@ test('a delayed previous date provider cannot paint into the newly selected date
   assert.equal(r.text(600, '2026-10-26'), 'New day note'); assert.equal(oldColors, 0);
 });
 
+test('an external clipboard Paste is available without reading the clipboard until explicitly pressed and fills the selected range', async (t) => {
+  const r = screen(t, { readPasteSource: async () => ({ kind: 'external', text: 'Copied from Sheets' }) });
+  await r.start(); assert.equal(r.systemReads, 0);
+  await r.tap(600); await r.selectThrough(603); assert.ok(r.menu());
+  assert.equal(r.menu().canPaste, true, 'external Paste cannot depend on an internal Context clipboard');
+  assert.equal(r.systemReads, 0, 'opening/selecting a menu never reads another app’s clipboard');
+  r.menu().onPaste(); await r.settle();
+  assert.equal(r.systemReads, 1);
+  assert.deepEqual(r.externalPreviews, [{ text: 'Copied from Sheets', dateKey: r.day, startMinute: 600, endMinute: 603 }]);
+  const applied = r.calls.find((call) => call.action === 'paste-external');
+  assert.equal(applied.text, 'Copied from Sheets'); assert.equal(applied.startMinute, 600); assert.equal(applied.endMinute, 603);
+  assert.equal(applied.previewToken, 'external-preview'); assert.equal(r.pastePreviews.length, 0);
+});
+
+test('a two-by-two external matrix confirms and refreshes every prepared date without replacing the Context clipboard', async (t) => {
+  const day = '2026-10-25', tomorrow = '2026-10-26'; const text = 'A\tB\nC\tD';
+  const externalRows = [[day, 600, 'A'], [tomorrow, 600, 'B'], [day, 601, 'C'], [tomorrow, 601, 'D']]
+    .map(([dateKey, minuteIndex, value]) => ({ dateKey, minuteIndex, text: value, categoryId: 'work', blockId: 'new' }));
+  const r = screen(t, { props: { dayCount: 3 }, readPasteSource: async () => ({ kind: 'external', text }), externalRows,
+    externalPreview: { token: 'matrix-preview', rows: 2, columns: 2, occupiedCount: 2,
+      ranges: [{ dateKey: day, startMinute: 600, endMinute: 601 }, { dateKey: tomorrow, startMinute: 600, endMinute: 601 }] } });
+  await r.start(); await r.hold(600); r.menu().onPaste(); await r.settle();
+  assert.equal(r.alerts.length, 1); assert.match(r.alerts[0].text, /2/);
+  const applied = r.calls.find((call) => call.action === 'paste-external');
+  assert.equal(applied.text, text); assert.equal(applied.previewToken, 'matrix-preview');
+  assert.equal(r.text(600, day), 'A'); assert.equal(r.text(601, day), 'C');
+  assert.equal(r.text(600, tomorrow), 'B'); assert.equal(r.text(601, tomorrow), 'D');
+  assert.equal(r.menu(), undefined, 'successful multi-date acknowledgement closes the selected-cell menu');
+});
+
+test('canceling the external overwrite review keeps the selected cells and never applies clipboard text', async (t) => {
+  const r = screen(t, { confirmReplace: false, readPasteSource: async () => ({ kind: 'external', text: 'New external value' }),
+    externalPreview: { token: 'occupied-preview', rows: 1, columns: 1, occupiedCount: 1,
+      ranges: [{ dateKey: '2026-10-25', startMinute: 600, endMinute: 600 }] } });
+  r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Keep original', categoryId: 'family', blockId: 'note' });
+  await r.start(); await r.hold(600); r.menu().onPaste(); await r.settle();
+  assert.equal(r.alerts.length, 1); assert.equal(r.calls.some((call) => call.action === 'paste-external'), false);
+  assert.equal(r.rows.get(`${r.day}:600`).text, 'Keep original'); assert.ok(r.menu()); assert.equal(r.menu().busy, false);
+});
+
+test('empty, denied and invalid external clipboard reads keep an actionable menu and every saved cell', async (t) => {
+  for (const failure of ['empty', 'denied', 'prepare-external']) {
+    const r = screen(t, { readPasteSource: async () => {
+      if (failure === 'empty') throw Error('Copy some text before pasting.');
+      if (failure === 'denied') throw Error('The device clipboard could not be read. Try again.');
+      return { kind: 'external', text: 'An invalid oversized matrix' };
+    } });
+    r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Keep saved note', categoryId: 'family', blockId: 'note' });
+    await r.start(); await r.hold(600); if (failure === 'prepare-external') r.failure = failure;
+    r.menu().onPaste(); await r.settle();
+    assert.ok(r.menu(), failure); assert.equal(r.menu().busy, false);
+    assert.match(r.menu().error, /Copy some text|clipboard could not be read|could not be prepared/);
+    assert.equal(r.rows.get(`${r.day}:600`).text, 'Keep saved note');
+    assert.equal(r.calls.some((call) => call.action === 'paste-external'), false);
+  }
+});
+
+test('navigation during an external clipboard read cannot prepare or paste into the abandoned date', async (t) => {
+  let resolve; const pending = new Promise((done) => { resolve = done; });
+  const r = screen(t, { readPasteSource: () => pending });
+  await r.start(); await r.hold(600); r.menu().onPaste(); await r.settle();
+  assert.equal(r.systemReads, 1); await r.navigate('2026-10-26');
+  resolve({ kind: 'external', text: 'Old destination text' }); await r.settle();
+  assert.equal(r.externalPreviews.length, 0); assert.equal(r.calls.some((call) => call.action === 'paste-external'), false);
+  assert.equal(r.rows.size, 0);
+});
+
+test('navigation during external preview prevents a later overwrite review or paste', async (t) => {
+  let resolve; const pending = new Promise((done) => { resolve = done; });
+  const r = screen(t, { readPasteSource: async () => ({ kind: 'external', text: 'External text' }), externalPreview: pending });
+  await r.start(); await r.hold(600); r.menu().onPaste(); await r.settle();
+  assert.equal(r.externalPreviews.length, 1); await r.navigate('2026-10-26');
+  resolve({ token: 'late-preview', rows: 1, columns: 1, occupiedCount: 1,
+    ranges: [{ dateKey: '2026-10-25', startMinute: 600, endMinute: 600 }] }); await r.settle();
+  assert.equal(r.alerts.length, 0); assert.equal(r.calls.some((call) => call.action === 'paste-external'), false);
+});
+
+test('backgrounding during an external clipboard read dismisses the old selection and prevents its pending paste', async (t) => {
+  let resolve; const pending = new Promise((done) => { resolve = done; });
+  const r = screen(t, { readPasteSource: () => pending });
+  r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Keep saved value', categoryId: 'family', blockId: 'note' });
+  await r.start(); await r.hold(600); r.menu().onPaste(); await r.settle();
+  await r.background(); resolve({ kind: 'external', text: 'Late clipboard value' }); await r.settle();
+  assert.equal(r.externalPreviews.length, 0); assert.equal(r.calls.some((call) => call.action === 'paste-external'), false);
+  assert.equal(r.menu(), undefined); assert.equal(r.rows.get(`${r.day}:600`).text, 'Keep saved value');
+});
+
+test('an explicitly chosen fresh external source takes the external path even while a Context copy remains available', async (t) => {
+  const r = screen(t, { readPasteSource: async () => ({ kind: 'external', text: 'Fresh spreadsheet text' }) });
+  r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Old Context snapshot', categoryId: 'work', blockId: 'note' });
+  await r.start(); await r.hold(600); r.menu().onCopy(); await r.settle();
+  assert.equal(r.systemCopies, 1); assert.equal(r.systemReads, 0);
+  await r.hold(601); r.menu().onPaste(); await r.settle();
+  assert.equal(r.calls.some((call) => call.action === 'paste'), false);
+  assert.equal(r.calls.find((call) => call.action === 'paste-external').text, 'Fresh spreadsheet text');
+  assert.equal(r.rows.get(`${r.day}:600`).text, 'Old Context snapshot');
+});
+
 test('a held recorded cell dispatches whole-cell Copy, then a held destination dispatches Paste', async (t) => {
   const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Read Context answer', categoryId: 'work', blockId: 'note' });
   await r.start(); await r.hold(600); assert.ok(r.menu()); await r.menu().onCopy(); await r.settle();
@@ -250,6 +482,7 @@ test('a held recorded cell dispatches whole-cell Copy, then a held destination d
   await r.tap(601); await r.hold(601); assert.equal(r.menu().canPaste, true); await r.menu().onPaste(); await r.settle();
   assert.equal(r.calls[1].action, 'paste'); assert.equal(r.calls[1].startMinute, 601); assert.equal(r.rows.get(`${r.day}:601`).text, 'Read Context answer');
   assert.equal(r.rows.get(`${r.day}:601`).categoryId, 'work'); assert.equal(r.rows.get(`${r.day}:600`).text, 'Read Context answer');
+  assert.equal(r.systemCopies, 1); assert.equal(r.systemReads, 1); assert.equal(r.externalPreviews.length, 0);
 });
 
 test('Paste forwards every selected minute to both overwrite preview and application', async (t) => {
@@ -307,6 +540,29 @@ test('a keyboard-hide layout change cannot move a menu button between touch down
   assert.deepEqual(r.calls.map((call) => call.action), ['copy']);
 });
 
+test('the sibling menu centers using measured width and defers horizontal resizing until the native release completes', async (t) => {
+  const r = screen(t); await r.start(); r.measureViewport(); await r.hold(600);
+  r.menu().onWidthChange(170); await r.settle();
+  assert.deepEqual(r.menuBox(), { width: 170, left: 110 });
+  assert.equal(r.menu().width, 170); assert.equal(r.menu().maxWidth, 374);
+  r.menu().onTouchActiveChange(true); r.menu().onWidthChange(300); await r.settle();
+  assert.deepEqual(r.menuBox(), { width: 170, left: 110 });
+  r.menu().onTouchActiveChange(false); await r.settle();
+  assert.deepEqual(r.menuBox(), { width: 170, left: 110 }, 'release must reach the original Pressable before its bounds change');
+  await r.flushAnimationFrames(); assert.deepEqual(r.menuBox(), { width: 300, left: 45 });
+});
+
+test('a pending command retains the measured menu width until acknowledgement, then applies deferred layout on a retryable error', async (t) => {
+  const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Original', categoryId: 'work', blockId: 'note' });
+  await r.start(); r.measureViewport(); await r.hold(600); r.menu().onWidthChange(170); await r.settle();
+  r.drafts.edit(r.day, 600, { text: 'Latest note' }); let release;
+  r.writeGate = new Promise((resolve) => { release = resolve; }); r.failure = 'copy';
+  r.menu().onCopy(); await r.settle(); assert.equal(r.menu().busy, true);
+  r.menu().onWidthChange(300); await r.settle(); assert.deepEqual(r.menuBox(), { width: 170, left: 110 });
+  release(); r.writeGate = null; await r.settle();
+  assert.match(r.menu().error, /copy failed/); assert.deepEqual(r.menuBox(), { width: 300, left: 45 });
+});
+
 test('the compact menu is outside the RN scroll responder that consumes the first tap during momentum', async (t) => {
   const scrollSource = fs.readFileSync(path.join(__dirname,
     '../node_modules/react-native/Libraries/Components/ScrollView/ScrollView.js'), 'utf8');
@@ -344,7 +600,8 @@ test('the sibling menu preserves root-relative anchors and outside cells still s
   r.measureViewport({ rootY: 80, bodyY: 170 }); assert.equal(r.menuPosition(), anchored, 'resize cannot move a pressed target');
   await r.tap(601);
   assert.equal(r.menu(), undefined); assert.equal(r.cell(601).props.accessibilityState.selected, true);
-  assert.equal(r.input(601), undefined, 'an outside cell selects directly without a dismiss-then-select tap or keyboard');
+  assert.ok(r.input(601), 'an outside cell opens its bottom entry bar directly');
+  assert.equal(r.input(601).autoFocus, undefined, 'selection does not focus its keyboard');
 });
 
 test('late native geometry callbacks cannot replace a newer root/body menu anchor', async (t) => {
@@ -356,15 +613,73 @@ test('late native geometry callbacks cannot replace a newer root/body menu ancho
   old.forEach((complete) => complete()); assert.equal(r.menuPosition(), before + 100);
 });
 
-test('single taps only select filled cells, double tap edits, and Save waits for current typing', async (t) => {
+test('single taps show the unfocused bottom entry bar, double tap edits, and Save waits for current typing before formatting', async (t) => {
   const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Original', categoryId: 'work', blockId: 'note' });
-  await r.start(); await r.tap(600); assert.equal(r.input(), undefined); r.advance(500); await r.tap(600); assert.equal(r.input(), undefined);
+  await r.start(); await r.tap(600); assert.equal(r.input().value, 'Original');
+  assert.equal(r.input().autoFocus, undefined); assert.ok(r.bar('entry'));
+  let focusRequests = 0; r.input().ref.current = { focus() { focusRequests++; } };
+  await r.flushAnimationFrames(); assert.equal(focusRequests, 0);
+  r.advance(500); await r.tap(600); await r.flushAnimationFrames(); assert.equal(focusRequests, 0);
   await r.tap(600); assert.equal(r.input().value, 'Original'); r.input().onChangeText('First edit'); await r.settle();
+  await r.flushAnimationFrames(); assert.equal(focusRequests, 1);
+  assert.equal(r.text(600), 'First edit', 'the saved-cell display mirrors raw bottom-input text before SQLite acknowledgement');
   let release; r.writeGate = new Promise((resolve) => { release = resolve; }); const previousDismisses = r.dismisses;
   r.input().onSubmitEditing(); await r.settle(); assert.ok(r.input()); assert.equal(r.dismisses, previousDismisses);
   r.input().onChangeText('Latest edit while saving'); await r.settle(); release(); r.writeGate = null; await r.settle();
   assert.equal(r.rows.get(`${r.day}:600`).text, 'Latest edit while saving'); assert.equal(r.input(), undefined);
+  assert.ok(r.bar('format')); r.action('Finish formatting').onPress(); await r.settle(); assert.equal(r.bar('format'), undefined);
   assert.ok(r.dismisses > previousDismisses); assert.equal(r.cell(600).props.accessibilityState.selected, true);
+});
+
+test('an untouched blank advances through both bottom checks without recording a minute, opening a popup, or clearing selection', async (t) => {
+  const h = screen(t); await h.start(); await h.tap(600);
+  assert.equal(h.input().value, ''); assert.equal(h.input().maxLength, 50000); assert.equal(h.input().autoFocus, undefined);
+  assert.equal(h.cell(600).props.children.some((child) => child?.type === 'TextInput'), false, 'grid cells never become editors');
+  h.action('Save minute text and show formatting').onPress(); await h.settle();
+  assert.equal(h.rows.size, 0); assert.equal(h.input(), undefined); assert.ok(h.bar('format')); assert.equal(h.menu(), undefined);
+  assert.ok(h.action('Bold')); assert.ok(h.action('Italic')); assert.ok(h.action('Underline'));
+  assert.ok(h.action('Choose text color')); assert.ok(h.action('Choose cell color'));
+  h.action('Finish formatting').onPress(); await h.settle();
+  assert.equal(h.bar('format'), undefined); assert.equal(h.bar('entry'), undefined); assert.equal(h.rows.size, 0);
+  assert.equal(h.cell(600).props.accessibilityState.selected, true);
+  await h.tap(600); assert.ok(h.bar('entry'), 'a subsequent selection opens entry again');
+});
+
+test('format actions stay in the saved bottom bar while held Group uses the existing inline composer', async (t) => {
+  const h = screen(t, { colors: [{ id: 'family', name: 'Basil', color: '#0B8043' }] }); h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600,
+    text: 'Read Codex', categoryId: 'study', blockId: 'note' });
+  await h.start(); await h.tap(600); await h.selectThrough(602); assert.ok(h.menu());
+  for (const key of ['onToggleBold', 'onToggleItalic', 'onToggleUnderline', 'onTextColor', 'onCellColor', 'onResetCellColor', 'onEvent'])
+    assert.equal(h.menu()[key], undefined, `${key} is absent from the held clipboard popup`);
+  assert.equal(typeof h.menu().onAutoFill, 'function'); assert.equal(typeof h.menu().onGroup, 'function');
+  h.action('Save minute text and show formatting').onPress(); await h.settle();
+  h.action('Bold').onPress(); await h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls.at(-1))), { action: 'format', dateKey: h.day, startMinute: 600, endMinute: 602, patch: { bold: true } });
+  h.action('Choose text color').onPress(); await h.settle(); h.palette().onTextColor('#123456'); await h.settle();
+  assert.equal(h.calls.at(-1).patch.textColor, '#123456'); assert.ok(h.bar('format'));
+  await h.hold(600); h.menu().onGroup(); await h.settle();
+  assert.ok(h.action('Activity title for selected minutes'), 'Group retains its explicit inline title form');
+  assert.equal(h.bar('format'), undefined, 'the existing group composer replaces the bar while naming an activity');
+  h.action('Cancel grouping').onPress(); await h.settle(); assert.ok(h.bar('format'));
+  assert.equal(h.menu(), undefined, 'canceling a deliberate fill-panel action does not open a held-cell popup');
+  await h.hold(600); h.menu().onGroup(); await h.settle();
+  h.action('Activity title for selected minutes').onChangeText('Reading'); await h.settle();
+  h.action('Choose group fill color').onPress(); await h.settle(); h.palette().onCellColor('family'); await h.settle();
+  assert.equal(h.action('Create group from selected minutes').disabled, false);
+  h.action('Create group from selected minutes').onPress(); await h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls.at(-1))), { action: 'group', dateKey: h.day, startMinute: 600, endMinute: 602, title: 'Reading', categoryId: 'family' });
+  assert.ok(h.bar('format'));
+});
+
+test('source Event stays in the fill panel and held Ungroup retains its existing selected-cell route', async (t) => {
+  const group = { dateKey: '2026-10-25', blockId: 'activity_group', title: 'Coffee', categoryId: 'family', startMinute: 600, endMinute: 601 };
+  const h = screen(t, { readGroups: async () => [group], readNative: async () => ({ plans: [plan('Source event', 600)], failures: [] }) });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Boil water', categoryId: 'family', blockId: group.blockId });
+  await h.start(); await h.tap(600); h.action('Save minute text and show formatting').onPress(); await h.settle();
+  h.action('Choose cell color').onPress(); await h.settle();
+  assert.ok(h.action('Open source calendar event details'));
+  await h.hold(600); assert.equal(typeof h.menu().onUngroup, 'function'); h.menu().onUngroup(); await h.settle();
+  assert.equal(h.calls.at(-1).action, 'ungroup'); assert.equal(h.calls.at(-1).startMinute, 600);
 });
 
 test('a failed keyboard Save preserves the typed value and editing for retry', async (t) => {
@@ -373,9 +688,7 @@ test('a failed keyboard Save preserves the typed value and editing for retry', a
   const previousDismisses = r.dismisses; r.input().onSubmitEditing(); await r.settle();
   assert.equal(r.input().value, 'An unsaved thought'); assert.equal(r.dismisses, previousDismisses);
   assert.equal(r.drafts.get(r.day, 600).error, true);
-  r.input().onAccessibilityAction({ nativeEvent: { actionName: 'showMenu' } }); await r.settle();
-  assert.equal(r.input(), undefined, 'an explicitly requested blocked whole-cell command can leave the raw cell selected without a keyboard');
-  await r.tap(600); await r.tap(600);
+  await r.hold(600); assert.equal(r.menu(), undefined, 'a failed draft blocks whole-cell actions without discarding the entry bar');
   assert.equal(r.input().value, 'An unsaved thought', 'the same raw cell remains editable after a failed database save');
   r.input().onChangeText('Revised after the failure'); await r.settle();
   r.failure = null; r.input().onSubmitEditing(); await r.settle();
@@ -401,9 +714,9 @@ test('editing owns native partial selection and text-only Cut/Paste without open
   await r.start(); await r.tap(600); await r.tap(600);
   assert.equal(r.input().contextMenuHidden, false);
   r.input().onSelectionChange({ nativeEvent: { selection: { start: 13, end: 24 } } });
-  await r.hold(600);
+  assert.equal(r.input().onTouchStart, undefined, 'the native input is outside the grid hold responder');
   assert.ok(r.input(), 'holding edited text must leave the native editor and its selection handles mounted');
-  assert.equal(r.menu(), undefined, 'the row cannot steal a native word-selection hold');
+  assert.equal(r.menu(), undefined, 'native word selection does not invoke grid actions');
   const phrase = 'talk to Mum';
   r.input().onChangeText('Make coffee; '); await r.settle(); // Native Cut reports only the new text value.
   await r.tap(601); await r.tap(601);
@@ -416,5 +729,6 @@ test('editing owns native partial selection and text-only Cut/Paste without open
   assert.equal(r.rows.get(`${r.day}:600`).blockId, 'activity_source');
   assert.equal(r.rows.get(`${r.day}:601`).blockId, 'activity_destination');
   assert.equal(r.calls.length, 0, 'native text actions do not invoke whole-cell Copy/Cut/Paste commands');
+  assert.equal(r.systemReads, 0, 'native partial text Paste stays inside the input and does not inspect the whole-cell clipboard');
   await r.hold(600); assert.ok(r.menu(), 'whole-cell actions remain available after editing closes');
 });

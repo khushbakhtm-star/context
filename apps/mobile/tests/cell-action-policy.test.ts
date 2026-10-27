@@ -72,3 +72,12 @@ test('duplicate draft rows and malformed indices cannot invent a multi-cell sele
   assert.equal(state.kind, 'single-text');
   assert.equal(state.canAutoFill, false);
 });
+
+test('blank colored or styled cells expose formatting without inventing text actions', () => {
+  for (const cell of [{ minuteIndex: 10, text: '', hasFill: true }, { minuteIndex: 10, hasFormatting: true }]) {
+    const policy = analyzeCellSelection([cell]);
+    assert.equal(policy.canFormat, true); assert.equal(policy.canClear, false);
+    assert.equal(policy.canAutoFill, false); assert.equal(policy.canGroup, false);
+  }
+  assert.equal(analyzeCellSelection([{ minuteIndex: 10 }]).canFormat, false);
+});

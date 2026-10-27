@@ -6,6 +6,8 @@ import { CELL_FORMAT_PREFIX, cellFormatKey, formatFromDocument, isActivityGroupI
 import { inlineMinuteKey, type InlineMinuteValue } from '../utils/inline-minute-drafts';
 import { addDays, dateKey } from '../utils/time';
 import { listCategories, listSelectableActivityCategories } from './categories';
+import { parseSpreadsheetCells, serializeSpreadsheetCells, spreadsheetPasteRanges,
+  type SpreadsheetPasteDestination, type SpreadsheetPasteMatrix } from '../utils/spreadsheet-paste';
 
 export type { CellFormat, MinuteCellRange } from '../utils/cell-format';
 export type CellFormatPatch = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string | null };
@@ -51,8 +53,15 @@ export type MinutePasteDestination = { dateKey: string; startMinute: number; end
 export type MinutePastePreview = { token: string; range: MinuteCellRange; occupiedCount: number; mode: 'copy' | 'cut' };
 type ClipboardRecord = SpreadsheetClipboard & { cells: CellState[] };
 type PasteRecord = MinutePastePreview & { clipboardToken: string; before: CellState[] };
+export type ExternalMinutePastePreview = { token: string; ranges: MinuteCellRange[]; rows: number; columns: number; occupiedCount: number };
+type ExternalPasteRecord = ExternalMinutePastePreview & { text: string; matrix: SpreadsheetPasteMatrix;
+  before: { day: string; cells: CellState[] }[] };
 export type ActivityGroupMovePreview = { token: string; source: ActivityGroup; range: MinuteCellRange; occupiedCount: number };
 type GroupMoveRecord = ActivityGroupMovePreview & { sourceCells: CellState[]; destinationCells: CellState[] };
+export type MinuteRangeMovePreview = { token: string; source: MinuteCellRange; range: MinuteCellRange; occupiedCount: number };
+type RangeMoveContext = { cells: CellState[]; groups: SpreadsheetBlockGuard[] };
+type RangeMoveRecord = MinuteRangeMovePreview & { sourceCells: CellState[]; destinationCells: CellState[];
+  sourceContext: RangeMoveContext; destinationContext: RangeMoveContext };
 type Typing = { key: string; command: Command; lastAt: number };
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -98,7 +107,9 @@ class SpreadsheetEditor {
   private deferredEdits = new Map<string, { day: string; minute: number; changes: Partial<InlineMinuteValue> }>();
   private clipboard: ClipboardRecord | null = null;
   private pastePreview: PasteRecord | null = null;
+  private externalPastePreview: ExternalPasteRecord | null = null;
   private groupMovePreview: GroupMoveRecord | null = null;
+  private rangeMovePreview: RangeMoveRecord | null = null;
 
   constructor() {
     inlineMinuteDrafts.subscribeCommits((value, result) => {
@@ -124,6 +135,13 @@ class SpreadsheetEditor {
     const { mode, range, count, token } = this.clipboard;
     return { mode, range: { ...range }, count, token };
   }
+  getClipboardText(): string | null {
+    if (!this.clipboard) return null;
+    try { return serializeSpreadsheetCells(this.clipboard.cells.map((cell) => [cell.entry?.text ?? ''])); }
+    catch { return null; /* Large internal snapshots remain usable inside Context. */ }
+  }
+  cancelExternalPaste() { this.externalPastePreview = null; }
+  cancelRangeMove() { this.rangeMovePreview = null; }
   clearClipboard() { this.clipboard = null; this.pastePreview = null; this.notify(); }
   private notify() { for (const listener of this.listeners) { try { listener(); } catch { /* stale observers are isolated */ } } }
   private boundary() {
@@ -272,7 +290,7 @@ class SpreadsheetEditor {
         // existing notes; explicit color-only members still record the selected time.
         entry: copySourceText ? { text: source.entry!.text, categoryId: categoryId ?? source.entry!.categoryId, blockId }
           : categoryId !== undefined ? { ...cell.entry, text: cell.entry?.text ?? '', categoryId, blockId } : cell.entry,
-        format: clone(source.format) }));
+        format: normalizeCellFormat({ ...source.format, ...(categoryId !== undefined ? { noFill: undefined } : {}) }) }));
       await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
         textChanged: Boolean(source.entry) || categoryId !== undefined, formatChanged: true });
     });
@@ -297,7 +315,7 @@ class SpreadsheetEditor {
       const after = before.map((cell) => ({ minuteIndex: cell.minuteIndex,
         // The title belongs to the activity; every minute keeps its own note.
         entry: { ...cell.entry, text: cell.entry?.text ?? '', categoryId: input.categoryId, blockId },
-        format: normalizeCellFormat({ ...cell.format, activityGroup: { id: blockId, title } }) }));
+        format: normalizeCellFormat({ ...cell.format, noFill: undefined, activityGroup: { id: blockId, title } }) }));
       await this.perform({ day: range.dateKey, before: Promise.resolve(before), after, textChanged: true, formatChanged: true });
     });
   }
@@ -311,9 +329,22 @@ class SpreadsheetEditor {
       const after = before.map((cell) => ({ ...clone(cell), entry: {
         ...cell.entry, text: cell.entry?.text ?? '', categoryId,
         blockId: cell.entry?.blockId ?? this.newToken('sheet'),
-      } }));
+      }, format: normalizeCellFormat({ ...cell.format, noFill: undefined }) }));
       await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
-        textChanged: true, formatChanged: false });
+        textChanged: true, formatChanged: true });
+    });
+  }
+  resetFill(range: MinuteCellRange) {
+    validateMinuteCellRange(range);
+    return this.enqueue(async () => {
+      const before = await readCells(range);
+      const after = before.map((cell) => {
+        const keepEntry = cell.entry && (cell.entry.text.trim() || isActivityGroupId(cell.entry.blockId));
+        return { ...clone(cell), entry: keepEntry ? { ...clone(cell.entry!), categoryId: 'unaccounted' } : null,
+          format: normalizeCellFormat({ ...cell.format, noFill: true }),
+          ...(cell.display ? { display: { ...clone(cell.display), categoryId: 'unaccounted', keepColor: Boolean(keepEntry && !cell.entry!.text.trim()) } } : {}) };
+      });
+      await this.perform({ day: range.dateKey, before: Promise.resolve(before), after, textChanged: true, formatChanged: true });
     });
   }
   ungroup(range: MinuteCellRange) {
@@ -437,6 +468,112 @@ class SpreadsheetEditor {
       this.groupMovePreview = null;
     });
   }
+  private async rangeMoveContext(range: MinuteCellRange): Promise<RangeMoveContext> {
+    const day = clone(await readCells({ dateKey: range.dateKey, startMinute: 0, endMinute: 1439 }));
+    const inside = (minute: number) => minute >= range.startMinute && minute <= range.endMinute;
+    const ids = new Set(day.filter((cell) => inside(cell.minuteIndex) && isActivityGroupId(cell.entry?.blockId))
+      .map((cell) => cell.entry!.blockId!));
+    return { cells: day.filter((cell) => inside(cell.minuteIndex) || ids.has(cell.entry?.blockId ?? '')),
+      groups: await Promise.all([...ids].map(async (blockId) => ({ blockId,
+        members: (await getEntriesForBlock(blockId)).map(({ dateKey, minuteIndex }) => ({ dateKey, minuteIndex })) }))) };
+  }
+  private async prepareRangeMoveInside(source: MinuteCellRange, destination: MinutePasteDestination, sourceToken?: string) {
+    const range = validateMinuteCellRange({ dateKey: destination.dateKey, startMinute: destination.startMinute,
+      endMinute: destination.startMinute + source.endMinute - source.startMinute });
+    const previous = this.rangeMovePreview;
+    if (sourceToken && (!previous || previous.token !== sourceToken || JSON.stringify(previous.source) !== JSON.stringify(source))) {
+      throw new Error('The selected move changed. Hold the cells again before moving.');
+    }
+    const sourceContext = sourceToken ? previous!.sourceContext : await this.rangeMoveContext(source);
+    const sourceCells = sourceContext.cells.filter((cell) => cell.minuteIndex >= source.startMinute && cell.minuteIndex <= source.endMinute);
+    if (!sourceCells.some((cell) => cell.entry || Object.keys(cell.format).length)) {
+      throw new Error('Record or format a selected cell before moving it. Calendar plans are not moved by a cell drag.');
+    }
+    const destinationContext = await this.rangeMoveContext(range);
+    const destinationCells = destinationContext.cells.filter((cell) => cell.minuteIndex >= range.startMinute && cell.minuteIndex <= range.endMinute);
+    const own = (minute: number) => range.dateKey === source.dateKey && minute >= source.startMinute && minute <= source.endMinute;
+    const preview: RangeMoveRecord = { token: this.newToken('rangeMove'), source: { ...source }, range: { ...range },
+      sourceCells: clone(sourceCells), destinationCells: clone(destinationCells), sourceContext: clone(sourceContext),
+      destinationContext: clone(destinationContext), occupiedCount: destinationCells.filter((cell) => !own(cell.minuteIndex) &&
+        (cell.entry || Object.keys(cell.format).length)).length };
+    this.rangeMovePreview = preview;
+    return { token: preview.token, source: { ...source }, range: { ...range }, occupiedCount: preview.occupiedCount };
+  }
+  prepareRangeMove(source: MinuteCellRange, destination: MinutePasteDestination, options: { sourceToken?: string } = {}) {
+    const range = { ...validateMinuteCellRange(source) }; const target = { ...destination };
+    return this.enqueue(() => this.prepareRangeMoveInside(range, target, options.sourceToken));
+  }
+  moveRange(source: MinuteCellRange, destination: MinutePasteDestination, options: { previewToken?: string } = {}) {
+    const sourceRange = { ...validateMinuteCellRange(source) }; const target = { ...destination };
+    return this.enqueue(async () => {
+      if (!options.previewToken) {
+        const preview = await this.prepareRangeMoveInside(sourceRange, target);
+        if (preview.occupiedCount) throw new Error('The destination contains entries or formatting. Review the destination before replacing it.');
+      }
+      const preview = this.rangeMovePreview;
+      if (!preview || options.previewToken && options.previewToken !== preview.token ||
+          JSON.stringify(preview.source) !== JSON.stringify(sourceRange) || preview.range.dateKey !== target.dateKey ||
+          preview.range.startMinute !== target.startMinute) throw new Error('The selected cells or destination changed. Hold the cells again before moving.');
+      if (preview.range.dateKey === sourceRange.dateKey && preview.range.startMinute === sourceRange.startMinute) {
+        this.rangeMovePreview = null; return;
+      }
+      const changes = new Map<string, { before: Map<number, CellState>; after: Map<number, CellState> }>();
+      const changeFor = (day: string) => {
+        if (!changes.has(day)) changes.set(day, { before: new Map(), after: new Map() });
+        return changes.get(day)!;
+      };
+      for (const [day, context] of [[sourceRange.dateKey, preview.sourceContext], [preview.range.dateKey, preview.destinationContext]] as const) {
+        const change = changeFor(day);
+        for (const cell of context.cells) if (!change.before.has(cell.minuteIndex)) {
+          change.before.set(cell.minuteIndex, clone(cell)); change.after.set(cell.minuteIndex, clone(cell));
+        }
+      }
+      const origin = changeFor(sourceRange.dateKey);
+      for (const cell of preview.sourceCells) origin.after.set(cell.minuteIndex, { minuteIndex: cell.minuteIndex, entry: null, format: {} });
+      const destinationChange = changeFor(preview.range.dateKey); const blocks = new Map<string, string>();
+      for (let offset = 0; offset < preview.sourceCells.length; offset++) {
+        const original = preview.sourceCells[offset]!; const minuteIndex = preview.range.startMinute + offset;
+        const format = clone(original.format); delete format.activityGroup;
+        const originalBlock = original.entry?.blockId ?? `minute_${offset}`;
+        if (!blocks.has(originalBlock)) blocks.set(originalBlock, this.newToken('sheet'));
+        const entry = original.entry && !(format.noFill && !original.entry.text.trim())
+          ? { text: original.entry.text, categoryId: original.entry.categoryId, blockId: blocks.get(originalBlock)! } : null;
+        destinationChange.after.set(minuteIndex, { minuteIndex, entry, format });
+      }
+      const groupsBefore = new Map<string, SpreadsheetBlockGuard>();
+      for (const group of [...preview.sourceContext.groups, ...preview.destinationContext.groups]) if (!groupsBefore.has(group.blockId)) groupsBefore.set(group.blockId, group);
+      const groupsAfter: SpreadsheetBlockGuard[] = [];
+      for (const group of groupsBefore.values()) {
+        const outside = group.members.filter((member) => !changes.has(member.dateKey));
+        if (outside.length) groupsAfter.push({ blockId: group.blockId, members: outside });
+        for (const [day, change] of changes) {
+          const remainder = [...change.after.values()].filter((cell) => cell.entry?.blockId === group.blockId).sort((a, b) => a.minuteIndex - b.minuteIndex);
+          let run: CellState[] = [];
+          const finish = () => {
+            if (!run.length) return;
+            const blockId = this.newToken('activity');
+            for (const cell of run) {
+              cell.entry = { ...cell.entry!, blockId };
+              cell.format = normalizeCellFormat({ ...cell.format, activityGroup: {
+                id: blockId, title: cell.format.activityGroup?.title ?? 'Activity' } });
+            }
+            groupsAfter.push({ blockId, members: run.map((cell) => ({ dateKey: day, minuteIndex: cell.minuteIndex })) }); run = [];
+          };
+          for (const cell of remainder) { if (run.length && run.at(-1)!.minuteIndex + 1 !== cell.minuteIndex) finish(); run.push(cell); }
+          finish();
+        }
+      }
+      const patches = [...changes].map(([day, change]) => ({ day,
+        before: [...change.before.values()].sort((a, b) => a.minuteIndex - b.minuteIndex),
+        after: [...change.after.values()].sort((a, b) => a.minuteIndex - b.minuteIndex) }));
+      await this.perform({ day: sourceRange.dateKey, before: Promise.resolve([]), after: [], patches,
+        guards: [...patches.map(({ day, before }) => ({ day, cells: before })),
+          { day: preview.range.dateKey, cells: preview.destinationCells }],
+        blockGuardsBefore: [...groupsBefore.values()], blockGuardsAfter: groupsAfter,
+        textChanged: true, formatChanged: true, canApply: () => this.rangeMovePreview?.token === preview.token });
+      this.rangeMovePreview = null;
+    });
+  }
   clear(range: MinuteCellRange) {
     validateMinuteCellRange(range);
     return this.enqueue(async () => {
@@ -467,9 +604,10 @@ class SpreadsheetEditor {
       if (!before.length) return;
       const after = before.map((cell) => {
         const categoryId = cell.entry?.categoryId ?? fallback.get(cell.minuteIndex)!;
+        const keepEntry = !cell.format.noFill || isActivityGroupId(cell.entry?.blockId);
         return { ...clone(cell),
-          entry: { ...cell.entry, text: '', categoryId, blockId: cell.entry?.blockId ?? this.newToken('sheet') },
-          display: { dateKey: range.dateKey, minuteIndex: cell.minuteIndex, text: '', categoryId, keepColor: true } };
+          entry: keepEntry ? { ...cell.entry, text: '', categoryId, blockId: cell.entry?.blockId ?? this.newToken('sheet') } : null,
+          display: { dateKey: range.dateKey, minuteIndex: cell.minuteIndex, text: '', categoryId, keepColor: keepEntry } };
       });
       await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
         textChanged: true, formatChanged: false });
@@ -564,6 +702,47 @@ class SpreadsheetEditor {
       this.notify();
     });
   }
+  private async prepareExternalPasteInside(text: string, matrix: SpreadsheetPasteMatrix, ranges: MinuteCellRange[]) {
+    const before = await Promise.all(ranges.map(async (range) => ({ day: range.dateKey, cells: clone(await readCells(range)) })));
+    const preview: ExternalPasteRecord = { token: this.newToken('external-paste'), text, matrix: clone(matrix), ranges: clone(ranges),
+      rows: ranges[0]!.endMinute - ranges[0]!.startMinute + 1, columns: matrix.columns,
+      occupiedCount: before.reduce((count, day) => count + day.cells.filter((cell) =>
+        Boolean(cell.entry) || Object.keys(cell.format).length > 0).length, 0), before };
+    this.externalPastePreview = preview;
+    return { token: preview.token, ranges: clone(preview.ranges), rows: preview.rows,
+      columns: preview.columns, occupiedCount: preview.occupiedCount };
+  }
+  prepareExternalPaste(text: string, destination: SpreadsheetPasteDestination): Promise<ExternalMinutePastePreview> {
+    const matrix = parseSpreadsheetCells(text); const ranges = spreadsheetPasteRanges(matrix, destination);
+    return this.enqueue(() => this.prepareExternalPasteInside(text, matrix, ranges));
+  }
+  pasteExternal(text: string, destination: SpreadsheetPasteDestination, options: { previewToken?: string } = {}) {
+    // Parse and freeze the requested rectangle before the first asynchronous step.
+    const matrix = parseSpreadsheetCells(text); const ranges = spreadsheetPasteRanges(matrix, destination);
+    return this.enqueue(async () => {
+      if (!options.previewToken) {
+        const preview = await this.prepareExternalPasteInside(text, matrix, ranges);
+        if (preview.occupiedCount) throw new Error('The destination contains entries or formatting. Review the destination before replacing it.');
+      }
+      const preview = this.externalPastePreview;
+      if (!preview || options.previewToken && options.previewToken !== preview.token || preview.text !== text ||
+          JSON.stringify(preview.ranges) !== JSON.stringify(ranges)) {
+        throw new Error('The spreadsheet text or destination changed. Select Paste again.');
+      }
+      const patches = preview.before.map(({ day, cells }, column) => ({ day, before: clone(cells),
+        after: cells.map((cell, row) => {
+          const text = preview.matrix.cells[preview.matrix.rows === 1 && preview.matrix.columns === 1 ? 0 : row]![column]!;
+          return { ...clone(cell), entry: cell.entry ? { ...clone(cell.entry), text } : text.trim()
+            ? { text, categoryId: 'unaccounted', blockId: this.newToken('sheet') } : null,
+            ...(cell.display ? { display: { ...clone(cell.display), text,
+              keepColor: Boolean(cell.entry && !text.trim()) } } : {}) };
+        }) }));
+      await this.perform({ day: ranges[0]!.dateKey, before: Promise.resolve([]), after: [], patches,
+        guards: preview.before.map(({ day, cells }) => ({ day, cells })), textChanged: true, formatChanged: true,
+        canApply: () => this.externalPastePreview?.token === preview.token });
+      this.externalPastePreview = null;
+    });
+  }
   undo() { return this.enqueue(async () => {
     const command = this.undoStack.at(-1); if (!command) return;
     await this.apply(command, true); this.undoStack.pop(); this.redoStack.push(command); this.notify();
@@ -585,10 +764,16 @@ export const clearTextMinuteRange = (range: MinuteCellRange, displayedColorFallb
   spreadsheetEditor.clearText(range, displayedColorFallbacks);
 export const groupMinuteRange = (range: MinuteCellRange, input: { title: string; categoryId: string }) => spreadsheetEditor.group(range, input);
 export const colorMinuteRange = (range: MinuteCellRange, categoryId: string) => spreadsheetEditor.color(range, categoryId);
+export const resetMinuteFill = (range: MinuteCellRange) => spreadsheetEditor.resetFill(range);
 export const ungroupMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.ungroup(range);
 export const prepareActivityGroupMove = (source: ActivityGroup, destination: MinutePasteDestination) => spreadsheetEditor.prepareGroupMove(source, destination);
 export const moveActivityGroup = (source: ActivityGroup, destination: MinutePasteDestination, options?: { previewToken?: string }) =>
   spreadsheetEditor.moveGroup(source, destination, options);
+export const prepareMinuteRangeMove = (source: MinuteCellRange, destination: MinutePasteDestination, options?: { sourceToken?: string }) =>
+  spreadsheetEditor.prepareRangeMove(source, destination, options);
+export const moveMinuteRange = (source: MinuteCellRange, destination: MinutePasteDestination, options?: { previewToken?: string }) =>
+  spreadsheetEditor.moveRange(source, destination, options);
+export const cancelMinuteRangeMove = () => spreadsheetEditor.cancelRangeMove();
 export const undoSpreadsheetEdit = () => spreadsheetEditor.undo();
 export const redoSpreadsheetEdit = () => spreadsheetEditor.redo();
 export const copyMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.copy(range, 'copy');
@@ -596,5 +781,10 @@ export const cutMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.copy
 export const prepareMinutePaste = (destination: MinutePasteDestination) => spreadsheetEditor.preparePaste(destination);
 export const pasteMinuteRange = (destination: MinutePasteDestination, options?: { previewToken?: string }) => spreadsheetEditor.paste(destination, options);
 export const getSpreadsheetClipboard = () => spreadsheetEditor.getClipboard();
+export const getSpreadsheetClipboardText = () => spreadsheetEditor.getClipboardText();
 export const clearSpreadsheetClipboard = () => spreadsheetEditor.clearClipboard();
+export const prepareExternalMinutePaste = (text: string, destination: SpreadsheetPasteDestination) => spreadsheetEditor.prepareExternalPaste(text, destination);
+export const pasteExternalMinuteRange = (text: string, destination: SpreadsheetPasteDestination, options?: { previewToken?: string }) =>
+  spreadsheetEditor.pasteExternal(text, destination, options);
+export const cancelExternalMinutePaste = () => spreadsheetEditor.cancelExternalPaste();
 export const subscribeSpreadsheetCommits = (listener: (event: SpreadsheetCommit) => void) => spreadsheetEditor.subscribeCommits(listener);

@@ -30,6 +30,12 @@ test('native occurrence color wins over base event, exposed event color and cale
   assert.equal(nativeEventColor({ id: 'apple-event' }, start, {}, '#445566'), '#445566');
 });
 
+test('an explicit fill reset suppresses actual, group and underlying plan colors until a new fill preview is chosen', () => {
+  assert.equal(calendarCellColor({ noFill: true, hasActual: true, actualColor: '#123456', groupColor: '#234567', planColor: '#345678' }), undefined);
+  assert.equal(calendarCellColor({ noFill: true, hasActual: false, planColor: '#345678' }), undefined);
+  assert.equal(calendarCellColor({ noFill: true, previewColor: '#567890', hasActual: true, actualColor: '#123456' }), '#567890');
+});
+
 test('every minute of an overnight or shifted plan retains full source color with an exclusive end boundary', () => {
   const day = '2026-10-25';
   const plan: PlannedEvent = { id: 'event', calendarId: 'calendar', title: 'Sleep', allDay: false,

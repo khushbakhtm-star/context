@@ -28,9 +28,10 @@ import { bindingInterval, matchActivityTranslation } from '../utils/activity-tra
 import { calendarColor, nativeEventColor } from '../utils/calendar-cell-color';
 import { formatCalendarMinuteLog } from '../utils/calendar-minute-log';
 import { getAccounts } from '../sync/accounts';
+import { hasConfiguredAccountCalendarWriter } from './calendar-write-routing';
 import { ensureSourceColorCategory, listCategories } from './categories';
 import { hashValue } from '../sync/codec';
-import { localActivityColorHash, notifyCalendarColorImported, reconcileLinkedAccountColors,
+import { listProjections, localActivityColorHash, notifyCalendarColorImported, reconcileLinkedAccountColors,
   requireCalendarColorImportCurrent } from '../sync/engine';
 
 function isWeb() {
@@ -47,6 +48,18 @@ export function configureCalendarProjection(calendarId: string | null) {
 }
 
 class ProjectionCancelledError extends Error {}
+
+async function accountOwnedCalendarBlocks() {
+  // A paused/revoked source link still owns its activity until explicitly
+  // removed. Falling back to the phone provider must not bypass that review.
+  return new Set((await listProjections()).filter((projection) => projection.state !== 'deleted')
+    .map((projection) => projection.blockId));
+}
+
+async function requireNativeWriteAuthority(blockId: string, canContinue: () => boolean) {
+  if (!canContinue() || await hasConfiguredAccountCalendarWriter() ||
+      (await accountOwnedCalendarBlocks()).has(blockId) || !canContinue()) throw new ProjectionCancelledError();
+}
 
 export async function getCalendarPermissionStatus() {
   if (isWeb()) return 'unavailable';
@@ -279,8 +292,10 @@ let nativeColorChain: Promise<void> = Promise.resolve();
 export function reconcileLinkedNativeColors(value: string, plans: readonly PlannedEvent[], calendars: readonly DeviceCalendar[]): Promise<string[]> {
   const work = async () => {
     const changed = new Set<string>();
+    const owned = await accountOwnedCalendarBlocks();
     await listCategories();
     for (const binding of await getSyncBindings(value)) {
+      if (owned.has(binding.blockId)) continue;
       const plan = plans.find((item) => item.id === binding.eventId && item.calendarId === binding.calendarId && !item.allDay);
       const calendar = calendars.find((item) => item.id === binding.calendarId);
       if (!plan || !calendar || !verifiedNativeEventColors.get(plan)) continue;
@@ -288,6 +303,7 @@ export function reconcileLinkedNativeColors(value: string, plans: readonly Plann
       if (!color) continue;
       const interval = bindingInterval(binding.segmentKey, binding.blockId);
       if (!interval) throw new Error('A linked activity needs review before importing its calendar color.');
+      await requireUnchangedNativeEvent(binding);
       const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === interval.dateKey &&
         entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute);
       if (!entries.length) continue;
@@ -318,6 +334,7 @@ export function reconcileLinkedNativeColors(value: string, plans: readonly Plann
       // Recheck exact ownership after the source/category awaits, before SQLite commit.
       const current = (await getSyncBindings(value)).find((item) => item.segmentKey === binding.segmentKey);
       if (!current || hashValue(current) !== hashValue(binding)) throw new Error('The calendar link changed. Refresh before importing its color.');
+      if ((await accountOwnedCalendarBlocks()).has(binding.blockId)) continue;
       const affected = await recolorExpectedMinuteEntries(entries, category.id, { key, value: {
         version: 1, calendarId: binding.calendarId, eventId: binding.eventId, remoteColor: color,
         localColorHash: localActivityColorHash(next) } satisfies NativeColorReceipt }, guard);
@@ -414,6 +431,62 @@ function eventDetails(segment: ActivitySegment) {
   };
 }
 
+type NativeWriteReceipt = { version: 1; calendarId: string; eventId: string; contentHash: string };
+const nativeWriteReceiptKey = (calendarId: string, eventId: string) =>
+  `calendar.native-write.v1.${encodeURIComponent(calendarId)}.${encodeURIComponent(eventId)}`;
+function nativeEventContentHash(event: { title?: unknown; notes?: unknown; startDate?: unknown; endDate?: unknown;
+  allDay?: unknown; recurrenceRule?: unknown }) {
+  const start = readEventDate(event.startDate).getTime(); const end = readEventDate(event.endDate).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) throw new Error('A linked calendar event has invalid times. Review it before synchronizing.');
+  const rule = event.recurrenceRule;
+  const recurring = typeof rule === 'string' ? rule.trim().length > 0 : rule && typeof rule === 'object'
+    ? Object.values(rule).some((value) => value !== null && value !== undefined && value !== '') : Boolean(rule);
+  return hashValue({ title: typeof event.title === 'string' ? event.title : '',
+    notes: typeof event.notes === 'string' ? event.notes.replace(/\r\n/g, '\n') : '', start, end,
+    allDay: event.allDay === true, recurring });
+}
+async function recordNativeWrite(calendarId: string, eventId: string, segment: ActivitySegment) {
+  await setSetting(nativeWriteReceiptKey(calendarId, eventId), { version: 1, calendarId, eventId,
+    contentHash: nativeEventContentHash(eventDetails(segment)) } satisfies NativeWriteReceipt);
+}
+async function requireUnchangedNativeEvent(binding: SyncBinding) {
+  let event: { calendarId: string; title?: unknown; notes?: unknown; startDate?: unknown; endDate?: unknown;
+    allDay?: unknown; recurrenceRule?: unknown };
+  try {
+    if (Platform.OS === 'android' && typeof CalendarRead.ExpoCalendarEvent?.get === 'function') {
+      const read = calendarReadChain.then(async () => {
+        const current = await CalendarRead.ExpoCalendarEvent.get(binding.eventId);
+        // Extract shared native getters while holding the same mapper lease as
+        // listEvents, bypassing the legacy Android empty-RRULE conversion.
+        return { calendarId: current.calendarId, title: current.title, notes: current.notes,
+          startDate: current.startDate, endDate: current.endDate, allDay: current.allDay, recurrenceRule: current.recurrenceRule };
+      });
+      calendarReadChain = read.then(() => undefined, () => undefined);
+      event = await read;
+    } else event = await Calendar.getEventAsync(binding.eventId);
+  }
+  catch (error) { if (isEventNotFoundError(error)) return; throw error; }
+  if (event.calendarId !== binding.calendarId) throw new Error('A linked calendar event changed calendars. Review it before synchronizing.');
+  const key = nativeWriteReceiptKey(binding.calendarId, binding.eventId);
+  const receipt = await getSetting<NativeWriteReceipt | null>(key, null);
+  const contentHash = nativeEventContentHash(event);
+  if (receipt) {
+    if (receipt.version !== 1 || receipt.calendarId !== binding.calendarId || receipt.eventId !== binding.eventId ||
+        !/^[a-f0-9]{64}$/.test(receipt.contentHash) || receipt.contentHash !== contentHash) {
+      throw new Error('This linked event was edited in your calendar. Its title, times and notes were kept. Review and link those changes before synchronizing this activity.');
+    }
+  } else {
+    // Older native copies have only an exact private event ID and their bound
+    // interval. A moved/resized event is not the old slot's disposable copy.
+    const interval = bindingInterval(binding.segmentKey, binding.blockId);
+    if (!interval || event.allDay || readEventDate(event.startDate).getTime() !== localDateAtMinute(interval.dateKey, interval.startMinute).getTime() ||
+        readEventDate(event.endDate).getTime() !== localDateAtMinute(interval.dateKey, interval.endMinute + 1).getTime()) {
+      throw new Error('This linked event moved or changed duration in your calendar. It was kept. Review and link its new time before synchronizing or resetting the old cells.');
+    }
+    await setSetting(key, { version: 1, calendarId: binding.calendarId, eventId: binding.eventId, contentHash } satisfies NativeWriteReceipt);
+  }
+}
+
 type NativeCreateIntent = { version: 1; calendarId: string; blockId: string; segmentKey: string; eventId: string | null };
 const nativeIntentKey = (calendarId: string, blockId: string) =>
   `calendar.create-intent:${encodeURIComponent(calendarId)}:${encodeURIComponent(blockId)}`;
@@ -462,8 +535,12 @@ async function createSegmentEvent(
       event.notes?.split(/\r?\n/).includes(blockMarker),
     );
   if (existing) {
+    await requireUnchangedNativeEvent({ calendarId, eventId: existing.id, blockId: segment.blockId,
+      segmentKey: segment.segmentKey, dateKey: segment.dateKey, updatedAt: '' });
+    await requireNativeWriteAuthority(segment.blockId, canContinue);
     const updatedId = await Calendar.updateEventAsync(existing.id, eventDetails(segment));
     const eventId = updatedId || existing.id;
+    await recordNativeWrite(calendarId, eventId, segment);
     claimedEventIds.add(eventId);
     return eventId;
   }
@@ -481,9 +558,12 @@ async function createSegmentEvent(
     if (!await boundEventIsDefinitelyMissing(intent.eventId)) {
       const recorded = await Calendar.getEventAsync(intent.eventId);
       if (recorded.calendarId !== calendarId) throw new Error('The unfinished calendar update belongs to a different calendar.');
-      if (!canContinue()) throw new ProjectionCancelledError();
+      await requireUnchangedNativeEvent({ calendarId, eventId: intent.eventId, blockId: segment.blockId,
+        segmentKey: segment.segmentKey, dateKey: segment.dateKey, updatedAt: '' });
+      await requireNativeWriteAuthority(segment.blockId, canContinue);
       const updatedId = await Calendar.updateEventAsync(intent.eventId, eventDetails(segment));
       const recoveredId = updatedId || intent.eventId;
+      await recordNativeWrite(calendarId, recoveredId, segment);
       if (recoveredId !== intent.eventId) await setSetting(intentKey, { ...intent, eventId: recoveredId });
       claimedEventIds.add(recoveredId);
       return recoveredId;
@@ -498,9 +578,12 @@ async function createSegmentEvent(
   const pending: NativeCreateIntent = { version: 1, calendarId, blockId: segment.blockId, segmentKey: segment.segmentKey, eventId: null };
   await setSetting(intentKey, pending);
   if (!canContinue()) { await setSetting(intentKey, null); throw new ProjectionCancelledError(); }
+  try { await requireNativeWriteAuthority(segment.blockId, canContinue); }
+  catch (error) { await setSetting(intentKey, null); throw error; }
   const eventId = await Calendar.createEventAsync(calendarId, eventDetails(segment));
   if (!eventId) throw new Error('The calendar did not return its event identifier, so this device-calendar link is paused. Review and link any existing calendar event before using account calendar editing; enabling editing alone does not reuse it.');
   await setSetting(intentKey, { ...pending, eventId });
+  await recordNativeWrite(calendarId, eventId, segment);
   claimedEventIds.add(eventId);
   return eventId;
 }
@@ -535,6 +618,7 @@ async function updateOrReplaceEvent(
   claimedEventIds: Set<string>,
   canContinue: () => boolean,
 ): Promise<ReconciliationResult> {
+  await requireUnchangedNativeEvent(binding);
   if (binding.calendarId !== targetCalendarId) {
     // Create first so changing the destination can never erase the only remote copy.
     const replacementId = await createSegmentEvent(
@@ -543,10 +627,11 @@ async function updateOrReplaceEvent(
       claimedEventIds,
       canContinue,
     );
-    if (!canContinue()) {
+    try { await requireNativeWriteAuthority(segment.blockId, canContinue); await requireUnchangedNativeEvent(binding); }
+    catch (error) {
       // The in-flight create finished after opt-out. Roll it back so the old binding remains true.
       await Calendar.deleteEventAsync(replacementId).catch(() => undefined);
-      throw new ProjectionCancelledError();
+      throw error;
     }
     try {
       await Calendar.deleteEventAsync(binding.eventId);
@@ -574,8 +659,10 @@ async function updateOrReplaceEvent(
     return { eventId: replacementId, action: 'created' };
   }
 
+  await requireNativeWriteAuthority(segment.blockId, canContinue);
   try {
     const updatedId = await Calendar.updateEventAsync(binding.eventId, eventDetails(segment));
+    await recordNativeWrite(targetCalendarId, updatedId || binding.eventId, segment);
     return { eventId: updatedId || binding.eventId, action: 'updated' };
   } catch (updateError) {
     if (!canContinue()) throw new ProjectionCancelledError();
@@ -603,6 +690,7 @@ export type CalendarSyncResult = {
   created: number;
   updated: number;
   removed: number;
+  deferred?: true;
 };
 
 export async function syncActualDay(
@@ -611,8 +699,10 @@ export async function syncActualDay(
   canContinue: () => boolean = () => true,
 ): Promise<CalendarSyncResult> {
   if (isWeb()) return { created: 0, updated: 0, removed: 0 };
-
-  const segments = await getDaySegments(value);
+  if (await hasConfiguredAccountCalendarWriter()) return { created: 0, updated: 0, removed: 0, deferred: true };
+  const owned = await accountOwnedCalendarBlocks();
+  const allSegments = await getDaySegments(value);
+  const segments = allSegments.filter((segment) => !owned.has(segment.blockId));
   for (const blockId of new Set(segments.filter((segment) => isActivityGroupId(segment.blockId)).map((segment) => segment.blockId))) {
     const members = await getEntriesForBlock(blockId);
     if (!members.every((entry) => entry.dateKey === value)) continue;
@@ -625,6 +715,8 @@ export async function syncActualDay(
       ? matchActivityTranslation(previous, current) : null;
     if (mapping && mapping.shiftMinutes !== 0) {
       if (!canContinue()) throw new ProjectionCancelledError();
+      await requireNativeWriteAuthority(blockId, canContinue);
+      for (const binding of existing) await requireUnchangedNativeEvent(binding);
       await remapActivitySyncBindings(blockId, mapping.matches.map(({ previous: old, current: next }) => {
         const before = existing.find((binding) => binding.segmentKey === old.key)!;
         return { before, after: { ...before, segmentKey: next.key, dateKey: next.dateKey } };
@@ -635,7 +727,9 @@ export async function syncActualDay(
       throw new Error('This activity moved with an ambiguous calendar shape. Review its linked events before synchronizing.');
     }
   }
-  const bindings = await getSyncBindings(value);
+  const allBindings = await getSyncBindings(value);
+  const bindings = allBindings.filter((binding) => !owned.has(binding.blockId));
+  const deferred = allSegments.length !== segments.length || allBindings.length !== bindings.length;
   const unused = new Map(bindings.map((binding) => [binding.segmentKey, binding]));
   const claimedEventIds = new Set(
     bindings
@@ -729,6 +823,8 @@ export async function syncActualDay(
       }
     }
     let remoteEventIsGone = false;
+    await requireNativeWriteAuthority(binding.blockId, canContinue);
+    await requireUnchangedNativeEvent(binding);
     try {
       await Calendar.deleteEventAsync(binding.eventId);
       remoteEventIsGone = true;
@@ -757,7 +853,7 @@ export async function syncActualDay(
   }
 
   if (cleanupError) throw cleanupError;
-  return { created, updated, removed };
+  return { created, updated, removed, ...(deferred ? { deferred: true as const } : {}) };
 }
 
 export type CalendarOutboxResult = {
@@ -765,6 +861,7 @@ export type CalendarOutboxResult = {
   succeeded: number;
   failed: number;
   remaining: number;
+  deferred?: true;
 };
 
 async function flushPendingActualsOnce(
@@ -773,6 +870,10 @@ async function flushPendingActualsOnce(
   priorityDates: string[],
   expectedGeneration: number,
 ): Promise<CalendarOutboxResult> {
+  if (await hasConfiguredAccountCalendarWriter()) {
+    const remaining = (await getPendingSyncDates(1)).length;
+    return { attempted: 0, succeeded: 0, failed: 0, remaining, ...(remaining ? { deferred: true as const } : {}) };
+  }
   const [priority, ordinary] = await Promise.all([
     getPendingSyncDatesFor(priorityDates),
     getPendingSyncDates(limit),
@@ -784,6 +885,7 @@ async function flushPendingActualsOnce(
   const pending = [...pendingByDate.values()];
   let succeeded = 0;
   let failed = 0;
+  let deferred = false;
   const canContinue = () =>
     projectionGeneration === expectedGeneration &&
     projectionTargetCalendarId === calendarId;
@@ -791,15 +893,17 @@ async function flushPendingActualsOnce(
   for (const item of pending) {
     if (!canContinue()) break;
     try {
-      if ((await getSyncBindings(item.dateKey)).some((binding) => binding.calendarId === calendarId)) {
+      const owned = await accountOwnedCalendarBlocks();
+      if ((await getSyncBindings(item.dateKey)).some((binding) => binding.calendarId === calendarId && !owned.has(binding.blockId))) {
         const calendars = await listDeviceCalendars();
         const read = await loadPlannedEventsResult([calendarId], item.dateKey, calendars);
         if (read.failures.length) throw new CalendarReadError(read.plans, read.failures);
         await reconcileLinkedNativeColors(item.dateKey, read.plans, calendars);
       }
       if (!canContinue()) throw new ProjectionCancelledError();
-      await syncActualDay(item.dateKey, calendarId, canContinue);
+      const result = await syncActualDay(item.dateKey, calendarId, canContinue);
       if (!canContinue()) throw new ProjectionCancelledError();
+      if (result.deferred) { deferred = true; continue; }
       await markSyncDateComplete(item.dateKey, item.updatedAt);
       succeeded += 1;
     } catch (error) {
@@ -810,7 +914,7 @@ async function flushPendingActualsOnce(
   }
 
   const remaining = (await getPendingSyncDates(1)).length;
-  return { attempted: pending.length, succeeded, failed, remaining };
+  return { attempted: pending.length, succeeded, failed, remaining, ...(deferred ? { deferred: true as const } : {}) };
 }
 
 let outboxChain: Promise<void> = Promise.resolve();

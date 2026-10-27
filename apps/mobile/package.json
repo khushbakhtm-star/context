@@ -1,6 +1,6 @@
 {
   "name": "context-mobile",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "private": true,
   "packageManager": "pnpm@11.25.0",
   "main": "index.ts",
@@ -20,6 +20,7 @@
     "expo": "~58.0.19",
     "expo-auth-session": "~58.0.14",
     "expo-calendar": "~58.0.6",
+    "expo-clipboard": "~58.0.4",
     "expo-constants": "~58.0.13",
     "expo-crypto": "~58.0.7",
     "expo-dev-client": "~58.0.15",

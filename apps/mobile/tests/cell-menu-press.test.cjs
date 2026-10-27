@@ -14,11 +14,11 @@ test('an open keyboard does not reserve a menu tap, and a single completed press
   } }).outputText;
   vm.runInNewContext(code, { module, exports: module.exports, Math,
     require(name) {
-      if (name === 'react') return { useMemo: (work) => work(), useEffect() {}, useState: (value) => [value, () => {}] };
+      if (name === 'react') return { useMemo: (work) => work(), useEffect() {}, useState: (value) => [value, () => {}], useRef: (value) => ({ current: value }) };
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
       if (name === 'react-native') return { View: 'View', Text: 'Text', Pressable: 'Pressable', ScrollView: 'ScrollView',
         Keyboard: { isVisible: () => true, dismiss() {} }, StyleSheet: { create: (value) => value, hairlineWidth: 0.5 },
-        BackHandler: { addEventListener: () => ({ remove() {} }) }, useWindowDimensions: () => ({ height: 800 }) };
+        BackHandler: { addEventListener: () => ({ remove() {} }) }, useWindowDimensions: () => ({ height: 800, width: 390 }) };
       if (name === '../appearance') return { useAppTheme: () => ({ colors: { ink: '#111111', panel: '#EEEEEE', hairline: '#CCCCCC' } }) };
       if (name === './CellColorPalette') return { CellColorPalette: 'CellColorPalette' };
       throw Error(`Unexpected menu press import ${name}`);

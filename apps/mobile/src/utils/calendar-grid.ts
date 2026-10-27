@@ -71,6 +71,19 @@ export function parseCalendarDateInput(input: string): string | null {
     ? dateKey(parsed) : null;
 }
 
+/** Arrival order from independent providers must not choose a different title,
+ * fill or source-event action on each refresh. Keep every overlapping event;
+ * direct account events carry the provider identity needed for explicit edits. */
+export function compareCalendarPlans(left: PlannedEvent, right: PlannedEvent): number {
+  const origin = Number(!left.accountEvent) - Number(!right.accountEvent);
+  if (origin) return origin;
+  for (const [a, b] of [[left.accountEvent?.accountId ?? '', right.accountEvent?.accountId ?? ''],
+    [left.calendarId, right.calendarId], [left.id, right.id]]) {
+    if (a !== b) return a! < b! ? -1 : 1;
+  }
+  return left.startDate.getTime() - right.startDate.getTime() || left.endDate.getTime() - right.endDate.getTime();
+}
+
 export function indexCalendarDay(value: string, entries: MinuteEntry[], plans: PlannedEvent[]) {
   const entriesByMinute = new Map<number, MinuteEntry>();
   for (const entry of entries) {
@@ -78,7 +91,7 @@ export function indexCalendarDay(value: string, entries: MinuteEntry[], plans: P
         entry.minuteIndex >= 0 && entry.minuteIndex < MINUTES_PER_DAY) entriesByMinute.set(entry.minuteIndex, entry);
   }
   const plansByMinute = new Map<number, PlannedEvent[]>();
-  for (const plan of plans) {
+  for (const plan of [...plans].sort(compareCalendarPlans)) {
     if (plan.allDay || !Number.isFinite(plan.startDate.getTime()) ||
         !Number.isFinite(plan.endDate.getTime()) || plan.endDate <= plan.startDate) continue;
     const range = calendarMinuteRange(plan.startDate, plan.endDate, value);

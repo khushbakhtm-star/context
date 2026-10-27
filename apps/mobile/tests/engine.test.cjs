@@ -247,6 +247,77 @@ async function linkedPrayer(t, remote = cloud()) {
   return { device, remote, original };
 }
 
+test('source note writeback preserves its original prayer title and exact Google color without a sync echo', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const original = { ...originalPrayer(), title: 'Pray', googleColorId: '10', displayColor: '#51B749' };
+  remote.seed(original);
+  await saveRange(device, 1135, 2, 'Prayed fardh and supplicated', 'unaccounted');
+  await device.engine.linkActualsToAccounts([day], planned(original));
+  await device.engine.synchronizeAccounts();
+  const written = remote.calls.filter((call) => call.type === 'update');
+  assert.equal(written.length, 1);
+  assert.equal(written[0].write.title, 'Pray');
+  assert.equal(written[0].write.googleColorId, '10');
+  assert.match(written[0].write.description, /Prayed fardh and supplicated/);
+  assert.equal((await device.db.getMinuteEntry(day, 1135)).text, 'Prayed fardh and supplicated');
+  await device.engine.synchronizeAccounts(); await device.engine.synchronizeAccounts();
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, 1);
+  assert.equal(remote.calls.filter((call) => call.type === 'create').length, 0);
+});
+
+test('an explicit activity title can rename its approved source without clearing an unmapped source label', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const original = { ...originalPrayer(), googleEventLabelId: 'label-prayer', displayColor: '#0B8043' };
+  remote.seed(original);
+  await explicitGroup(device, 1135, ['Prayed fardh', 'Supplicated'], 'Prayed Maghrib', 'unaccounted');
+  await device.engine.linkActualsToAccounts([day], planned(original));
+  await device.engine.synchronizeAccounts();
+  const write = remote.calls.find((call) => call.type === 'update').write;
+  assert.equal(write.title, 'Prayed Maghrib'); assert.equal(write.googleEventLabelId, 'label-prayer');
+});
+
+test('a new native-colored actual uses only an exact account Google palette identity', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await device.db.putSyncDocument('category:google_api_basil', { id: 'google_api_basil', name: 'Basil',
+    color: '#51B749', provider: 'google', accountId: 'google:person', providerColorId: '10', providerOriginalColor: '#51B749' });
+  const exact = await device.categories.ensureSourceColorCategory({ color: '#51B749', name: 'Native exact', calendarId: 'native-1', provider: 'device' });
+  const nativeDisplay = await device.categories.ensureSourceColorCategory({ color: '#0B8043', name: 'Native display', calendarId: 'native-1', provider: 'device' });
+  await saveRange(device, 600, 1, 'Exact color', exact.id);
+  await saveRange(device, 610, 1, 'Display color', nativeDisplay.id);
+  await device.engine.linkActualsToAccounts([day]); await device.engine.synchronizeAccounts();
+  const creates = remote.calls.filter((call) => call.type === 'create');
+  assert.equal(creates.find((call) => call.write.title === 'Exact color').write.googleColorId, '10');
+  assert.equal(creates.find((call) => call.write.title === 'Display color').write.googleColorId, undefined,
+    'native Basil and legacy API Basil are not interchangeable without a provider identity');
+});
+
+test('prior source-title/color baselines import a real remote edit without a normalization conflict', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const original = { ...originalPrayer(), googleColorId: '10', displayColor: '#51B749' };
+  remote.seed(original); await saveRange(device, 1135, 2, 'Pray fardh', 'unaccounted');
+  await device.engine.linkActualsToAccounts([day], planned(original)); await device.engine.synchronizeAccounts();
+  const projection = (await device.engine.listProjections())[0];
+  const oldWrite = { ...remote.calls.find((call) => call.type === 'update').write, title: 'Pray fardh' };
+  delete oldWrite.googleColorId; delete oldWrite.googleEventLabelId; delete oldWrite.microsoftCategories;
+  delete oldWrite.sourceOperationId;
+  await device.db.putSyncDocument(`projection:${projection.id}`, { ...projection, baseLocalHash: device.codec.hashValue(oldWrite) });
+  remote.edit('personal', original.id, { title: 'User renamed prayer' });
+  await device.engine.synchronizeAccounts();
+  const saved = (await device.engine.listProjections())[0];
+  assert.equal(saved.state, 'synced'); assert.equal(saved.title, 'User renamed prayer');
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, 1);
+  assert.equal((await device.db.getMinuteEntry(day, 1135)).text, 'Pray fardh');
+});
+
+test('a user calendar rename to Unaccounted is not guessed to be historical corruption', async (t) => {
+  const { device, remote, original } = await linkedPrayer(t);
+  remote.edit('personal', original.id, { title: 'Unaccounted' });
+  await device.engine.synchronizeAccounts(); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.get(`personal:${original.id}`).title, 'Unaccounted');
+  assert.equal((await device.engine.listProjections())[0].title, 'Unaccounted');
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, 1);
+});
+
 function editFirstPrayerMinute(description, text) {
   const range = '6:55 PM – 7:05 PM  Pray fardh';
   assert.ok(description.includes(range), 'the external-edit fixture must change a real compact range');
@@ -336,6 +407,39 @@ async function linkedColoredActivity(t) {
   await device.engine.synchronizeAccounts();
   return { device, remote, original };
 }
+
+test('renaming, recoloring and moving two Context-created events imports without writing Unaccounted back', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await saveRange(device, 24, 1, 'asdf', 'unaccounted');
+  await saveRange(device, 26, 1, 'qwer', 'unaccounted');
+  await device.engine.linkActualsToAccounts([day]); await device.engine.synchronizeAccounts();
+  const projections = await device.engine.listProjections();
+  const prayer = projections.find((item) => item.startMinute === 24);
+  const doctor = projections.find((item) => item.startMinute === 26);
+  assert.ok(prayer?.eventId && doctor?.eventId);
+  remote.edit('personal', prayer.eventId, { title: 'Prayer', start: iso(389), end: iso(390),
+    googleColorId: '10', displayColor: '#51B749' });
+  remote.edit('personal', doctor.eventId, { title: 'Mum doctor appointment', start: iso(600), end: iso(660),
+    googleColorId: '6', displayColor: '#FFB878', location: 'Clinic' });
+  device.accounts[0].consent.importCalendarEdits = false; remote.calls.length = 0;
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
+  device.accounts[0].consent.importCalendarEdits = true;
+  device.accounts[0].consent.editInvitations = true; device.accounts[0].consent.editSeries = true;
+  await device.engine.synchronizeAccounts();
+  assert.equal(await device.db.getMinuteEntry(day, 24), null); assert.equal(await device.db.getMinuteEntry(day, 26), null);
+  assert.ok(await device.db.getMinuteEntry(day, 389)); assert.ok(await device.db.getMinuteEntry(day, 659));
+  const categories = await device.categories.listCategories();
+  const prayerEntry = await device.db.getMinuteEntry(day, 389); const doctorEntry = await device.db.getMinuteEntry(day, 600);
+  assert.equal(categories.find((item) => item.id === prayerEntry.categoryId).color.toUpperCase(), '#51B749');
+  assert.equal(categories.find((item) => item.id === doctorEntry.categoryId).color.toUpperCase(), '#FFB878');
+  await device.engine.synchronizeAccounts(); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.get(`personal:${prayer.eventId}`).title, 'Prayer');
+  assert.equal(remote.events.get(`personal:${doctor.eventId}`).title, 'Mum doctor appointment');
+  assert.equal(remote.events.get(`personal:${doctor.eventId}`).location, 'Clinic');
+  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
+  assert.ok((await device.engine.listProjections()).every((item) => item.state === 'synced'));
+});
 
 test('a provider recolor fills exact linked account minutes without rewriting notes, group formatting or the source', async (t) => {
   const { device, remote, original } = await linkedColoredActivity(t);
@@ -931,6 +1035,120 @@ test('an acknowledged winning ledger value still retains an older remote value f
   assert.ok(conflicts.some((document) => document.value?.text === 'Previously unseen offline thought'));
 });
 
+async function browserImport(remote, device, changes, id = 'browser_first_edit') {
+  const stamp = new Date(Date.now() + 10_000).toISOString();
+  const documents = changes.map((change, index) => ({ key: `minute:${change.day}:${change.minute}`,
+    revision: `${String(Date.now() + 10_000).padStart(16, '0')}:${String(index).padStart(8, '0')}:browser_actor`,
+    value: change.value === null ? null : { id: `browser_${index}`, dateKey: change.day, minuteIndex: change.minute,
+      text: change.text, categoryId: 'study', blockId: `browser_${id}_${index}`, source: 'manual', createdAt: stamp, updatedAt: stamp,
+      ...change.value } }));
+  const batch = { version: 1, id, documents };
+  remote.files.set(`context-${id}.json`, await device.codec.encryptBatch(batch, 'Context shared private ledger passphrase'));
+  return documents;
+}
+
+test('a new browser day creates only an authorized account actual after encrypted import, without native outbox or source adoption', async (t) => {
+  const remote = cloud(); const device = phone(t, remote, account({ ledgerStorage: true })); await prepare(device, true);
+  const original = originalPrayer(); remote.seed(original);
+  await browserImport(remote, device, [{ day: '2026-10-28', minute: 600, text: 'New browser minute' }]);
+  await device.engine.synchronizeAccounts();
+  assert.equal((await device.db.getMinuteEntry('2026-10-28', 600)).text, 'New browser minute');
+  const projections = await device.engine.listProjections(); assert.equal(projections.length, 1);
+  assert.equal(projections[0].sourceEventId, null); assert.equal(projections[0].calendarId, 'personal');
+  assert.equal(projections[0].state, 'synced');
+  assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 0); assert.equal((await device.db.getPendingSyncDates()).length, 0);
+  assert.equal(remote.events.get(`personal:${original.id}`).version, original.version);
+  assert.equal(remote.calls.filter((call) => call.type === 'create').length, 1);
+  await device.engine.synchronizeAccounts(); assert.equal(remote.calls.filter((call) => call.type === 'create').length, 1);
+});
+
+test('an upload failure after browser merge leaves its durable link ticket for a later safe account pass', async (t) => {
+  const remote = cloud(); const device = phone(t, remote, account({ ledgerStorage: true })); await prepare(device, true);
+  await browserImport(remote, device, [{ day: day, minute: 601, text: 'Imported before failed upload' }]);
+  remote.onWriteFile = async () => { throw Error('Upload temporarily unavailable'); };
+  await device.engine.synchronizeAccounts();
+  assert.equal((await device.db.getMinuteEntry(day, 601)).text, 'Imported before failed upload');
+  assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 1);
+  assert.equal(remote.calls.filter((call) => call.type === 'create').length, 0);
+  remote.onWriteFile = null; await device.engine.synchronizeAccounts();
+  assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 0);
+  assert.equal(remote.calls.filter((call) => call.type === 'create').length, 1);
+});
+
+test('browser imports wait for account write permission and a destination rather than silently dropping their link intent', async (t) => {
+  for (const reason of ['permission', 'destination']) {
+    const remote = cloud(); const device = phone(t, remote, account({ ledgerStorage: true, calendarWrite: reason !== 'permission' }));
+    await prepare(device, true);
+    if (reason === 'destination') await device.engine.setAccountPreferences('google:person', { selectedCalendarIds: ['personal'], writeCalendarId: null });
+    await browserImport(remote, device, [{ day, minute: 602, text: 'Wait for authorized actuals' }]);
+    await device.engine.synchronizeAccounts();
+    assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 1);
+    assert.equal(remote.calls.filter((call) => call.type === 'create').length, 0);
+    await device.inline.retryInlineMinuteLinks({ synchronize: false });
+    assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 1,
+      'the App/native preflight drain must not acknowledge an imported ticket before account routing is ready');
+    device.accounts[0].consent.calendarWrite = true;
+    await device.engine.setAccountPreferences('google:person', { selectedCalendarIds: ['personal'], writeCalendarId: 'personal' });
+    await device.engine.synchronizeAccounts();
+    assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 0);
+    assert.equal(remote.calls.filter((call) => call.type === 'create').length, 1);
+  }
+});
+
+test('a winning browser tombstone reconciles its existing generated account event without inventing a new native write', async (t) => {
+  const remote = cloud(); const device = phone(t, remote, account({ ledgerStorage: true })); await prepare(device, true);
+  const imported = await browserImport(remote, device, [{ day, minute: 603, text: 'To remove from browser' }]);
+  await device.engine.synchronizeAccounts(); assert.equal(remote.events.size, 1);
+  const tombstone = { ...imported[0], revision: `${String(Date.now() + 20_000).padStart(16, '0')}:00000000:browser_actor`, value: null };
+  remote.files.set('context-browser_delete.json', await device.codec.encryptBatch({ version: 1, id: 'browser_delete', documents: [tombstone] },
+    'Context shared private ledger passphrase'));
+  await device.engine.synchronizeAccounts();
+  assert.equal(await device.db.getMinuteEntry(day, 603), null); assert.equal(remote.events.size, 0);
+  assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 0); assert.equal((await device.db.getPendingSyncDates()).length, 0);
+});
+
+test('one hundred deferred import tickets do not spin the inline drain or starve ordinary local-save tickets', async (t) => {
+  const remote = cloud(); const device = phone(t, remote, account({ calendarWrite: false })); await prepare(device);
+  const stamp = new Date().toISOString();
+  await device.db.mergeSyncDocuments(Array.from({ length: 100 }, (_, index) => ({ key: `minute:${day}:${700 + index}`,
+    revision: `${String(Date.now() + 1000).padStart(16, '0')}:${String(index).padStart(8, '0')}:browser_actor`,
+    value: { id: `browser_${index}`, dateKey: day, minuteIndex: 700 + index, text: 'Waiting for account setup', categoryId: 'study',
+      blockId: `browser_${index}`, source: 'manual', createdAt: stamp, updatedAt: stamp } })));
+  await device.inline.retryInlineMinuteLinks({ synchronize: false });
+  assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 100);
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 900, durationMinutes: 1,
+    text: 'Ordinary local edit', categoryId: 'study', queueInlineLink: true });
+  assert.equal((await device.db.getPendingInlineMinuteLinks())[0].minuteIndex, 900, 'ordinary local work is not hidden behind deferred imports');
+  await device.inline.retryInlineMinuteLinks({ synchronize: false });
+  assert.equal((await device.db.getPendingInlineMinuteLinks()).length, 100);
+  assert.equal((await device.db.getPendingInlineMinuteLinks()).some((ticket) => ticket.minuteIndex === 900), false);
+});
+
+test('a bounded account drain rotates one hundred unrouteable imports so a newer eligible day reaches its calendar', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const stamp = new Date().toISOString(); const laterDay = '2026-10-26';
+  const docs = Array.from({ length: 100 }, (_, index) => ({ key: `minute:${day}:${700 + index}`,
+    revision: `${String(Date.now() + 1000).padStart(16, '0')}:${String(index).padStart(8, '0')}:browser_actor`,
+    value: { id: `browser_${index}`, dateKey: day, minuteIndex: 700 + index, text: 'Retained disconnected owner', categoryId: 'study',
+      blockId: 'disconnected_browser_block', source: 'manual', createdAt: stamp, updatedAt: stamp } }));
+  await device.db.mergeSyncDocuments(docs);
+  await device.db.putSyncDocument('projection:disconnected_owner', { id: 'disconnected_owner', accountId: 'removed-account',
+    calendarId: 'removed-calendar', eventId: 'retained-event', sourceEventId: null, blockId: 'disconnected_browser_block',
+    dateKey: day, startMinute: 700, endMinute: 799, baseEvent: null, baseLocalHash: null, state: 'pending' });
+  await device.db.mergeSyncDocuments([{ key: `minute:${laterDay}:600`, revision: `${String(Date.now() + 2000).padStart(16, '0')}:00000000:browser_actor`,
+    value: { ...docs[0].value, id: 'new-routeable', dateKey: laterDay, minuteIndex: 600, text: 'New eligible browser day', blockId: 'new_browser_block' } }]);
+  const beforeTokens = new Map((await device.db.getPendingInlineMinuteLinks(500)).map((ticket) => [`${ticket.dateKey}:${ticket.minuteIndex}`, ticket.token]));
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.calls.filter((call) => call.type === 'create').length, 0, 'one pass remains bounded to its first hundred tickets');
+  assert.equal((await device.db.getPendingInlineMinuteLinks())[0].dateKey, laterDay);
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.calls.filter((call) => call.type === 'create').length, 1);
+  assert.ok([...remote.events.values()].some((event) => event.description.includes('New eligible browser day')));
+  const remaining = await device.db.getPendingInlineMinuteLinks(500); assert.equal(remaining.length, 100);
+  assert.ok(remaining.every((ticket) => ticket.token === beforeTokens.get(`${ticket.dateKey}:${ticket.minuteIndex}`)),
+    'rotation preserves every deferred token and never acknowledges a disconnected owner');
+});
+
 test('two independent phones exchange encrypted minute updates and deletion tombstones', async (t) => {
   const remote = cloud();
   const storageAccount = account({ ledgerStorage: true, calendarRead: false, calendarWrite: false,
@@ -1046,6 +1264,39 @@ test('a titled activity includes both selected endpoints, preserves minute notes
   assert.equal(remote.events.size, 1);
   assert.equal([...remote.events.values()][0].title, 'Review revised paper');
   assert.match([...remote.events.values()][0].description, /4:42 PM  A further thought/);
+});
+
+test('held Group and partial Ungroup use the real spreadsheet-to-account pipeline without losing the event title, notes or fill', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const start = 600;
+  for (const [offset, text] of ['Boil water', '', 'Talk to Mum', '', 'Pour coffee'].entries()) {
+    if (text) await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: start + offset, text, categoryId: 'family' });
+  }
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: start, endMinute: start + 4 },
+    { title: 'Make coffee', categoryId: 'family' });
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  const grouped = [...remote.events.values()]; assert.equal(grouped.length, 1);
+  const originalId = grouped[0].id;
+  assert.equal(grouped[0].title, 'Make coffee'); assert.equal(grouped[0].start, iso(start)); assert.equal(grouped[0].end, iso(start + 5));
+  assert.equal(grouped[0].categoryId, 'family'); assert.match(grouped[0].description, /Boil water/);
+  assert.match(grouped[0].description, /Talk to Mum/); assert.match(grouped[0].description, /Pour coffee/);
+  await device.sheet.ungroupMinuteRange({ dateKey: day, startMinute: start + 2, endMinute: start + 2 });
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  const split = [...remote.events.values()].sort((a, b) => a.start.localeCompare(b.start));
+  assert.deepEqual(split.map((event) => [event.title, event.start, event.end, event.categoryId]), [
+    ['Make coffee', iso(start), iso(start + 2), 'family'],
+    ['Talk to Mum', iso(start + 2), iso(start + 3), 'family'],
+    ['Make coffee', iso(start + 3), iso(start + 5), 'family'],
+  ]);
+  assert.equal(remote.events.has(`personal:${originalId}`), false, 'the obsolete complete-group copy is retired after its replacement segments synchronize');
+  assert.ok((await device.db.getDayEntries(day)).every((entry) => entry.categoryId === 'family'));
+  assert.deepEqual((await device.db.getDayEntries(day)).map((entry) => entry.text), ['Boil water', '', 'Talk to Mum', '', 'Pour coffee']);
+  assert.ok(split.every((event) => event.title !== 'Unaccounted'));
+  await device.sheet.undoSpreadsheetEdit(); await device.inline.retryInlineMinuteLinks({ synchronize: false });
+  await device.engine.synchronizeAccounts();
+  const restored = [...remote.events.values()]; assert.equal(restored.length, 1); assert.equal(restored[0].title, 'Make coffee');
+  assert.equal(restored[0].start, iso(start)); assert.equal(restored[0].end, iso(start + 5));
+  assert.equal(remote.calls.filter((call) => call.type === 'updateSeries').length, 0, 'grouping does not request unrelated series writes');
 });
 
 test('a differently colored minute inside an activity projects separately and imports its own title without retitling neighboring segments', async (t) => {

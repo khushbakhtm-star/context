@@ -10,7 +10,6 @@ import type { ActivitySegment, CalendarPreferences, DeviceCalendar, PlannedEvent
 import { isDateKey, monthDateCells, normalizeSelectedDates } from '../utils/date-selection';
 import { monthAgendaItems, type MonthAgendaItem } from '../utils/month-agenda';
 import { addDays, dateKey, formatDayHeading, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
-import { InfoButton } from './InfoButton';
 import { createCalendarListFocus, type CalendarViewFocusRequest } from '../utils/calendar-list-focus';
 
 type Props = {
@@ -23,6 +22,7 @@ type Props = {
   clockFormat: '12h' | '24h';
   onOpenMinute: (day: string, minute: number) => void;
   onVisibleMonthChange?: (month: string) => void;
+  onSyncWarningChange?: (message: string | null) => void;
 };
 type DaySources = { sourceKey: string; segments: ActivitySegment[]; devicePlans: PlannedEvent[]; accountPlans: PlannedEvent[];
   localReady: boolean; deviceReady: boolean; accountReady: boolean; accountFresh: boolean;
@@ -37,7 +37,7 @@ function accessDenied(error: unknown) {
 }
 
 export function MonthOverview({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, clockFormat, onOpenMinute,
-  onVisibleMonthChange }: Props) {
+  onVisibleMonthChange, onSyncWarningChange }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const daysKey = normalizeSelectedDates(selectedDates).join('|');
@@ -67,7 +67,6 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
   }, [focusRequest?.token, focusRequest?.dateKey, monthKey, daysKey, listFocus]);
   useEffect(() => () => listFocus.cancel(), [listFocus]);
   const [data, setData] = useState<Record<string, DayState>>({});
-  const [retry, setRetry] = useState(0);
   const requestMonths = useRef<(months: string[]) => void>(() => {});
   const visibleMonths = useRef<string[]>([]);
   const visibleMonthCallback = useRef(onVisibleMonthChange);
@@ -160,24 +159,22 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
     const visible = visibleMonths.current.filter((month) => months.includes(month));
     enqueueMonths(visible.length ? visible : months.slice(0, 1));
     return () => { cancelled = true; pools.forEach((pool) => { pool.queue.length = 0; }); };
-  }, [daysKey, calendarKey, preferenceKey, dataVersion, retry]);
+  }, [daysKey, calendarKey, preferenceKey, dataVersion]);
 
   const weekdays = useMemo(() => Array.from({ length: 7 }, (_, index) =>
     new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(addDays('2026-10-19', index))), []);
   const today = dateKey(new Date());
-  const failed = Object.values(data).some((day) => day.failed);
+  const warning = Object.values(data).some((day) => day.localFailed)
+    ? 'Some saved activity could not load. Your saved ledger is unchanged. Tap Sync to retry.'
+    : Object.values(data).some((day) => day.deviceFailed || day.accountFailed)
+      ? 'Some calendar events could not load. Showing saved activity and available plans. Tap Sync to retry.' : null;
+  useEffect(() => { onSyncWarningChange?.(warning); }, [warning, onSyncWarningChange]);
+  useEffect(() => () => onSyncWarningChange?.(null), [onSyncWarningChange]);
   const openDay = (day: string) => {
     if (isDateKey(day)) onOpenMinute(day, day === dateKey(new Date()) ? minuteIndexForDate(new Date()) : 9 * 60);
   };
 
   return <View style={styles.container}>
-    {failed ? <View style={styles.errorRow}>
-      <Text accessibilityRole="alert" style={styles.error}>Some events could not load</Text>
-      <Pressable accessibilityRole="button" onPress={() => setRetry((value) => value + 1)} style={styles.retry}>
-        <Text style={styles.retryText}>Retry</Text>
-      </Pressable>
-      <InfoButton title="Month events" message="The overview shows the available calendar events and recorded activity blocks for your selected dates. Some sources could not be read. Retry, or check the selected calendars and account connection in Settings. Tap a day or event to open its minute cells." />
-    </View> : null}
     <FlatList ref={list} key={daysKey} data={months} keyExtractor={(month) => month} initialNumToRender={1} maxToRenderPerBatch={2} windowSize={3}
       extraData={activeDate} onScrollToIndexFailed={listFocus.onFailure}
       onScrollBeginDrag={() => { listFocus.cancel(); pendingFocus.current = null; }}
@@ -225,7 +222,6 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
                 </Pressable> : null}
                 {active && !items.length && (!state || !state.localReady || !state.deviceReady || !state.accountReady)
                   ? <Text accessibilityLabel={`Loading ${heading}`} style={styles.pending}>…</Text> : null}
-                {state?.failed ? <Text accessibilityLabel={`Some events unavailable on ${heading}`} style={styles.failed}>!</Text> : null}
                 <Pressable accessibilityRole="button" accessibilityLabel={`Open minutes for ${heading}`} disabled={!isDateKey(cell.dateKey)}
                   onPress={() => openDay(cell.dateKey)} style={styles.daySpace} />
               </View>;
@@ -262,9 +258,4 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   moreText: { color: colors.graphite, fontSize: 11 },
   daySpace: { flex: 1, minHeight: 12 },
   pending: { color: colors.muted, textAlign: 'center', fontSize: 14 },
-  failed: { color: colors.danger, textAlign: 'center', fontSize: 12 },
-  errorRow: { flexDirection: 'row', alignItems: 'center', paddingLeft: 12, paddingRight: 4, gap: 4 },
-  error: { flex: 1, color: colors.danger, fontSize: 12 },
-  retry: { minHeight: 44, paddingHorizontal: 8, justifyContent: 'center' },
-  retryText: { color: colors.ink, fontSize: 12, fontWeight: '600' },
 });

@@ -59,6 +59,6 @@ test('explicit two to seven day selections never fabricate columns when pinch zo
       assert.equal(layout.contentWidth, layout.railWidth + count * layout.dayWidth);
     }
   }
-  assert.ok(calendarGridLayout(390, 1, 0.5, 1, 44).dayCount > 1,
-    'standard preset views retain their existing pinch-to-show-more behavior');
+  assert.equal(calendarGridLayout(390, 1, 0.5, 1, 44).dayCount, 1,
+    'Day keeps one full-width column while pinch changes only row height');
 });

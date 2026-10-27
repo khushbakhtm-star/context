@@ -10,7 +10,7 @@ const ts = require('typescript');
 function screenHarness(t, kind, options = {}) {
   const sourceRoot = path.join(__dirname, '../src');
   const slots = [], effects = [], timers = new Map(), modules = new Map();
-  const calls = [], reads = [], nativeReads = [], cachedReads = [], accountReads = [], opened = [], pendingReads = new Map();
+  const calls = [], reads = [], nativeReads = [], cachedReads = [], accountReads = [], opened = [], warnings = [], pendingReads = new Map();
   let hook = 0, dirty = false, tree, timerId = 0, now = 0;
   let dimensions = { width: 390, height: 844, fontScale: 1 };
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
@@ -91,7 +91,7 @@ function screenHarness(t, kind, options = {}) {
   const props = { activeDate: '2026-10-25', focusRequest: { dateKey: '2026-10-25', token: 1 },
     selectedDates: kind === 'month' ? Array.from({ length: 31 }, (_, i) => `2026-10-${String(i + 1).padStart(2, '0')}`) : null,
     calendars: [], preferences: { selectedCalendarIds: [] }, dataVersion: 0, clockFormat: '24h',
-    onOpenMinute: (...values) => opened.push(values), onOpenMonth() {}, ...options.props };
+    onOpenMinute: (...values) => opened.push(values), onOpenMonth() {}, onSyncWarningChange: (message) => warnings.push(message), ...options.props };
   function render() { dirty = false; hook = 0; tree = Component(props); while (effects.length) effects.shift()(); return tree; }
   async function settle() { for (let i = 0; i < 35; i++) { await Promise.resolve(); if (dirty) render(); } }
   function nodes(node = tree) {
@@ -101,9 +101,10 @@ function screenHarness(t, kind, options = {}) {
   function find(type, predicate = () => true, node = tree) { return nodes(node).find((value) => value.type === type && predicate(value)); }
   function advance(ms = 0) { now += ms;
     for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.callback(); } }
-  t.after(() => { for (const slot of slots) slot?.cleanup?.(); timers.clear(); });
+  function unmount() { for (const slot of slots) { slot?.cleanup?.(); if (slot) slot.cleanup = undefined; } timers.clear(); }
+  t.after(unmount);
   render();
-  return { props, calls, reads, nativeReads, cachedReads, accountReads, opened, pendingReads, render, settle, advance, nodes, find,
+  return { props, calls, reads, nativeReads, cachedReads, accountReads, opened, warnings, pendingReads, render, settle, advance, nodes, find, unmount,
     list: () => find('FlatList'), get tree() { return tree; },
     setDimensions(value) { dimensions = { ...dimensions, ...value }; dirty = true; render(); },
     setProps(value) { Object.assign(props, value); render(); },
@@ -271,7 +272,8 @@ test('an independent successful native result appears before a delayed account r
     account.reject(new Error('Offline')); await r.settle();
     assert.ok(hasText(r, dayTree(r, kind, day), 'Recorded now'));
     assert.ok(hasText(r, dayTree(r, kind, day), 'Phone calendar'));
-    assert.ok(hasText(r, r.tree, 'Some events could not load'));
+    assert.match(r.warnings.at(-1), /Some calendar events could not load/);
+    assert.equal(hasText(r, r.tree, 'Some events could not load'), false);
   }
 });
 
@@ -350,6 +352,37 @@ test('changed calendar selection and permission failures clear cached plans with
     phase = 2; r.setProps({ dataVersion: 1 }); await r.settle();
     assert.ok(hasText(r, dayTree(r, kind, day), 'Keep local note'));
     assert.equal(hasText(r, dayTree(r, kind, day), 'Selected phone event'), false);
-    assert.ok(hasText(r, r.tree, 'Some events could not load'));
+    assert.match(r.warnings.at(-1), /Some calendar events could not load/);
+    assert.equal(hasText(r, r.tree, 'Some events could not load'), false);
+  }
+});
+
+test('Month and Schedule report source warning only through the callback, clear after retry data refresh and on unmount', async (t) => {
+  const day = '2026-10-25';
+  for (const kind of ['month', 'schedule']) {
+    let failed = true;
+    const r = screenHarness(t, kind, { props: { selectedDates: [day], focusRequest: null },
+      device: () => ({ plans: [], failures: failed ? [{ calendarId: 'device', code: 'ERR_CALENDAR_READ_FAILED' }] : [] }) });
+    await r.settle(); assert.match(r.warnings.at(-1), /Some calendar events could not load/);
+    const tree = dayTree(r, kind, day);
+    assert.equal(hasText(r, r.tree, 'Some events could not load'), false);
+    assert.equal(hasText(r, tree, 'Events unavailable'), false);
+    assert.equal(r.nodes(tree).some((node) => /Some events unavailable/.test(node.props.accessibilityLabel ?? '')), false);
+    assert.equal(r.nodes().some((node) => node.type === 'Pressable' && hasText(r, node, 'Retry')), false);
+    failed = false; r.setProps({ dataVersion: 1 }); await r.settle();
+    assert.equal(r.warnings.at(-1), null, 'successful Sync-triggered refresh removes the warning');
+    failed = true; r.setProps({ dataVersion: 2 }); await r.settle(); assert.match(r.warnings.at(-1), /calendar events/);
+    r.unmount(); assert.equal(r.warnings.at(-1), null, 'leaving the view releases its parent warning slot');
+  }
+});
+
+test('local activity read failures use the parent warning slot without falsely claiming an empty schedule', async (t) => {
+  const day = '2026-10-25';
+  for (const kind of ['month', 'schedule']) {
+    const r = screenHarness(t, kind, { props: { selectedDates: [day], focusRequest: null },
+      segments: () => Promise.reject(new Error('Local read unavailable')) });
+    await r.settle(); assert.match(r.warnings.at(-1), /saved activity could not load/);
+    assert.equal(hasText(r, r.tree, 'Some events could not load'), false);
+    assert.equal(hasText(r, dayTree(r, kind, day), 'No events'), false);
   }
 });

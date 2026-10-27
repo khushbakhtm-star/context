@@ -39,23 +39,26 @@ not offer this Google-dependent watch transport. No broad scanner exclusion is a
 
 ## Reviewed inputs
 
-`fdroid/source-inputs.json` records 27 package identities, npm integrity, 107 exact unused file
+`fdroid/source-inputs.json` records 28 package identities, npm integrity, 109 exact unused file
 removals, and five narrow source patches. Every affected file has a fixed SHA-256; the build never
 generates new trusted hashes for itself. Changed inputs fail and require review.
 
-The current refresh adds only `expo-print` 58.0.7 and `expo-sharing` 58.0.20 to the previously
-reviewed dependency graph. Both are MIT-licensed Expo modules and use the existing source-build
-selection. Their six newly reviewed removals are the two modules' local-Maven AAR/source-JAR
-publications and Print's debug/release Apple XCFramework archives. No new source patch, scanner
-exception, Android SDK change, or proprietary dependency is introduced by this refresh. The
-standalone `context-calendar-colors` module uses Android SDK source APIs and remains included
-when the optional Wear sources are removed.
+The current refresh adds MIT-licensed `expo-clipboard` 58.0.4 to the reviewed dependency graph.
+Its two newly reviewed unused inputs are its local-Maven AAR/source-JAR publications; its
+Android module compiles from source through the existing all-module selection. It introduces
+no new npm dependency, source patch, scanner exception or toolchain change. The prior Print
+58.0.7 and Sharing 58.0.20 inventory remains intact, including Print's Apple-only archives.
+The SDK-only `context-calendar-colors` source remains included when optional Wear sources are
+removed. Clipboard's registered Android source module is `expo.modules.clipboard.ClipboardModule`.
 
-The 107 entries count reviewed manifest paths, not the number removed on any particular runner.
-A unique temporary-fixture test verifies the six new hashes, removes only copied fixture files,
-and checks that the installed package files remain unchanged. Cold Linux scanning, an integrated
-F-Droid recipe build, and APK scanning of the newly pinned application commit are still required;
-the earlier 0.1.8 verification is not evidence that this refreshed source has passed them.
+The 109 entries count reviewed manifest paths, not removals on a particular runner. Linux is
+expected to omit the one Windows-only macro input, so an actual Linux audit may record 108;
+independent CI must establish its actual count. Temporary-fixture tests verify all eight
+Print/Sharing/Clipboard hashes, remove only copied files and confirm installed package bytes
+remain unchanged. Cold Linux source scanning, the integrated F-Droid recipe build and APK scans
+of the newly pinned source are still required. Historical 0.1.16 results are not evidence that
+this refreshed source passed. Native evidence must resolve Print, Sharing, Clipboard and the
+calendar-color bridge to actual DEX class definitions, using exact R8 mappings where obfuscated.
 
 - Prebuilt Expo local-Maven AAR/JAR publications and core's unused native cache are removed after
   selecting source compilation. Apple XCFramework/Swift-macro files, non-Linux Hermes hosts, and

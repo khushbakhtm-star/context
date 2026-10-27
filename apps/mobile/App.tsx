@@ -45,6 +45,7 @@ import { DateSelectionPopup } from './src/components/DateSelectionPopup';
 import { MonthOverview } from './src/components/MonthOverview';
 import { CalendarViewIcon } from './src/components/CalendarViewIcon';
 import { CalendarHeaderIcon } from './src/components/CalendarHeaderIcon';
+import { CalendarPeriodSwipe } from './src/components/CalendarPeriodSwipe';
 import { PrintOptionsPopup } from './src/components/PrintOptionsPopup';
 import { CalendarYearScreen } from './src/screens/CalendarYearScreen';
 import { CalendarScheduleScreen } from './src/screens/CalendarScheduleScreen';
@@ -57,7 +58,7 @@ import { createCalendarRefreshBurst } from './src/utils/calendar-refresh';
 import { isDateKey, normalizeSelectedDates } from './src/utils/date-selection';
 import type { CalendarNavigationTarget } from './src/utils/calendar-navigation';
 import { calendarViewDates, calendarViewKind, calendarViewModePageTarget, type CalendarViewMode } from './src/utils/calendar-view-mode';
-import { getAccounts } from './src/sync/accounts';
+import { hasConfiguredAccountCalendarWriter } from './src/services/calendar-write-routing';
 import { configureCalendarColorImports, requestAccountSynchronization, subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
 import { listCategories } from './src/services/categories';
 import { printContextSchedule } from './src/services/print';
@@ -126,6 +127,7 @@ function AppController() {
   const printAbortRef = useRef<AbortController | null>(null);
   const [manualSyncing, setManualSyncing] = useState(false);
   const [manualSyncError, setManualSyncError] = useState<string | null>(null);
+  const [calendarLoadWarning, setCalendarLoadWarning] = useState<{ scope: string; message: string | null } | null>(null);
   const manualSyncAbortRef = useRef<AbortController | null>(null);
   const calendarColorContextRef = useRef<{ dates: string[]; calendars: DeviceCalendar[]; preferences: CalendarPreferences }>({
     dates: [], calendars: [], preferences: DEFAULT_PREFERENCES,
@@ -161,7 +163,10 @@ function AppController() {
   calendarProjectionConfigRef.current = { ready, syncActuals: preferences.syncActuals,
     writeCalendarId: preferences.writeCalendarId, accountCalendarWrites };
   const nativeProjectionWork = useMemo(() => createCoalescedDateWork(async (dates) => {
-    const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
+    // Finish durable local source-link ownership before choosing a writer. The
+    // native projector also excludes exact account-owned blocks before writes.
+    await retryInlineMinuteLinks({ synchronize: false });
+    const directWrites = await hasConfiguredAccountCalendarWriter();
     const current = calendarProjectionConfigRef.current;
     if (!controllerMountedRef.current || AppState.currentState !== 'active' || !current.ready || directWrites ||
         current.accountCalendarWrites || !current.syncActuals || !current.writeCalendarId) return;
@@ -252,7 +257,7 @@ function AppController() {
           getSetting<unknown>('calendar.selected-date-keys', null),
           getSetting<unknown>('calendar.view-mode', null),
         ]);
-        const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
+        const directWrites = await hasConfiguredAccountCalendarWriter();
         setAccountCalendarWrites(directWrites);
         if (!mounted) return;
         configureCalendarProjection(
@@ -374,9 +379,8 @@ function AppController() {
     if (!controllerMountedRef.current) return;
     setDataVersion((version) => version + 1);
     const sequence = ++accountRefreshSequence.current;
-    void getAccounts().then((accounts) => {
+    void hasConfiguredAccountCalendarWriter().then((directWrites) => {
       if (!controllerMountedRef.current || sequence !== accountRefreshSequence.current) return;
-      const directWrites = accounts.some((account) => account.consent.calendarWrite);
       setAccountCalendarWrites(directWrites);
       const current = calendarProjectionConfigRef.current;
       configureCalendarProjection(
@@ -651,6 +655,21 @@ function AppController() {
   const previousView = calendarViewModePageTarget(navigationState, -1);
   const nextView = calendarViewModePageTarget(navigationState, 1);
   const viewKind = calendarViewKind(viewMode, selectedDateKeys);
+  function swipeCalendarPeriod(direction: -1 | 1) {
+    if (tab !== 'today' || datePickerOpen || viewChangingRef.current) return;
+    const target = direction < 0 ? previousView : nextView;
+    if (target) return transitionFromCalendar(() => shiftCalendarView(target), 'Could not change dates');
+  }
+  const syncWarningScope = JSON.stringify([tab, viewKind, activeDate, selectedDateKeys]);
+  const syncWarningScopeRef = useRef(syncWarningScope);
+  syncWarningScopeRef.current = syncWarningScope;
+  const reportCalendarSyncWarning = useCallback((message: string | null) => {
+    if (syncWarningScopeRef.current !== syncWarningScope) return;
+    setCalendarLoadWarning((previous) => previous?.scope === syncWarningScope && previous.message === message
+      ? previous : { scope: syncWarningScope, message });
+  }, [syncWarningScope]);
+  const calendarSyncError = [...new Set([manualSyncError,
+    calendarLoadWarning?.scope === syncWarningScope ? calendarLoadWarning.message : null].filter(Boolean))].join('\n\n') || null;
   const overviewDates = useMemo(() => calendarViewDates(viewMode, activeDate, selectedDateKeys),
     [viewMode, activeDate, selectedDateKeys]);
   calendarColorContextRef.current = { dates: overviewDates, calendars, preferences };
@@ -684,7 +703,7 @@ function AppController() {
             accountResult.message !== 'Connect an account to sync your phones') messages.push(accountResult.message);
         if (accountResult.conflicts) messages.push('Review calendar conflicts in Settings → Calendar accounts.');
         const config = calendarProjectionConfigRef.current;
-        const directWrites = (await getAccounts()).some((account) => account.consent.calendarWrite);
+        const directWrites = await hasConfiguredAccountCalendarWriter();
         requireCurrent();
         if (config.syncActuals && config.writeCalendarId && !config.accountCalendarWrites && !directWrites) {
           const result = await flushPendingActuals(config.writeCalendarId);
@@ -811,21 +830,26 @@ function AppController() {
               {tab === 'today' ? <>
                 <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void navigate('search')}
                   onPrint={() => void openPrintOptions()}
-                  onSync={() => void synchronizeCalendar()} syncing={manualSyncing} syncError={manualSyncError}
+                  onSync={() => void synchronizeCalendar()} syncing={manualSyncing} syncError={calendarSyncError}
                   onOpenReports={() => void navigate('reports')} onJumpToNow={jumpToCurrentMinute}
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
                   onPrevious={() => shiftCalendarView(previousView)} onNext={() => shiftCalendarView(nextView)}
                   onOpenDatePicker={() => setDatePickerOpen(true)} />
+                <CalendarPeriodSwipe scope={viewKind + '|' + activeDate + '|' + (selectedDateKeys?.join(',') ?? '')}
+                  enabled={viewKind !== 'minutes' && !viewChanging && !datePickerOpen}
+                  onPage={(direction) => void swipeCalendarPeriod(direction)}>
                 {viewKind === 'year' ? <CalendarYearScreen activeDate={activeDate} onOpenMinute={openCalendarMinute} focusRequest={focusRequest}
                   onOpenMonth={(month) => void changeViewMode('month', month)} /> : viewKind === 'schedule' ? <CalendarScheduleScreen
                   activeDate={activeDate} selectedDates={overviewDates} calendars={calendars}
                   preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
                   dataVersion={dataVersion} clockFormat={clockFormat} onOpenMinute={openCalendarMinute}
+                  onSyncWarningChange={reportCalendarSyncWarning}
                   focusRequest={focusRequest}
                   onVisibleMonthChange={visibleOverviewMonthChanged}
                 /> : viewKind === 'month' ? <MonthOverview
                   activeDate={activeDate} focusRequest={focusRequest}
+                  onSyncWarningChange={reportCalendarSyncWarning}
                   selectedDates={overviewDates}
                   calendars={calendars}
                   preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
@@ -839,6 +863,7 @@ function AppController() {
                   calendars={calendars}
                   preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
                   dataVersion={dataVersion}
+                  onSyncWarningChange={reportCalendarSyncWarning}
                   focusRequest={focusRequest}
                   onFocusConsumed={consumeFocus}
                   onDataChanged={dataChanged}
@@ -852,8 +877,10 @@ function AppController() {
                   onZoomChange={changeCalendarZoom}
                   clockFormat={clockFormat}
                   onCreatePlan={() => void navigate('plan')}
+                  onPeriodSwipe={(direction) => void swipeCalendarPeriod(direction)}
                 />
                 }
+                </CalendarPeriodSwipe>
               </> : null}
               {tab === 'reports' ? <ReportsScreen dataVersion={dataVersion} initialDate={activeDate}
                 metric={dashboardMetric} onMetricChange={setDashboardMetric} /> : null}
@@ -927,6 +954,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const [history, setHistory] = useState(() => spreadsheetEditor.snapshot());
   const [historyPending, setHistoryPending] = useState(false);
   const historyOperation = useRef(false);
+  const syncLongPress = useRef(false);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [viewMenuTop, setViewMenuTop] = useState(48);
   const [viewMenuRight, setViewMenuRight] = useState(8);
@@ -1172,12 +1200,16 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     <Pressable accessibilityRole="button" accessibilityLabel={syncing ? 'Synchronizing calendars' : syncError ? 'Calendar sync needs attention. Tap to retry' : 'Sync attached calendars'}
       accessibilityHint={syncError ? 'Touch and hold for sync details' : undefined}
       disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, busy: syncing }}
-      onPressIn={() => binderPress.cancel()}
-      onLongPress={() => { if (syncError) Alert.alert('Calendar synchronization', syncError); }}
+      onPressIn={() => { syncLongPress.current = false; binderPress.cancel(); }}
+      onLongPress={() => { syncLongPress.current = true; if (syncError) Alert.alert('Calendar synchronization', syncError); }}
       accessibilityActions={syncError ? [{ name: 'longpress', label: 'Show sync details' }] : []}
       onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress' && syncError) Alert.alert('Calendar synchronization', syncError); }}
-      onPress={() => { binderPress.cancel(); onSync(); }} style={controlStyle}>
-      {syncing ? <ActivityIndicator size="small" color={colors.graphite} /> : <CalendarHeaderIcon name="sync" />}
+      onPress={() => { binderPress.cancel(); if (syncLongPress.current) { syncLongPress.current = false; return; } onSync(); }} style={controlStyle}>
+      <View style={styles.syncIconWrap}>
+        {syncing ? <ActivityIndicator size="small" color={colors.graphite} /> : <CalendarHeaderIcon name="sync" />}
+        {syncError ? <Text accessible={false} importantForAccessibility="no" allowFontScaling={false}
+          style={styles.syncAttention}>!</Text> : null}
+      </View>
     </Pressable>
     </View>
   </ScrollView>
@@ -1275,15 +1307,19 @@ function ApplicationFrame({
         <View style={styles.screen}>
           {ready && tab !== 'today' ? (
             <View style={styles.screenHeader}>
-              <Text style={styles.screenTitle}>{SCREEN_TITLES[tab]}</Text>
-              <Pressable
+              {tab === 'settings' ? <Pressable accessibilityRole="button" accessibilityLabel="Back to calendar"
+                onPress={onReturnToCalendar} style={styles.menuButton}>
+                <Text accessible={false} style={styles.settingsBackArrow}>←</Text>
+              </Pressable> : null}
+              <Text accessibilityRole="header" style={styles.screenTitle}>{SCREEN_TITLES[tab]}</Text>
+              {tab !== 'settings' ? <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Back to calendar"
                 onPress={onReturnToCalendar}
                 style={styles.backButton}
               >
                 <Text style={styles.backText}>Calendar</Text>
-              </Pressable>
+              </Pressable> : null}
             </View>
           ) : null}
           {children}
@@ -1343,6 +1379,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     justifyContent: 'space-between', backgroundColor: colors.paper },
   calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
   historyArrow: { color: colors.graphite, fontSize: 27, lineHeight: 34 },
+  syncIconWrap: { width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
+  syncAttention: { position: 'absolute', top: -4, right: -5, minWidth: 11, height: 15, borderRadius: 4,
+    backgroundColor: colors.paper, color: colors.graphite, fontSize: 13, lineHeight: 15, fontWeight: '800', textAlign: 'center' },
   disabledCalendarNavigation: { opacity: 0.3 },
   viewMenuBackdrop: { flex: 1 },
   viewMenu: { position: 'absolute', width: 208, paddingVertical: 8, borderWidth: StyleSheet.hairlineWidth,
@@ -1361,6 +1400,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   screenTitle: { flex: 1, marginLeft: 8, color: colors.ink, fontSize: 17, fontWeight: '600' },
   backButton: { minHeight: 44, paddingHorizontal: 10, justifyContent: 'center' },
   backText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
+  settingsBackArrow: { color: colors.graphite, fontSize: 26, lineHeight: 32 },
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.paper },
   loadingText: { marginTop: 14, color: colors.muted, fontSize: 13 },
   errorPanel: { width: '82%', maxWidth: 360, alignItems: 'center' },

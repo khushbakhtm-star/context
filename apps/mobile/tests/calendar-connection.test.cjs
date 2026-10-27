@@ -53,6 +53,7 @@ function calendarRuntime(overrides = {}) {
       if (name === 'expo-calendar/legacy') return nativeCalendar;
       if (name === 'expo-calendar') return {};
       if (name === '../data/database') return {};
+      if (name === './calendar-write-routing') return { hasConfiguredAccountCalendarWriter: async () => false };
       if (name === '../sync/accounts') return { getAccounts: async () => [] };
       if (name === './categories' || name === '../sync/engine' || name === '../sync/codec') return {};
       if (name === '../theme') return { categoryById: () => ({ name: 'Activity' }) };

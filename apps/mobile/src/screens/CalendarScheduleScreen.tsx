@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useAppTheme } from '../appearance';
-import { InfoButton } from '../components/InfoButton';
 import { getDaySegments } from '../data/database';
 import { loadPlannedEventsResult } from '../services/calendar';
 import { loadAccountPlansResult, loadCachedAccountPlans } from '../sync/engine';
@@ -24,6 +23,7 @@ type Props = {
   clockFormat: '12h' | '24h';
   onOpenMinute: (day: string, minute: number) => void;
   onVisibleMonthChange?: (month: string) => void;
+  onSyncWarningChange?: (message: string | null) => void;
 };
 type DaySources = { sourceKey: string; segments: ActivitySegment[]; devicePlans: PlannedEvent[]; accountPlans: PlannedEvent[];
   localReady: boolean; deviceReady: boolean; accountReady: boolean; accountFresh: boolean;
@@ -38,7 +38,7 @@ function accessDenied(error: unknown) {
 }
 
 export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, clockFormat,
-  onOpenMinute, onVisibleMonthChange }: Props) {
+  onOpenMinute, onVisibleMonthChange, onSyncWarningChange }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const daysKey = calendarViewDates('schedule', activeDate, selectedDates).join('|');
@@ -50,7 +50,6 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
     return () => listFocus.cancel();
   }, [focusRequest?.token, focusRequest?.dateKey, daysKey, listFocus]);
   const [data, setData] = useState<Record<string, DayState>>({});
-  const [retry, setRetry] = useState(0);
   const requestDays = useRef<(days: string[]) => void>(() => {});
   const visibleDays = useRef<string[]>([]);
   const visibleMonthCallback = useRef(onVisibleMonthChange);
@@ -146,21 +145,19 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
     const visible = visibleDays.current.filter((day) => positions.has(day));
     enqueueDays(visible.length ? visible : days.slice(0, 3));
     return () => { cancelled = true; pools.forEach((pool) => { pool.queue.length = 0; }); };
-  }, [daysKey, calendarKey, preferenceKey, dataVersion, retry]);
+  }, [daysKey, calendarKey, preferenceKey, dataVersion]);
 
-  const failed = Object.values(data).some((day) => day.failed);
+  const warning = Object.values(data).some((day) => day.localFailed)
+    ? 'Some saved activity could not load. Your saved ledger is unchanged. Tap Sync to retry.'
+    : Object.values(data).some((day) => day.deviceFailed || day.accountFailed)
+      ? 'Some calendar events could not load. Showing saved activity and available plans. Tap Sync to retry.' : null;
+  useEffect(() => { onSyncWarningChange?.(warning); }, [warning, onSyncWarningChange]);
+  useEffect(() => () => onSyncWarningChange?.(null), [onSyncWarningChange]);
   const openDay = (day: string) => {
     const now = new Date();
     onOpenMinute(day, day === dateKey(now) ? minuteIndexForDate(now) : 9 * 60);
   };
   return <View style={styles.container}>
-    {failed ? <View style={styles.errorRow}>
-      <Text accessibilityRole="alert" style={styles.error}>Some events could not load</Text>
-      <Pressable accessibilityRole="button" onPress={() => setRetry((value) => value + 1)} style={styles.retry}>
-        <Text style={styles.retryText}>Retry</Text>
-      </Pressable>
-      <InfoButton title="Schedule events" message="Available calendar events and recorded activities appear together. Recorded minutes replace the overlapping part of a plan. Retry missing sources, or check the calendar selection and account connection in Settings. Tap an activity to open its minute cells." />
-    </View> : null}
     <FlatList ref={list} key={daysKey} data={days} extraData={data} keyExtractor={(day) => day}
       onScrollToIndexFailed={listFocus.onFailure} onScrollBeginDrag={listFocus.cancel}
       maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
@@ -189,7 +186,7 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
                 {description.trim() ? <Text numberOfLines={3} style={styles.description}>{description}</Text> : null}
               </View>
             </Pressable>;
-          }) : <Text style={styles.empty}>{state.failed ? 'Events unavailable' : 'No events'}</Text>}
+          }) : state.failed ? null : <Text style={styles.empty}>No events</Text>}
         </View>;
       }} />
   </View>;
@@ -209,8 +206,4 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   eventTitle: { color: colors.ink, fontSize: 16, fontWeight: '500', marginTop: 4 },
   description: { color: colors.graphite, fontSize: 13, lineHeight: 19, marginTop: 6 },
   empty: { color: colors.muted, fontSize: 13, paddingVertical: 8 },
-  errorRow: { flexDirection: 'row', alignItems: 'center', paddingLeft: 12, paddingRight: 4, gap: 4 },
-  error: { flex: 1, color: colors.danger, fontSize: 12 },
-  retry: { minHeight: 44, paddingHorizontal: 8, justifyContent: 'center' },
-  retryText: { color: colors.ink, fontSize: 12, fontWeight: '600' },
 });

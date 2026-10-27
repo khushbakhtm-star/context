@@ -10,6 +10,381 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const day = '2026-10-25';
 const { setImmediate } = require('node:timers/promises');
 
+test('dragging an independent selected range moves full cells across dates without touching clipboard and has one atomic Undo', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 100, 'Clipboard stays'); const clipboard = await sheet.cutMinuteRange(range(100));
+  await sheet.pasteExternalMinuteRange('  coffee ☕  ', { dateKey: day, startMinute: 600 });
+  await sheet.colorMinuteRange(range(600, 601), 'family');
+  await sheet.applyCellFormat(range(600), { bold: true, underline: true, textColor: '#123456' });
+  await sheet.applyCellFormat(range(602), { italic: true });
+  const source = range(600, 602), target = { dateKey: '2026-10-26', startMinute: 700 };
+  const formats = plain([...(await sheet.getDayCellFormats(day))]);
+  const held = await sheet.prepareMinuteRangeMove(source, { dateKey: day, startMinute: 600 });
+  const preview = await sheet.prepareMinuteRangeMove(source, target, { sourceToken: held.token });
+  assert.equal((await api.getMinuteEntry(day, 600)).text, '  coffee ☕  ');
+  assert.equal(await api.getMinuteEntry(target.dateKey, 700), null);
+  await sheet.moveMinuteRange(source, target, { previewToken: preview.token });
+  for (const minute of [600, 601, 602]) assert.equal(await api.getMinuteEntry(day, minute), null);
+  assert.equal((await api.getMinuteEntry(target.dateKey, 700)).text, '  coffee ☕  ');
+  assert.equal((await api.getMinuteEntry(target.dateKey, 701)).text, '');
+  assert.equal((await api.getMinuteEntry(target.dateKey, 701)).categoryId, 'family');
+  assert.equal(await api.getMinuteEntry(target.dateKey, 702), null, 'style-only blank stays unrecorded');
+  const movedFormats = await sheet.getDayCellFormats(target.dateKey);
+  assert.deepEqual(plain(movedFormats.get(700)), { bold: true, underline: true, textColor: '#123456' });
+  assert.deepEqual(plain(movedFormats.get(702)), { italic: true });
+  assert.deepEqual(plain(sheet.getSpreadsheetClipboard()), plain(clipboard));
+  assert.equal((await api.getMinuteEntry(day, 100)).text, 'Clipboard stays');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 600)).text, '  coffee ☕  ');
+  assert.equal((await api.getDayEntries(target.dateKey)).length, 0);
+  assert.deepEqual(plain([...(await sheet.getDayCellFormats(day))]), formats);
+  await sheet.redoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(target.dateKey, 701)).categoryId, 'family');
+  assert.deepEqual(plain(sheet.getSpreadsheetClipboard()), plain(clipboard));
+});
+
+test('selected range drag uses an immutable snapshot for overlapping upward and downward destinations', async (t) => {
+  for (const start of [599, 601]) {
+    const { api, sheet } = harness(t); await api.initializeDatabase();
+    for (const [offset, text] of ['A', 'B', 'C'].entries()) await save(api, 600 + offset, text);
+    const source = range(600, 602), destination = { dateKey: day, startMinute: start };
+    const preview = await sheet.prepareMinuteRangeMove(source, destination);
+    assert.equal(preview.occupiedCount, 0, 'overlap with the same source needs no replacement prompt');
+    await sheet.moveMinuteRange(source, destination, { previewToken: preview.token });
+    assert.deepEqual((await api.getDayEntries(day)).map((entry) => [entry.minuteIndex, entry.text]),
+      [[start, 'A'], [start + 1, 'B'], [start + 2, 'C']]);
+    await sheet.undoSpreadsheetEdit();
+    assert.deepEqual((await api.getDayEntries(day)).map((entry) => [entry.minuteIndex, entry.text]), [[600, 'A'], [601, 'B'], [602, 'C']]);
+  }
+});
+
+test('partial-group dragging detaches moved notes and atomically splits the untouched and overwritten activity remainders', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  for (let minute = 600; minute <= 604; minute++) await save(api, minute, `Note ${minute}`);
+  await sheet.groupMinuteRange(range(600, 604), { title: 'Coffee', categoryId: 'family' });
+  await sheet.groupMinuteRange(range(700, 704), { title: 'Work', categoryId: 'work' });
+  const original = (await api.getMinuteEntry(day, 600)).blockId;
+  const destinationOriginal = (await api.getMinuteEntry(day, 700)).blockId;
+  await sheet.applyCellFormat(range(602), { underline: true });
+  const source = range(602), destination = { dateKey: day, startMinute: 702 };
+  const preview = await sheet.prepareMinuteRangeMove(source, destination); assert.equal(preview.occupiedCount, 1);
+  await sheet.moveMinuteRange(source, destination, { previewToken: preview.token });
+  assert.equal(await api.getMinuteEntry(day, 602), null);
+  assert.equal((await api.getMinuteEntry(day, 702)).text, 'Note 602');
+  assert.equal((await api.getMinuteEntry(day, 702)).categoryId, 'family');
+  assert.equal((await sheet.getDayCellFormats(day)).get(702).activityGroup, undefined);
+  assert.equal((await sheet.getDayCellFormats(day)).get(702).underline, true);
+  const groups = await sheet.getDayActivityGroups(day);
+  assert.deepEqual(plain(groups.map((group) => [group.startMinute, group.endMinute, group.title])),
+    [[600, 601, 'Coffee'], [603, 604, 'Coffee'], [700, 701, 'Work'], [703, 704, 'Work']]);
+  assert.equal(new Set(groups.map((group) => group.blockId)).size, 4);
+  await sheet.undoSpreadsheetEdit();
+  assert.deepEqual(plain((await sheet.getDayActivityGroups(day)).map((group) => [group.blockId, group.startMinute, group.endMinute])),
+    [[original, 600, 604], [destinationOriginal, 700, 704]]);
+  await sheet.redoSpreadsheetEdit(); assert.equal((await sheet.getDayActivityGroups(day)).length, 4);
+});
+
+test('range drag rejects stale source, destination ABA, cancellation, untouched plans and day overflow without clearing cells', async (t) => {
+  for (const changed of ['source', 'destination', 'cancel']) {
+    const { api, sheet } = harness(t); await api.initializeDatabase(); await save(api, 600, 'Keep');
+    const source = range(600), destination = { dateKey: '2026-10-26', startMinute: 700 };
+    const held = await sheet.prepareMinuteRangeMove(source, { dateKey: day, startMinute: 600 });
+    if (changed === 'source') { await save(api, 600, 'Changed'); await save(api, 600, 'Keep'); }
+    const preview = await sheet.prepareMinuteRangeMove(source, destination, { sourceToken: held.token });
+    if (changed === 'destination') {
+      await api.saveMinuteEntry({ dateKey: destination.dateKey, minuteIndex: 700, text: 'Later', categoryId: 'study' });
+      await api.deleteMinuteEntry(destination.dateKey, 700);
+    }
+    if (changed === 'cancel') sheet.cancelMinuteRangeMove();
+    await assert.rejects(sheet.moveMinuteRange(source, destination, { previewToken: preview.token }), /changed/);
+    assert.equal((await api.getMinuteEntry(day, 600)).text, 'Keep');
+    assert.equal(await api.getMinuteEntry(destination.dateKey, 700), null);
+    await assert.rejects(sheet.prepareMinuteRangeMove(range(600, 601), { dateKey: day, startMinute: 1439 }), /valid minute range/);
+    await assert.rejects(sheet.prepareMinuteRangeMove(range(800), destination), /Calendar plans are not moved/);
+  }
+});
+
+test('failed range move rolls back cells, journal, format and queued calendar work; same-place drop adds no history', async (t) => {
+  const { api, sheet, sqlite, inline } = harness(t); await api.initializeDatabase();
+  await save(api, 600, 'Keep'); await sheet.applyCellFormat(range(600), { bold: true });
+  await inline.retryInlineMinuteLinks();
+  const destination = { dateKey: '2026-10-26', startMinute: 700 };
+  const before = plain(await api.getSyncDocuments(''));
+  const pending = plain(await api.getPendingInlineMinuteLinks());
+  const source = range(600), preview = await sheet.prepareMinuteRangeMove(source, destination);
+  sqlite.exec(`CREATE TRIGGER reject_range_move BEFORE INSERT ON ledger_documents
+    WHEN NEW.key = 'category:minuteFormat:2026-10-26:700' BEGIN SELECT RAISE(ABORT, 'move failed'); END;`);
+  await assert.rejects(sheet.moveMinuteRange(source, destination, { previewToken: preview.token }), /move failed/);
+  assert.equal((await api.getMinuteEntry(day, 600)).text, 'Keep'); assert.equal(await api.getMinuteEntry(destination.dateKey, 700), null);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before); assert.deepEqual(plain(await api.getPendingInlineMinuteLinks()), pending);
+  const unchanged = await sheet.prepareMinuteRangeMove(source, { dateKey: day, startMinute: 600 });
+  await sheet.moveMinuteRange(source, { dateKey: day, startMinute: 600 }, { previewToken: unchanged.token });
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await sheet.getDayCellFormats(day)).get(600), undefined, 'Undo is the earlier bold action, not a no-op move');
+});
+
+test('canceling a selected-range move after its transaction starts restores all source and destination cells', async (t) => {
+  const h = harness(t); const { api, sheet } = h; await api.initializeDatabase(); await save(api, 600, 'Keep source');
+  await sheet.copyMinuteRange(range(600)); const clipboard = plain(sheet.getSpreadsheetClipboard());
+  const destination = { dateKey: '2026-10-26', startMinute: 700 };
+  const preview = await sheet.prepareMinuteRangeMove(range(600), destination);
+  const before = plain(await api.getSyncDocuments(''));
+  h.onRunAsync = async (sql) => { if (sql.startsWith('DELETE FROM minute_entries')) {
+    sheet.cancelMinuteRangeMove(); h.onRunAsync = undefined;
+  } };
+  await assert.rejects(sheet.moveMinuteRange(range(600), destination, { previewToken: preview.token }), /canceled/);
+  assert.equal((await api.getMinuteEntry(day, 600)).text, 'Keep source'); assert.equal(await api.getMinuteEntry(destination.dateKey, 700), null);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before); assert.deepEqual(plain(sheet.getSpreadsheetClipboard()), clipboard);
+});
+
+test('a partial-group range move and its atomic Undo converge through the private ledger without copying group identity', async (t) => {
+  const a = harness(t), b = harness(t); await a.api.initializeDatabase(); await b.api.initializeDatabase();
+  await a.sheet.groupMinuteRange(range(600, 602), { title: 'Coffee', categoryId: 'family' });
+  const notePreview = await a.sheet.prepareExternalMinutePaste('Talk to Mum', { dateKey: day, startMinute: 601 });
+  await a.sheet.pasteExternalMinuteRange('Talk to Mum', { dateKey: day, startMinute: 601 }, { previewToken: notePreview.token });
+  const original = (await a.api.getMinuteEntry(day, 601)).blockId;
+  await b.api.mergeSyncDocuments(plain(await a.api.getSyncDocuments('')));
+  const destination = { dateKey: '2026-10-26', startMinute: 700 };
+  const preview = await a.sheet.prepareMinuteRangeMove(range(601), destination);
+  await a.sheet.moveMinuteRange(range(601), destination, { previewToken: preview.token });
+  await b.api.mergeSyncDocuments(plain(await a.api.getSyncDocuments('')));
+  assert.equal(await b.api.getMinuteEntry(day, 601), null);
+  assert.equal((await b.api.getMinuteEntry(destination.dateKey, 700)).text, 'Talk to Mum');
+  assert.notEqual((await b.api.getMinuteEntry(destination.dateKey, 700)).blockId, original);
+  assert.deepEqual(plain(await b.sheet.getDayActivityGroups(day)), plain(await a.sheet.getDayActivityGroups(day)));
+  await a.sheet.undoSpreadsheetEdit(); await b.api.mergeSyncDocuments(plain(await a.api.getSyncDocuments('')));
+  assert.equal((await b.api.getMinuteEntry(day, 601)).blockId, original);
+  assert.equal(await b.api.getMinuteEntry(destination.dateKey, 700), null);
+});
+
+test('external spreadsheet rectangles paste across three dates with one Undo while preserving Context styles, fills and explicit groups', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  const next = '2026-10-26', third = '2026-10-27';
+  await save(api, 100, 'Internal source', 'study'); const internal = await sheet.cutMinuteRange(range(100));
+  await save(api, 200, 'Old first', 'family'); await save(api, 201, 'Old second', 'family');
+  await sheet.groupMinuteRange(range(200, 201), { title: 'Existing activity', categoryId: 'family' });
+  await sheet.applyCellFormat(range(200), { bold: true, underline: true, textColor: '#123456' });
+  await api.saveMinuteEntry({ dateKey: next, minuteIndex: 201, text: 'Clear this note', categoryId: 'work' });
+  const group = (await api.getMinuteEntry(day, 200)).blockId;
+  const beforeFormats = plain([...(await sheet.getDayCellFormats(day))]);
+  const text = 'Coffee\t"Talk to Mum\nBook doctor"\t=SUM(A1:A2)\n\t\tUnicode ☕';
+  const destination = { dateKey: day, startMinute: 200 };
+  const preview = await sheet.prepareExternalMinutePaste(text, destination);
+  assert.deepEqual(plain(preview.ranges), [range(200, 201), range(200, 201, next), range(200, 201, third)]);
+  assert.equal(preview.rows, 2); assert.equal(preview.columns, 3); assert.equal(preview.occupiedCount, 3);
+  await sheet.pasteExternalMinuteRange(text, destination, { previewToken: preview.token });
+  assert.equal((await api.getMinuteEntry(day, 200)).text, 'Coffee'); assert.equal((await api.getMinuteEntry(day, 201)).text, '');
+  assert.equal((await api.getMinuteEntry(day, 200)).blockId, group); assert.equal((await api.getMinuteEntry(day, 201)).blockId, group);
+  assert.equal((await api.getMinuteEntry(day, 200)).categoryId, 'family');
+  assert.deepEqual(plain([...(await sheet.getDayCellFormats(day))]), beforeFormats);
+  assert.equal((await api.getMinuteEntry(next, 200)).text, 'Talk to Mum\nBook doctor');
+  assert.equal((await api.getMinuteEntry(next, 201)).text, ''); assert.equal((await api.getMinuteEntry(next, 201)).categoryId, 'work');
+  assert.equal((await api.getMinuteEntry(third, 200)).text, '=SUM(A1:A2)', 'formulas stay literal text');
+  assert.equal((await api.getMinuteEntry(third, 201)).text, 'Unicode ☕');
+  assert.notEqual((await api.getMinuteEntry(third, 200)).blockId, (await api.getMinuteEntry(third, 201)).blockId,
+    'external text must not invent a common activity/group identity');
+  assert.equal((await api.getMinuteEntry(next, 200)).categoryId, 'unaccounted');
+  assert.deepEqual(plain(sheet.getSpreadsheetClipboard()), plain(internal));
+  assert.equal((await api.getMinuteEntry(day, 100)).text, 'Internal source', 'external paste never executes a pending internal Cut');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(day, 200)).text, 'Old first');
+  assert.equal((await api.getMinuteEntry(day, 201)).text, 'Old second');
+  assert.equal(await api.getMinuteEntry(next, 200), null); assert.equal((await api.getMinuteEntry(next, 201)).text, 'Clear this note');
+  assert.equal((await api.getDayEntries(third)).length, 0);
+  await sheet.redoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(third, 201)).text, 'Unicode ☕');
+  assert.deepEqual(plain(sheet.getSpreadsheetClipboard()), plain(internal));
+});
+
+test('external single-cell Paste fills the selected range and blank fields remain blank without inventing minutes', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await sheet.pasteExternalMinuteRange('Read Codex', { dateKey: day, startMinute: 719, endMinute: 722 });
+  assert.deepEqual((await api.getDayEntries(day)).map((entry) => entry.text), Array(4).fill('Read Codex'));
+  assert.equal(new Set((await api.getDayEntries(day)).map((entry) => entry.blockId)).size, 4);
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getDayEntries(day)).length, 0);
+  await sheet.pasteExternalMinuteRange('a\t\nb\t', { dateKey: day, startMinute: 10 });
+  assert.equal((await api.getDayEntries('2026-10-26')).length, 0);
+  assert.deepEqual((await api.getDayEntries(day)).map((entry) => entry.text), ['a', 'b']);
+});
+
+test('fill Reset keeps notes and styles, removes empty colored ghost records, and Undo/Redo restores the exact range', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 300, 'Keep my words', 'family'); await sheet.colorMinuteRange(range(301), 'family');
+  await sheet.applyCellFormat(range(300, 301), { bold: true, textColor: '#123456' });
+  await sheet.resetMinuteFill(range(300, 302));
+  assert.equal((await api.getMinuteEntry(day, 300)).text, 'Keep my words');
+  assert.equal((await api.getMinuteEntry(day, 300)).categoryId, 'unaccounted');
+  assert.equal(await api.getMinuteEntry(day, 301), null); assert.equal(await api.getMinuteEntry(day, 302), null);
+  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(300)), { bold: true, textColor: '#123456', noFill: true });
+  assert.equal((await api.getCategoryTimeTotals(day, day)).reduce((sum, row) => sum + row.minutes, 0), 1);
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 301)).categoryId, 'family');
+  assert.equal((await api.getMinuteEntry(day, 300)).categoryId, 'family');
+  assert.equal((await sheet.getDayCellFormats(day)).get(300).noFill, undefined);
+  await sheet.redoSpreadsheetEdit(); assert.equal(await api.getMinuteEntry(day, 301), null);
+  await sheet.applyCellFormat(range(300), { textColor: null });
+  assert.equal((await api.getMinuteEntry(day, 300)).text, 'Keep my words');
+  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(300)), { bold: true, noFill: true });
+  await sheet.clearTextMinuteRange(range(300)); assert.equal(await api.getMinuteEntry(day, 300), null);
+  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(300)), { bold: true, noFill: true });
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 300)).text, 'Keep my words');
+});
+
+test('fill Reset preserves blank group membership, and explicit color/group/fill removes the no-fill override', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 400, 'Grouped note', 'family'); await sheet.groupMinuteRange(range(400, 401), { title: 'Activity', categoryId: 'family' });
+  const block = (await api.getMinuteEntry(day, 400)).blockId;
+  await sheet.resetMinuteFill(range(400, 401));
+  for (const minute of [400, 401]) { assert.equal((await api.getMinuteEntry(day, minute)).blockId, block);
+    assert.equal((await api.getMinuteEntry(day, minute)).categoryId, 'unaccounted');
+    assert.equal((await sheet.getDayCellFormats(day)).get(minute).noFill, true); }
+  assert.equal((await api.getMinuteEntry(day, 401)).text, '');
+  await sheet.colorMinuteRange(range(400), 'family'); assert.equal((await sheet.getDayCellFormats(day)).get(400).noFill, undefined);
+  await sheet.groupMinuteRange(range(400, 401), { title: 'Activity', categoryId: 'family' });
+  assert.equal((await sheet.getDayCellFormats(day)).get(401).noFill, undefined);
+  await sheet.resetMinuteFill(range(400, 401));
+  await sheet.fillMinuteRange(range(400, 401), 400, 'family');
+  assert.equal((await sheet.getDayCellFormats(day)).get(401).noFill, undefined);
+  assert.equal((await api.getMinuteEntry(day, 401)).text, 'Grouped note');
+});
+
+test('no-fill metadata survives the released encrypted-ledger whitelist and private-ledger replay', async (t) => {
+  const first = harness(t), second = harness(t); await first.api.initializeDatabase(); await second.api.initializeDatabase();
+  await save(first.api, 500, 'Retain note', 'family'); await first.sheet.resetMinuteFill(range(500));
+  const documents = plain(await first.api.getSyncDocuments(''));
+  const codec = first.load(first.source('sync/codec.ts'));
+  assert.doesNotThrow(() => codec.validateBatch({ version: 1, id: 'no_fill_metadata', documents }));
+  await second.api.mergeSyncDocuments(documents);
+  assert.equal((await second.api.getMinuteEntry(day, 500)).text, 'Retain note');
+  assert.equal((await second.sheet.getDayCellFormats(day)).get(500).noFill, true);
+});
+
+test('a format write failure rolls fill Reset back without deleting colored blanks or losing notes', async (t) => {
+  const { api, sheet, sqlite } = harness(t); await api.initializeDatabase();
+  await save(api, 600, 'Keep note', 'family'); await sheet.colorMinuteRange(range(601), 'family');
+  const before = plain(await api.getSyncDocuments(''));
+  sqlite.exec(`CREATE TRIGGER reject_reset BEFORE INSERT ON ledger_documents
+    WHEN NEW.key = 'category:minuteFormat:2026-10-25:601' BEGIN SELECT RAISE(ABORT, 'injected Reset failure'); END;`);
+  await assert.rejects(sheet.resetMinuteFill(range(600, 601)), /injected Reset failure/);
+  assert.equal((await api.getMinuteEntry(day, 600)).text, 'Keep note');
+  assert.equal((await api.getMinuteEntry(day, 600)).categoryId, 'family');
+  assert.equal((await api.getMinuteEntry(day, 601)).categoryId, 'family');
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before);
+});
+
+test('external edge whitespace and quoted CRLF notes survive SQLite, Undo/Redo, internal Copy and explicit formatting/grouping', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  const first = '  ☕ coffee  ', second = '\r\n talk\tMum \r\n';
+  const text = `"${first}"\t"${second}"`, destination = { dateKey: day, startMinute: 500 };
+  await save(api, 500, 'Previous note', 'family');
+  const preview = await sheet.prepareExternalMinutePaste(text, destination);
+  await sheet.pasteExternalMinuteRange(text, destination, { previewToken: preview.token });
+  assert.equal((await api.getMinuteEntry(day, 500)).text, first);
+  assert.equal((await api.getMinuteEntry('2026-10-26', 500)).text, second);
+  const documents = await api.getSyncDocuments('minute:');
+  assert.equal(documents.find((value) => value.key === `minute:${day}:500`).value.text, first);
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 500)).text, 'Previous note');
+  assert.equal(await api.getMinuteEntry('2026-10-26', 500), null);
+  await sheet.redoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 500)).text, first);
+  assert.equal((await api.getMinuteEntry('2026-10-26', 500)).text, second);
+  // A whitespace-only difference is real clipboard data, so it must neither be
+  // mistaken for a no-op nor invalidate the later Undo's expected text guard.
+  const whitespace = await sheet.prepareExternalMinutePaste('☕ coffee', destination);
+  await sheet.pasteExternalMinuteRange('☕ coffee', destination, { previewToken: whitespace.token });
+  assert.equal((await api.getMinuteEntry(day, 500)).text, '☕ coffee');
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 500)).text, first);
+  await sheet.copyMinuteRange(range(500)); assert.equal(sheet.getSpreadsheetClipboardText(), first);
+  await sheet.pasteMinuteRange({ dateKey: day, startMinute: 501 });
+  assert.equal((await api.getMinuteEntry(day, 501)).text, first);
+  await sheet.applyCellFormat(range(500, 501), { italic: true });
+  await sheet.groupMinuteRange(range(500, 501), { title: 'Coffee notes', categoryId: 'family' });
+  assert.equal((await api.getMinuteEntry(day, 500)).text, first);
+  assert.equal((await api.getMinuteEntry(day, 501)).text, first);
+  assert.equal((await sheet.getDayCellFormats(day)).get(501).italic, true);
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 501)).text, first);
+  await sheet.redoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 500)).text, first);
+});
+
+test('external Paste previews the entire rectangle and rejects changed text, destination, or any later destination revision', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await api.saveMinuteEntry({ dateKey: '2026-10-27', minuteIndex: 501, text: 'Review last target', categoryId: 'family' });
+  const text = 'a\tb\tc\nd\te\tf', destination = { dateKey: day, startMinute: 500 };
+  await assert.rejects(sheet.pasteExternalMinuteRange(text, destination), /Review the destination/);
+  assert.equal((await api.getDayEntries(day)).length, 0);
+  const preview = await sheet.prepareExternalMinutePaste(text, destination); assert.equal(preview.occupiedCount, 1);
+  await assert.rejects(sheet.pasteExternalMinuteRange(text + 'x', destination, { previewToken: preview.token }), /text or destination changed/);
+  await assert.rejects(sheet.pasteExternalMinuteRange(text, { ...destination, startMinute: 499 }, { previewToken: preview.token }), /text or destination changed/);
+  await api.saveMinuteEntry({ dateKey: '2026-10-27', minuteIndex: 501, text: 'Changed', categoryId: 'family' });
+  await api.saveMinuteEntry({ dateKey: '2026-10-27', minuteIndex: 501, text: 'Review last target', categoryId: 'family' });
+  const before = plain(await api.getSyncDocuments(''));
+  await assert.rejects(sheet.pasteExternalMinuteRange(text, destination, { previewToken: preview.token }), /changed/);
+  assert.equal((await api.getDayEntries(day)).length, 0); assert.equal((await api.getDayEntries('2026-10-26')).length, 0);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before);
+});
+
+test('a failure on the third day rolls external text, ledger, and calendar-link work back across all dates', async (t) => {
+  const { api, sheet, sqlite } = harness(t); await api.initializeDatabase();
+  const text = 'a\tb\tc\nd\te\tf', destination = { dateKey: day, startMinute: 600 };
+  const preview = await sheet.prepareExternalMinutePaste(text, destination);
+  const before = plain(await api.getSyncDocuments('')); const pending = plain(await api.getPendingInlineMinuteLinks());
+  const outbox = plain(sqlite.prepare('SELECT * FROM sync_outbox ORDER BY date_key').all());
+  sqlite.exec(`CREATE TRIGGER reject_external_paste BEFORE INSERT ON minute_entries
+    WHEN NEW.date_key = '2026-10-27' AND NEW.minute_index = 601 BEGIN SELECT RAISE(ABORT, 'injected external failure'); END;`);
+  await assert.rejects(sheet.pasteExternalMinuteRange(text, destination, { previewToken: preview.token }), /injected external failure/);
+  for (const date of [day, '2026-10-26', '2026-10-27']) assert.equal((await api.getDayEntries(date)).length, 0);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before); assert.deepEqual(plain(await api.getPendingInlineMinuteLinks()), pending);
+  assert.deepEqual(plain(sqlite.prepare('SELECT * FROM sync_outbox ORDER BY date_key').all()), outbox);
+  assert.equal(sheet.spreadsheetEditor.snapshot().canUndo, false);
+});
+
+test('canceling an external paste during its transaction leaves no partial cells and does not change internal Copy', async (t) => {
+  const h = harness(t); const { api, sheet } = h; await api.initializeDatabase();
+  await save(api, 100, 'Keep internal'); const internal = await sheet.copyMinuteRange(range(100));
+  const text = 'a\tb\nc\td', destination = { dateKey: day, startMinute: 700 };
+  const preview = await sheet.prepareExternalMinutePaste(text, destination); const before = plain(await api.getSyncDocuments(''));
+  h.onRunAsync = async (sql) => { if (sql.startsWith('INSERT INTO minute_entries')) {
+    sheet.cancelExternalMinutePaste(); h.onRunAsync = undefined; } };
+  await assert.rejects(sheet.pasteExternalMinuteRange(text, destination, { previewToken: preview.token }), /canceled/);
+  assert.equal(await api.getMinuteEntry(day, 700), null); assert.equal((await api.getDayEntries('2026-10-26')).length, 0);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before); assert.deepEqual(plain(sheet.getSpreadsheetClipboard()), plain(internal));
+});
+
+test('internal clipboard text comes from its captured snapshot and large snapshots remain usable internally', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 100, 'Coffee\nTalk to Mum'); await sheet.copyMinuteRange(range(100, 101));
+  await save(api, 100, 'Later source change');
+  assert.equal(sheet.getSpreadsheetClipboardText(), '"Coffee\nTalk to Mum"\n""');
+  await save(api, 200, 'x'.repeat(50_001)); const large = await sheet.copyMinuteRange(range(200));
+  assert.equal(sheet.getSpreadsheetClipboardText(), null);
+  assert.deepEqual(plain(sheet.getSpreadsheetClipboard()), plain(large));
+  await sheet.pasteMinuteRange({ dateKey: day, startMinute: 201 });
+  assert.equal((await api.getMinuteEntry(day, 201)).text.length, 50_001);
+});
+
+test('external paste bounds fail before mutation and a 31-day rectangle is still one undoable transaction', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  const before = plain(await api.getSyncDocuments(''));
+  assert.throws(() => sheet.prepareExternalMinutePaste('a\nb', { dateKey: day, startMinute: 1439 }), /midnight/);
+  assert.throws(() => sheet.prepareExternalMinutePaste('a\tb', { dateKey: '9999-12-31', startMinute: 1 }), /supported/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before);
+  const text = Array.from({ length: 31 }, (_, index) => String(index + 1)).join('\t');
+  await sheet.pasteExternalMinuteRange(text, { dateKey: day, startMinute: 1439 });
+  assert.equal((await api.getMinuteEntry('2026-11-24', 1439)).text, '31');
+  await sheet.undoSpreadsheetEdit(); assert.equal((await api.getEntriesBetween(day, '2026-11-24')).length, 0);
+});
+
+test('the shared transaction validates date count, duplicate dates and total cell budget before changing any day', async (t) => {
+  const { api } = harness(t); await api.initializeDatabase(); await save(api, 0, 'Keep existing');
+  const before = plain(await api.getSyncDocuments(''));
+  const change = (index, count = 1) => {
+    const target = Array.from({ length: count }, (_, minuteIndex) => ({ minuteIndex, entry: null, format: {} }));
+    return { day: new Date(Date.UTC(2026, 9, 25 + index)).toISOString().slice(0, 10), target, expected: target };
+  };
+  for (const changes of [Array.from({ length: 32 }, (_, index) => change(index)),
+    [change(0), change(0)], Array.from({ length: 31 }, (_, index) => change(index, 324))]) {
+    await assert.rejects(api.applySpreadsheetTransaction(changes, { textChanged: true, formatChanged: true }), /Invalid spreadsheet transaction/);
+  }
+  assert.equal((await api.getMinuteEntry(day, 0)).text, 'Keep existing');
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before);
+});
+
 function harness(t) {
   const sqlite = new DatabaseSync(':memory:');
   let onRunAsync;

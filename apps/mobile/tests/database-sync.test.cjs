@@ -83,7 +83,8 @@ test('source color import preserves minute identity, notes, groups, source and f
     activityGroup: { id: 'activity_color', title: 'Coffee' } } });
   await api.saveSyncBinding({ segmentKey: 'activity_color:100:101', blockId: 'activity_color', dateKey: day, calendarId: 'device', eventId: 'native-12' });
   sqlite.prepare('INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at) VALUES (?, 3, ?, ?)').run(day, 'existing pending write', 'before');
-  sqlite.prepare('INSERT INTO inline_minute_link_outbox VALUES (?, ?, ?, ?)').run(day, 100, JSON.stringify([day]), 'prior-link-token');
+  sqlite.prepare('INSERT OR REPLACE INTO inline_minute_link_outbox (date_key, minute_index, affected_dates_json, token) VALUES (?, ?, ?, ?)')
+    .run(day, 100, JSON.stringify([day]), 'prior-link-token');
   const queues = plain({ native: sqlite.prepare('SELECT * FROM sync_outbox').all(), inline: sqlite.prepare('SELECT * FROM inline_minute_link_outbox').all() });
   const bindings = plain(await api.getSyncBindings(day));
   const before = plain(await api.getDayEntries(day));
@@ -446,8 +447,9 @@ test('explicit color-only minutes count in reports and round-trip through the cl
   assert.equal(await second.mergeSyncDocuments(documents), 1);
   assert.equal((await second.getMinuteEntry(day, 300)).text, '');
   assert.equal((await second.getCategoryTimeTotals(day, day))[0].minutes, 1);
-  assert.equal((await second.getPendingInlineMinuteLinks()).length, 0,
-    'Importing another phone does not invent a new local inline-link intent');
+  assert.equal((await second.getPendingInlineMinuteLinks()).length, 1,
+    'A winning peer minute queues an exact account-link retry, without a native-calendar outbox');
+  assert.equal((await second.getPendingSyncDates()).length, 0);
 });
 
 test('restoring a conflicting color-only minute retains its blank text and creates a winning revision', async (t) => {
@@ -469,6 +471,56 @@ test('restoring a conflicting color-only minute retains its blank text and creat
   assert.equal(document.value.text, '');
   assert.ok(document.revision > remote.revision);
   assert.equal((await api.getLedgerConflicts()).length, 0);
+});
+
+test('only winning peer minutes and tombstones queue durable exact account links without native-calendar writes', async (t) => {
+  const { api } = createRepository(t); await api.initializeDatabase();
+  const incoming = { key: minuteKey(700), revision: revision(1000, 0, 'browser_actor'), value: value(700, 'Browser thought') };
+  await api.mergeSyncDocuments([incoming]);
+  let tickets = await api.getPendingInlineMinuteLinks(); assert.equal(tickets.length, 1);
+  assert.equal(tickets[0].dateKey, day); assert.equal(tickets[0].minuteIndex, 700);
+  assert.deepEqual(plain(tickets[0].affectedDates), [day]); assert.equal((await api.getPendingSyncDates()).length, 0);
+  await api.acknowledgeInlineMinuteLink(tickets[0]);
+  await api.mergeSyncDocuments([incoming]);
+  await api.mergeSyncDocuments([{ ...incoming, revision: revision(999, 0, 'browser_actor'), value: value(700, 'Older peer thought') }]);
+  await api.mergeSyncDocuments([{ key: 'category:browser_label', revision: revision(1001, 0, 'browser_actor'), value: { name: 'Label' } }]);
+  assert.equal((await api.getPendingInlineMinuteLinks()).length, 0, 'identical, losing and metadata records cannot create new link intent');
+  await api.mergeSyncDocuments([{ ...incoming, revision: revision(1002, 0, 'browser_actor'), value: null }]);
+  tickets = await api.getPendingInlineMinuteLinks(); assert.equal(tickets.length, 1); assert.equal(tickets[0].minuteIndex, 700);
+  assert.equal(await api.getMinuteEntry(day, 700), null); assert.equal((await api.getPendingSyncDates()).length, 0);
+});
+
+test('a rejected peer batch rolls back newly queued account links with its notes and journal', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  const documents = plain(await api.getSyncDocuments(''));
+  await assert.rejects(api.mergeSyncDocuments([
+    { key: minuteKey(710), revision: revision(1000, 0, 'browser_actor'), value: value(710, 'Must roll back') },
+    { key: minuteKey(711), revision: revision(1000, 1, 'browser_actor'), value: value(712, 'Wrong coordinate') },
+  ]), /Invalid synchronized minute/);
+  assert.equal(await api.getMinuteEntry(day, 710), null); assert.equal((await api.getPendingInlineMinuteLinks()).length, 0);
+  assert.equal((await api.getPendingSyncDates()).length, 0); assert.deepEqual(plain(await api.getSyncDocuments('')), documents);
+  assert.equal(sqlite.prepare('SELECT importing FROM ledger_clock WHERE id=1').get().importing, 0);
+});
+
+test('legacy inline-ticket migration preserves local intent and imported-account requirements survive a coalesced local edit', async (t) => {
+  const { api, sqlite } = createRepository(t);
+  sqlite.exec(`CREATE TABLE inline_minute_link_outbox (date_key TEXT NOT NULL, minute_index INTEGER NOT NULL,
+    affected_dates_json TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(date_key,minute_index))`);
+  sqlite.prepare('INSERT INTO inline_minute_link_outbox VALUES (?,?,?,?)').run(day, 100, JSON.stringify([day]), 'legacy-token');
+  await api.initializeDatabase();
+  let tickets = await api.getPendingInlineMinuteLinks(); assert.equal(tickets[0].token, 'legacy-token');
+  assert.equal(tickets[0].requiresAccountWriter, undefined);
+  await api.mergeSyncDocuments([{ key: minuteKey(720), revision: revision(Date.now() + 1000, 0, 'browser_actor'), value: value(720, 'Browser edit') }]);
+  const imported = (await api.getPendingInlineMinuteLinks()).find((ticket) => ticket.minuteIndex === 720);
+  assert.equal(imported.requiresAccountWriter, true);
+  await api.saveMinuteRange({ dateKey: day, startMinute: 720, durationMinutes: 1, text: 'Latest local revision', categoryId: 'study', queueInlineLink: true });
+  tickets = await api.getPendingInlineMinuteLinks(); const latest = tickets.find((ticket) => ticket.minuteIndex === 720);
+  assert.equal(latest.requiresAccountWriter, true); assert.notEqual(latest.token, imported.token);
+  assert.equal(await api.acknowledgeInlineMinuteLink(imported), false);
+  assert.equal(await api.deferInlineMinuteLink(imported), false, 'a stale defer cannot rotate or replace newer intent');
+  assert.equal(await api.deferInlineMinuteLink(latest), true);
+  assert.equal((await api.getPendingInlineMinuteLinks()).find((ticket) => ticket.minuteIndex === 720).token, latest.token);
+  await api.initializeDatabase(); assert.equal((await api.getPendingInlineMinuteLinks()).find((ticket) => ticket.minuteIndex === 720).requiresAccountWriter, true);
 });
 
 test('inline link tickets are scoped to explicit edits and stale acknowledgements retain newer work', async (t) => {

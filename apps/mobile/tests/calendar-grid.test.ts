@@ -54,6 +54,27 @@ test('plan duration uses the tapped column date when an activity crosses midnigh
   assert.equal(suggestedPlanDuration('2026-10-25', 1430, {} as MinuteEntry, plan), null);
 });
 
+test('overlapping source title, color and edit identity stay stable across provider arrival orders', async () => {
+  const day = '2026-10-25';
+  const native = { id: 'device-event', calendarId: 'device', title: 'Pray', color: '#0B8043', allDay: false,
+    startDate: localDateAtMinute(day, 389), endDate: localDateAtMinute(day, 390) } satisfies PlannedEvent;
+  const account = { ...native, id: 'remote-event', calendarId: 'google-calendar', color: '#51B749',
+    accountEvent: { accountId: 'google:owner', event: { id: 'remote-event' } } } as PlannedEvent;
+  const other = { ...account, id: 'another-real-event', calendarId: 'z-other-calendar', title: 'Another activity' };
+  for (const order of [[native, account, other], [other, account, native], [account, native, other]]) {
+    const original = [...order];
+    const events = indexCalendarDay(day, [], order).plansByMinute.get(389)!;
+    assert.equal(events[0], account); assert.equal(events[0]!.color, '#51B749');
+    assert.equal(events.length, 3, 'overlaps are retained; title/time similarity is not treated as identity');
+    assert.deepEqual(order, original, 'the caller cache is not mutated');
+    const selected = await loadCalendarMinuteSelection({ dateKey: day, minuteIndex: 389, rangeKey: day, token: 1 }, {
+      readEntry: async () => null, readPlans: () => order,
+      currentState: () => ({ mounted: true, rangeKey: day, token: 1, visibleDays: [day] }),
+    });
+    assert.equal(selected!.plan, account, 'the displayed source and explicit Event action use the same identity');
+  }
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });

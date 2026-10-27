@@ -108,6 +108,30 @@
       "patch": []
     },
     {
+      "name": "expo-clipboard",
+      "version": "58.0.4",
+      "npmIntegrity": "sha512-b2eEJMwdWXLTrmrkg/otsmL2OV6s9D90tytSNBsY87UswrWf6JwxcB2OaWegyUWD9XnvtBVNeVK7lej0zZh+5A==",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/expo/expo.git",
+        "directory": "packages/expo-clipboard"
+      },
+      "remove": [
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.clipboard/58.0.4/expo.modules.clipboard-58.0.4-sources.jar",
+          "sha256": "803f42246a4d74fc967505fd7a7b7181637b9b8288eec61ebaf05d28e0cde6ff",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        },
+        {
+          "path": "local-maven-repo/host/exp/exponent/expo.modules.clipboard/58.0.4/expo.modules.clipboard-58.0.4.aar",
+          "sha256": "f7d6c9c8a390aea96117e36cdefca87b675e18a2f0f9143fb2374a61994ec16b",
+          "reason": "unused publication; all Expo Android modules compile from source"
+        }
+      ],
+      "patch": []
+    },
+    {
       "name": "expo-constants",
       "version": "58.0.13",
       "npmIntegrity": "sha512-zUj1rcnYg0O2wKF9L32ToEtFujc5OkslZJ4lWeg+fEwoPMLVwldn6kdEkX8zx31KgSwF94Ey1mIFdFX8Brp73Q==",

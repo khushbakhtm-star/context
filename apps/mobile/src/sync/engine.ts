@@ -2,9 +2,10 @@ import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 
 import {
-  acknowledgeUploaded, getActivityTitleForEntries, getDayEntries, getDaySegments, getDocumentsForUpload, getEntriesBetween,
-  getEntriesForBlock, getSetting, getSyncDocuments, hasSeenSyncFile,
+  acknowledgeInlineMinuteLink, acknowledgeUploaded, deferInlineMinuteLink, getActivityTitleForEntries, getDayEntries, getDaySegments, getDocumentsForUpload, getEntriesBetween,
+  getEntriesForBlock, getPendingInlineMinuteLinks, getSetting, getSyncDocuments, hasSeenSyncFile,
   markSyncFileSeen, mergeSyncDocuments, putSyncDocument, remapActivityProjections, replaceProjectedMinutes, recolorExpectedMinuteEntries, setSetting,
+  type PendingInlineMinuteLink,
 } from '../data/database';
 import { categoryById } from '../theme';
 import { CATEGORIES } from '../theme';
@@ -528,22 +529,44 @@ async function linkActuals(
   }
 }
 
+function providerWriteColors(projection: Projection, categoryId: string) {
+  const provider = projection.accountId.startsWith('google:') ? 'google' : 'microsoft';
+  const mapping = categoryProviderColor(categoryId, provider, projection.accountId, projection.calendarId);
+  if (mapping.colorId || mapping.eventLabelId || mapping.categoryName) return {
+    googleColorId: mapping.colorId, googleEventLabelId: mapping.eventLabelId,
+    microsoftCategories: mapping.categoryName ? [mapping.categoryName] : undefined,
+  };
+  // Recording a note does not choose a new provider color. Keep the exact known
+  // event IDs/categories, including an inherited calendar default, on updates.
+  if (projection.baseEvent) return {
+    googleColorId: projection.baseEvent.googleColorId,
+    googleEventLabelId: projection.baseEvent.googleEventLabelId,
+    microsoftCategories: projection.baseEvent.microsoftCategories,
+  };
+  // Native-calendar source colors have no account palette identity. For a new
+  // actual, translate only an exact Google palette value; never guess an alias
+  // between Google's native display colors and its legacy API color values.
+  const category = CATEGORIES.find((item) => item.id === categoryId);
+  const exact = provider === 'google' && category ? CATEGORIES.find((item) =>
+    item.provider === 'google' && item.accountId === projection.accountId && item.providerColorId &&
+    calendarColor(item.providerOriginalColor ?? item.color)?.toUpperCase() === category.color.toUpperCase()) : undefined;
+  return { googleColorId: exact?.providerColorId, googleEventLabelId: undefined, microsoftCategories: undefined };
+}
+
 function buildWrite(projection: Projection, segment: ActivitySegment): CalendarEventWrite {
   const preserved = projection.baseEvent ? readCalendarDescription(projection.baseEvent, projection.id).preserved : '';
   const description = makeCalendarDescription(preserved, formatCalendarMinuteLog(segment.entries), 2);
   const zone = projection.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const mapping = categoryProviderColor(segment.categoryId,
-    projection.accountId.startsWith('google:') ? 'google' : 'microsoft',
-    projection.accountId, projection.calendarId);
-  return { title: segment.activityTitle ?? projection.title ?? (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
+  return { title: segment.activityTitle ?? projection.title ??
+      (projection.sourceEventId ? projection.baseEvent?.title : undefined) ??
+      (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
     ...description,
     start: zonedMinuteToInstant(segment.dateKey, segment.startMinute, zone),
     end: zonedMinuteToInstant(segment.entries.at(-1)!.dateKey,
       segment.entries.at(-1)!.minuteIndex + 1, zone),
     timeZone: zone,
     projectionId: projection.id, categoryId: segment.categoryId,
-    googleColorId: mapping.colorId, googleEventLabelId: mapping.eventLabelId,
-    microsoftCategories: mapping.categoryName ? [mapping.categoryName] : undefined,
+    ...providerWriteColors(projection, segment.categoryId),
     sourceOperationId: projection.pendingSourceOperationId };
 }
 function eventHash(event: RemoteCalendarEvent) {
@@ -557,15 +580,24 @@ function localWriteHash(write: CalendarEventWrite) {
   const { sourceOperationId: _operation, ...content } = write;
   return hashValue(content);
 }
-/** A formatter upgrade is not a local edit. Reconstruct only the version-one
- * writer acknowledged by an existing v1 projection; real text/color/time changes
- * still change both hashes and retain the normal conflict checks. */
+/** Writer normalization is not a local edit. Compare the acknowledged prior
+ * title/color shape, and the version-one formatter where applicable. Real local
+ * text/category/title/time changes still retain the normal conflict checks. */
 function localProjectionUnchanged(projection: Projection, segment: ActivitySegment, write = buildWrite(projection, segment)) {
-  if (localWriteHash(write) === projection.baseLocalHash) return true;
+  const mapping = categoryProviderColor(segment.categoryId,
+    projection.accountId.startsWith('google:') ? 'google' : 'microsoft', projection.accountId, projection.calendarId);
+  const previousWrite = { ...write,
+    title: segment.activityTitle ?? projection.title ??
+      (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
+    googleColorId: mapping.colorId, googleEventLabelId: mapping.eventLabelId,
+    microsoftCategories: mapping.categoryName ? [mapping.categoryName] : undefined };
+  const candidates = [write, previousWrite];
+  if (candidates.some((candidate) => localWriteHash(candidate) === projection.baseLocalHash)) return true;
   if (projection.baseEvent?.descriptionLog?.version !== 1) return false;
   const preserved = readCalendarDescription(projection.baseEvent, projection.id).preserved;
   const oldLog = segment.entries.map((entry) => `${minuteLabel(entry.minuteIndex, true)}  ${entry.text}`).join('\n');
-  return localWriteHash({ ...write, ...makeCalendarDescription(preserved, oldLog, 1) }) === projection.baseLocalHash;
+  return candidates.some((candidate) =>
+    localWriteHash({ ...candidate, ...makeCalendarDescription(preserved, oldLog, 1) }) === projection.baseLocalHash);
 }
 function partitionActivity(entries: MinuteEntry[]) {
   const civil = (day: string, minute: number) => Date.parse(`${day}T00:00:00Z`) + minute * 60000;
@@ -808,6 +840,17 @@ export async function resolveProjectionConflict(id: string, choice: 'context' | 
   }
 }
 
+/** Imported minutes keep their durable retry until an authorized account owns
+ * the exact block. Ordinary local-save tickets retain their existing behavior. */
+export async function canAcknowledgeInlineMinuteLink(ticket: PendingInlineMinuteLink): Promise<boolean> {
+  if (!ticket.requiresAccountWriter) return true;
+  const entry = (await getDayEntries(ticket.dateKey)).find((item) => item.minuteIndex === ticket.minuteIndex);
+  if (!entry) return true;
+  const accounts = await getAccounts();
+  return (await listProjections()).some((projection) => projection.state !== 'deleted' && projection.blockId === entry.blockId &&
+    accounts.some((account) => account.id === projection.accountId && account.consent.calendarWrite));
+}
+
 async function runSync(): Promise<AccountSyncStatus> {
   publish({ running: true, message: 'Synchronizing accounts…' });
   const errors: string[] = [];
@@ -824,6 +867,25 @@ async function runSync(): Promise<AccountSyncStatus> {
       } catch (error) {
         blockedAccounts.add(account.id);
         errors.push(`${account.label}: ${error instanceof Error ? error.message : 'Storage sync failed.'}`);
+      }
+    }
+    // Winning peer/browser minutes have durable exact-coordinate link tickets.
+    // Drain a bounded pass only after storage succeeds; never infer a source
+    // occurrence or create a native-calendar write from imported ledger data.
+    if (!blockedAccounts.size) {
+      for (const ticket of await getPendingInlineMinuteLinks(100)) {
+        try {
+          const permitted = (await getAccounts()).some((item) => item.consent.calendarWrite &&
+            (item.provider === 'google' || item.provider === 'microsoft'));
+          if (ticket.requiresAccountWriter && !permitted) { await deferInlineMinuteLink(ticket); continue; }
+          await linkActualsToAccounts(ticket.affectedDates, null,
+            { dateKey: ticket.dateKey, minuteIndex: ticket.minuteIndex });
+          if (await canAcknowledgeInlineMinuteLink(ticket)) await acknowledgeInlineMinuteLink(ticket);
+          else await deferInlineMinuteLink(ticket);
+        } catch {
+          if (ticket.requiresAccountWriter) await deferInlineMinuteLink(ticket).catch(() => undefined);
+          errors.push('Some imported minute changes could not be linked to an authorized calendar. They remain queued for retry.');
+        }
       }
     }
     const projections = await listProjections();

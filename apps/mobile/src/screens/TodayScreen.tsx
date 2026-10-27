@@ -16,10 +16,13 @@ import { flushPendingActuals, loadPlannedEventsResult, openPlannedEvent, reconci
 import { ensureSourceColorCategory, listSelectableActivityCategories } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits,
   subscribeInlineMinuteLinkWarnings } from '../services/inline-minutes';
-import { applyCellFormat, clearTextMinuteRange, colorMinuteRange, copyMinuteRange, cutMinuteRange, editInlineMinute,
+import { applyCellFormat, clearTextMinuteRange, colorMinuteRange, resetMinuteFill, copyMinuteRange, cutMinuteRange, editInlineMinute,
   fillMinuteRange, getDayActivityGroups, getDayCellFormats, getSpreadsheetClipboard, groupMinuteRange, pasteMinuteRange,
-  prepareMinutePaste, getMovableActivityGroup, prepareActivityGroupMove, moveActivityGroup, ungroupMinuteRange,
+  prepareMinutePaste, prepareExternalMinutePaste, pasteExternalMinuteRange,
+  getMovableActivityGroup, prepareActivityGroupMove, moveActivityGroup, ungroupMinuteRange,
+  prepareMinuteRangeMove, moveMinuteRange, cancelMinuteRangeMove,
   spreadsheetEditor, type ActivityGroup, type CellFormat, type MinuteCellRange } from '../services/spreadsheet';
+import { copySpreadsheetCellsToSystem, readSpreadsheetPasteSource } from '../services/system-cell-clipboard';
 import { categoryById, type ActivityCategory, type AppColors } from '../theme';
 import { inlineMinuteKey } from '../utils/inline-minute-drafts';
 import { activityTextColor, beginInlineCellTap, trackInlineCellTap,
@@ -32,6 +35,7 @@ import { activityGroupDragGrip, activityGroupDropTarget, activityGroupDragScroll
   type ActivityGroupDragGrip, type ActivityGroupDropTarget } from '../utils/activity-group-drag';
 import { calendarGridLayout, calendarZoomOffsets, normalizeCalendarZoom, revealCalendarDay,
   type CalendarZoomAnchor } from '../utils/calendar-layout';
+import { createCalendarPeriodSwipe, type CalendarPeriodDirection } from '../utils/calendar-period-swipe';
 import { getAccounts } from '../sync/accounts';
 import { linkActualsToAccounts, loadCachedAccountPlans, loadAccountPlansResult, synchronizeAccounts } from '../sync/engine';
 import type { CalendarPreferences, DeviceCalendar, MinuteEntry, PlannedEvent } from '../types';
@@ -68,6 +72,7 @@ type Props = {
   onFocusConsumed: (token?: number) => void;
   onDataChanged: () => void;
   onOpenSettings: () => void;
+  onSyncWarningChange?: (message: string | null) => void;
   dayCount?: CalendarDayCount;
   onDayCountChange?: (count: CalendarDayCount) => void;
   selectedDates?: readonly string[] | null;
@@ -78,16 +83,17 @@ type Props = {
   clockFormat?: '12h' | '24h';
   onCreatePlan?: () => void;
   viewResetToken?: number;
+  onPeriodSwipe?: (direction: CalendarPeriodDirection) => void;
 };
 
 export function TodayScreen({
   activeDate, onDateChange, calendars, preferences, dataVersion, focusRequest,
-  onFocusConsumed, onDataChanged, onOpenSettings, dayCount = 1, onDayCountChange, selectedDates, dateSelectionOpen = false,
-  zoom = 1, onZoomChange, clockFormat = '12h', onCreatePlan, viewResetToken = 0,
+  onFocusConsumed, onDataChanged, onOpenSettings, onSyncWarningChange, dayCount = 1, onDayCountChange, selectedDates, dateSelectionOpen = false,
+  zoom = 1, onZoomChange, clockFormat = '12h', onCreatePlan, viewResetToken = 0, onPeriodSwipe,
 }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const insets = useSafeAreaInsets();
-  const { width: windowWidth, fontScale } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight, fontScale } = useWindowDimensions();
   const clockFormatRef = useRef(clockFormat);
   const sourceColorJobs = useRef(new Map<string, Promise<void>>());
   const sourceColorJobEpochs = useRef(new Map<string, number>());
@@ -142,6 +148,9 @@ export function TodayScreen({
   const pinchRef = useRef<{ distance: number; zoom: number; anchor: CalendarZoomAnchor; generation: number } | null>(null);
   const pinchFrameRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null);
   const pendingPinchZoomRef = useRef<number | null>(null);
+  const periodSwipeRef = useRef(createCalendarPeriodSwipe());
+  const periodSwipeGenerationRef = useRef<number | null>(null);
+  const periodSwipeStateRef = useRef({ blocked: false, onPage: onPeriodSwipe });
   const gridLayoutRef = useRef(gridLayout);
   const railFormatRef = useRef(timeWidthKey);
   if (railFormatRef.current !== timeWidthKey) {
@@ -162,18 +171,21 @@ export function TodayScreen({
   const projectionMessageTokenRef = useRef(0);
   const mountedRef = useRef(true);
   const appStateRef = useRef(AppState.currentState);
-  const measurementKey = timeWidthKey + '|' + liveZoom;
+  const measurementKey = timeWidthKey;
   const measurementKeyRef = useRef(measurementKey);
   measurementKeyRef.current = measurementKey;
   const [dayData, setDayData] = useState<Record<string, DayData>>({});
   const [editor, setEditor] = useState<CalendarMinuteSelection | null>(null);
   const [inlineSelection, setInlineSelection] = useState<CalendarMinuteSelection | null>(null);
   const [inlineEditing, setInlineEditing] = useState(false);
+  const [entryBarMode, setEntryBarMode] = useState<'entry' | 'format' | null>(null);
+  const [formatPalette, setFormatPalette] = useState<'text' | 'cell' | null>(null);
   const inlineEditingRef = useRef(inlineEditing);
   inlineEditingRef.current = inlineEditing;
   const inlineSelectionRef = useRef(inlineSelection);
   const inlineInputRef = useRef<ComponentRef<typeof TextInput>>(null);
   const inlineDoneBusyRef = useRef(false);
+  const [entrySaving, setEntrySaving] = useState(false);
   const cellTouchRef = useRef<InlineCellTap | null>(null);
   const cellActivationRef = useRef<CellActivationTap | null>(null);
   const inlineTextSelectionRef = useRef({ start: 0, end: 0 });
@@ -206,24 +218,30 @@ export function TodayScreen({
   const fillHandleLeft = useRef(new Animated.Value(0)).current;
   const fillHandleOpacity = useRef(new Animated.Value(0)).current;
   const cellMenuTop = useRef(new Animated.Value(0)).current;
+  const cellMenuLeft = useRef(new Animated.Value(8)).current;
   const cellMenuOriginX = useRef(new Animated.Value(0)).current;
   const cellMenuOriginY = useRef(new Animated.Value(0)).current;
   const menuOriginRef = useRef({ x: 0, y: 0 });
   const cellMenuHeightRef = useRef(100);
+  const cellMenuWidthRef = useRef(440);
+  const pendingCellMenuWidthRef = useRef<number | null>(null);
+  const [cellMenuWidth, setCellMenuWidth] = useState(440);
   const menuTouchActiveRef = useRef(false);
   const menuTouchReleaseFrameRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null);
-  const cellHoldRef = useRef<{ day: string; minute: number; group: boolean; x: number; y: number;
+  const cellHoldRef = useRef<{ day: string; minute: number; group: boolean; range: MinuteCellRange | null; x: number; y: number;
     generation: number; sequence: number } | null>(null);
   const cellHoldSequenceRef = useRef(0);
   const cellHoldTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
-  const groupDragRef = useRef<{ source: ActivityGroup; grip: ActivityGroupDragGrip; target: ActivityGroupDropTarget;
+  const groupDragRef = useRef<({ kind: 'group'; source: ActivityGroup; sourceToken?: never } |
+    { kind: 'range'; source: MinuteCellRange; sourceToken: string }) & { grip: ActivityGroupDragGrip; target: ActivityGroupDropTarget;
     x: number; y: number; originX: number; originY: number; moved: boolean;
     sequence: number; generation: number; rowHeight: number; dayWidth: number } | null>(null);
   const groupDragSequenceRef = useRef(0);
   const groupDragOwnedRef = useRef(false);
   const groupDragTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [groupDragging, setGroupDragging] = useState(false);
-  const [groupDragPreview, setGroupDragPreview] = useState<{ source: ActivityGroup; target: ActivityGroupDropTarget } | null>(null);
+  const [groupDragPreview, setGroupDragPreview] = useState<{ source: ActivityGroup | MinuteCellRange;
+    notes: string[]; target: ActivityGroupDropTarget } | null>(null);
   const [toolbarError, setToolbarError] = useState<string | null>(null);
   const [toolBusy, setToolBusy] = useState(false);
   const toolBusyRef = useRef(false);
@@ -246,6 +264,8 @@ export function TodayScreen({
   dayDataRef.current = dayData;
   editorRef.current = editor;
   inlineSelectionRef.current = inlineSelection;
+  periodSwipeStateRef.current = { onPage: onPeriodSwipe, blocked: dateSelectionOpen || cellMenuOpen || rangeSelecting ||
+    groupComposerOpen || groupPaletteOpen || Boolean(formatPalette) || inlineEditing || Boolean(editor) };
   currentFocusRef.current = focusRequest;
 
   const projectionConfigRef = useRef({ enabled: preferences.syncActuals, calendarId: preferences.writeCalendarId });
@@ -276,6 +296,13 @@ export function TodayScreen({
     const selection = inlineSelectionRef.current;
     if (!selection) { fillHandleOpacity.setValue(0); setFillHandleVisible(false); return; }
     const layout = gridLayoutRef.current;
+    if (!menuTouchActiveRef.current && !menuCommandPendingRef.current && pendingCellMenuWidthRef.current !== null) {
+      const width = Math.max(48, Math.min(440, layout.viewportWidth - 16, pendingCellMenuWidthRef.current));
+      pendingCellMenuWidthRef.current = null;
+      if (Math.abs(cellMenuWidthRef.current - width) >= 0.5) {
+        cellMenuWidthRef.current = width; setCellMenuWidth(width);
+      }
+    }
     const minute = rangeDragRef.current?.endMinute ?? rangeEndRef.current ?? selection.minuteIndex;
     const y = (minute + 1) * layout.rowHeight - verticalOffsetRef.current - 12;
     const height = bodyWindowRef.current.height;
@@ -301,6 +328,8 @@ export function TodayScreen({
       menuY = handleTop + menuHeight + 38 <= height - 6 ? handleTop + 32 : handleTop - menuHeight - 8;
     }
     if (!menuTouchActiveRef.current && !menuCommandPendingRef.current) {
+      const width = Math.min(440, layout.viewportWidth - 16, cellMenuWidthRef.current);
+      cellMenuLeft.setValue(Math.max(8, (layout.viewportWidth - width) / 2));
       cellMenuOriginX.setValue(menuOriginRef.current.x); cellMenuOriginY.setValue(menuOriginRef.current.y);
       cellMenuTop.setValue(Math.max(6, Math.min(menuLimit, menuY)));
     }
@@ -359,6 +388,7 @@ export function TodayScreen({
     groupDragSequenceRef.current += 1;
     groupDragOwnedRef.current = false;
     groupDragRef.current = null;
+    cancelMinuteRangeMove();
     if (groupDragTimerRef.current) clearInterval(groupDragTimerRef.current);
     groupDragTimerRef.current = null;
     if (updateUI && mountedRef.current) { setGroupDragging(false); setGroupDragPreview(null); }
@@ -380,15 +410,23 @@ export function TodayScreen({
     const target = activityGroupDropTarget(x, y, groupDragGeometry(), drag.grip);
     if (target) {
       drag.target = target;
-      setGroupDragPreview({ source: drag.source, target });
+      setGroupDragPreview((previous) => ({ source: drag.source, notes: previous?.notes ?? [], target }));
     }
   }
 
   async function beginGroupDrag(hold: NonNullable<typeof cellHoldRef.current>) {
-    if (!hold.group || cellHoldRef.current !== hold || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
-    let source: ActivityGroup | null;
-    try { source = await getMovableActivityGroup(hold.day, hold.minute); }
-    catch { return; }
+    if (cellHoldRef.current !== hold || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
+    let source: ActivityGroup | MinuteCellRange | null = null;
+    let kind: 'group' | 'range' = 'range'; let sourceToken: string | undefined;
+    try {
+      const group = hold.group ? await getMovableActivityGroup(hold.day, hold.minute).catch(() => null) : null;
+      if (group && (!hold.range || hold.range.startMinute === group.startMinute && hold.range.endMinute === group.endMinute)) {
+        source = group; kind = 'group';
+      } else {
+        source = hold.range ?? { dateKey: hold.day, startMinute: hold.minute, endMinute: hold.minute };
+        sourceToken = (await prepareMinuteRangeMove(source, { dateKey: source.dateKey, startMinute: source.startMinute })).token;
+      }
+    } catch { return; }
     if (!source || cellHoldRef.current !== hold || hold.generation !== navigationGenerationRef.current ||
         !mountedRef.current || AppState.currentState !== 'active') return;
     const geometry = groupDragGeometry();
@@ -405,11 +443,18 @@ export function TodayScreen({
     setGroupComposerOpen(false); setCellMenuOpen(false);
     cellTouchRef.current = null; cellActivationRef.current = null;
     Keyboard.dismiss();
-    groupDragRef.current = { source, grip, target, x: hold.x, y: hold.y,
+    groupDragRef.current = { ...(kind === 'group' ? { kind, source: source as ActivityGroup }
+      : { kind, source, sourceToken: sourceToken! }), grip, target, x: hold.x, y: hold.y,
       originX: hold.x, originY: hold.y, moved: false,
       sequence: ++groupDragSequenceRef.current,
       generation: navigationGenerationRef.current, rowHeight: geometry.rowHeight, dayWidth: geometry.dayWidth };
-    setGroupDragging(true); setGroupDragPreview({ source, target });
+    const entries = dayDataRef.current[source.dateKey]?.entries ?? [];
+    const notes = Array.from({ length: Math.min(8, source.endMinute - source.startMinute + 1) }, (_, offset) => {
+      const minute = source!.startMinute + offset;
+      const text = entries.find((entry) => entry.minuteIndex === minute)?.text ?? '';
+      return `${timeLabel(minute)} ${text}`;
+    });
+    setGroupDragging(true); setGroupDragPreview({ source, target, notes });
     groupDragTimerRef.current = setInterval(() => {
       const drag = groupDragRef.current;
       if (!drag) return;
@@ -443,30 +488,42 @@ export function TodayScreen({
     const destination = claimed && drag.moved ? { dateKey: drag.target.dateKey, startMinute: drag.target.startMinute }
       : { dateKey: source.dateKey, startMinute: source.startMinute };
     if (destination.dateKey === source.dateKey && destination.startMinute === source.startMinute) {
-      await openInlineMinute(source.dateKey, source.startMinute, false, source, true, true);
+      cancelMinuteRangeMove();
+      await openInlineMinute(source.dateKey, source.startMinute, false, drag.kind === 'group' ? drag.source : undefined, true, true);
+      if (drag.kind === 'range' && groupDragIsCurrent(drag)) {
+        rangeStartRef.current = source.startMinute; rangeEndRef.current = source.endMinute;
+        setRangeStart(source.startMinute); setRangeEnd(source.endMinute);
+      }
       return;
     }
-    let preview: Awaited<ReturnType<typeof prepareActivityGroupMove>> | null = null;
-    const prepared = await runSpreadsheetTool(async () => { preview = await prepareActivityGroupMove(source, destination); });
-    if (!prepared || !preview || !groupDragIsCurrent(drag)) return;
-    const pending = preview as Awaited<ReturnType<typeof prepareActivityGroupMove>>;
+    let preview: { token: string; occupiedCount: number } | null = null;
+    const prepared = await runSpreadsheetTool(async () => { preview = drag.kind === 'group'
+      ? await prepareActivityGroupMove(drag.source, destination)
+      : await prepareMinuteRangeMove(drag.source, destination, { sourceToken: drag.sourceToken }); });
+    if (!prepared || !preview || !groupDragIsCurrent(drag)) { cancelMinuteRangeMove(); return; }
+    const pending = preview as { token: string; occupiedCount: number };
     if (pending.occupiedCount) {
       const replace = await new Promise<boolean>((resolve) => Alert.alert('Replace existing cells?',
         `${pending.occupiedCount} destination ${pending.occupiedCount === 1 ? 'minute contains' : 'minutes contain'} text or formatting.`,
         [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
           { text: 'Replace', onPress: () => resolve(true) }], { cancelable: true, onDismiss: () => resolve(false) }));
-      if (!replace || !groupDragIsCurrent(drag)) return;
+      if (!replace || !groupDragIsCurrent(drag)) { cancelMinuteRangeMove(); return; }
     }
     const affectedDates = [...new Set([source.dateKey, destination.dateKey])];
     affectedDates.forEach((day) => markLocalChange([day]));
     const moved = await runSpreadsheetTool(async () => {
-      await moveActivityGroup(source, destination, { previewToken: pending.token });
+      if (drag.kind === 'group') await moveActivityGroup(drag.source, destination, { previewToken: pending.token });
+      else await moveMinuteRange(drag.source, destination, { previewToken: pending.token });
       await Promise.all(affectedDates.map(refreshLocalEntries));
     });
     if (moved && groupDragIsCurrent(drag)) {
-      const movedGroup = { ...source, dateKey: destination.dateKey, startMinute: destination.startMinute,
-        endMinute: destination.startMinute + source.endMinute - source.startMinute };
+      const movedGroup = drag.kind === 'group' ? { ...drag.source, dateKey: destination.dateKey, startMinute: destination.startMinute,
+        endMinute: destination.startMinute + source.endMinute - source.startMinute } : undefined;
       await openInlineMinute(destination.dateKey, destination.startMinute, false, movedGroup, true, true);
+      if (drag.kind === 'range') { rangeStartRef.current = destination.startMinute;
+        rangeEndRef.current = destination.startMinute + source.endMinute - source.startMinute;
+        setRangeStart(destination.startMinute);
+        setRangeEnd(destination.startMinute + source.endMinute - source.startMinute); }
     }
   }
 
@@ -485,18 +542,15 @@ export function TodayScreen({
 
   function beginCellHold(day: string, minute: number, group: boolean, event: GestureResponderEvent) {
     const selected = inlineSelectionRef.current;
-    if (inlineEditingRef.current && selected?.dateKey === day && selected.minuteIndex === minute) {
-      // The focused native editor owns word selection, caret handles and its
-      // Cut/Copy/Paste menu. A row hold must not unmount that editor.
-      cancelCellHold(); cellTouchRef.current = null; cellActivationRef.current = null;
-      return;
-    }
     if (groupDragRef.current || rangeDragRef.current || menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
     cancelCellHold();
     cellTouchRef.current = beginInlineCellTap(inlineMinuteKey(day, minute),
       { x: event.nativeEvent.pageX, y: event.nativeEvent.pageY }, Date.now(), event.nativeEvent.touches.length);
     if (event.nativeEvent.touches.length !== 1) return;
-    const hold = { day, minute, group, x: event.nativeEvent.pageX, y: event.nativeEvent.pageY,
+    const first = rangeStartRef.current, last = rangeEndRef.current;
+    const range = selected?.dateKey === day && first != null && last != null && minute >= Math.min(first, last) && minute <= Math.max(first, last)
+      ? { dateKey: day, startMinute: Math.min(first, last), endMinute: Math.max(first, last) } : null;
+    const hold = { day, minute, group, range, x: event.nativeEvent.pageX, y: event.nativeEvent.pageY,
       generation: navigationGenerationRef.current, sequence: cellHoldSequenceRef.current };
     cellHoldRef.current = hold;
     cellHoldTimersRef.current.push(setTimeout(() => {
@@ -504,7 +558,7 @@ export function TodayScreen({
       suppressCellPressRef.current = { key: inlineMinuteKey(day, minute), until: Number.POSITIVE_INFINITY };
       void openLongPressMenu(day, minute);
     }, 450));
-    if (group) cellHoldTimersRef.current.push(setTimeout(() => { void beginGroupDrag(hold); }, 1100));
+    cellHoldTimersRef.current.push(setTimeout(() => { void beginGroupDrag(hold); }, 1100));
   }
 
   function moveCellHold(event: GestureResponderEvent) {
@@ -630,7 +684,7 @@ export function TodayScreen({
 
   function recordTimeLabelWidth(width: number, key: string) {
     if (!mountedRef.current || key !== measurementKeyRef.current || !Number.isFinite(width) || width <= 0) return;
-    const baseWidth = width / liveZoom;
+    const baseWidth = width;
     if (Math.abs((measuredTimeWidths[timeWidthKey] ?? 0) - baseWidth) < 0.3) return;
     if (positionedViewRef.current && !pendingZoomAnchorRef.current) {
       pendingZoomAnchorRef.current = { ...captureZoomAnchor(), generation: navigationGenerationRef.current };
@@ -693,9 +747,23 @@ export function TodayScreen({
     });
   }
 
+  function periodSwipeBlocked() {
+    return !periodSwipeStateRef.current.onPage || periodSwipeStateRef.current.blocked || !mountedRef.current ||
+      AppState.currentState !== 'active' || Boolean(groupDragRef.current || rangeDragRef.current || pinchRef.current) ||
+      menuTouchActiveRef.current || menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy ||
+      (rangeStartRef.current != null && rangeEndRef.current != null && rangeStartRef.current !== rangeEndRef.current);
+  }
   const pinchResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponderCapture: (event) => Boolean(groupDragRef.current) || (!rangeDragRef.current && event.nativeEvent.touches.length === 2),
-    onMoveShouldSetPanResponderCapture: (event) => Boolean(groupDragRef.current) || (!rangeDragRef.current && event.nativeEvent.touches.length === 2),
+    onStartShouldSetPanResponderCapture: (event) => {
+      periodSwipeRef.current.start(event.nativeEvent.touches.length, periodSwipeBlocked());
+      return Boolean(groupDragRef.current) || (!rangeDragRef.current && event.nativeEvent.touches.length === 2);
+    },
+    onMoveShouldSetPanResponderCapture: (event, gesture) => {
+      if (groupDragRef.current || (!rangeDragRef.current && event.nativeEvent.touches.length === 2)) {
+        periodSwipeRef.current.cancel(); return true;
+      }
+      return periodSwipeRef.current.move(gesture, periodSwipeBlocked());
+    },
     onPanResponderGrant: (event: GestureResponderEvent) => {
       cellTouchRef.current = null; cellActivationRef.current = null;
       if (groupDragRef.current) {
@@ -704,6 +772,10 @@ export function TodayScreen({
         return;
       }
       cancelCellHold();
+      if (event.nativeEvent.touches.length === 1 && periodSwipeRef.current.claimed && !periodSwipeBlocked()) {
+        periodSwipeGenerationRef.current = navigationGenerationRef.current;
+        return;
+      }
       const [first, second] = event.nativeEvent.touches;
       if (!first || !second) return;
       const distance = Math.hypot(second.pageX - first.pageX, second.pageY - first.pageY);
@@ -714,11 +786,14 @@ export function TodayScreen({
         anchor: captureZoomAnchor({ x: (first.pageX + second.pageX) / 2, y: (first.pageY + second.pageY) / 2 }) };
       setPinching(true);
     },
-    onPanResponderMove: (event: GestureResponderEvent) => {
+    onPanResponderMove: (event: GestureResponderEvent, gesture) => {
       if (groupDragRef.current) {
         if (event.nativeEvent.touches.length !== 1) cancelGroupDrag();
         else updateGroupDrag(event.nativeEvent.pageX, event.nativeEvent.pageY);
         return;
+      }
+      if (periodSwipeGenerationRef.current !== null) {
+        periodSwipeRef.current.move(gesture, periodSwipeBlocked()); return;
       }
       const pinch = pinchRef.current;
       const [first, second] = event.nativeEvent.touches;
@@ -730,12 +805,17 @@ export function TodayScreen({
             pendingPinchZoomRef.current != null) applyLiveZoom(pendingPinchZoomRef.current, pinchRef.current.anchor);
       });
     },
-    onPanResponderRelease: (event) => {
+    onPanResponderRelease: (event, gesture) => {
       if (groupDragRef.current) void finishGroupDrag(event.nativeEvent.pageX, event.nativeEvent.pageY);
+      else if (periodSwipeGenerationRef.current !== null) {
+        const generation = periodSwipeGenerationRef.current; periodSwipeGenerationRef.current = null;
+        const direction = periodSwipeRef.current.finish(gesture, periodSwipeBlocked() || generation !== navigationGenerationRef.current);
+        if (direction) periodSwipeStateRef.current.onPage?.(direction);
+      }
       else finishPinch();
     },
-    onPanResponderTerminate: () => { cancelGroupDrag(); finishPinch(); },
-    onPanResponderReject: () => { cancelGroupDrag(); finishPinch(); },
+    onPanResponderTerminate: () => { periodSwipeGenerationRef.current = null; periodSwipeRef.current.cancel(); cancelGroupDrag(); finishPinch(); },
+    onPanResponderReject: () => { periodSwipeGenerationRef.current = null; periodSwipeRef.current.cancel(); cancelGroupDrag(); finishPinch(); },
     onPanResponderTerminationRequest: () => false,
     onShouldBlockNativeResponder: () => true,
   }), []);
@@ -1193,6 +1273,7 @@ export function TodayScreen({
       setEditor(null);
       setInlineSelection(selection);
       setInlineEditing(editText);
+      setEntryBarMode('entry'); setFormatPalette(null);
       setCellMenuOpen(false);
       setGroupComposerOpen(false);
       setRangeSelecting(false);
@@ -1224,6 +1305,7 @@ export function TodayScreen({
     const token = selectionTokenRef.current;
     const generation = navigationGenerationRef.current;
     inlineDoneBusyRef.current = true;
+    setEntrySaving(true);
     try {
       const saved = await inlineMinuteDrafts.flush(inlineMinuteKey(selection.dateKey, selection.minuteIndex));
       const current = inlineMinuteDrafts.get(selection.dateKey, selection.minuteIndex);
@@ -1232,10 +1314,11 @@ export function TodayScreen({
         setActionError('This minute could not be saved. Your text is kept here. Try again.'); return;
       }
       cellTouchRef.current = null; cellActivationRef.current = null;
-      setInlineEditing(false); setCellMenuOpen(false); setActionError(null); Keyboard.dismiss();
+      setInlineEditing(false); setCellMenuOpen(false); setEntryBarMode('format'); setFormatPalette(null);
+      setActionError(null); Keyboard.dismiss();
     } catch {
       if (selectionStillCurrent(selection, token, generation)) setActionError('This minute could not be saved. Your text is kept here. Try again.');
-    } finally { inlineDoneBusyRef.current = false; }
+    } finally { inlineDoneBusyRef.current = false; if (mountedRef.current) setEntrySaving(false); }
   }
 
   useEffect(() => {
@@ -1312,7 +1395,7 @@ export function TodayScreen({
         try {
           const result = await flushPendingActuals(latest.calendarId, queuedDates);
           if (mountedRef.current && messageToken === projectionMessageTokenRef.current) {
-            setProjectionWarning(result.failed > 0 || result.remaining > 0 ? 'Calendar copy needs a retry.' : null);
+            setProjectionWarning(result.failed > 0 || result.remaining > 0 && !result.deferred ? 'Calendar copy needs a retry.' : null);
           }
         } catch {
           if (mountedRef.current && messageToken === projectionMessageTokenRef.current) {
@@ -1416,10 +1499,19 @@ export function TodayScreen({
     } catch { setActionError('The calendar plan could not be opened.'); }
   }
 
+  const calendarReadWarning = calendarReadError ? [...new Set([
+    days.some((day) => dayData[day]?.nativeReadError) ? 'Phone-calendar events could not refresh. Check phone calendar access and the selected calendars in Settings.' : null,
+    days.some((day) => dayData[day]?.accountReadError) ? 'Account-calendar events could not refresh. Check the account connection and calendar access in Settings.' : null,
+    days.some((day) => dayData[day]?.colorReadError) ? 'Calendar colors could not refresh. Saved minute text and colors have been kept.' : null,
+  ].filter(Boolean))].join('\n\n') || 'Calendar events could not refresh. Saved minute notes remain available.' : null;
+  const calendarSyncWarning = [...new Set([
+    inlineLinkWarning ? 'Your minute is saved on this phone, but account synchronization needs a retry.' : null,
+    accountWarning, projectionWarning, calendarReadWarning,
+  ].filter(Boolean))].join('\n\n') || null;
+  useEffect(() => { onSyncWarningChange?.(calendarSyncWarning); }, [calendarSyncWarning, onSyncWarningChange]);
+  useEffect(() => () => onSyncWarningChange?.(null), [onSyncWarningChange]);
   const notice = (inlineError ? 'A minute could not be saved. Tap to retry; your draft is kept.' : null) ?? toolbarError ?? actionError ??
-    (inlineLinkWarning ? 'Account synchronization needs a retry. Your minute is saved.' : null) ?? accountWarning ?? projectionWarning ??
     (loadError ? 'Some ledger rows could not refresh. Pull down to retry.' :
-      calendarReadError ? 'Some calendar plans could not load. Pull down to retry.' :
         days.some((day) => dayData[day]?.formatReadError) ? 'Some text styles could not refresh. Pull down to retry.' :
           days.some((day) => dayData[day]?.groupReadError) ? 'Some activity outlines could not refresh. Pull down to retry.' : null);
   const selectedDraft = inlineSelection
@@ -1440,15 +1532,19 @@ export function TodayScreen({
     return analyzeCellSelection(Array.from({ length: selectedRange.endMinute - selectedRange.startMinute + 1 }, (_, offset) => {
       const minuteIndex = selectedRange.startMinute + offset;
       const draft = draftsByKey.get(inlineMinuteKey(selectedRange.dateKey, minuteIndex));
+      const entry = index?.entriesByMinute.get(minuteIndex);
+      const format = dayData[selectedRange.dateKey]?.formats?.get(minuteIndex) ?? {};
       return { minuteIndex, text: draft?.text ?? index?.entriesByMinute.get(minuteIndex)?.text ??
-        index?.plansByMinute.get(minuteIndex)?.[0]?.title ?? '', groupId: groups?.get(minuteIndex)?.blockId };
+        index?.plansByMinute.get(minuteIndex)?.[0]?.title ?? '', groupId: groups?.get(minuteIndex)?.blockId,
+        hasFill: Boolean(entry && !format.noFill),
+        hasFormatting: Boolean(format.bold || format.italic || format.underline || format.textColor) };
     }), inlineSelection?.minuteIndex);
   }, [selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute, indexedDays, indexedGroups, draftsByKey, inlineSelection?.minuteIndex]);
   const menuGroup = inlineSelection ? indexedGroups.get(inlineSelection.dateKey)?.get(inlineSelection.minuteIndex) : undefined;
   const menuFillColor = calendarCellColor({ hasActual: Boolean(inlineSelection?.entry || (selectedDraft && selectedDraft.revision > 0)),
     actualColor: categoryById(selectedDraft?.categoryId ?? inlineSelection?.entry?.categoryId ?? 'unaccounted').color,
     groupColor: menuGroup ? categoryById(menuGroup.categoryId).color : undefined,
-    planColor: inlineSelection?.plan?.color }) ?? colors.paper;
+    planColor: inlineSelection?.plan?.color, noFill: selectedFormat.noFill }) ?? colors.calendarCell;
   const menuTextColor = selectedFormat.textColor ?? activityTextColor(menuFillColor, colors.ink);
 
   async function runSpreadsheetTool(work: () => Promise<unknown>) {
@@ -1501,7 +1597,8 @@ export function TodayScreen({
   }
 
   function cancelGroupComposer() {
-    setGroupComposerOpen(false); setGroupPaletteOpen(false); setRangeColorChosen(false); setCellMenuOpen(true);
+    setGroupComposerOpen(false); setGroupPaletteOpen(false); setRangeColorChosen(false); setCellMenuOpen(false);
+    setEntryBarMode('format'); setFormatPalette(null);
     Keyboard.dismiss(); positionFillHandle();
   }
 
@@ -1544,7 +1641,7 @@ export function TodayScreen({
     });
     if (applied && mountedRef.current && generation === navigationGenerationRef.current && token === selectionTokenRef.current) {
       setCellMenuOpen(false); setGroupComposerOpen(false); setRangeSelecting(false); setRangeStart(null); setRangeEnd(null);
-      setGroupPaletteOpen(false); Keyboard.dismiss();
+      setGroupPaletteOpen(false); setEntryBarMode('format'); setFormatPalette(null); Keyboard.dismiss();
     }
   }
 
@@ -1626,6 +1723,21 @@ export function TodayScreen({
     }
   }
 
+  async function resetSelectionFill(command?: CellCommandSelection) {
+    const range = command?.range ?? parsedRange();
+    const selection = command?.selection ?? inlineSelectionRef.current;
+    if (!range || !selection || !await prepareOptions(selection)) return;
+    recordExplicitColor(range.dateKey, range.startMinute, range.endMinute);
+    const token = selectionTokenRef.current; const generation = navigationGenerationRef.current;
+    markLocalChange([range.dateKey]);
+    const applied = await runSpreadsheetTool(async () => {
+      await resetMinuteFill(range); await refreshLocalEntries(range.dateKey);
+    });
+    if (applied && selectionStillCurrent(selection, token, generation)) {
+      setRangeColorChosen(false); positionFillHandle();
+    }
+  }
+
   function selectionStillCurrent(selection: CalendarMinuteSelection, token: number, generation: number) {
     const current = inlineSelectionRef.current;
     return mountedRef.current && AppState.currentState === 'active' && token === selectionTokenRef.current &&
@@ -1648,6 +1760,7 @@ export function TodayScreen({
         }
       }
       await (mode === 'cut' ? cutMinuteRange(range) : copyMinuteRange(range));
+      await copySpreadsheetCellsToSystem();
     });
     if (applied && selectionStillCurrent(selection, token, generation)) {
       // Retain the source selection while the whole-cell clipboard is armed.
@@ -1658,18 +1771,32 @@ export function TodayScreen({
 
   async function pasteSelectedCells(command?: CellCommandSelection) {
     const selection = command?.selection ?? inlineSelectionRef.current;
-    const clipboard = getSpreadsheetClipboard();
-    if (!selection || !clipboard || !await prepareOptions(selection)) return;
+    if (!selection || !await prepareOptions(selection)) return;
     const token = selectionTokenRef.current;
     const generation = navigationGenerationRef.current;
     const targetRange = command?.range ?? parsedRange();
     const destination = { dateKey: selection.dateKey,
       startMinute: targetRange?.startMinute ?? selection.minuteIndex,
       endMinute: targetRange?.endMinute ?? selection.minuteIndex };
-    let preview: Awaited<ReturnType<typeof prepareMinutePaste>> | null = null;
-    const prepared = await runSpreadsheetTool(async () => { preview = await prepareMinutePaste(destination); });
+    type PastePreview = { token: string; occupiedCount: number; ranges: MinuteCellRange[];
+      source: Awaited<ReturnType<typeof readSpreadsheetPasteSource>>; cutSourceDate?: string };
+    let preview: PastePreview | null = null;
+    const prepared = await runSpreadsheetTool(async () => {
+      const source = await readSpreadsheetPasteSource();
+      if (!selectionStillCurrent(selection, token, generation)) return;
+      if (source.kind === 'external') {
+        const result = await prepareExternalMinutePaste(source.text, destination);
+        preview = { ...result, source };
+      } else {
+        const clipboard = getSpreadsheetClipboard();
+        if (!clipboard) throw new Error('Copy or cut some cells before pasting.');
+        const result = await prepareMinutePaste(destination);
+        preview = { ...result, ranges: [result.range], source,
+          cutSourceDate: clipboard.mode === 'cut' ? clipboard.range.dateKey : undefined };
+      }
+    });
     if (!prepared || !preview || !selectionStillCurrent(selection, token, generation)) return;
-    const pending = preview as Awaited<ReturnType<typeof prepareMinutePaste>>;
+    const pending = preview as PastePreview;
     if (pending.occupiedCount > 0) {
       const replace = await new Promise<boolean>((resolve) => Alert.alert('Replace existing cells?',
         `${pending.occupiedCount} destination ${pending.occupiedCount === 1 ? 'minute contains' : 'minutes contain'} text or formatting.`,
@@ -1677,10 +1804,13 @@ export function TodayScreen({
           { text: 'Replace', onPress: () => resolve(true) }], { cancelable: true, onDismiss: () => resolve(false) }));
       if (!replace || !selectionStillCurrent(selection, token, generation)) return;
     }
-    const affectedDates = [...new Set([destination.dateKey, ...(clipboard.mode === 'cut' ? [clipboard.range.dateKey] : [])])];
+    const affectedDates = [...new Set([...pending.ranges.map((range) => range.dateKey),
+      ...(pending.cutSourceDate ? [pending.cutSourceDate] : [])])];
     affectedDates.forEach((day) => markLocalChange([day]));
     const applied = await runSpreadsheetTool(async () => {
-      await pasteMinuteRange(destination, { previewToken: pending.token });
+      if (pending.source.kind === 'external') {
+        await pasteExternalMinuteRange(pending.source.text, destination, { previewToken: pending.token });
+      } else await pasteMinuteRange(destination, { previewToken: pending.token });
       await Promise.all(affectedDates.map(refreshLocalEntries));
     });
     if (applied && selectionStillCurrent(selection, token, generation)) closeRangeOptions();
@@ -1723,9 +1853,9 @@ export function TodayScreen({
       </View>
       <View ref={gridViewportRef} collapsable={false} style={styles.gridViewport} onLayout={measureMinuteViewport}
         onTouchEnd={endCellHold} onTouchCancel={cancelCellInteraction} {...pinchResponder.panHandlers}>
-      <Animated.ScrollView ref={horizontalRef} horizontal directionalLockEnabled nestedScrollEnabled scrollEnabled={!pinching && !rangeDragging && !groupDragging}
+      <Animated.ScrollView ref={horizontalRef} horizontal directionalLockEnabled nestedScrollEnabled scrollEnabled={gridLayout.maxOffset > 0 && !pinching && !rangeDragging && !groupDragging}
         style={styles.horizontalViewport} contentContainerStyle={[styles.horizontalContent, { width: gridLayout.contentWidth }]}
-        keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={days.length > 1}
+        keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false}
         onScroll={onHorizontalScroll} scrollEventThrottle={16}>
         <View style={[styles.gridContent, { width: gridLayout.contentWidth }]}>
           <View style={styles.dateHeader}>
@@ -1742,7 +1872,8 @@ export function TodayScreen({
                 <Text numberOfLines={1} maxFontSizeMultiplier={1.25} style={[styles.weekday, day === today && styles.todayWeekday]}>
                   {new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(parseDateKey(day))}
                 </Text>
-                <View style={[styles.dateCircle, day === today && styles.todayCircle]}>
+                <View style={[styles.dateCircle, { width: Math.min(46, Math.max(1, gridLayout.dayWidth - 4)),
+                  height: Math.min(46, Math.max(1, gridLayout.dayWidth - 4)) }, day === today && styles.todayCircle]}>
                   <Text maxFontSizeMultiplier={1.25} style={[styles.dateNumber, day === today && styles.todayNumber]}>
                     {parseDateKey(day).getDate()}
                   </Text>
@@ -1791,8 +1922,8 @@ export function TodayScreen({
       </View> : null}
 
       {notice ? (
-        <Pressable onPress={inlineError ? () => void flushInlineMinutes() : inlineLinkWarning ? () => void retryInlineMinuteLinks() : toolbarError
-          ? () => setToolbarError(null) : calendarReadError ? onOpenSettings : () => void refresh()} style={styles.notice}>
+        <Pressable onPress={inlineError ? () => void flushInlineMinutes() : toolbarError
+          ? () => setToolbarError(null) : () => void refresh()} style={styles.notice}>
           <Text style={styles.noticeText}>{notice}</Text>
         </Pressable>
       ) : null}
@@ -1863,30 +1994,29 @@ export function TodayScreen({
               const group = indexedGroups.get(day)?.get(minute);
               const groupStarts = group?.startMinute === minute;
               const groupColor = group ? categoryById(group.categoryId).color : undefined;
+              const format = dayData[day]?.formats?.get(minute) ?? {};
               const previewColor = rangeSelected && rangeColorChosen && groupHasGoogleColor ? categoryById(rangeColorId).color : undefined;
               const solidColor = calendarCellColor({ previewColor, actualColor: color,
-                hasActual: Boolean(hasDraftValue || entry), groupColor, planColor: plan?.color });
+                hasActual: Boolean(hasDraftValue || entry), groupColor, planColor: plan?.color, noFill: format.noFill });
               const defaultTextColor = activityTextColor(solidColor, colors.ink);
-              const titleTextColor = activityTextColor(solidColor ?? groupColor, colors.ink);
+              const titleTextColor = activityTextColor(solidColor ?? (format.noFill ? undefined : groupColor), colors.ink);
               const cellVisibleWidth = Math.max(1, Math.min(gridLayout.dayWidth, gridLayout.viewportWidth - gridLayout.railWidth));
               const badgeWidth = groupStarts ? Math.min(cellVisibleWidth * 0.45, Math.max(28, cellVisibleWidth * 0.4)) : 0;
               const noteWidth = Math.max(1, cellVisibleWidth - badgeWidth - (groupStarts ? 18 : 12));
-              const format = dayData[day]?.formats?.get(minute) ?? {};
               const textStyle = { fontWeight: format.bold ? '700' as const : '400' as const,
                 fontStyle: format.italic ? 'italic' as const : 'normal' as const,
                 textDecorationLine: format.underline ? 'underline' as const : 'none' as const,
                 color: format.textColor ?? defaultTextColor };
               const displayedText = draft?.text ?? entry?.text ?? plan?.title;
-              const editing = inline && inlineEditing && !rangeSelecting && !groupComposerOpen;
               const isCurrent = day === today && minute === currentMinute;
               return (
-                <Pressable key={day} accessibilityRole={editing ? undefined : 'button'}
+                <Pressable key={day} accessibilityRole="button"
                   accessibilityState={{ selected: inline || rangeSelected }}
-                  accessibilityLabel={editing ? undefined : dayLabels.get(day) + ', ' + timeLabel(minute) +
+                  accessibilityLabel={dayLabels.get(day) + ', ' + timeLabel(minute) +
                     (group ? ', ' + group.title : '') + (displayedText ? ', ' + displayedText : ', empty cell')}
-                  accessibilityHint={editing ? undefined : rangeSelecting
+                  accessibilityHint={rangeSelecting
                     ? 'Hold selected cells for actions. Drag the selection handle to change the range.'
-                    : group ? 'Tap to select. Double tap to edit. Hold for actions, or hold longer and drag to move this activity.' : 'Tap to select. Double tap to edit. Hold for cell actions.'}
+                    : group ? 'Tap to select. Double tap to edit in the bottom text bar. Hold for actions, or hold longer and drag to move this activity.' : 'Tap to select. Double tap to edit in the bottom text bar. Hold for cell actions.'}
                   onPressIn={() => { suppressCellPressRef.current = null; }}
                   onTouchStart={(event) => beginCellHold(day, minute, Boolean(group), event)}
                   onTouchMove={moveCellHold} onTouchEnd={endCellHold} onTouchCancel={cancelCellInteraction}
@@ -1902,9 +2032,9 @@ export function TodayScreen({
                     // explicit Edit action provides keyboard access without timing gestures.
                     const result = touch ? finishCellActivation(touch, key,
                       { x: event.nativeEvent.pageX, y: event.nativeEvent.pageY }, Date.now(), cellActivationRef.current,
-                      editing ? key : null) : { action: 'select' as const, next: null };
+                      null) : { action: 'select' as const, next: null };
                     cellActivationRef.current = result.next;
-                    if (editing || result.action === 'none' || result.action === 'caret') return;
+                    if (result.action === 'none' || result.action === 'caret') return;
                     if (result.action === 'edit') { void openInlineMinute(day, minute, true, undefined, false, true); return; }
                     if (rangeSelecting && !cellMenuOpen && !groupComposerOpen) { void selectRangeEndpoint(day, minute); return; }
                     if (cellMenuOpen) {
@@ -1912,7 +2042,7 @@ export function TodayScreen({
                     }
                     void openInlineMinute(day, minute, false, undefined, false, true);
                   }}
-                  accessibilityActions={editing ? undefined : [{ name: 'editMinute', label: 'Edit minute text' },
+                  accessibilityActions={[{ name: 'editMinute', label: 'Edit minute text' },
                     { name: 'selectMinutes', label: 'Select multiple minutes' }]}
                   onAccessibilityAction={(event) => {
                     if (menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
@@ -1932,29 +2062,7 @@ export function TodayScreen({
                   {spreadsheetState.clipboard?.mode === 'cut' && spreadsheetState.clipboard.range.dateKey === day &&
                     minute >= spreadsheetState.clipboard.range.startMinute && minute <= spreadsheetState.clipboard.range.endMinute
                     ? <View pointerEvents="none" style={styles.cutCellOutline} /> : null}
-                  {editing && draft ? <TextInput ref={inlineInputRef} value={draft.text}
-                    editable={!spreadsheetState.busy && !toolBusy} contextMenuHidden={false} rejectResponderTermination={false}
-                    multiline scrollEnabled returnKeyType="done" submitBehavior="submit"
-                    accessibilityLabel={dayLabels.get(day) + ', ' + timeLabel(minute) + (group ? ', ' + group.title : '') + ', minute text'}
-                    placeholder="Record" placeholderTextColor={solidColor ? defaultTextColor : colors.muted} selectionColor={colors.currentTime}
-                    accessibilityHint="Hold to select text and use Cut, Copy or Paste. Use the keyboard checkmark to save and close the keyboard."
-                    accessibilityActions={[{ name: 'showMenu', label: 'Selected minute actions' }]}
-                    onAccessibilityAction={(event) => {
-                      if (event.nativeEvent.actionName === 'showMenu') void openLongPressMenu(day, minute);
-                    }}
-                    onSelectionChange={(event) => { inlineTextSelectionRef.current = event.nativeEvent.selection; }}
-                    onChangeText={(text) => {
-                      markLocalChange([day]);
-                      const current = inlineMinuteDrafts.get(day, minute);
-                      editInlineMinute(day, minute, { text, keepColor: text.trim() ? false : current?.keepColor ?? false });
-                      if (current) inheritNewMinuteColor(day, minute, plan, current.categoryId, current.revision, Boolean(entry));
-                    }}
-                    onBlur={() => { void inlineMinuteDrafts.flush(inlineMinuteKey(day, minute)); }}
-                    onFocus={() => revealInlineMinute(minute)}
-                    onSubmitEditing={() => void finishInlineEditing()} style={[styles.cellText, styles.inlineInput, {
-                      width: noteWidth,
-                    }, textStyle]} />
-                    : <Text numberOfLines={1} maxFontSizeMultiplier={1.4}
+                  {<Text numberOfLines={1} maxFontSizeMultiplier={1.4}
                       style={[styles.cellText, !entry && !draft && styles.planText,
                         !displayedText && styles.placeholder, groupStarts && { maxWidth: noteWidth }, textStyle]}>
                       {displayedText ?? ''}
@@ -1980,10 +2088,11 @@ export function TodayScreen({
         const right = Math.min(gridLayout.railWidth + (target.column + 1) * gridLayout.dayWidth,
           horizontalOffsetRef.current + gridLayout.viewportWidth);
         return bottom > top && right > left ? <View pointerEvents="none" style={[styles.groupMovePreview, {
-          left, top, height: bottom - top, width: right - left,
+          left, top, height: bottom - top, width: right - left, overflow: 'hidden',
         }]}>
-          <Text numberOfLines={2} style={styles.groupMoveTitle}>{groupDragPreview.source.title}</Text>
+          <Text numberOfLines={1} style={styles.groupMoveTitle}>{'title' in groupDragPreview.source ? groupDragPreview.source.title : 'Move selected cells'}</Text>
           <Text numberOfLines={1} style={styles.groupMoveTime}>{timeLabel(target.startMinute)} – {timeLabel(target.endMinute)}</Text>
+          {groupDragPreview.notes.map((note, index) => <Text key={index} numberOfLines={1} style={styles.groupMoveTime}>{note}</Text>)}
         </View> : null;
       })() : null}
       {inlineSelection && !groupDragging && !groupComposerOpen && !editor ? (
@@ -2015,8 +2124,8 @@ export function TodayScreen({
       {cellMenuOpen && inlineSelection && !groupDragging && !rangeDragging && !groupComposerOpen ? (
         <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
         <Animated.View style={[styles.cellMenuPosition, {
-          width: Math.min(440, gridLayout.viewportWidth - 16),
-          left: Math.max(8, (gridLayout.viewportWidth - Math.min(440, gridLayout.viewportWidth - 16)) / 2),
+          width: Math.min(440, gridLayout.viewportWidth - 16, cellMenuWidth),
+          left: cellMenuLeft,
           transform: [{ translateX: cellMenuOriginX }, { translateY: Animated.add(cellMenuOriginY, cellMenuTop) }],
         }]}>
           <CellActionMenu busy={menuCommandPending || toolBusy || spreadsheetState.busy}
@@ -2026,20 +2135,107 @@ export function TodayScreen({
             onClear={cellPolicy.canClear ? () => void dispatchCellCommand(clearSelection) : undefined}
             onGroup={cellPolicy.canGroup ? () => void dispatchCellCommand(openCurrentRangeOptions) : undefined}
             onUngroup={cellPolicy.canUngroup ? () => void dispatchCellCommand(ungroupSelection) : undefined}
-            onEvent={inlineSelection.plan ? () => void dispatchCellCommand((scope) => showMinuteDetails(scope.selection.dateKey, scope.selection.minuteIndex)) : undefined}
-            onPaste={() => void dispatchCellCommand(pasteSelectedCells)} canPaste={Boolean(spreadsheetState.clipboard)}
-            format={selectedFormat} textColor={menuTextColor} fillColor={menuFillColor}
-            selectedColorId={selectedDraft?.categoryId ?? inlineSelection.entry?.categoryId} colorChoices={pickerColors}
-            onToggleBold={cellPolicy.canFormat ? () => void dispatchCellCommand((scope) => formatSelection({ bold: !selectedFormat.bold }, scope)) : undefined}
-            onToggleItalic={cellPolicy.canFormat ? () => void dispatchCellCommand((scope) => formatSelection({ italic: !selectedFormat.italic }, scope)) : undefined}
-            onToggleUnderline={cellPolicy.canFormat ? () => void dispatchCellCommand((scope) => formatSelection({ underline: !selectedFormat.underline }, scope)) : undefined}
-            onTextColor={cellPolicy.canFormat ? (color) => void dispatchCellCommand((scope) => formatSelection({ textColor: color ?? undefined }, scope)) : undefined}
-            onCellColor={cellPolicy.canFormat ? (id) => void dispatchCellCommand((scope) => colorSelection(id, scope)) : undefined}
+            onPaste={() => void dispatchCellCommand(pasteSelectedCells)} canPaste
             maxHeight={Math.max(80, bodyWindowRef.current.height - 12)} error={toolbarError}
+            width={Math.min(440, gridLayout.viewportWidth - 16, cellMenuWidth)}
+            maxWidth={Math.min(440, gridLayout.viewportWidth - 16)}
+            onWidthChange={(width) => { if (Number.isFinite(width) && width > 0) {
+              pendingCellMenuWidthRef.current = width; positionFillHandle();
+            } }}
             onHeightChange={(height) => { cellMenuHeightRef.current = height; positionFillHandle(); }}
             onTouchActiveChange={setMenuTouchActive}
             onClose={() => { if (!menuCommandPendingRef.current && !toolBusyRef.current) closeRangeOptions(); }} />
         </Animated.View>
+        </View>
+      ) : null}
+
+      {inlineSelection && entryBarMode && !groupDragging && !rangeDragging && !groupComposerOpen && !editor ? (
+        <View accessibilityLabel={entryBarMode === 'entry' ? 'Minute text entry bar' : 'Minute formatting bar'}
+          style={[styles.bottomBar, entryBarMode === 'format' && !formatPalette && styles.compactBottomBar]}>
+          {entryBarMode === 'entry' ? <View style={styles.entryBarRow}>
+            <TextInput ref={inlineInputRef} value={selectedDraft?.text ?? inlineSelection.entry?.text ?? inlineSelection.plan?.title ?? ''}
+              editable={!spreadsheetState.busy && !toolBusy} contextMenuHidden={false} rejectResponderTermination={false}
+              multiline scrollEnabled maxLength={50000} returnKeyType="done" submitBehavior="submit"
+              accessibilityLabel={dayLabels.get(inlineSelection.dateKey) + ', ' + timeLabel(inlineSelection.minuteIndex) + ', minute text'}
+              accessibilityHint="Tap to type. Hold text to select part of it and use Cut, Copy or Paste. The checkmark saves and opens formatting."
+              placeholder="Record" placeholderTextColor={colors.muted} selectionColor={colors.currentTime}
+              onSelectionChange={(event) => { inlineTextSelectionRef.current = event.nativeEvent.selection; }}
+              onChangeText={(text) => {
+                const { dateKey: day, minuteIndex: minute } = inlineSelection;
+                const active = inlineSelectionRef.current;
+                if (active?.dateKey !== day || active.minuteIndex !== minute) return;
+                markLocalChange([day]);
+                const current = inlineMinuteDrafts.get(day, minute);
+                editInlineMinute(day, minute, { text, keepColor: text.trim() ? false : current?.keepColor ?? false });
+                if (current) inheritNewMinuteColor(day, minute, inlineSelection.plan ?? undefined, current.categoryId, current.revision, Boolean(inlineSelection.entry));
+              }}
+              onBlur={() => {
+                const current = inlineSelectionRef.current;
+                if (current?.dateKey === inlineSelection.dateKey && current.minuteIndex === inlineSelection.minuteIndex) setInlineEditing(false);
+                void inlineMinuteDrafts.flush(inlineMinuteKey(inlineSelection.dateKey, inlineSelection.minuteIndex));
+              }}
+              onFocus={() => {
+                const current = inlineSelectionRef.current;
+                if (current?.dateKey !== inlineSelection.dateKey || current.minuteIndex !== inlineSelection.minuteIndex) return;
+                setInlineEditing(true); revealInlineMinute(inlineSelection.minuteIndex);
+              }}
+              onSubmitEditing={() => void finishInlineEditing()}
+              style={styles.bottomTextInput} />
+            <Pressable accessibilityRole="button" accessibilityLabel="Save minute text and show formatting"
+              disabled={entrySaving || toolBusy || spreadsheetState.busy}
+              onPress={() => void finishInlineEditing()} style={styles.bottomTool}>
+              <Text allowFontScaling={false} style={styles.bottomCheck}>✓</Text>
+            </Pressable>
+          </View> : <>
+            {formatPalette ? <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="always" keyboardDismissMode="none"
+              style={{ maxHeight: Math.max(96, Math.min(240, windowHeight * 0.3)) }}>
+              <CellColorPalette key={formatPalette} mode={formatPalette} busy={menuCommandPending || toolBusy || spreadsheetState.busy}
+                textColor={menuTextColor} explicitTextColor={selectedFormat.textColor}
+                selectedColorId={selectedDraft?.categoryId ?? inlineSelection.entry?.categoryId} colorChoices={pickerColors}
+                onTextColor={(color) => { setFormatPalette(null);
+                  void dispatchCellCommand((scope) => formatSelection({ textColor: color ?? undefined }, scope)); }}
+                onCellColor={(id) => { setFormatPalette(null); void dispatchCellCommand((scope) => colorSelection(id, scope)); }}
+                onResetCellColor={() => { setFormatPalette(null); void dispatchCellCommand(resetSelectionFill); }}
+                onClose={() => setFormatPalette(null)} />
+              {formatPalette === 'cell' && inlineSelection.plan ? <View style={styles.fillPanelActions}>
+                {inlineSelection.plan ? <Pressable accessibilityRole="button" accessibilityLabel="Open source calendar event details"
+                  disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
+                  onPress={() => { setFormatPalette(null); void dispatchCellCommand((scope) => showMinuteDetails(scope.selection.dateKey, scope.selection.minuteIndex)); }}
+                  style={styles.fillPanelAction}><Text style={styles.fillPanelActionText}>Event</Text>
+                </Pressable> : null}
+              </View> : null}
+            </ScrollView> : null}
+            <View accessibilityRole="toolbar" accessibilityLabel="Format selected minute cells" style={styles.formatBarRow}>
+              {([{ label: 'Bold', glyph: 'B', selected: selectedFormat.bold, patch: { bold: !selectedFormat.bold },
+                style: { fontWeight: '800' as const } },
+              { label: 'Italic', glyph: 'I', selected: selectedFormat.italic, patch: { italic: !selectedFormat.italic },
+                style: { fontStyle: 'italic' as const } },
+              { label: 'Underline', glyph: 'U', selected: selectedFormat.underline, patch: { underline: !selectedFormat.underline },
+                style: { textDecorationLine: 'underline' as const } }]).map((tool) => <Pressable key={tool.label}
+                accessibilityRole="button" accessibilityLabel={tool.label} accessibilityState={{ selected: Boolean(tool.selected) }}
+                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
+                onPress={() => void dispatchCellCommand((scope) => formatSelection(tool.patch, scope))}
+                style={[styles.bottomTool, tool.selected && styles.bottomToolSelected]}>
+                <Text allowFontScaling={false} style={[styles.bottomToolText, tool.style]}>{tool.glyph}</Text>
+              </Pressable>)}
+              <Pressable accessibilityRole="button" accessibilityLabel="Choose text color" accessibilityState={{ expanded: formatPalette === 'text' }}
+                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
+                onPress={() => { Keyboard.dismiss(); setFormatPalette((value) => value === 'text' ? null : 'text'); }} style={styles.bottomTool}>
+                <Text allowFontScaling={false} style={styles.bottomToolText}>A</Text>
+                <View style={[styles.bottomTextColorLine, { backgroundColor: menuTextColor }]} />
+              </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="Choose cell color" accessibilityState={{ expanded: formatPalette === 'cell' }}
+                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
+                onPress={() => { Keyboard.dismiss(); setFormatPalette((value) => value === 'cell' ? null : 'cell'); }} style={styles.bottomTool}>
+                <View style={[styles.groupColorDot, { backgroundColor: menuFillColor }]} />
+              </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="Finish formatting"
+                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
+                onPress={() => { setEntryBarMode(null); setFormatPalette(null); setInlineEditing(false); Keyboard.dismiss(); }} style={styles.bottomTool}>
+                <Text allowFontScaling={false} style={styles.bottomCheck}>✓</Text>
+              </Pressable>
+            </View>
+          </>}
         </View>
       ) : null}
 
@@ -2070,6 +2266,23 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
   const railWidth = layout.railWidth;
   return StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.paper },
+    bottomBar: { flexShrink: 0, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline,
+      backgroundColor: colors.panel },
+    compactBottomBar: { alignSelf: 'flex-start', maxWidth: '100%', marginHorizontal: 6, borderRadius: 8 },
+    entryBarRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6, paddingVertical: 4, gap: 4 },
+    bottomTextInput: { flex: 1, minHeight: 44, maxHeight: 132, paddingHorizontal: 10, paddingVertical: 10,
+      color: colors.ink, fontSize: 16, textAlignVertical: 'top', borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.hairline, borderRadius: 6, backgroundColor: colors.surface },
+    formatBarRow: { flexDirection: 'row', flexWrap: 'wrap', alignSelf: 'flex-start', alignItems: 'center',
+      paddingHorizontal: 8, paddingVertical: 4, gap: 2 },
+    fillPanelActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, paddingHorizontal: 8, paddingBottom: 4 },
+    fillPanelAction: { minHeight: 44, paddingHorizontal: 12, justifyContent: 'center' },
+    fillPanelActionText: { color: colors.ink, fontSize: 14 },
+    bottomTool: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
+    bottomToolSelected: { backgroundColor: colors.selectedDay },
+    bottomToolText: { fontSize: 23, lineHeight: 27, color: colors.ink },
+    bottomCheck: { fontSize: 27, color: colors.ink },
+    bottomTextColorLine: { width: 23, height: 3, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
     createEventButton: { position: 'absolute', right: 16, bottom: 16, width: 56, height: 56, borderRadius: 16,
       justifyContent: 'center', alignItems: 'center', backgroundColor: colors.accent },
     createEventIcon: { color: colors.onAccent, fontSize: 34, fontWeight: '400', lineHeight: 40 },
@@ -2120,7 +2333,7 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
       borderRightWidth: 1, borderBottomWidth: 1, borderColor: gridLine },
     timeMeasurement: { position: 'absolute', left: 0, top: 0, width: 4096, opacity: 0 },
     timeMeasurementText: { alignSelf: 'flex-start', fontWeight: '600' },
-    minuteTime: { color: colors.ink, fontSize: Math.round(16 * layout.zoom), fontWeight: '400', fontVariant: ['tabular-nums'], includeFontPadding: false },
+    minuteTime: { color: colors.ink, fontSize: 16, fontWeight: '400', fontVariant: ['tabular-nums'], includeFontPadding: false },
     currentMinuteText: { color: colors.ink, fontWeight: '600' },
     selectionPrompt: { flexDirection: 'row', alignItems: 'center', paddingLeft: 12, paddingRight: 4,
       borderBottomWidth: 1, borderBottomColor: colors.hairline, backgroundColor: colors.panel },
@@ -2145,13 +2358,13 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     activityLastCell: { borderBottomWidth: 1.5 },
     activityBadge: { position: 'absolute', top: 2, bottom: 2, justifyContent: 'center', paddingLeft: 4,
       borderLeftWidth: 1, backgroundColor: 'transparent' },
-    activityTitle: { color: colors.ink, fontSize: Math.max(8, Math.round(11 * layout.zoom)), fontWeight: '600' },
-    cellText: { color: colors.ink, fontSize: Math.round(16 * layout.zoom), lineHeight: Math.round(21 * layout.zoom), fontWeight: '400', includeFontPadding: false },
+    activityTitle: { color: colors.ink, fontSize: 11, fontWeight: '600' },
+    cellText: { color: colors.ink, fontSize: 16, lineHeight: 21, fontWeight: '400', includeFontPadding: false },
     editingCell: { borderWidth: 2, borderColor: focusedCell, zIndex: 2 },
     rangeCell: { borderLeftWidth: 2, borderLeftColor: focusedCell, borderRightWidth: 2, borderRightColor: focusedCell },
     rangeFirstCell: { borderTopWidth: 2, borderTopColor: focusedCell },
     rangeLastCell: { borderBottomWidth: 2, borderBottomColor: focusedCell },
-    inlineInput: { paddingVertical: Math.round(layout.zoom), paddingHorizontal: 0, margin: 0, maxHeight: rowHeight - 4,
+    inlineInput: { paddingVertical: 1, paddingHorizontal: 0, margin: 0, maxHeight: rowHeight - 4,
       textAlignVertical: 'center', backgroundColor: 'transparent' },
     placeholder: { color: colors.muted, fontWeight: '400', fontSize: 11 },
     planText: { color: colors.graphite, fontWeight: '400' },

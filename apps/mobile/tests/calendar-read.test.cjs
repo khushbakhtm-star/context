@@ -55,6 +55,7 @@ function calendarRuntime(overrides = {}) {
       if (name === 'expo-calendar/legacy') return legacy;
       if (name === '../../modules/context-calendar-colors') return { getEventColorsAsync: async () => state.eventColors };
       if (name === '../data/database') return {};
+      if (name === './calendar-write-routing') return { hasConfiguredAccountCalendarWriter: async () => false };
       if (name === '../sync/accounts') return { getAccounts: async () => [] };
       if (name === './categories' || name === '../sync/engine' || name === '../sync/codec') return {};
       if (name === '../theme') return { categoryById: () => ({ name: 'Activity' }) };

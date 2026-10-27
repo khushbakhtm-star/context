@@ -117,15 +117,15 @@ export function SettingsScreen({
       </View>
 
       <View style={styles.sectionHeadingRow}>
-        <Text style={styles.calendarHeading}>Calendar connection</Text>
-        <InfoButton title="Calendar connection" message={"Context reads plans from calendars connected to this phone. Add or enable Google, iCloud, Outlook or Exchange in your phone’s Calendar settings first. Teams and Zoom meetings normally appear through their Google or Outlook event. Your complete minute ledger stays in Context.\n\nDevice-calendar access copies actuals into separate events. Account connections can also replace a selected original occurrence and import edits when you allow those permissions. Account calendar writes take over from device writeback to avoid duplicate events."} />
+        <Text style={styles.calendarHeading}>Phone calendars</Text>
+        <InfoButton title="Phone calendars" message={"Show plans from calendars connected to this phone. Add or enable Google, iCloud, Outlook or Exchange in your phone’s Calendar settings first. Teams and Zoom meetings normally appear through their Google or Outlook event.\n\nThe phone-calendar connection publishes separate Context activity events. An account connection can also replace a selected original occurrence and import edits when allowed. A configured account Actuals destination takes over new activity publishing; enabling account write permission alone does not. Existing linked activities keep their approved connection."} />
       </View>
 
       <View style={styles.accountButton}>
         <Pressable accessibilityRole="button" onPress={onOpenAccounts} style={styles.navigationAction}>
           <Text style={styles.accountTitle}>Accounts & synchronization</Text>
         </Pressable>
-        <InfoButton onDark title="Accounts & synchronization" message="Connect Google, Microsoft or other storage to synchronize your encrypted ledger between phones. Account calendar connections also support importing event edits and replacing original plans with your permission." />
+        <InfoButton onDark title="Accounts & synchronization" message={"Connect the same storage account and ledger passphrase on both phones to synchronize your encrypted private ledger. Calendar descriptions remain readable in that calendar and follow its sharing settings.\n\nAccount calendar connections can import event edits and replace selected original plans when allowed. Choose an Actuals destination to publish new activities through that account; write permission alone does not replace the phone-calendar connection."} />
       </View>
 
       <View style={styles.categoriesButton}>
@@ -152,7 +152,7 @@ export function SettingsScreen({
         <>
           <View style={styles.sectionHeadingRow}>
             <Text style={styles.sectionTitle}>Calendars used for plans</Text>
-            <InfoButton title="Calendars used for plans" message={"Check the calendars you want to appear in Today. When creating an event in Google Calendar, save it in one of these checked calendars. Events refresh when you return to Context.\n\nTap Use to choose the calendar for actual activity blocks. The selected calendar is marked Actuals. A read-only calendar can supply plans but cannot receive activity blocks."} />
+            <InfoButton title="Calendars used for plans" message={"Check the calendars you want to appear in Day. When creating an event in Google Calendar, save it in one of these checked calendars. Events refresh when you return to Context.\n\nTap Use to choose the calendar for actual activity blocks. The selected calendar is marked Actuals. A read-only calendar can supply plans but cannot receive activity blocks."} />
           </View>
           <View style={styles.calendarCard}>
             {calendars.map((calendar, index) => {
@@ -247,10 +247,6 @@ export function SettingsScreen({
         </>
       ) : null}
 
-      <View style={styles.privacyCard}>
-        <Text style={styles.privacyTitle}>Privacy</Text>
-        <InfoButton title="Privacy" message="Account synchronization encrypts your private ledger before storing it in your selected app folder. Calendar descriptions are readable in your calendar and follow its sharing settings. Connect the same storage account and passphrase on both phones." />
-      </View>
       <WatchSettings />
       <ReleaseUpdateSettings updates={updates} />
     </ScrollView>
@@ -339,7 +335,4 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   notice: { marginTop: 24, padding: 16, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 14 },
   noticeTitle: { color: colors.graphite, fontSize: 13, fontWeight: '700', flexShrink: 1 },
   noticeBody: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },
-  privacyCard: { flexDirection: 'row', alignItems: 'center', marginTop: 12,
-    paddingHorizontal: 16, paddingVertical: 4, borderRadius: 14, backgroundColor: colors.panel },
-  privacyTitle: { flex: 1, color: colors.graphite, fontSize: 13, fontWeight: '700' },
 });

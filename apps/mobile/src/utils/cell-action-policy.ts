@@ -2,6 +2,8 @@ export type CellActionPolicyCell = {
   minuteIndex: number;
   text?: string | null;
   groupId?: string | null;
+  hasFill?: boolean;
+  hasFormatting?: boolean;
 };
 
 export type CellActionPolicy = {
@@ -46,7 +48,7 @@ export function analyzeCellSelection(cells: readonly CellActionPolicyCell[], pre
     canClear: hasText,
     canAutoFill: multiple && uniqueTexts.size === 1,
     canGroup: multiple && hasText,
-    canFormat: hasText,
+    canFormat: hasText || selected.some((cell) => cell.hasFill || cell.hasFormatting),
     canUngroup: groupIds.length > 0,
     groupIds,
   };

@@ -18,23 +18,18 @@ export function parseCalendarMinute(input: string): number | null {
   return ((meridiem ? hour % 12 + (meridiem === 'PM' ? 12 : 0) : hour) * 60) + minute;
 }
 
-/** measuredBaseTimeWidth is the native text width at 100% zoom, including the
- * user's font scale. A passive time rail adds only one pixel on each side. */
+/** The native label measurement includes the user's font scale and stays fixed
+ * during vertical zoom. A passive time rail adds one pixel on each side. */
 export function calendarGridLayout(viewport: number, preset: CalendarDayCount, value = 1, bufferedDays: number = preset,
   measuredBaseTimeWidth?: number, exactSelection = false) {
   const viewportWidth = Number.isFinite(viewport) && viewport > CALENDAR_TIME_RAIL ? viewport : 360;
   const zoom = normalizeCalendarZoom(value);
   const compact = typeof measuredBaseTimeWidth === 'number' && Number.isFinite(measuredBaseTimeWidth) && measuredBaseTimeWidth > 0;
-  const baseRailWidth = compact ? Math.ceil(measuredBaseTimeWidth) + 2 : CALENDAR_TIME_RAIL;
-  const railWidth = compact
-    ? Math.min(Math.ceil(measuredBaseTimeWidth * zoom) + 2, viewportWidth - 64)
-    : Math.min(Math.max(52, Math.round(CALENDAR_TIME_RAIL * zoom)), Math.max(52, viewportWidth - 64));
-  const baseAvailable = viewportWidth - baseRailWidth;
-  const baseDayWidth = preset === 1 ? Math.max(160, baseAvailable) : Math.max(160, baseAvailable / preset);
-  const dayWidth = Math.max(80, Math.round(baseDayWidth * zoom));
-  const needed = zoom < 1 ? Math.ceil(Math.max(1, viewportWidth - railWidth) / dayWidth) + 1 : preset;
-  const dayCount = exactSelection ? preset : Math.min(7, Math.max(preset, needed, bufferedDays));
-  const contentWidth = exactSelection ? railWidth + dayCount * dayWidth : Math.max(viewportWidth, railWidth + dayCount * dayWidth);
+  const railWidth = Math.min(compact ? Math.ceil(measuredBaseTimeWidth) + 2 : CALENDAR_TIME_RAIL, viewportWidth - 64);
+  // A view is one complete page. Pinch changes minute density; dates and text keep their horizontal geometry.
+  const dayCount = Math.max(1, Math.min(7, Math.trunc(preset))) as CalendarDayCount;
+  const dayWidth = (viewportWidth - railWidth) / dayCount;
+  const contentWidth = viewportWidth;
   return { viewportWidth, dayWidth, contentWidth, railWidth, zoom, rowHeight: Math.max(17, Math.round(CALENDAR_BASE_ROW_HEIGHT * zoom)),
     maxOffset: Math.max(0, contentWidth - viewportWidth), dayCount };
 }

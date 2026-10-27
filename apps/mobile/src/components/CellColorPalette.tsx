@@ -14,6 +14,7 @@ type Props = {
   colorChoices: readonly ActivityCategory[];
   onTextColor: (color: string | null) => void;
   onCellColor: (id: string) => void;
+  onResetCellColor?: () => void;
   onClose: () => void;
 };
 
@@ -22,7 +23,7 @@ const TEXT_COLORS = ['#FFFFFF', '#D2D2D2', '#96938C', '#171817', '#C4B8E7', '#8D
 const HEX = /^#[0-9a-f]{6}$/i;
 
 export function CellColorPalette({ mode, busy, textColor, explicitTextColor, selectedColorId,
-  colorChoices, onTextColor, onCellColor, onClose }: Props) {
+  colorChoices, onTextColor, onCellColor, onResetCellColor, onClose }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [hex, setHex] = useState(explicitTextColor ?? textColor);
@@ -40,6 +41,12 @@ export function CellColorPalette({ mode, busy, textColor, explicitTextColor, sel
       </Pressable>
     </View>
     <View accessibilityRole="radiogroup" accessibilityLabel={mode === 'text' ? 'Text colors' : 'Cell colors'} style={styles.choices}>
+      <Pressable accessibilityRole="button" accessibilityLabel={mode === 'text' ? 'Reset text color' : 'Reset cell fill'}
+        accessibilityState={{ disabled: busy || mode === 'cell' && !onResetCellColor }}
+        disabled={busy || mode === 'cell' && !onResetCellColor}
+        onPress={() => mode === 'text' ? onTextColor(null) : onResetCellColor?.()} style={styles.reset}>
+        <Text style={styles.actionText}>Reset</Text>
+      </Pressable>
       {mode === 'text' ? TEXT_COLORS.map((color) => <Pressable key={color} accessibilityRole="radio"
         accessibilityLabel={'Text color ' + color}
         accessibilityState={{ checked: explicitTextColor?.toUpperCase() === color, disabled: busy }}
@@ -57,10 +64,6 @@ export function CellColorPalette({ mode, busy, textColor, explicitTextColor, sel
       </Pressable>)}
     </View>
     {mode === 'text' ? <View style={styles.custom}>
-      <Pressable accessibilityRole="button" accessibilityState={{ selected: !explicitTextColor, disabled: busy }}
-        disabled={busy} onPress={() => onTextColor(null)} style={styles.automatic}>
-        <Text style={styles.actionText}>Automatic</Text>
-      </Pressable>
       <TextInput value={hex} onChangeText={setHex} accessibilityLabel="Custom text color hexadecimal value"
         placeholder="#RRGGBB" placeholderTextColor={colors.muted} autoCapitalize="characters" autoCorrect={false}
         editable={!busy} maxLength={7} selectTextOnFocus style={styles.hexInput} returnKeyType="done"
@@ -88,7 +91,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   dot: { width: 26, height: 26, borderRadius: 13, borderWidth: 1, borderColor: colors.swatchBorder },
   hex: { color: colors.graphite, fontSize: 9, lineHeight: 12 },
   custom: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 5, marginTop: 8 },
-  automatic: { minHeight: 44, paddingHorizontal: 7, justifyContent: 'center' },
+  reset: { minHeight: 50, minWidth: 48, paddingHorizontal: 7, alignItems: 'center', justifyContent: 'center' },
   actionText: { color: colors.ink, fontSize: 12, fontWeight: '600' },
   hexInput: { minWidth: 90, flexGrow: 1, minHeight: 44, color: colors.ink, borderWidth: 1, borderColor: colors.hairline,
     paddingHorizontal: 8, borderRadius: 4, fontSize: 13 },

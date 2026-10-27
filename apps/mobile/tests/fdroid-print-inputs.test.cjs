@@ -7,12 +7,12 @@ const { STATE, digest, prepareInstalledSources } = require('../scripts/fdroid-so
 
 const root = path.resolve(__dirname, '..');
 const inventory = JSON.parse(fs.readFileSync(path.join(root, 'fdroid/source-inputs.json'), 'utf8'));
-const names = ['expo-print', 'expo-sharing'];
+const names = ['expo-print', 'expo-sharing', 'expo-clipboard'];
 const reviewed = inventory.packages.filter((entry) => names.includes(entry.name));
 
-test('Print and Sharing add exactly six hash-reviewed unused inputs without changing source patches or the toolchain', () => {
-  assert.equal(inventory.packages.length, 27);
-  assert.equal(inventory.packages.reduce((count, entry) => count + entry.remove.length, 0), 107);
+test('Print, Sharing and Clipboard use eight hash-reviewed unused inputs without changing source patches or the toolchain', () => {
+  assert.equal(inventory.packages.length, 28);
+  assert.equal(inventory.packages.reduce((count, entry) => count + entry.remove.length, 0), 109);
   assert.equal(inventory.packages.reduce((count, entry) => count + entry.patch.length, 0), 5);
   assert.deepEqual(reviewed.map((entry) => entry.name).sort(), [...names].sort());
   const lock = fs.readFileSync(path.join(root, 'pnpm-lock.yaml'), 'utf8');
@@ -26,13 +26,13 @@ test('Print and Sharing add exactly six hash-reviewed unused inputs without chan
     assert.deepEqual(entry.patch, []);
     for (const file of entry.remove) assert.equal(digest(fs.readFileSync(path.join(location, file.path))), file.sha256);
   }
-  assert.equal(reviewed.reduce((count, entry) => count + entry.remove.length, 0), 6);
-  assert.equal(reviewed.flatMap((entry) => entry.remove).filter((entry) => entry.path.endsWith('.aar')).length, 2);
-  assert.equal(reviewed.flatMap((entry) => entry.remove).filter((entry) => entry.path.endsWith('-sources.jar')).length, 2);
+  assert.equal(reviewed.reduce((count, entry) => count + entry.remove.length, 0), 8);
+  assert.equal(reviewed.flatMap((entry) => entry.remove).filter((entry) => entry.path.endsWith('.aar')).length, 3);
+  assert.equal(reviewed.flatMap((entry) => entry.remove).filter((entry) => entry.path.endsWith('-sources.jar')).length, 3);
   assert.equal(reviewed.flatMap((entry) => entry.remove).filter((entry) => entry.path.endsWith('.tar.gz')).length, 2);
 });
 
-test('the six new removals run only on copied temporary fixtures and never change installed package bytes', (t) => {
+test('the eight reviewed removals run only on copied temporary fixtures and never change installed package bytes', (t) => {
   const temporary = fs.realpathSync(os.tmpdir());
   const staging = fs.realpathSync(fs.mkdtempSync(path.join(temporary, 'context-print-fdroid-')));
   t.after(() => {
@@ -80,7 +80,7 @@ test('the six new removals run only on copied temporary fixtures and never chang
   const fixtureInventory = { packages: reviewed,
     hermes: { package: 'hermes-compiler', version: '1.0.0', path: 'hermesc/linux64-bin/hermesc', sha256: digest(hermesBytes) } };
   const audit = prepareInstalledSources(staging, { inventory: fixtureInventory });
-  assert.equal(audit.removed.length, 6);
+  assert.equal(audit.removed.length, 8);
   assert.deepEqual(audit.patched, []);
   for (const file of fixturePaths) assert.equal(fs.existsSync(file), false);
   for (const file of originals) assert.equal(digest(fs.readFileSync(file.path)), file.sha256, 'installed package file must remain untouched');

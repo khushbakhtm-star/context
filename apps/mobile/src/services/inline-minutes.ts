@@ -1,5 +1,5 @@
-import { acknowledgeInlineMinuteLink, deleteMinuteEntry, getMinuteEntry, getPendingInlineMinuteLinks, saveMinuteRange } from '../data/database';
-import { linkActualsToAccounts, requestAccountSynchronization } from '../sync/engine';
+import { acknowledgeInlineMinuteLink, deferInlineMinuteLink, deleteMinuteEntry, getMinuteEntry, getPendingInlineMinuteLinks, saveMinuteRange } from '../data/database';
+import { canAcknowledgeInlineMinuteLink, linkActualsToAccounts, requestAccountSynchronization } from '../sync/engine';
 import type { MinuteEntry } from '../types';
 import { InlineMinuteDrafts, type InlineMinuteValue } from '../utils/inline-minute-drafts';
 import { isActivityGroupId } from '../utils/cell-format';
@@ -56,14 +56,20 @@ export function retryInlineMinuteLinks(options: { synchronize?: boolean } = {}):
       while (more) {
         linkRequested = false;
         const pending = await getPendingInlineMinuteLinks();
+        let acknowledged = 0;
         for (const ticket of pending) {
           try {
             await linkActualsToAccounts(ticket.affectedDates, null,
               { dateKey: ticket.dateKey, minuteIndex: ticket.minuteIndex });
-            await acknowledgeInlineMinuteLink(ticket);
-          } catch { failed = true; }
+            if (!ticket.requiresAccountWriter || await canAcknowledgeInlineMinuteLink(ticket)) {
+              if (await acknowledgeInlineMinuteLink(ticket)) acknowledged++;
+            } else await deferInlineMinuteLink(ticket);
+          } catch {
+            failed = true;
+            if (ticket.requiresAccountWriter) await deferInlineMinuteLink(ticket).catch(() => undefined);
+          }
         }
-        more = !failed && (pending.length === 100 || linkRequested);
+        more = !failed && (pending.length === 100 && acknowledged > 0 || linkRequested);
       }
       updateLinkWarning(failed);
       if (networkRequested) requestAccountSynchronization();
