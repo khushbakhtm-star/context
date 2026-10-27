@@ -1,6 +1,6 @@
 """Unsigned watch build controller. No key, token, credential or publisher access.
 
-The source pin is intentionally unresolved in this ignored preparation copy.
+The application source pin is immutable; this controller has no publisher access.
 Only generated watch Gradle signing is disabled; application source is untouched.
 """
 from __future__ import annotations
@@ -129,13 +129,16 @@ def resource_file(resources, kind, name):
         end = index + 1
         while end < len(lines) and not re.match(r"^\s*resource\s+0x[0-9a-fA-F]+\s", lines[end]):
             end += 1
-        paths = set(re.findall(r"\(file\)\s+([^\s]+)", "\n".join(lines[index:end])))
-        if len(paths) != 1:
-            raise ValueError(f"Compiled {kind}/{name} must have one file value")
-        member = next(iter(paths)).strip('"')
-        if not member.startswith("res/") or "\\" in member or ":" in member or ".." in member.split("/"):
-            raise ValueError("Compiled resource file leaves APK resources")
-        found.append({"id": match[1].lower(), "member": member})
+        values = re.findall(r"\(([^)]*)\)\s+\(file\)\s+([^\s]+)", "\n".join(lines[index:end]))
+        if not 1 <= len(values) <= 16 or len(set(config for config, _ in values)) != len(values):
+            raise ValueError(f"Compiled {kind}/{name} must have bounded distinct file configurations")
+        files = []
+        for config, member in values:
+            member = member.strip('"')
+            if not member.startswith("res/") or "\\" in member or ":" in member or ".." in member.split("/"):
+                raise ValueError("Compiled resource file leaves APK resources")
+            files.append({"configuration": config, "member": member})
+        found.append({"id": match[1].lower(), "files": files})
     if len(found) != 1:
         raise ValueError(f"Expected one compiled {kind}/{name} resource")
     return found[0]
@@ -146,12 +149,27 @@ def tile_resource_files(resources):
             "logo": resource_file(resources, "drawable", "context_logo")}
 
 
-def tile_preview_verified(xml, links):
-    if (len(re.findall(r"^\s*E: layer-list(?: |$)", xml, re.M)) != 1 or
-            not re.search(r"android:drawable[^\n]*@" + re.escape(links["logo"]["id"]), xml, re.I) or
-            not re.search(r"android:color[^\n]*0xff000000", xml, re.I)):
+def tile_preview_verified(xml, links, require_content=True):
+    if len(re.findall(r"^\s*E: layer-list(?: |$)", xml, re.M)) != 1:
+        raise ValueError("Compiled Tile preview must be a layer-list")
+    if require_content and (not re.search(r"android:drawable[^\n]*@" + re.escape(links["logo"]["id"]), xml, re.I) or
+            not re.search(r"android:color[^\n]*(?:0xff000000|#ff000000)(?:\s|$)", xml, re.I)):
         raise ValueError("Compiled Tile preview must show the approved logo on black")
     return True
+
+
+def tile_preview_versions(links):
+    versions = {}
+    for item in links["preview"]["files"]:
+        config = item["configuration"]
+        if not re.fullmatch(r"(?:v[1-9][0-9]*)?", config):
+            raise ValueError("Unexpected non-version Tile preview configuration")
+        versions[item["member"]] = int(config[1:]) if config else 0
+    supported = [version for version in versions.values() if version <= 30]
+    if not supported:
+        raise ValueError("No Tile preview drawable applies to the minimum SDK")
+    minimum_choice = max(supported)
+    return {member: version >= minimum_choice for member, version in versions.items()}
 
 
 def tile_manifest_verified(xml, resources):
@@ -197,10 +215,23 @@ def verify(source, reports, receipt):
     resources = run([tools / "aapt2", "dump", "resources", apk])
     (reports / "compiled-watch-resources.txt").write_text(resources)
     links = tile_resource_files(resources)
-    preview_xml = run([tools / "aapt2", "dump", "xmltree", apk, "--file", links["preview"]["member"]])
-    (reports / "compiled-tile-preview.txt").write_text(preview_xml)
     tile_manifest_verified(xml, resources)
-    tile_preview_verified(preview_xml, links)
+    preview_proof = []
+    versions = tile_preview_versions(links)
+    with zipfile.ZipFile(apk) as resource_zip:
+        for item in [entry for resource in links.values() for entry in resource["files"]]:
+            if item["member"] not in resource_zip.namelist():
+                raise ValueError("A compiled Tile preview/logo file value is missing from the APK")
+            item["sha256"] = sha(resource_zip.read(item["member"]))
+    for index, item in enumerate(links["preview"]["files"]):
+        preview_xml = run([tools / "aapt2", "dump", "xmltree", apk, "--file", item["member"]])
+        filename = f"compiled-tile-preview-{index}.txt"
+        (reports / filename).write_text(preview_xml)
+        required = versions[item["member"]]
+        tile_preview_verified(preview_xml, links, required)
+        preview_proof.append({"member": item["member"], "configuration": item["configuration"],
+                              "applicableAtSupportedSdk": required, "xmlReport": filename,
+                              "xmlSha256": sha(preview_xml.encode())})
     if has_signing_block(data):
         raise ValueError("An unsigned watch artifact unexpectedly contains an APK signing block")
     with zipfile.ZipFile(apk) as archive:
@@ -210,10 +241,6 @@ def verify(source, reports, receipt):
         if (any(re.fullmatch(r"META-INF/[^/]+\.(?:SF|RSA|DSA|EC)", name, re.I) for name in names) or
                 "assets/index.android.bundle" in names or "assets/app.config" in names):
             raise ValueError("The unsigned native watch APK contains a signature or phone bundle")
-        if any(item["member"] not in names for item in links.values()):
-            raise ValueError("A compiled Tile preview/logo file value is missing from the APK")
-        for item in links.values():
-            item["sha256"] = sha(archive.read(item["member"]))
         dex_files = {name: archive.read(name) for name in names if re.fullmatch(r"classes(?:[2-9]|[1-9][0-9]+)?\.dex", name)}
         classes = verify_required_class_definitions(dex_files, MODULES)
     if (f"package: name='{APP_ID}' versionCode='{CODE}' versionName='{VERSION}'" not in identity or
@@ -253,7 +280,10 @@ def verify(source, reports, receipt):
                     "noPhoneBundle": True, "actualClassDefinitionsVerified": True,
                     "nativeClassDefinitions": classes, "tileManifestVerified": True, "unitTests": tests,
                     "approvedTilePreviewPresent": True, "tileResources": links,
-                    "compiledPreviewXmlSha256": sha(preview_xml.encode()), "noApkSigningBlock": True,
+                    "compiledPreviewAlternatives": preview_proof,
+                    "tileResourceSelectionPolicy": {"minimumSdk": 30, "configurationSource": "compiled resource table, never ZIP filenames",
+                        "verifiedAlternatives": "highest version applicable at API 30 and every higher version",
+                        "lowerCompilerFallbacks": "ZIP membership and layer-list checked; unreachable below selected API-30 alternative"}, "noApkSigningBlock": True,
                     "noJarSignature": True, "apksignerExpectedUnsignedExit": 1,
                     "publisherCertificateExpectedAfterLocalSigning": CERTIFICATE,
                     "scope": "Unsigned native watch and actual compiled Tile checks only; no signing, publication or physical device test."})
