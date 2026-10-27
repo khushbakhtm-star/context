@@ -118,6 +118,42 @@ def element_blocks(xml, element):
         yield "\n".join(lines[start:end])
 
 
+def resource_file(resources, kind, name):
+    lines = resources.splitlines()
+    pattern = re.compile(r"^\s*resource\s+(0x[0-9a-fA-F]{8})\s+(?:[A-Za-z0-9_.]+:)?" + re.escape(kind + "/" + name) + r"(?:\s|$)")
+    found = []
+    for index, line in enumerate(lines):
+        match = pattern.match(line)
+        if not match:
+            continue
+        end = index + 1
+        while end < len(lines) and not re.match(r"^\s*resource\s+0x[0-9a-fA-F]+\s", lines[end]):
+            end += 1
+        paths = set(re.findall(r"\(file\)\s+([^\s]+)", "\n".join(lines[index:end])))
+        if len(paths) != 1:
+            raise ValueError(f"Compiled {kind}/{name} must have one file value")
+        member = next(iter(paths)).strip('"')
+        if not member.startswith("res/") or "\\" in member or ":" in member or ".." in member.split("/"):
+            raise ValueError("Compiled resource file leaves APK resources")
+        found.append({"id": match[1].lower(), "member": member})
+    if len(found) != 1:
+        raise ValueError(f"Expected one compiled {kind}/{name} resource")
+    return found[0]
+
+
+def tile_resource_files(resources):
+    return {"preview": resource_file(resources, "drawable", "context_tile_preview"),
+            "logo": resource_file(resources, "drawable", "context_logo")}
+
+
+def tile_preview_verified(xml, links):
+    if (len(re.findall(r"^\s*E: layer-list(?: |$)", xml, re.M)) != 1 or
+            not re.search(r"android:drawable[^\n]*@" + re.escape(links["logo"]["id"]), xml, re.I) or
+            not re.search(r"android:color[^\n]*0xff000000", xml, re.I)):
+        raise ValueError("Compiled Tile preview must show the approved logo on black")
+    return True
+
+
 def tile_manifest_verified(xml, resources):
     blocks = [block for block in element_blocks(xml, "service") if
               re.search(r'android:name[^\n]*="(?:com\.context\.minuteledger\.wear\.ContextTileService|\.ContextTileService)"', block)]
@@ -128,9 +164,9 @@ def tile_manifest_verified(xml, resources):
             "androidx.wear.tiles.action.BIND_TILE_PROVIDER" in block and "androidx.wear.tiles.PREVIEW" in block and
             re.search(r'android:exported[^\n]*0xffffffff', block)):
         raise ValueError("Compiled Tile service permission/action/preview/export status is invalid")
-    preview_ids = re.findall(r"resource\s+(0x[0-9a-fA-F]+)\s+(?:[A-Za-z0-9_.]+:)?drawable/context_tile_preview(?:\s|$)", resources)
+    preview = tile_resource_files(resources)["preview"]
     previews = [item for item in element_blocks(block, "meta-data") if "androidx.wear.tiles.PREVIEW" in item]
-    if len(preview_ids) != 1 or len(previews) != 1 or not re.search(r'android:resource[^\n]*@' + re.escape(preview_ids[0]), previews[0]):
+    if len(previews) != 1 or not re.search(r'android:resource[^\n]*@' + re.escape(preview["id"]), previews[0], re.I):
         raise ValueError("Compiled Tile preview must point to its approved-emblem drawable")
     activities = [block for block in element_blocks(xml, "activity") if
                   re.search(r'android:name[^\n]*="(?:com\.context\.minuteledger\.wear\.MinuteActivity|\.MinuteActivity)"', block)]
@@ -152,6 +188,19 @@ def verify(source, reports, receipt):
     run([tools / "zipalign", "-P", "16", "-f", "4", original, apk])
     run([tools / "zipalign", "-c", "-P", "16", "-v", "4", apk])
     data = apk.read_bytes()
+    with zipfile.ZipFile(apk) as diagnostic_zip:
+        (reports / "apk-zip-entries.json").write_text(json.dumps(diagnostic_zip.namelist(), indent=2) + "\n")
+    identity = run([tools / "aapt2", "dump", "badging", apk])
+    (reports / "native-package-identity.txt").write_text(identity)
+    xml = run([tools / "aapt2", "dump", "xmltree", apk, "--file", "AndroidManifest.xml"])
+    (reports / "compiled-watch-manifest.txt").write_text(xml)
+    resources = run([tools / "aapt2", "dump", "resources", apk])
+    (reports / "compiled-watch-resources.txt").write_text(resources)
+    links = tile_resource_files(resources)
+    preview_xml = run([tools / "aapt2", "dump", "xmltree", apk, "--file", links["preview"]["member"]])
+    (reports / "compiled-tile-preview.txt").write_text(preview_xml)
+    tile_manifest_verified(xml, resources)
+    tile_preview_verified(preview_xml, links)
     if has_signing_block(data):
         raise ValueError("An unsigned watch artifact unexpectedly contains an APK signing block")
     with zipfile.ZipFile(apk) as archive:
@@ -161,17 +210,15 @@ def verify(source, reports, receipt):
         if (any(re.fullmatch(r"META-INF/[^/]+\.(?:SF|RSA|DSA|EC)", name, re.I) for name in names) or
                 "assets/index.android.bundle" in names or "assets/app.config" in names):
             raise ValueError("The unsigned native watch APK contains a signature or phone bundle")
-        if "res/drawable/context_tile_preview.xml" not in names:
-            raise ValueError("Compiled approved-emblem Tile preview is missing")
+        if any(item["member"] not in names for item in links.values()):
+            raise ValueError("A compiled Tile preview/logo file value is missing from the APK")
+        for item in links.values():
+            item["sha256"] = sha(archive.read(item["member"]))
         dex_files = {name: archive.read(name) for name in names if re.fullmatch(r"classes(?:[2-9]|[1-9][0-9]+)?\.dex", name)}
         classes = verify_required_class_definitions(dex_files, MODULES)
-    identity = run([tools / "aapt2", "dump", "badging", apk])
     if (f"package: name='{APP_ID}' versionCode='{CODE}' versionName='{VERSION}'" not in identity or
             "uses-feature: name='android.hardware.type.watch'" not in identity or "sdkVersion:'30'" not in identity):
         raise ValueError("Actual watch package/version/required feature/minimum SDK differs")
-    xml = run([tools / "aapt2", "dump", "xmltree", apk, "--file", "AndroidManifest.xml"])
-    resources = run([tools / "aapt2", "dump", "resources", apk])
-    tile_manifest_verified(xml, resources)
     tests = {"cases": 0, "failures": 0, "errors": 0, "skipped": 0}
     test_files = list((mobile / "android/wear/build/test-results").glob("test*/TEST-*.xml"))
     if not test_files:
@@ -197,9 +244,6 @@ def verify(source, reports, receipt):
     tests["requiredSuitesVerified"] = sorted(completed_suites)
     if tests["cases"] <= tests["skipped"] or tests["failures"] or tests["errors"]:
         raise ValueError("Watch JVM tests failed or no test actually ran")
-    (reports / "native-package-identity.txt").write_text(identity)
-    (reports / "compiled-watch-manifest.txt").write_text(xml)
-    (reports / "compiled-watch-resources.txt").write_text(resources)
     negative = run([tools / "apksigner", "verify", "--verbose", apk], expected=1)
     (reports / "expected-unsigned-signature-check.txt").write_text(negative)
     receipt.update({"status": "unsigned-build-verified", "finishedAt": datetime.now(timezone.utc).isoformat(),
@@ -208,7 +252,8 @@ def verify(source, reports, receipt):
                     "nativeIdentityVerified": True, "watchFeatureRequired": True,
                     "noPhoneBundle": True, "actualClassDefinitionsVerified": True,
                     "nativeClassDefinitions": classes, "tileManifestVerified": True, "unitTests": tests,
-                    "approvedTilePreviewPresent": True, "noApkSigningBlock": True,
+                    "approvedTilePreviewPresent": True, "tileResources": links,
+                    "compiledPreviewXmlSha256": sha(preview_xml.encode()), "noApkSigningBlock": True,
                     "noJarSignature": True, "apksignerExpectedUnsignedExit": 1,
                     "publisherCertificateExpectedAfterLocalSigning": CERTIFICATE,
                     "scope": "Unsigned native watch and actual compiled Tile checks only; no signing, publication or physical device test."})
