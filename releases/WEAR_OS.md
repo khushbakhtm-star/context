@@ -45,3 +45,11 @@ The optional watch transport uses Google Play services. Context's F-Droid prepar
 Physical checks on the paired Galaxy Watch7 remain required: small round-screen layout, typing/dictation, scrolling, earlier-day entry, midnight, offline save/reconnect, phone restart, conflict review, and access revocation. Source tests and native assembly alone do not establish those results.
 
 Official references: [Wear OS debugging](https://developer.android.com/training/wearables/get-started/debugging), [Data Layer](https://developer.android.com/training/wearables/data/overview), [Android platform tools](https://developer.android.com/tools/releases/platform-tools).
+
+## Watch 0.1.10 dictation update
+
+The separate [Watch 0.1.10 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.10/context-0.1.10-wear-preview.apk) saves an accepted dictation
+result automatically to the minute opened by that editor. Keyboard entry still uses Save.
+Install as an Update on the watch; the phone stays at 0.1.18. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
+contains the exact source and automated build/package/signature receipts. Physical dictation
+and reconnect behavior still need checking after this watch update.

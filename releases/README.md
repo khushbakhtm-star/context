@@ -2,12 +2,38 @@
 
 `latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
 phone 0.1.18 (build 19), available by 2026-10-27 at 13:53:47 UTC. The FOSS phone 0.1.18 (build 19) was available by 2026-10-27 at 13:53:47 UTC.
-The separate watch 0.1.9 (code 100010) was published on 2026-10-27 at 13:52:43 UTC. Official store entries remain absent pending actual
+The separate watch 0.1.10 (code 100011) was published on 2026-10-27 at 18:34:20 UTC. Official store entries remain absent pending actual
 availability. A source tag alone, unpublished upload, review submission, or queued release must not
 add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Published 0.1.10 Watch update
+
+[Watch 0.1.10 release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10) / [watch APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.10/context-0.1.10-wear-preview.apk)
+was available by **2026-10-27 at 18:34:20 UTC**, release 425841266, APK asset 682497265.
+All five public asset sizes/digests match the independently verified local outputs;
+the watch tag points to application source `2019b79e0f1f23583b6322d5ce3259dd1ffe6dfe`.
+[Unsigned build 40560111855](https://github.com/khushbakhtm-star/context/actions/runs/40560111855)
+used controller `b19941e33405a75d6d6572f3278f027608931ca4`; signing stayed local.
+
+Accepted dictation saves automatically to the editor's original minute. Stale, cancelled
+or replaced speech sessions cannot save into another minute. The existing Record now
+Tile, typed entry, historical editing and paired-phone transport remain available.
+Watch versioning is independent: 0.1.10/code100011 follows watch 0.1.9/code100010;
+the phone remains 0.1.18/code19.
+
+The signed APK is **11,384,534 bytes**, SHA-256
+`45412f15a79db71581af00cff45bbcb2f5d084f63750efc7397425dabe242c02`. All 39 JVM tests (0 skipped), five actual native
+class definitions, compiled Tile service/resource/logo bindings, protected ZIP content,
+custom cryptographic v2 verification, official supported-SDK v3 verification, separate
+official contained-v2 signature proof, original publisher certificate and 16 KiB alignment
+passed. The bounded v2 verifier override makes no runtime claim below minimum SDK30.
+
+Install on the watch as an Update. Automated checks do not establish physical dictation,
+Tile/lifecycle behavior or phone transport on this binary. This optional Google-dependent
+companion remains separate from phone APKs, F-Droid and official store availability.
 
 ## Published 0.1.18 FOSS phone update
 
