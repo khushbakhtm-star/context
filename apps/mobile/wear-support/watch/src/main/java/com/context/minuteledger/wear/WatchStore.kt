@@ -5,6 +5,7 @@ import android.util.AtomicFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 
 /** One atomic journal shared by the activity and the background Data Layer listener. */
@@ -44,6 +45,69 @@ class WatchStore(context: Context) {
         state.getJSONArray("pending").put(JSONObject().put("operation", operation).put("status", "pending"))
         write(state)
         JSONObject(operation.toString())
+    }
+    /** Accept one confirmed recognizer result and its replay receipt together.
+     * Only the existing operation journal holds the text; receipts keep hashes.
+     * Receipts survive phone ACK removal, and pending IDs cover older captures. */
+    fun saveDictation(plan: DictationSavePlan): Unit = synchronized(lock) {
+        require(SpeechSessionGuard.accepts(plan.speech, plan.speech.requestCode, plan.editor)) {
+            "The dictation belongs to another editor."
+        }
+        require(isDictationId(plan.operationId) && plan.text.isNotBlank() &&
+            plan.text.length <= DictationSavePolicy.MAX_TEXT_LENGTH) { "Invalid confirmed dictation." }
+        require(plan.writeRequired == plan.editor.needsSave(plan.text)) { "The dictation draft changed." }
+        val operation = JSONObject().put("version", 1).put("operationId", plan.operationId)
+            .put("dateKey", plan.editor.coordinate.dateKey).put("minuteIndex", plan.editor.coordinate.minuteIndex)
+            .put("text", plan.text).put("baseKnown", plan.editor.baseKnown)
+            .put("expectedVersion", plan.editor.expectedVersion ?: JSONObject.NULL)
+        if (plan.editor.chosenCategory != null) operation.put("categoryId", plan.editor.chosenCategory)
+        require(operation.toString().toByteArray(Charsets.UTF_8).size <= 256 * 1024) { "The watch edit is too large." }
+        val payloadHash = dictationDigest(operation)
+        val state = read()
+        val pending = state.getJSONArray("pending")
+        val matches = (0 until pending.length()).map { pending.getJSONObject(it).getJSONObject("operation") }
+            .filter { it.getString("operationId") == plan.operationId }
+        require(matches.size <= 1 && matches.all { dictationDigest(it) == payloadHash }) {
+            "A saved dictation identity has different text."
+        }
+        val confirmed = confirmedDictations(state)
+        val previous = (0 until confirmed.length()).map { confirmed.getJSONObject(it) }
+            .filter { it.getString("operationId") == plan.operationId }
+        require(previous.size <= 1 && previous.all { it.getString("payloadSha256") == payloadHash }) {
+            "A confirmed dictation identity has changed."
+        }
+        if (previous.isNotEmpty()) return@synchronized
+        if (plan.writeRequired && matches.isEmpty()) {
+            pending.put(JSONObject().put("operation", operation).put("status", "pending"))
+        }
+        val retained = JSONArray()
+        for (index in maxOf(0, confirmed.length() - 255) until confirmed.length()) retained.put(confirmed.getJSONObject(index))
+        retained.put(JSONObject().put("operationId", plan.operationId).put("payloadSha256", payloadHash))
+        state.put("confirmedDictations", retained)
+        write(state)
+    }
+    fun hasConfirmedDictation(operationId: String): Boolean = synchronized(lock) {
+        if (!isDictationId(operationId)) return@synchronized false
+        val state = read()
+        val confirmed = confirmedDictations(state)
+        if ((0 until confirmed.length()).any { confirmed.getJSONObject(it).getString("operationId") == operationId })
+            return@synchronized true
+        val pending = state.getJSONArray("pending")
+        (0 until pending.length()).any { pending.getJSONObject(it).getJSONObject("operation").getString("operationId") == operationId }
+    }
+    private fun confirmedDictations(state: JSONObject): JSONArray =
+        if (state.has("confirmedDictations")) state.getJSONArray("confirmedDictations") else JSONArray()
+    private fun isDictationId(value: String): Boolean = value.length == 36 &&
+        runCatching { UUID.fromString(value).toString().equals(value, ignoreCase = true) }.getOrDefault(false)
+    private fun dictationDigest(operation: JSONObject): String {
+        // Array order is explicit and stable across JSONObject implementations.
+        val payload = JSONArray().put(operation.getInt("version")).put(operation.getString("dateKey"))
+            .put(operation.getInt("minuteIndex")).put(operation.getString("text"))
+            .put(if (operation.has("categoryId") && !operation.isNull("categoryId")) operation.getString("categoryId") else JSONObject.NULL)
+            .put(operation.getBoolean("baseKnown"))
+            .put(if (!operation.isNull("expectedVersion")) operation.getString("expectedVersion") else JSONObject.NULL)
+        return MessageDigest.getInstance("SHA-256").digest(payload.toString().toByteArray(Charsets.UTF_8))
+            .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
     }
     fun pendingRecords(): List<JSONObject> = synchronized(lock) {
         val list = read().getJSONArray("pending")

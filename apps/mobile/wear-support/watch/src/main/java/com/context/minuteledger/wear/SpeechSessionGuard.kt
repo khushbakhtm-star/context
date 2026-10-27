@@ -1,8 +1,15 @@
 package com.context.minuteledger.wear
 
+import java.util.UUID
+
 /** Identity of one system recognizer invocation, retained through recreation. */
-data class SpeechSession(val requestCode: Int, val editorSessionId: String, val coordinate: Coordinate) {
-    init { require(requestCode in 0..65535); require(editorSessionId.isNotBlank()) }
+data class SpeechSession(val requestCode: Int, val editorSessionId: String, val coordinate: Coordinate,
+    val operationId: String = UUID.randomUUID().toString()) {
+    init {
+        require(requestCode in 0..65535)
+        require(editorSessionId.isNotBlank())
+        require(operationId.isNotBlank())
+    }
 }
 
 object SpeechSessionGuard {

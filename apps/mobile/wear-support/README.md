@@ -16,8 +16,13 @@ its original phone-version baseline rather than silently adopting a newer phone 
 
 The main ledger contains the date heading, Now, and the 1,440-minute list.
 Cancel or save the entry to browse. Scroll the list or use the touch bezel to step by a minute.
-Tap a minute to type with the installed watch keyboard or choose Dictate. The editor
-keeps its original date/minute while the clock changes. Tap the date heading to open a
+Tap a minute to type with the installed watch keyboard or choose Dictate. Confirming
+and sending a dictated note saves it on the watch, closes the editor and queues phone
+synchronization; a second manual Save is unnecessary. Canceled or blank dictation keeps
+the existing text. A local save failure retains the dictated words for retry. Capture
+receipts prevent a repeated result from adding another operation, including after a phone
+acknowledgement. Typed edits still use Save. The editor keeps its original date/minute
+while the clock changes. Tap the date heading to open a
 dialog with a `YYYY-MM-DD` field and previous/next day controls. Now returns to the current
 minute. Downloaded days remain available offline. An uncached day loads after the paired
 phone is running Context.
@@ -42,8 +47,8 @@ The config plugin generates `android/wear` from reviewed sources; the EAS profil
 tests; AGP 9 only creates unit tests for its selected test build type, which defaults to
 debug. Cloud-only `credentials.json` supplies
 the same remote signing key used by the phone. Independent watch identity comes from the
-strict `watch/version.json` metadata (0.1.9/code100010); phone version changes do not alter it.
-Previous watch 0.1.8 used code100009. Watch and phone update artifacts remain separate.
+strict `watch/version.json` metadata (0.1.10/code100011); phone version changes do not alter it.
+Previous watch 0.1.9 used code100010. Watch and phone update artifacts remain separate.
 Release signing fails if those credentials
 are absent. Never create a new watch key, export credentials or change the watch package ID.
 Verify both APK package names and public signing certificate hashes before distribution.

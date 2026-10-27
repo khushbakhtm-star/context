@@ -55,8 +55,10 @@ class MinuteActivity : Activity() {
         val autoNow: Boolean, val inputFocused: Boolean)
     private var pendingRestore: RestoredEditor? = null
     private var pendingSpeech: SpeechSession? = null
+    private var retryDictation: DictationSavePlan? = null
     private var nextSpeechRequest = SPEECH
     private var preserveSpeechResume = false
+    private var confirmedSpeechReturn = false
     private val pickers = mutableSetOf<Dialog>()
     private var deferredNow = false
     private var visible = false
@@ -93,6 +95,7 @@ class MinuteActivity : Activity() {
         deferredNow = savedInstanceState?.getBoolean("deferredNow", false) ?: false
         nextSpeechRequest = savedInstanceState?.getInt("nextSpeechRequest", SPEECH) ?: SPEECH
         preserveSpeechResume = savedInstanceState?.getBoolean("preserveSpeechResume", false) ?: false
+        confirmedSpeechReturn = savedInstanceState?.getBoolean("confirmedSpeechReturn", false) ?: false
         savedInstanceState?.let {
             selected = Coordinate(it.getString("date") ?: selected.dateKey, it.getInt("minute", selected.minuteIndex))
             followingNow = it.getBoolean("follow", true)
@@ -147,8 +150,24 @@ class MinuteActivity : Activity() {
             editorSession = session; editing = target
             if (savedInstanceState.containsKey("speechRequest")) {
                 val speech = SpeechSession(savedInstanceState.getInt("speechRequest"),
-                    savedInstanceState.getString("speechSessionId") ?: session.sessionId, target)
+                    savedInstanceState.getString("speechSessionId") ?: session.sessionId, target,
+                    savedInstanceState.getString("speechOperationId") ?: java.util.UUID.randomUUID().toString())
                 if (SpeechSessionGuard.accepts(speech, speech.requestCode, session)) pendingSpeech = speech
+            }
+            savedInstanceState.getString("dictationRetryText")?.let { retryText ->
+                val retrySpeech = SpeechSession(savedInstanceState.getInt("dictationRetryRequest", SPEECH),
+                    session.sessionId, target, savedInstanceState.getString("dictationRetryOperationId")
+                        ?: java.util.UUID.randomUUID().toString())
+                retryDictation = DictationSavePlan(retrySpeech,
+                    session.copy(chosenCategory = savedInstanceState.getString("dictationRetryCategory")), retryText,
+                    savedInstanceState.getBoolean("dictationRetryWriteRequired", true))
+            }
+            val completedId = pendingSpeech?.operationId ?: retryDictation?.operationId
+            if (completedId != null && runCatching { store.hasConfirmedDictation(completedId) }.getOrDefault(false)) {
+                // A previous instance may have committed just before it was recreated.
+                selected = target; followingNow = false
+                pendingRestore = null; restoringEditor = false; editing = null; editorSession = null
+                pendingSpeech = null; retryDictation = null; confirmedSpeechReturn = true
             }
         }
     }
@@ -171,7 +190,10 @@ class MinuteActivity : Activity() {
         preserveSpeechResume = false
         wasStopped = false
         if (pendingRestore != null) list.post { restoreEditor() }
-        applyLaunch(LaunchTrigger.ON_START)
+        val resumeTrigger = DictationSavePolicy.resumeTrigger(confirmedSpeechReturn, deferredNow)
+        confirmedSpeechReturn = false
+        if (resumeTrigger != null) applyLaunch(resumeTrigger)
+        else { render(); centerMinute() }
     }
     override fun onPause() {
         resumed = false; launchGeneration++; super.onPause()
@@ -194,6 +216,7 @@ class MinuteActivity : Activity() {
         out.putString("date", selected.dateKey); out.putInt("minute", selected.minuteIndex); out.putBoolean("follow", followingNow)
         out.putBoolean("deferredNow", deferredNow); out.putInt("nextSpeechRequest", nextSpeechRequest)
         out.putBoolean("preserveSpeechResume", preserveSpeechResume)
+        out.putBoolean("confirmedSpeechReturn", confirmedSpeechReturn)
         editing?.let { out.putString("editorDate", it.dateKey); out.putInt("editorMinute", it.minuteIndex)
             out.putString("editorText", editor?.text?.toString() ?: pendingRestore?.text ?: "") }
         editorSession?.let {
@@ -205,7 +228,16 @@ class MinuteActivity : Activity() {
         out.putString("editorInitialText", pendingRestore?.initialText ?: editorInitialText)
         out.putBoolean("editorAutoNow", pendingRestore?.autoNow ?: editorAutoNow)
         out.putBoolean("editorInputFocused", pendingRestore?.inputFocused ?: (editor?.hasFocus() == true))
-        pendingSpeech?.let { out.putInt("speechRequest", it.requestCode); out.putString("speechSessionId", it.editorSessionId) }
+        pendingSpeech?.let {
+            out.putInt("speechRequest", it.requestCode); out.putString("speechSessionId", it.editorSessionId)
+            out.putString("speechOperationId", it.operationId)
+        }
+        retryDictation?.let {
+            out.putString("dictationRetryText", it.text); out.putInt("dictationRetryRequest", it.speech.requestCode)
+            out.putString("dictationRetryOperationId", it.operationId)
+            out.putString("dictationRetryCategory", it.editor.chosenCategory)
+            out.putBoolean("dictationRetryWriteRequired", it.writeRequired)
+        }
         super.onSaveInstanceState(out)
     }
     private fun restoreEditor() {
@@ -338,6 +370,7 @@ class MinuteActivity : Activity() {
     private fun openEditor(target: Coordinate, restored: String? = null, restoredSession: EditorSession? = null,
         autoNow: Boolean = false, restoredInitialText: String? = null, restoreInputFocus: Boolean = false) {
         editorDialog?.dismiss(); followingNow = false
+        if (restoredSession == null) retryDictation = null
         val day = store.day(target.dateKey)
         val cached = store.cachedEntry(target.dateKey, target.minuteIndex)
         val pending = store.latest(target.dateKey, target.minuteIndex)
@@ -419,13 +452,7 @@ class MinuteActivity : Activity() {
         val actions = row()
         actions.addView(button("Cancel", "Cancel minute edit") { editorDialog?.dismiss() }, LinearLayout.LayoutParams(0, dp(WatchLayout.ACTIONS), 1f))
         actions.addView(button("Save", "Save this minute on the watch") {
-            try {
-                val text = input.text.toString().trim()
-                if (session.needsSave(text)) {
-                    store.save(session.coordinate, text, session.chosenCategory, session.baseKnown, session.expectedVersion)
-                }
-                editorDialog?.dismiss(); render(); WatchTransport.sendPending(this)
-            } catch (_: Exception) { toast("Could not save. Keep this editor open and try again.") }
+            saveEditor(session, input.text.toString().trim())
         }, LinearLayout.LayoutParams(0, dp(WatchLayout.ACTIONS), 1f))
         content.addView(actions)
         editing = target; editor = input
@@ -433,7 +460,7 @@ class MinuteActivity : Activity() {
         editorDialog = dialog
         dialog.setOnDismissListener {
             if (editorDialog === dialog && editorSession?.sessionId == session.sessionId) {
-                editing = null; editor = null; editorDialog = null; editorSession = null; pendingSpeech = null
+                editing = null; editor = null; editorDialog = null; editorSession = null; pendingSpeech = null; retryDictation = null
                 if (visible && !isChangingConfigurations) applyLaunch(LaunchTrigger.EDITOR_CLOSED)
             }
         }
@@ -456,16 +483,53 @@ class MinuteActivity : Activity() {
     @Deprecated("Uses the system speech activity for compatibility with Wear OS 3 and later")
     override fun onActivityResult(request: Int, result: Int, data: Intent?) {
         super.onActivityResult(request, result, data)
-        if (!SpeechSessionGuard.accepts(pendingSpeech, request, editorSession)) return
+        val speech = pendingSpeech
+        val session = editorSession
+        if (!SpeechSessionGuard.accepts(speech, request, session)) return
         preserveSpeechResume = !resumed
         pendingSpeech = null
-        if (result == RESULT_OK) {
-            data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { text ->
-                val restore = pendingRestore
-                if (restore != null) pendingRestore = restore.copy(text = text)
-                else { editor?.setText(text); editor?.setSelection(editor?.text?.length ?: 0) }
-            }
+        val rawText = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        val plan = DictationSavePolicy.prepare(speech, request, session, result == RESULT_OK, rawText) ?: return
+        // Keep the confirmed words editable if durable local storage needs a retry.
+        pendingRestore = pendingRestore?.copy(text = plan.text)
+        editor?.setText(plan.text); editor?.setSelection(editor?.text?.length ?: 0)
+        retryDictation = plan
+        try {
+            store.saveDictation(plan)
+        } catch (_: Exception) {
+            toast("Could not save. Your dictated words are still here. Tap Save to retry.")
+            return
         }
+        finishSavedEditor(plan.editor, fromDictation = true)
+    }
+    private fun saveEditor(session: EditorSession, text: String) {
+        if (editorSession?.sessionId != session.sessionId || editing != session.coordinate || pendingSpeech != null) return
+        val retry = retryDictation?.takeIf { it.editor.sessionId == session.sessionId &&
+            it.editor.coordinate == session.coordinate && it.text == text && it.editor.chosenCategory == session.chosenCategory }
+        try {
+            if (retry != null) store.saveDictation(retry)
+            else if (session.needsSave(text)) store.save(session.coordinate, text, session.chosenCategory, session.baseKnown, session.expectedVersion)
+        } catch (_: Exception) {
+            toast("Could not save. Keep this editor open and try again.")
+            return
+        }
+        finishSavedEditor(session, fromDictation = false)
+    }
+    private fun finishSavedEditor(session: EditorSession, fromDictation: Boolean) {
+        if (editorSession?.sessionId != session.sessionId) return
+        val oldDialog = editorDialog
+        // Clear ownership before dismissing: neither restoration nor an old
+        // onDismiss callback may reopen or clear a different minute's editor.
+        pendingRestore = null; restoringEditor = false
+        editing = null; editor = null; editorDialog = null; editorSession = null
+        pendingSpeech = null; retryDictation = null
+        selected = session.coordinate; followingNow = false
+        if (fromDictation) confirmedSpeechReturn = !resumed
+        oldDialog?.dismiss()
+        runCatching { render(); centerMinute() }.onFailure { status.text = "Saved on watch" }
+        applyLaunch(LaunchTrigger.EDITOR_CLOSED)
+        // Connectivity never decides whether the locally committed note saved.
+        runCatching { WatchTransport.sendPending(this) }
     }
     private fun chooseDate() {
         cancelPendingLaunch()

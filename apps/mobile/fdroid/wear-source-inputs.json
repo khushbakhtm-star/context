@@ -47,7 +47,7 @@
     },
     {
       "path": "wear-support/README.md",
-      "sha256": "11c92ea064576dbb0dcb0bfc814d17965e19f37c2deada082822df429272465f"
+      "sha256": "054979d14f3ec7250c7aea37374e69dec297bbb502a40ca8770fe817c2c39a55"
     },
     {
       "path": "wear-support/watch/build.gradle",
@@ -66,6 +66,10 @@
       "sha256": "91258932e370bfb6012ff41e2af97ca9039fbbd3bf32a7a7553e1577319a43fb"
     },
     {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/DictationSavePolicy.kt",
+      "sha256": "3a4cf4081c430e06e297f32a0b9461a7ea3221d63b7776d5fb1c4e643f819427"
+    },
+    {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/LaunchPolicy.kt",
       "sha256": "7234eae28bbb356c2cefb31e89b9baf1190af32976cc1d2c76b69b5f1a704a98"
     },
@@ -75,11 +79,11 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/MinuteActivity.kt",
-      "sha256": "7149447ee47235943d76d1fecc6cf55949afa3c03366faf61fa2b82e5bb44aa5"
+      "sha256": "48588c9f0305fa530c298326c9bdf8ae0bc320f6bca6a5fd67c718b1e790a48b"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/SpeechSessionGuard.kt",
-      "sha256": "308c04cf8ce1e1bbb044e1f76a0604436ae049fd00d260fba162007a29b52046"
+      "sha256": "8d72b50083ed940e3f4d187709af42c86cdbc2bbed840e7d423fba4590408675"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchLayout.kt",
@@ -87,7 +91,7 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchStore.kt",
-      "sha256": "02559637b6a0f8279e44571148194192e76b63c075be1c0a3f3626e978475633"
+      "sha256": "3359cec3f5ed08e6c708524c6bbb60222bd0df803d7702ba281a3582ac2857ba"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchTransport.kt",
@@ -104,6 +108,10 @@
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/ContextTileLayoutTest.kt",
       "sha256": "0b788db2c2babea3fb77a467e463be4781ed9e0f202d6cc83658aaebe6ab4aad"
+    },
+    {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMDictationSavePolicyTest.kt",
+      "sha256": "a6f48d4d40d4cf9aa37a5d8fee757bc109ab2d268274dcbfa8cf06903753abc1"
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMLaunchPolicyTest.kt",
@@ -123,7 +131,7 @@
     },
     {
       "path": "wear-support/watch/version.json",
-      "sha256": "1239528b6f3b32b5afe25d27a7aa97428340581f1b2173317d1d1009728ba968"
+      "sha256": "a7743406e1e10d72b76139f3f213d83f5c426ba2454d3567d6976a1a36d4a78e"
     }
   ]
 }
