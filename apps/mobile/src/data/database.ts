@@ -4,7 +4,7 @@ import { CATEGORIES, categoryById } from '../theme';
 import type { ActivitySegment, MinuteEntry, SearchResult, SyncBinding } from '../types';
 import { addDays, dateKey } from '../utils/time';
 import type { SyncDocument } from '../sync/types';
-import { CELL_FORMAT_PREFIX, cellFormatDocument, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, validateMinuteCellRange, type CellFormat } from '../utils/cell-format';
+import { CELL_FORMAT_PREFIX, cellFormatDocument, cellFormatKey, cellEventLabel, formatFromDocument, isActivityGroupId, isCalendarEventId, normalizeCellFormat, validateMinuteCellRange, type CellFormat } from '../utils/cell-format';
 import { serializeSQLiteWrites } from './sqlite-write-gate';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -413,9 +413,17 @@ export async function saveMinuteRange(input: {
     ].filter((row): row is MinuteRow => Boolean(row));
     // Explicit activities remain separate even when their colors match. Editing
     // a member retains its activity identity; ordinary neighbors never absorb it.
-    const matchingRows = isActivityGroupId(existingStart?.block_id)
+    const named = async (row: MinuteRow | undefined) => {
+      if (!row) return false;
+      if (isActivityGroupId(row.block_id)) return true;
+      const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
+        cellFormatKey(row.date_key, row.minute_index));
+      return Boolean(cellEventLabel(formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null), row.block_id));
+    };
+    const matchingRows = await named(existingStart)
       ? [existingStart!]
-      : candidates.filter((row) => !isActivityGroupId(row.block_id));
+      : (await Promise.all(candidates.map(async (row) => await named(row) ? null : row)))
+        .filter((row): row is MinuteRow => row !== null);
     const blockId = matchingRows[0]?.block_id ?? makeId('block');
     const blocksToMerge = [
       ...new Set(
@@ -569,15 +577,21 @@ export async function getDaySegments(value: string): Promise<ActivitySegment[]> 
   const entries = await getDayEntries(value);
   const formats = await getSyncDocuments(`${CELL_FORMAT_PREFIX}${value}:`);
   const labels = new Map(formats.map((document) => [
-    Number(document.key.slice(`${CELL_FORMAT_PREFIX}${value}:`.length)), formatFromDocument(document.value).activityGroup,
+    Number(document.key.slice(`${CELL_FORMAT_PREFIX}${value}:`.length)), formatFromDocument(document.value),
   ]));
   const segments: ActivitySegment[] = [];
   for (const entry of entries) {
     const previous = segments.at(-1);
+    const priorEntry = previous?.entries.at(-1);
+    const priorLabel = priorEntry && cellEventLabel(labels.get(priorEntry.minuteIndex) ?? {}, priorEntry.blockId);
+    const label = cellEventLabel(labels.get(entry.minuteIndex) ?? {}, entry.blockId);
+    const sameBorder = priorLabel || label
+      ? Boolean(priorLabel && label && priorLabel.id === label.id && priorLabel.title === label.title)
+      : previous?.categoryId === entry.categoryId;
     if (
       previous &&
       previous.blockId === entry.blockId &&
-      previous.categoryId === entry.categoryId &&
+      sameBorder &&
       previous.endMinute + 1 === entry.minuteIndex
     ) {
       previous.entries.push(entry);
@@ -596,11 +610,15 @@ export async function getDaySegments(value: string): Promise<ActivitySegment[]> 
     });
   }
   for (const segment of segments) {
-    const member = segment.entries.find((entry) => labels.get(entry.minuteIndex)?.id === entry.blockId);
-    if (member) segment.activityTitle = labels.get(member.minuteIndex)!.title;
+    const label = segment.entries.map((entry) => cellEventLabel(labels.get(entry.minuteIndex) ?? {}, entry.blockId)).find(Boolean);
+    if (label) segment.activityTitle = label.title;
   }
   return segments;
 }
+
+/** Explicit name retained for calendar writers; named borders are already
+ * coalesced by getDaySegments without changing their minute-level categories. */
+export const getDayCalendarSegments = getDaySegments;
 
 /** Resolve labels only on their actual member coordinates, never from stale styling. */
 export async function getActivityTitleForEntries(entries: MinuteEntry[]) {
@@ -611,11 +629,10 @@ export async function getActivityTitleForEntries(entries: MinuteEntry[]) {
 async function activityTitleInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync'>,
   entries: Pick<MinuteEntry, 'dateKey' | 'minuteIndex' | 'blockId'>[]) {
   for (const entry of entries) {
-    if (!isActivityGroupId(entry.blockId)) continue;
     const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
       cellFormatKey(entry.dateKey, entry.minuteIndex));
-    const label = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null).activityGroup;
-    if (label?.id === entry.blockId) return label.title;
+    const label = cellEventLabel(formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null), entry.blockId);
+    if (label) return label.title;
   }
   return undefined;
 }
@@ -1068,7 +1085,7 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
   }
   for (const guard of guards) validate(guard.day, guard.cells);
   for (const guard of blockGuards) {
-    if (!isActivityGroupId(guard.blockId) || !guard.members.length || guard.members.length > 1440 ||
+    if (!isCalendarEventId(guard.blockId) || guard.members.length > 1440 ||
         new Set(guard.members.map((member) => `${member.dateKey}:${member.minuteIndex}`)).size !== guard.members.length) {
       throw new Error('Invalid activity membership guard.');
     }
@@ -1139,18 +1156,19 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
           } else {
             await txn.runAsync(`INSERT INTO minute_entries
               (id, date_key, minute_index, text, category_id, block_id, source, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(date_key, minute_index) DO UPDATE SET text = excluded.text,
-                category_id = excluded.category_id, block_id = excluded.block_id, source = 'manual', updated_at = excluded.updated_at`,
+                category_id = excluded.category_id, block_id = excluded.block_id, source = excluded.source, updated_at = excluded.updated_at`,
               row?.id ?? cell.entry.id ?? makeId('minute'), day, cell.minuteIndex, cell.entry.text, cell.entry.categoryId,
-              cell.entry.blockId ?? row?.block_id ?? makeId('block'), cell.entry.createdAt ?? row?.created_at ?? now, now);
+              cell.entry.blockId ?? row?.block_id ?? makeId('block'), cell.entry.source ?? 'manual', cell.entry.createdAt ?? row?.created_at ?? now, now);
           }
           await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
         }
         if (options.formatChanged) {
           const before = expectedByMinute.get(cell.minuteIndex)!;
-          if (cell.entry && isActivityGroupId(cell.entry.blockId) &&
-              canonicalValue(before.format.activityGroup ?? null) !== canonicalValue(cell.format.activityGroup ?? null)) {
+          if (cell.entry && (cellEventLabel(cell.format, cell.entry.blockId) || cellEventLabel(before.format, before.entry?.blockId)) &&
+              canonicalValue(cellEventLabel(before.format, before.entry?.blockId) ?? null) !==
+                canonicalValue(cellEventLabel(cell.format, cell.entry.blockId) ?? null)) {
             // A title-only edit still changes the calendar event even when no note or color changed.
             textChanged = true; dayTextChanged = true;
             await queueInlineMinuteLink(txn, day, cell.minuteIndex, [day]);
@@ -1279,6 +1297,20 @@ export async function mergeSyncDocuments(documents: SyncDocument[]) {
         // as an inline save. Keep the ticket atomic with the winning import;
         // importing suppresses ordinary journal triggers and native outboxes.
         await queueInlineMinuteLink(txn, coordinate.date, coordinate.minute, [coordinate.date], true);
+      } else if (incoming.key.startsWith(CELL_FORMAT_PREFIX)) {
+        const point = /^(\d{4}-\d{2}-\d{2}):(0|[1-9]\d{0,3})$/.exec(incoming.key.slice(CELL_FORMAT_PREFIX.length));
+        const previous = formatFromDocument(existing?.value_json ? JSON.parse(existing.value_json) : null);
+        const next = formatFromDocument(incoming.value);
+        if (point && canonicalValue([previous.activityGroup ?? null, previous.calendarEvent ?? null]) !==
+            canonicalValue([next.activityGroup ?? null, next.calendarEvent ?? null])) {
+          const minute = Number(point[2]);
+          let valid = true;
+          try { validateMinuteCellRange({ dateKey: point[1]!, startMinute: minute, endMinute: minute }); }
+          catch { valid = false; }
+          // Border metadata may arrive after its minute ticket was acknowledged.
+          // Route only account-owned intent; a peer never creates a native write.
+          if (valid) await queueInlineMinuteLink(txn, point[1]!, minute, [point[1]!], true);
+        }
       } else if (!incoming.key.startsWith('projection:') && !incoming.key.startsWith('category:')) {
         throw new Error('Unrecognized synchronization record.');
       }
@@ -1315,7 +1347,11 @@ export async function restoreLedgerConflict(document: SyncDocument) {
   await dismissLedgerConflict(document.key, document.revision);
 }
 
-/** Calendar imports update the minute ledger and cloud journal in one transaction. */
+export type ProjectedFormatSnapshot = { dateKey: string; minuteIndex: number; format: CellFormat;
+  version?: SpreadsheetCellState['version'] };
+
+/** Source imports journal only the private ledger. Their exact row/style/binding
+ * snapshots and raw-draft guard commit together with device-local receipts. */
 export async function replaceProjectedMinutes(input: {
   blockId: string;
   previousDate: string;
@@ -1324,72 +1360,130 @@ export async function replaceProjectedMinutes(input: {
   previousEnd: number;
   expectedEntries?: MinuteEntry[];
   expectedActivityTitle?: string;
+  expectedFormats?: ProjectedFormatSnapshot[];
+  clearPreviousFormats?: boolean;
+  beforeCommitGuard?: () => void;
+  expectedBinding?: SyncBinding;
+  nextBinding?: Omit<SyncBinding, 'updatedAt'>;
+  localReceipt?: { key: string; value: unknown };
   activityTitle?: string;
   entries: { dateKey: string; minuteIndex: number; text: string; categoryId: string }[];
 }) {
+  const endDate = input.previousEndDate ?? input.previousDate;
+  const coordinate = (day: string, minute: number) => `${day}:${minute}`;
+  if (!isCalendarEventId(input.blockId) || input.entries.length > 1440) throw new Error('Invalid imported event.');
+  for (const [day, minute] of [[input.previousDate, input.previousStart], [endDate, input.previousEnd]] as const) {
+    validateMinuteCellRange({ dateKey: day, startMinute: minute, endMinute: minute });
+  }
+  for (const entry of input.entries) validateMinuteCellRange({ dateKey: entry.dateKey, startMinute: entry.minuteIndex, endMinute: entry.minuteIndex });
+  if (new Set(input.entries.map((entry) => coordinate(entry.dateKey, entry.minuteIndex))).size !== input.entries.length) {
+    throw new Error('Duplicate imported minute.');
+  }
+  const formats = new Map<string, ProjectedFormatSnapshot>();
+  for (const snapshot of input.expectedFormats ?? []) {
+    validateMinuteCellRange({ dateKey: snapshot.dateKey, startMinute: snapshot.minuteIndex, endMinute: snapshot.minuteIndex });
+    const key = coordinate(snapshot.dateKey, snapshot.minuteIndex);
+    if (formats.has(key) || formats.size >= 10_000) throw new Error('Invalid imported cell snapshots.');
+    formats.set(key, snapshot);
+  }
+  if (input.clearPreviousFormats && !input.expectedFormats) throw new Error('Review the old cell formatting before importing this event.');
+  if (input.nextBinding && (!input.expectedBinding || input.nextBinding.blockId !== input.blockId ||
+      input.nextBinding.calendarId !== input.expectedBinding.calendarId || input.nextBinding.eventId !== input.expectedBinding.eventId)) {
+    throw new Error('Calendar import cannot change the linked source identity.');
+  }
+  if (input.localReceipt && (!/^calendar\.native-write\.v1\.[A-Za-z0-9%._-]{1,500}$/.test(input.localReceipt.key) ||
+      JSON.stringify(input.localReceipt.value).length > 65_536)) throw new Error('Invalid local calendar receipt.');
   const db = await database();
   const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async (txn) => {
-    const endDate = input.previousEndDate ?? input.previousDate;
-    if (input.expectedEntries) {
-      const current = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries
-        WHERE block_id = ?
-          AND (date_key > ? OR (date_key = ? AND minute_index >= ?))
-          AND (date_key < ? OR (date_key = ? AND minute_index <= ?))
-        ORDER BY date_key, minute_index`, input.blockId, input.previousDate,
-        input.previousDate, input.previousStart, endDate, endDate, input.previousEnd);
-      if (canonicalValue(current.map(mapMinuteRow)) !== canonicalValue(input.expectedEntries)) {
-        throw new Error('The local activity changed during calendar import. Review both versions.');
-      }
-      if (isActivityGroupId(input.blockId) &&
-          await activityTitleInside(txn, current.map(mapMinuteRow)) !== input.expectedActivityTitle) {
-        throw new Error('The local activity title changed during calendar import. Review both versions.');
-      }
+    input.beforeCommitGuard?.();
+    const current = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries
+      WHERE block_id = ? AND (date_key > ? OR (date_key = ? AND minute_index >= ?))
+      AND (date_key < ? OR (date_key = ? AND minute_index <= ?)) ORDER BY date_key, minute_index`,
+      input.blockId, input.previousDate, input.previousDate, input.previousStart, endDate, endDate, input.previousEnd);
+    if (input.expectedEntries && canonicalValue(current.map(mapMinuteRow)) !== canonicalValue(input.expectedEntries)) {
+      throw new Error('The local activity changed during calendar import. Review both versions.');
     }
-    // Moving an activity carries only its group label. Ordinary minute styling
-    // stays at its coordinate, and stale labels cannot attach to unrelated notes.
-    if (isActivityGroupId(input.blockId)) {
-      const previousMembers = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE block_id = ?
-        AND (date_key > ? OR (date_key = ? AND minute_index >= ?))
-        AND (date_key < ? OR (date_key = ? AND minute_index <= ?))`,
-        input.blockId, input.previousDate, input.previousDate, input.previousStart, endDate, endDate, input.previousEnd);
-      for (const row of previousMembers) {
-        const key = cellFormatKey(row.date_key, row.minute_index);
-        const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
-        const format = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
-        if (format.activityGroup?.id === input.blockId) {
-          delete format.activityGroup;
-          await putSyncDocumentInside(txn, key, cellFormatDocument(format));
+    if (input.expectedEntries && await activityTitleInside(txn, current.map(mapMinuteRow)) !== input.expectedActivityTitle) {
+      throw new Error('The local activity title changed during calendar import. Review both versions.');
+    }
+    for (const snapshot of formats.values()) {
+      const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, cellFormatKey(snapshot.dateKey, snapshot.minuteIndex));
+      const actual = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
+      if (canonicalValue(actual) !== canonicalValue(normalizeCellFormat(snapshot.format))) {
+        throw new Error('A cell format changed during calendar import. Review both versions.');
+      }
+      if (snapshot.version) {
+        const minute = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, `minute:${snapshot.dateKey}:${snapshot.minuteIndex}`);
+        if ((minute?.revision ?? null) !== snapshot.version.minuteRevision || (document?.revision ?? null) !== snapshot.version.formatRevision) {
+          throw new Error('A cell changed during calendar import. Review both versions.');
         }
       }
     }
+    type BindingRow = { segment_key: string; block_id: string; date_key: string; calendar_id: string; event_id: string; updated_at: string };
+    if (input.expectedBinding) {
+      const expected = input.expectedBinding;
+      const row = await txn.getFirstAsync<BindingRow>(`SELECT * FROM sync_bindings WHERE segment_key = ?`, expected.segmentKey);
+      const value = row ? { segmentKey: row.segment_key, blockId: row.block_id, dateKey: row.date_key,
+        calendarId: row.calendar_id, eventId: row.event_id, updatedAt: row.updated_at } : null;
+      if (expected.blockId !== input.blockId || canonicalValue(value) !== canonicalValue(expected)) {
+        throw new Error('The source calendar binding changed during import. Refresh before trying again.');
+      }
+      if (input.nextBinding && input.nextBinding.segmentKey !== expected.segmentKey) {
+        const occupied = await txn.getFirstAsync<BindingRow>(`SELECT * FROM sync_bindings WHERE segment_key = ?`, input.nextBinding.segmentKey);
+        if (occupied) throw new Error('The imported event destination already has another calendar binding.');
+      }
+    }
+    const targets = new Set(input.entries.map((entry) => coordinate(entry.dateKey, entry.minuteIndex)));
+    for (const entry of input.entries) {
+      const existing = await txn.getFirstAsync<{ block_id: string }>(`SELECT block_id FROM minute_entries WHERE date_key = ? AND minute_index = ?`, entry.dateKey, entry.minuteIndex);
+      if (existing && existing.block_id !== input.blockId) throw new Error('This calendar edit overlaps another recorded activity. Resolve it in Context.');
+    }
+    input.beforeCommitGuard?.();
+    for (const row of current) {
+      const key = cellFormatKey(row.date_key, row.minute_index);
+      const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
+      const format = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
+      if (format.activityGroup?.id === input.blockId) delete format.activityGroup;
+      if (format.calendarEvent?.id === input.blockId) delete format.calendarEvent;
+      if (!targets.has(coordinate(row.date_key, row.minute_index)) && input.clearPreviousFormats) {
+        if (!formats.has(coordinate(row.date_key, row.minute_index))) throw new Error('The old event formatting was not reviewed.');
+        await putSyncDocumentInside(txn, key, null);
+      } else await putSyncDocumentInside(txn, key, cellFormatDocument(format));
+    }
     await txn.runAsync(`DELETE FROM minute_entries WHERE block_id = ?
       AND (date_key > ? OR (date_key = ? AND minute_index >= ?))
-      AND (date_key < ? OR (date_key = ? AND minute_index <= ?))`,
-      input.blockId, input.previousDate, input.previousDate, input.previousStart,
-      endDate, endDate, input.previousEnd);
+      AND (date_key < ? OR (date_key = ? AND minute_index <= ?))`, input.blockId,
+      input.previousDate, input.previousDate, input.previousStart, endDate, endDate, input.previousEnd);
     for (const entry of input.entries) {
-      const existing = await txn.getFirstAsync<{ block_id: string }>(
-        `SELECT block_id FROM minute_entries WHERE date_key = ? AND minute_index = ?`,
-        entry.dateKey, entry.minuteIndex);
-      if (existing && existing.block_id !== input.blockId) {
-        throw new Error('This calendar edit overlaps another recorded activity. Resolve it in Context.');
-      }
       await txn.runAsync(`INSERT INTO minute_entries
         (id, date_key, minute_index, text, category_id, block_id, source, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'imported', ?, ?)
         ON CONFLICT(date_key, minute_index) DO UPDATE SET text = excluded.text,
-          category_id = excluded.category_id, block_id = excluded.block_id,
-          source = 'imported', updated_at = excluded.updated_at`,
-        makeId('minute'), entry.dateKey, entry.minuteIndex, entry.text, entry.categoryId,
-        input.blockId, now, now);
-      if (isActivityGroupId(input.blockId) && input.activityTitle?.trim()) {
-        const key = cellFormatKey(entry.dateKey, entry.minuteIndex);
-        const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
-        const format = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
-        format.activityGroup = { id: input.blockId, title: input.activityTitle.trim().slice(0, 200) };
+          category_id = excluded.category_id, block_id = excluded.block_id, source = 'imported', updated_at = excluded.updated_at`,
+        makeId('minute'), entry.dateKey, entry.minuteIndex, entry.text, entry.categoryId, input.blockId, now, now);
+      const key = cellFormatKey(entry.dateKey, entry.minuteIndex);
+      const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
+      const format = formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null);
+      if (input.activityTitle?.trim()) {
+        delete format.activityGroup; delete format.calendarEvent;
+        if (formats.has(coordinate(entry.dateKey, entry.minuteIndex))) delete format.noFill;
+        if (isActivityGroupId(input.blockId)) format.activityGroup = { id: input.blockId, title: input.activityTitle.trim().slice(0, 200) };
+        else format.calendarEvent = { id: input.blockId, title: input.activityTitle.trim().slice(0, 200) };
         await putSyncDocumentInside(txn, key, cellFormatDocument(format));
       }
     }
+    if (input.nextBinding) {
+      const next = input.nextBinding;
+      await txn.runAsync(`INSERT INTO sync_bindings (segment_key, block_id, date_key, calendar_id, event_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(segment_key) DO UPDATE SET block_id = excluded.block_id,
+        date_key = excluded.date_key, calendar_id = excluded.calendar_id, event_id = excluded.event_id, updated_at = excluded.updated_at`,
+        next.segmentKey, next.blockId, next.dateKey, next.calendarId, next.eventId, now);
+      if (input.expectedBinding!.segmentKey !== next.segmentKey) await txn.runAsync(`DELETE FROM sync_bindings WHERE segment_key = ?`, input.expectedBinding!.segmentKey);
+    }
+    if (input.localReceipt) await txn.runAsync(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      input.localReceipt.key, JSON.stringify(input.localReceipt.value), now);
+    input.beforeCommitGuard?.();
   });
 }

@@ -1,7 +1,7 @@
 import { applySpreadsheetTransaction, getSpreadsheetCells, getDaySegments, getEntriesBetween, getEntriesForBlock, getSyncDocuments,
   type SpreadsheetCellState, type SpreadsheetGuard, type SpreadsheetBlockGuard } from '../data/database';
 import { inlineMinuteDrafts, retryInlineMinuteLinks } from './inline-minutes';
-import { CELL_FORMAT_PREFIX, cellFormatKey, formatFromDocument, isActivityGroupId, normalizeCellFormat, validateMinuteCellRange,
+import { CELL_FORMAT_PREFIX, cellFormatKey, cellEventLabel, formatFromDocument, isActivityGroupId, normalizeCellFormat, validateMinuteCellRange,
   type CellFormat, type MinuteCellRange } from '../utils/cell-format';
 import { inlineMinuteKey, type InlineMinuteValue } from '../utils/inline-minute-drafts';
 import { addDays, dateKey } from '../utils/time';
@@ -17,10 +17,16 @@ export type ActivityGroup = { blockId: string; dateKey: string; startMinute: num
   title: string; categoryId: string };
 
 export async function getDayActivityGroups(day: string): Promise<ActivityGroup[]> {
-  return (await getDaySegments(day)).flatMap((segment) => segment.activityTitle ? [{
-    blockId: segment.blockId, dateKey: day, startMinute: segment.startMinute, endMinute: segment.endMinute,
-    title: segment.activityTitle, categoryId: segment.categoryId,
-  }] : []);
+  const groups: ActivityGroup[] = [];
+  for (const segment of await getDaySegments(day)) {
+    if (!segment.activityTitle) continue;
+    const previous = groups.at(-1);
+    if (previous?.blockId === segment.blockId && previous.title === segment.activityTitle && previous.endMinute + 1 === segment.startMinute) {
+      previous.endMinute = segment.endMinute;
+    } else groups.push({ blockId: segment.blockId, dateKey: day, startMinute: segment.startMinute,
+      endMinute: segment.endMinute, title: segment.activityTitle, categoryId: segment.categoryId });
+  }
+  return groups;
 }
 
 /** Resolve the entire named activity, including minute notes with differing colors. */
@@ -28,15 +34,14 @@ export async function getMovableActivityGroup(day: string, minute: number): Prom
   validateMinuteCellRange({ dateKey: day, startMinute: minute, endMinute: minute });
   const cell = (await getSpreadsheetCells({ dateKey: day, startMinute: minute, endMinute: minute }))[0]!;
   const blockId = cell.entry?.blockId;
-  if (!isActivityGroupId(blockId)) return null;
+  if (!blockId || !cellEventLabel(cell.format, blockId)) return null;
   const members = await getEntriesForBlock(blockId);
   if (!members.length || members.some((member) => member.dateKey !== day) ||
       members.at(-1)!.minuteIndex - members[0]!.minuteIndex + 1 !== members.length) {
     throw new Error('Choose one complete activity within a single day before moving it.');
   }
   const formats = await getDayCellFormats(day);
-  const title = members.map((member) => formats.get(member.minuteIndex)?.activityGroup)
-    .find((label) => label?.id === blockId)?.title;
+  const title = members.map((member) => cellEventLabel(formats.get(member.minuteIndex) ?? {}, blockId)).find(Boolean)?.title;
   if (!title) throw new Error('The activity title could not be read. Refresh before moving it.');
   return { blockId, dateKey: day, startMinute: members[0]!.minuteIndex,
     endMinute: members.at(-1)!.minuteIndex, title, categoryId: members[0]!.categoryId };
@@ -64,6 +69,13 @@ type RangeMoveRecord = MinuteRangeMovePreview & { sourceCells: CellState[]; dest
   sourceContext: RangeMoveContext; destinationContext: RangeMoveContext };
 type Typing = { key: string; command: Command; lastAt: number };
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+function withoutEventLabel(format: CellFormat) {
+  const next = { ...format }; delete next.activityGroup; delete next.calendarEvent; return next;
+}
+function withEventLabel(format: CellFormat, id: string, title: string) {
+  return normalizeCellFormat({ ...withoutEventLabel(format),
+    ...(isActivityGroupId(id) ? { activityGroup: { id, title } } : { calendarEvent: { id, title } }) });
+}
 
 export async function getDayCellFormats(day: string): Promise<Map<number, CellFormat>> {
   const documents = await getSyncDocuments(`${CELL_FORMAT_PREFIX}${day}:`);
@@ -174,7 +186,7 @@ class SpreadsheetEditor {
         const cells = await readCells({ dateKey: day, startMinute: minute, endMinute: minute });
         const cell = cells[0]!;
         if (priorEdited) cell.entry = entryOf(raw) ? { ...cell.entry, ...entryOf(raw)! } :
-          isActivityGroupId(cell.entry?.blockId) ? { ...cell.entry!, text: '', categoryId: raw.categoryId } : null;
+          (isActivityGroupId(cell.entry?.blockId) || cellEventLabel(cell.format, cell.entry?.blockId)) ? { ...cell.entry!, text: '', categoryId: raw.categoryId } : null;
         cell.display = raw;
         return cells;
       });
@@ -183,7 +195,7 @@ class SpreadsheetEditor {
       const command: Command = { day, before, after: [], textChanged: true, formatChanged: false };
       command.before = before.then((cells) => {
         const member = cells[0]?.entry;
-        if (isActivityGroupId(member?.blockId)) {
+        if (isActivityGroupId(member?.blockId) || cellEventLabel(cells[0]?.format ?? {}, member?.blockId)) {
           const after = command.after[0];
           if (after) after.entry = { ...member, ...after.entry,
             text: after.display?.text.trim() ?? after.entry?.text ?? '',
@@ -295,6 +307,93 @@ class SpreadsheetEditor {
         textChanged: Boolean(source.entry) || categoryId !== undefined, formatChanged: true });
     });
   }
+  /** Bounds, labels and notes are distinct. One transaction detaches the selection
+   * and partitions every affected named event, including source-linked legacy IDs. */
+  private async editEventSelection(range: MinuteCellRange, mode: 'group' | 'reset' | 'ungroup',
+    input?: { title: string; categoryId: string }) {
+    const days = new Map<string, CellState[]>();
+    const readDay = async (day: string) => {
+      if (!days.has(day)) days.set(day, await readCells({ dateKey: day, startMinute: 0, endMinute: 1439 }));
+      return days.get(day)!;
+    };
+    const selected = (day: string, minute: number) => day === range.dateKey && minute >= range.startMinute && minute <= range.endMinute;
+    const day = await readDay(range.dateKey);
+    const selectedCells = day.filter((cell) => selected(range.dateKey, cell.minuteIndex));
+    const ids = new Set(selectedCells.filter((cell) => cellEventLabel(cell.format, cell.entry?.blockId) ||
+      isActivityGroupId(cell.entry?.blockId)).map((cell) => cell.entry!.blockId!));
+    if (mode === 'ungroup' && !ids.size) return;
+    const members = new Map<string, Awaited<ReturnType<typeof getEntriesForBlock>>>();
+    for (const id of ids) {
+      const rows = (await getEntriesForBlock(id)).sort((a, b) => a.dateKey.localeCompare(b.dateKey) || a.minuteIndex - b.minuteIndex);
+      if (rows.length > 1440) throw new Error('Select an event of at most 24 hours before changing its border.');
+      members.set(id, rows);
+      for (const row of rows) await readDay(row.dateKey);
+    }
+    const changes = new Map<string, { before: Map<number, CellState>; after: Map<number, CellState> }>();
+    const include = (day: string, cell: CellState) => {
+      if (!changes.has(day)) changes.set(day, { before: new Map(), after: new Map() });
+      const change = changes.get(day)!;
+      if (!change.before.has(cell.minuteIndex)) { change.before.set(cell.minuteIndex, clone(cell)); change.after.set(cell.minuteIndex, clone(cell)); }
+      return change.after.get(cell.minuteIndex)!;
+    };
+    for (const cell of selectedCells) include(range.dateKey, cell);
+    for (const rows of members.values()) for (const row of rows) include(row.dateKey, days.get(row.dateKey)![row.minuteIndex]!);
+    if ([...changes.values()].reduce((count, change) => count + change.before.size, 0) > 10_000) {
+      throw new Error('Select fewer event minutes before changing these borders.');
+    }
+    // Redefining one existing event keeps its exact calendar linkage on the new bounds.
+    const targetId = mode === 'group' ? ids.size === 1 ? [...ids][0]! : this.newToken('activity') : null;
+    const beforeGuards: SpreadsheetBlockGuard[] = [...members].map(([blockId, rows]) => ({ blockId,
+      members: rows.map(({ dateKey, minuteIndex }) => ({ dateKey, minuteIndex })) }));
+    const allIds = new Set(ids);
+    const civil = (day: string, minute: number) => Date.parse(`${day}T00:00:00Z`) / 60000 + minute;
+    for (const [id, rows] of members) {
+      const title = rows.map((row) => cellEventLabel(days.get(row.dateKey)![row.minuteIndex]!.format, id)?.title).find(Boolean) ?? 'Activity';
+      const remainder = rows.filter((row) => !selected(row.dateKey, row.minuteIndex));
+      let run: typeof rows = []; let index = 0;
+      const finish = () => {
+        if (!run.length) return;
+        const nextId = index++ === 0 && targetId !== id ? id : this.newToken('activity');
+        allIds.add(nextId);
+        for (const row of run) {
+          const cell = changes.get(row.dateKey)!.after.get(row.minuteIndex)!;
+          cell.entry = { ...cell.entry!, blockId: nextId };
+          cell.format = withEventLabel(cell.format, nextId, title);
+        }
+        run = [];
+      };
+      for (const row of remainder) {
+        if (run.length && civil(row.dateKey, row.minuteIndex) !== civil(run.at(-1)!.dateKey, run.at(-1)!.minuteIndex) + 1) finish();
+        run.push(row);
+      }
+      finish();
+    }
+    if (targetId) allIds.add(targetId);
+    for (const original of selectedCells) {
+      const cell = changes.get(range.dateKey)!.after.get(original.minuteIndex)!;
+      if (mode === 'group') {
+        cell.entry = { ...cell.entry, text: cell.entry?.text ?? '', categoryId: input!.categoryId, blockId: targetId! };
+        cell.format = withEventLabel({ ...cell.format, noFill: undefined }, targetId!, input!.title);
+        if (cell.display) cell.display = { ...cell.display, categoryId: input!.categoryId,
+          text: cell.entry.text, keepColor: !cell.entry.text.trim() };
+      } else if (mode === 'reset') {
+        cell.entry = null; cell.format = { noFill: true };
+        cell.display = { dateKey: range.dateKey, minuteIndex: cell.minuteIndex, text: '', categoryId: 'unaccounted', keepColor: false };
+      } else if (ids.has(cell.entry?.blockId ?? '')) {
+        cell.entry = { ...cell.entry!, blockId: this.newToken('sheet') };
+        cell.format = withoutEventLabel(cell.format);
+      }
+    }
+    const patches = [...changes].map(([day, change]) => ({ day,
+      before: [...change.before.values()].sort((a, b) => a.minuteIndex - b.minuteIndex),
+      after: [...change.after.values()].sort((a, b) => a.minuteIndex - b.minuteIndex) }));
+    for (const id of allIds) if (!members.has(id)) beforeGuards.push({ blockId: id, members: [] });
+    const afterGuards = [...allIds].map((blockId) => ({ blockId, members: patches.flatMap((patch) => patch.after
+      .filter((cell) => cell.entry?.blockId === blockId).map((cell) => ({ dateKey: patch.day, minuteIndex: cell.minuteIndex }))) }));
+    await this.perform({ day: range.dateKey, before: Promise.resolve([]), after: [], patches,
+      guards: patches.map((patch) => ({ day: patch.day, cells: patch.before })),
+      blockGuardsBefore: beforeGuards, blockGuardsAfter: afterGuards, textChanged: true, formatChanged: true });
+  }
   group(range: MinuteCellRange, input: { title: string; categoryId: string }) {
     validateMinuteCellRange(range);
     const title = input.title.trim();
@@ -305,19 +404,12 @@ class SpreadsheetEditor {
       if (!(await listSelectableActivityCategories()).some((category) => category.id === input.categoryId)) {
         throw new Error('Choose a Google Calendar color before grouping these minutes.');
       }
-      const before = await readCells(range);
-      const candidate = before[0]?.entry?.blockId;
-      const allEntries = await getEntriesBetween(dateKey(addDays(range.dateKey, -1)), dateKey(addDays(range.dateKey, 1)));
-      const wholeExisting = isActivityGroupId(candidate) && before.every((cell) => cell.entry?.blockId === candidate) &&
-        !allEntries.some((entry) => entry.blockId === candidate &&
-          (entry.dateKey !== range.dateKey || entry.minuteIndex < range.startMinute || entry.minuteIndex > range.endMinute));
-      const blockId = wholeExisting ? candidate : `activity_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
-      const after = before.map((cell) => ({ minuteIndex: cell.minuteIndex,
-        // The title belongs to the activity; every minute keeps its own note.
-        entry: { ...cell.entry, text: cell.entry?.text ?? '', categoryId: input.categoryId, blockId },
-        format: normalizeCellFormat({ ...cell.format, noFill: undefined, activityGroup: { id: blockId, title } }) }));
-      await this.perform({ day: range.dateKey, before: Promise.resolve(before), after, textChanged: true, formatChanged: true });
+      await this.editEventSelection(range, 'group', { title, categoryId: input.categoryId });
     });
+  }
+  resetCells(range: MinuteCellRange) {
+    validateMinuteCellRange(range);
+    return this.enqueue(() => this.editEventSelection(range, 'reset'));
   }
   color(range: MinuteCellRange, categoryId: string) {
     validateMinuteCellRange(range);
@@ -339,7 +431,7 @@ class SpreadsheetEditor {
     return this.enqueue(async () => {
       const before = await readCells(range);
       const after = before.map((cell) => {
-        const keepEntry = cell.entry && (cell.entry.text.trim() || isActivityGroupId(cell.entry.blockId));
+        const keepEntry = cell.entry && (cell.entry.text.trim() || isActivityGroupId(cell.entry.blockId) || cellEventLabel(cell.format, cell.entry.blockId));
         return { ...clone(cell), entry: keepEntry ? { ...clone(cell.entry!), categoryId: 'unaccounted' } : null,
           format: normalizeCellFormat({ ...cell.format, noFill: true }),
           ...(cell.display ? { display: { ...clone(cell.display), categoryId: 'unaccounted', keepColor: Boolean(keepEntry && !cell.entry!.text.trim()) } } : {}) };
@@ -349,53 +441,7 @@ class SpreadsheetEditor {
   }
   ungroup(range: MinuteCellRange) {
     validateMinuteCellRange(range);
-    return this.enqueue(async () => {
-      const day = await readCells({ dateKey: range.dateKey, startMinute: 0, endMinute: 1439 });
-      const selected = (minute: number) => minute >= range.startMinute && minute <= range.endMinute;
-      const ids = new Set(day.filter((cell) => selected(cell.minuteIndex) && isActivityGroupId(cell.entry?.blockId))
-        .map((cell) => cell.entry!.blockId!));
-      if (!ids.size) return;
-      const before = day.filter((cell) => selected(cell.minuteIndex) || ids.has(cell.entry?.blockId ?? ''));
-      const after = clone(before);
-      const byMinute = new Map(after.map((cell) => [cell.minuteIndex, cell]));
-      const blockGuardsBefore: SpreadsheetBlockGuard[] = [];
-      const blockGuardsAfter: SpreadsheetBlockGuard[] = [];
-      for (const blockId of ids) {
-        const members = await getEntriesForBlock(blockId);
-        blockGuardsBefore.push({ blockId, members: members.map(({ dateKey, minuteIndex }) => ({ dateKey, minuteIndex })) });
-        const outside = members.filter((member) => member.dateKey !== range.dateKey);
-        if (outside.length) blockGuardsAfter.push({ blockId,
-          members: outside.map(({ dateKey, minuteIndex }) => ({ dateKey, minuteIndex })) });
-        const label = day.map((cell) => cell.format.activityGroup).find((value) => value?.id === blockId);
-        const remainder = day.filter((cell) => cell.entry?.blockId === blockId && !selected(cell.minuteIndex));
-        let run: CellState[] = [];
-        const finish = () => {
-          if (!run.length) return;
-          const id = this.newToken('activity');
-          for (const cell of run) {
-            const target = byMinute.get(cell.minuteIndex)!;
-            target.entry = { ...target.entry!, blockId: id };
-            target.format = normalizeCellFormat({ ...target.format,
-              activityGroup: { id, title: label?.title ?? 'Activity' } });
-          }
-          blockGuardsAfter.push({ blockId: id,
-            members: run.map((cell) => ({ dateKey: range.dateKey, minuteIndex: cell.minuteIndex })) });
-          run = [];
-        };
-        for (const cell of remainder) {
-          if (run.length && run.at(-1)!.minuteIndex + 1 !== cell.minuteIndex) finish();
-          run.push(cell);
-        }
-        finish();
-      }
-      for (const cell of after) {
-        if (!selected(cell.minuteIndex) || !ids.has(cell.entry?.blockId ?? '')) continue;
-        cell.entry = { ...cell.entry!, blockId: this.newToken('sheet') };
-        delete cell.format.activityGroup;
-      }
-      await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
-        textChanged: true, formatChanged: true, blockGuardsBefore, blockGuardsAfter });
-    });
+    return this.enqueue(() => this.editEventSelection(range, 'ungroup'));
   }
   private async prepareGroupMoveInside(source: ActivityGroup, destination: MinutePasteDestination) {
     const current = await getMovableActivityGroup(source.dateKey, source.startMinute);
@@ -471,7 +517,7 @@ class SpreadsheetEditor {
   private async rangeMoveContext(range: MinuteCellRange): Promise<RangeMoveContext> {
     const day = clone(await readCells({ dateKey: range.dateKey, startMinute: 0, endMinute: 1439 }));
     const inside = (minute: number) => minute >= range.startMinute && minute <= range.endMinute;
-    const ids = new Set(day.filter((cell) => inside(cell.minuteIndex) && isActivityGroupId(cell.entry?.blockId))
+    const ids = new Set(day.filter((cell) => inside(cell.minuteIndex) && (isActivityGroupId(cell.entry?.blockId) || cellEventLabel(cell.format, cell.entry?.blockId)))
       .map((cell) => cell.entry!.blockId!));
     return { cells: day.filter((cell) => inside(cell.minuteIndex) || ids.has(cell.entry?.blockId ?? '')),
       groups: await Promise.all([...ids].map(async (blockId) => ({ blockId,
@@ -533,7 +579,7 @@ class SpreadsheetEditor {
       const destinationChange = changeFor(preview.range.dateKey); const blocks = new Map<string, string>();
       for (let offset = 0; offset < preview.sourceCells.length; offset++) {
         const original = preview.sourceCells[offset]!; const minuteIndex = preview.range.startMinute + offset;
-        const format = clone(original.format); delete format.activityGroup;
+        const format = withoutEventLabel(clone(original.format));
         const originalBlock = original.entry?.blockId ?? `minute_${offset}`;
         if (!blocks.has(originalBlock)) blocks.set(originalBlock, this.newToken('sheet'));
         const entry = original.entry && !(format.noFill && !original.entry.text.trim())
@@ -546,16 +592,18 @@ class SpreadsheetEditor {
       for (const group of groupsBefore.values()) {
         const outside = group.members.filter((member) => !changes.has(member.dateKey));
         if (outside.length) groupsAfter.push({ blockId: group.blockId, members: outside });
-        for (const [day, change] of changes) {
+        let retainedOriginal = outside.length > 0;
+        for (const [day, change] of [...changes].sort(([a], [b]) => a.localeCompare(b))) {
           const remainder = [...change.after.values()].filter((cell) => cell.entry?.blockId === group.blockId).sort((a, b) => a.minuteIndex - b.minuteIndex);
           let run: CellState[] = [];
           const finish = () => {
             if (!run.length) return;
-            const blockId = this.newToken('activity');
+            const blockId = retainedOriginal ? this.newToken('activity') : group.blockId;
+            retainedOriginal = true;
             for (const cell of run) {
+              const title = cellEventLabel(cell.format, group.blockId)?.title ?? 'Activity';
               cell.entry = { ...cell.entry!, blockId };
-              cell.format = normalizeCellFormat({ ...cell.format, activityGroup: {
-                id: blockId, title: cell.format.activityGroup?.title ?? 'Activity' } });
+              cell.format = withEventLabel(cell.format, blockId, title);
             }
             groupsAfter.push({ blockId, members: run.map((cell) => ({ dateKey: day, minuteIndex: cell.minuteIndex })) }); run = [];
           };
@@ -604,7 +652,7 @@ class SpreadsheetEditor {
       if (!before.length) return;
       const after = before.map((cell) => {
         const categoryId = cell.entry?.categoryId ?? fallback.get(cell.minuteIndex)!;
-        const keepEntry = !cell.format.noFill || isActivityGroupId(cell.entry?.blockId);
+        const keepEntry = !cell.format.noFill || Boolean(cellEventLabel(cell.format, cell.entry?.blockId)) || isActivityGroupId(cell.entry?.blockId);
         return { ...clone(cell),
           entry: keepEntry ? { ...cell.entry, text: '', categoryId, blockId: cell.entry?.blockId ?? this.newToken('sheet') } : null,
           display: { dateKey: range.dateKey, minuteIndex: cell.minuteIndex, text: '', categoryId, keepColor: keepEntry } };
@@ -679,7 +727,7 @@ class SpreadsheetEditor {
         const minuteIndex = range.startMinute + offset;
         if (!target.before.has(minuteIndex)) target.before.set(minuteIndex, clone(preview.before[offset]!));
         const cell = clipboard.cells[clipboard.count === 1 ? 0 : offset]!;
-        const format = clone(cell.format); delete format.activityGroup;
+        const format = withoutEventLabel(clone(cell.format));
         let entry = null;
         if (cell.entry) {
           const original = cell.entry.blockId ?? `minute_${offset}`;
@@ -764,6 +812,7 @@ export const clearTextMinuteRange = (range: MinuteCellRange, displayedColorFallb
   spreadsheetEditor.clearText(range, displayedColorFallbacks);
 export const groupMinuteRange = (range: MinuteCellRange, input: { title: string; categoryId: string }) => spreadsheetEditor.group(range, input);
 export const colorMinuteRange = (range: MinuteCellRange, categoryId: string) => spreadsheetEditor.color(range, categoryId);
+export const resetMinuteCells = (range: MinuteCellRange) => spreadsheetEditor.resetCells(range);
 export const resetMinuteFill = (range: MinuteCellRange) => spreadsheetEditor.resetFill(range);
 export const ungroupMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.ungroup(range);
 export const prepareActivityGroupMove = (source: ActivityGroup, destination: MinutePasteDestination) => spreadsheetEditor.prepareGroupMove(source, destination);

@@ -586,3 +586,96 @@ test('an inline link queue failure rolls back its minute, journal, and device ou
   assert.equal((await api.getMinuteEntry(day, 331)).text, 'Keep this if deleting fails');
   assert.deepEqual(plain(await api.getSyncDocuments('minute:')), before);
 });
+
+
+test('source imports keep a legacy event title outside blank minute notes and preserve its ID through manual note/category changes', async(t)=>{
+  const {api}=createRepository(t);await api.initializeDatabase();const block='legacy_dental';
+  await api.replaceProjectedMinutes({blockId:block,previousDate:day,previousStart:530,previousEnd:532,activityTitle:'Dentist',
+    entries:[530,531,532].map(minuteIndex=>({dateKey:day,minuteIndex,text:'',categoryId:'work'}))});
+  assert.ok((await api.getDayEntries(day)).every(e=>e.text===''&&e.blockId===block));
+  assert.equal((await api.getDaySegments(day))[0].activityTitle,'Dentist');
+  await api.saveMinuteEntry({dateKey:day,minuteIndex:531,text:'Ask about filling',categoryId:'family'});
+  assert.equal((await api.getMinuteEntry(day,531)).blockId,block);
+  await api.saveMinuteRange({dateKey:day,startMinute:531,durationMinutes:1,text:'',categoryId:'family',allowEmptyText:true});
+  assert.equal((await api.getMinuteEntry(day,531)).blockId,block);
+  assert.equal(await api.getActivityTitleForEntries(await api.getEntriesForBlock(block)),'Dentist');
+  await api.saveMinuteEntry({dateKey:day,minuteIndex:529,text:'Separate same-color note',categoryId:'work'});
+  assert.notEqual((await api.getMinuteEntry(day,529)).blockId,block);
+});
+
+test('a moved source import atomically clears reviewed old styles, preserves destination style, remaps exact binding and receipts without calendar echo',async(t)=>{
+  const {api,sqlite}=createRepository(t);await api.initializeDatabase();const block='legacy_dental';
+  await api.replaceProjectedMinutes({blockId:block,previousDate:day,previousStart:530,previousEnd:531,activityTitle:'Dentist',
+    entries:[530,531].map(minuteIndex=>({dateKey:day,minuteIndex,text:'',categoryId:'work'}))});
+  const old=(await api.getSpreadsheetCells({dateKey:day,startMinute:530,endMinute:531}));
+  await api.putSyncDocument(`category:minuteFormat:${day}:530`,{kind:'minuteFormat',format:{...old[0].format,bold:true,noFill:true}});
+  await api.putSyncDocument(`category:minuteFormat:${day}:560`,{kind:'minuteFormat',format:{italic:true,noFill:true}});
+  await api.saveSyncBinding({segmentKey:`${day}:${block}:530-531`,blockId:block,dateKey:day,calendarId:'cal',eventId:'exact'});
+  const expectedBinding=(await api.getSyncBindings(day))[0];
+  const snapshots=[...(await api.getSpreadsheetCells({dateKey:day,startMinute:530,endMinute:531})),...(await api.getSpreadsheetCells({dateKey:day,startMinute:560,endMinute:561}))]
+    .map(cell=>({dateKey:day,...cell}));
+  let guardCalls=0;
+  await api.replaceProjectedMinutes({blockId:block,previousDate:day,previousStart:530,previousEnd:531,
+    expectedEntries:await api.getEntriesForBlock(block),expectedActivityTitle:'Dentist',activityTitle:'Dental appointment',
+    expectedFormats:snapshots,clearPreviousFormats:true,beforeCommitGuard:()=>{guardCalls++;},expectedBinding,
+    nextBinding:{...expectedBinding,segmentKey:`${day}:${block}:560-561`},
+    localReceipt:{key:'calendar.native-write.v1.cal.exact',value:{version:2,sourceTitle:'Dental appointment'}},
+    entries:[560,561].map(minuteIndex=>({dateKey:day,minuteIndex,text:'',categoryId:'work'}))});
+  assert.equal(guardCalls,3);assert.equal(await api.getMinuteEntry(day,530),null);
+  const oldDoc=(await api.getSyncDocuments(`category:minuteFormat:${day}:530`))[0];assert.equal(oldDoc.value,null);
+  const dest=(await api.getSpreadsheetCells({dateKey:day,startMinute:560,endMinute:560}))[0];
+  assert.deepEqual(plain(dest.format),{italic:true,calendarEvent:{id:block,title:'Dental appointment'}});
+  assert.equal(dest.entry.text,'');assert.equal((await api.getSyncBindings(day))[0].segmentKey,`${day}:${block}:560-561`);
+  assert.equal((await api.getSetting('calendar.native-write.v1.cal.exact',null)).sourceTitle,'Dental appointment');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n,0);
+  assert.equal((await api.getPendingInlineMinuteLinks()).length,0);
+});
+
+test('source import rejects formatting ABA, changed binding and late raw-draft edits without partial note/title/receipt changes',async(t)=>{
+  for(const changed of ['format-aba','binding','late-draft']){
+    const {api,sqlite}=createRepository(t);await api.initializeDatabase();const block='legacy_guard';
+    await api.replaceProjectedMinutes({blockId:block,previousDate:day,previousStart:700,previousEnd:700,activityTitle:'Dentist',
+      entries:[{dateKey:day,minuteIndex:700,text:'Original note',categoryId:'work'}]});
+    await api.saveSyncBinding({segmentKey:`${day}:${block}:700-700`,blockId:block,dateKey:day,calendarId:'cal',eventId:'exact'});
+    const expectedBinding=(await api.getSyncBindings(day))[0],expectedEntries=await api.getEntriesForBlock(block);
+    const expectedFormats=[...(await api.getSpreadsheetCells({dateKey:day,startMinute:700,endMinute:701}))].map(cell=>({dateKey:day,...cell}));
+    if(changed==='format-aba'){await api.putSyncDocument(`category:minuteFormat:${day}:701`,{kind:'minuteFormat',format:{bold:true}});await api.putSyncDocument(`category:minuteFormat:${day}:701`,null);}
+    if(changed==='binding')sqlite.prepare('UPDATE sync_bindings SET event_id=?').run('new-owned-event');
+    const before=plain(await api.getSyncDocuments(''));let calls=0;
+    await assert.rejects(api.replaceProjectedMinutes({blockId:block,previousDate:day,previousStart:700,previousEnd:700,expectedEntries,
+      expectedActivityTitle:'Dentist',activityTitle:'Renamed',expectedFormats,clearPreviousFormats:true,expectedBinding,
+      nextBinding:{...expectedBinding,segmentKey:`${day}:${block}:701-701`},
+      localReceipt:{key:'calendar.native-write.v1.cal.exact',value:{version:2}},beforeCommitGuard:()=>{if(changed==='late-draft'&&++calls===3)throw Error('Raw draft changed');},
+      entries:[{dateKey:day,minuteIndex:701,text:'',categoryId:'work'}]}),/changed/);
+    assert.deepEqual(plain(await api.getSyncDocuments('')),before);assert.equal((await api.getMinuteEntry(day,700)).text,'Original note');
+    assert.equal(await api.getMinuteEntry(day,701),null);assert.equal(await api.getSetting('calendar.native-write.v1.cal.exact',null),null);
+  }
+});
+
+test('late peer border metadata and its removal queue account-only linking after the minute ticket was already acknowledged',async(t)=>{
+  const {api,sqlite}=createRepository(t);await api.initializeDatabase();const key=`category:minuteFormat:${day}:530`;
+  await api.mergeSyncDocuments([{key:minuteKey(530),revision:revision(100),value:value(530,'Private note',{blockId:'legacy_border'})}]);
+  for(const ticket of await api.getPendingInlineMinuteLinks())await api.acknowledgeInlineMinuteLink(ticket);
+  await api.mergeSyncDocuments([{key,revision:revision(200),value:{kind:'minuteFormat',format:{calendarEvent:{id:'legacy_border',title:'Dental'}}}}]);
+  let tickets=await api.getPendingInlineMinuteLinks();assert.equal(tickets.length,1);assert.equal(tickets[0].requiresAccountWriter,true);assert.equal(tickets[0].minuteIndex,530);
+  await api.acknowledgeInlineMinuteLink(tickets[0]);
+  await api.mergeSyncDocuments([{key,revision:revision(150),value:{kind:'minuteFormat',format:{calendarEvent:{id:'legacy_border',title:'Stale'}}}}]);
+  assert.equal((await api.getPendingInlineMinuteLinks()).length,0);
+  await api.mergeSyncDocuments([{key,revision:revision(300),value:{kind:'minuteFormat',format:{calendarEvent:{id:'legacy_border',title:'Dental'},bold:true}}}]);
+  assert.equal((await api.getPendingInlineMinuteLinks()).length,0,'ordinary formatting does not reschedule a calendar event');
+  await api.mergeSyncDocuments([{key,revision:revision(400),value:null}]);tickets=await api.getPendingInlineMinuteLinks();assert.equal(tickets.length,1);assert.equal(tickets[0].requiresAccountWriter,true);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n,0);
+});
+
+
+test('one exact event border coalesces different minute colors while adjacent unbordered or differently titled legacy rows stay separate',async(t)=>{
+ const {api}=createRepository(t);await api.initializeDatabase();const block='legacy_shared';
+ const entries=[100,101,102,103,104].map((minuteIndex,i)=>({key:minuteKey(minuteIndex),revision:revision(500,i),value:value(minuteIndex,`Note ${minuteIndex}`,{blockId:block,categoryId:i%2?'family':'work'})}));
+ await api.mergeSyncDocuments(entries);
+ for(const [minute,title] of [[100,'Dentist'],[101,'Dentist'],[102,'Travel'],[103,'Travel']]){
+  await api.putSyncDocument(`category:minuteFormat:${day}:${minute}`,{kind:'minuteFormat',format:{calendarEvent:{id:block,title}}});
+ }
+ const segments=await api.getDaySegments(day);assert.deepEqual(plain(segments.map(x=>[x.startMinute,x.endMinute,x.activityTitle??null])),[[100,101,'Dentist'],[102,103,'Travel'],[104,104,null]]);
+ assert.deepEqual((await api.getDayEntries(day)).map(x=>x.categoryId),['work','family','work','family','work']);
+ assert.deepEqual(plain(await api.getDayCalendarSegments(day)),plain(segments));
+});

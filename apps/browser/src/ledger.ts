@@ -6,7 +6,8 @@ export type BrowserLedgerState = { version: 1; device: string; wall: number; cou
   documents: SyncDocument[]; conflicts: SyncDocument[]; pending: Record<string, string>; seen: string[];
   upload: null | { name: string; ciphertext: string; batch: SyncBatch; driveId?: string } };
 export type CellChange = { day: string; minute: number; text: string };
-export type UndoEdit = { before: SyncDocument[]; after: SyncDocument[] };
+export type UndoEdit = { before: SyncDocument[]; after: SyncDocument[];
+  blockGuards?: { blockId: string; members: { key: string; revision: string }[] }[] };
 export const minuteKey = (day: string, minute: number) => `minute:${day}:${minute}`;
 export function emptyLedger(device: string): BrowserLedgerState {
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(device)) throw new Error('Invalid browser ledger identity.');
@@ -122,6 +123,11 @@ export function editCells(state: BrowserLedgerState, changes: CellChange[], now 
 }
 export function undoEdit(state: BrowserLedgerState, undo: UndoEdit, now = Date.now()): BrowserLedgerState {
   const next = clone(state); const map = new Map(next.documents.map((doc) => [doc.key, doc]));
+  for (const guard of undo.blockGuards ?? []) {
+    const members = next.documents.filter((doc) => doc.key.startsWith('minute:') && doc.value?.blockId === guard.blockId)
+      .map(({ key, revision }) => ({ key, revision })).sort((a, b) => a.key.localeCompare(b.key));
+    if (hashValue(members) !== hashValue(guard.members)) throw new Error('This activity changed since this edit. Undo would overwrite newer work.');
+  }
   for (const expected of undo.after) if (map.get(expected.key)?.revision !== expected.revision) throw new Error('These cells changed since this edit. Undo would overwrite newer work.');
   for (const previous of undo.before) {
     const revision = tick(next, now); map.set(previous.key, { ...clone(previous), revision }); next.pending[previous.key] = revision;

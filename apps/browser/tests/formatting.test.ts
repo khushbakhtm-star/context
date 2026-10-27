@@ -159,12 +159,16 @@ test('deliberate Group retains each minute note/identity/style, records selected
   assert.deepEqual(state, original);
 });
 
-test('browser Group/Ungroup reject partial existing groups and nonconsecutive/cross-day selections atomically', () => {
+test('browser Group supports redefining a single existing minute while malformed and cross-day selections remain atomic', () => {
   const state = initial(); const before = hashValue(state);
-  assert.throws(() => groupSelection(state, [{ day, minute: 600 }], { title: 'New' }, []), /Ungroup.*whole/);
+  const renamed = groupSelection(state, [{ day, minute: 600 }], { title: 'New' }, [], 2000);
+  assert.equal(getMinute(renamed.state, day, 600)!.value!.blockId, 'activity_read');
+  assert.equal(formatFromDocument(document(renamed.state, cellFormatKey(day, 600))?.value).activityGroup?.title, 'New');
   const distant = mergeLedger(state, [{ ...minute(700), key: 'minute:2026-10-28:700', value: {
     ...minute(700).value!, dateKey: '2026-10-28' } }]);
-  assert.throws(() => ungroupSelection(distant, [{ day, minute: 600 }], 2000), /whole activity/);
+  const partial = ungroupSelection(distant, [{ day, minute: 600 }], 2000);
+  assert.equal(getMinute(partial.state, '2026-10-28', 700)!.value!.blockId, 'activity_read');
+  assert.notEqual(getMinute(partial.state, day, 600)!.value!.blockId, 'activity_read');
   for (const coords of [[{ day, minute: 600 }, { day, minute: 602 }],
     [{ day, minute: 600 }, { day: '2026-10-28', minute: 601 }], [{ day, minute: 600 }, { day, minute: 600 }]]) {
     assert.throws(() => groupSelection(emptyLedger('browser_actor'), coords, { title: 'Test' }, [], 2000), /consecutive/);

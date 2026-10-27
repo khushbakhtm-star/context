@@ -3,11 +3,22 @@
  * value deliberately has no category id/name/color, and new category queries exclude it. */
 export const CELL_FORMAT_PREFIX = 'category:minuteFormat:';
 export type ActivityGroupLabel = { id: string; title: string };
-export type CellFormat = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string; noFill?: true; activityGroup?: ActivityGroupLabel };
+export type CellFormat = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string; noFill?: true;
+  activityGroup?: ActivityGroupLabel; calendarEvent?: ActivityGroupLabel };
 export type MinuteCellRange = { dateKey: string; startMinute: number; endMinute: number };
 
 export function isActivityGroupId(value: unknown): value is string {
   return typeof value === 'string' && /^activity_[A-Za-z0-9_-]{1,150}$/.test(value);
+}
+
+/** Source-linked blocks retain their provider identity when given an event title. */
+export function isCalendarEventId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(value);
+}
+
+export function cellEventLabel(format: CellFormat, blockId: string | undefined): ActivityGroupLabel | undefined {
+  if (!blockId) return undefined;
+  return [format.activityGroup, format.calendarEvent].find((label) => label?.id === blockId);
 }
 
 export function normalizeActivityGroup(value: unknown): ActivityGroupLabel | undefined {
@@ -31,6 +42,13 @@ export function normalizeCellFormat(value: unknown): CellFormat {
   }
   const activityGroup = normalizeActivityGroup(source.activityGroup);
   if (activityGroup) result.activityGroup = activityGroup;
+  const event = source.calendarEvent;
+  if (event && typeof event === 'object' && !Array.isArray(event)) {
+    const label = event as Record<string, unknown>;
+    if (isCalendarEventId(label.id) && typeof label.title === 'string' && label.title.trim() && label.title.trim().length <= 200) {
+      result.calendarEvent = { id: label.id, title: label.title.trim() };
+    }
+  }
   return result;
 }
 

@@ -9,7 +9,7 @@ test('empty selections expose clipboard actions without text formatting or AutoF
     assert.equal(state.sourceMinute, null);
     assert.equal(state.canClear, false);
     assert.equal(state.canFormat, false);
-    assert.equal(state.canGroup, false);
+    assert.equal(state.canGroup, true);
     assert.equal(state.canAutoFill, false);
   }
 });
@@ -20,7 +20,7 @@ test('single populated minutes have formatting and clearing without range-only a
   assert.equal(state.canClear, true);
   assert.equal(state.canFormat, true);
   assert.equal(state.canAutoFill, false);
-  assert.equal(state.canGroup, false);
+  assert.equal(state.canGroup, true);
 });
 
 test('one populated cell among blanks is the AutoFill source even when the anchor is blank', () => {
@@ -77,7 +77,18 @@ test('blank colored or styled cells expose formatting without inventing text act
   for (const cell of [{ minuteIndex: 10, text: '', hasFill: true }, { minuteIndex: 10, hasFormatting: true }]) {
     const policy = analyzeCellSelection([cell]);
     assert.equal(policy.canFormat, true); assert.equal(policy.canClear, false);
-    assert.equal(policy.canAutoFill, false); assert.equal(policy.canGroup, false);
+    assert.equal(policy.canAutoFill, false); assert.equal(policy.canGroup, true);
   }
   assert.equal(analyzeCellSelection([{ minuteIndex: 10 }]).canFormat, false);
+});
+
+
+test('Reset is distinct from Clear and hidden no-fill suppression alone is not a visible edit', () => {
+  assert.equal(analyzeCellSelection([]).canGroup, false);
+  assert.equal(analyzeCellSelection([{ minuteIndex: 530 }]).canReset, false);
+  for (const cell of [{ minuteIndex: 530, text: 'Dentist' }, { minuteIndex: 530, hasFill: true },
+    { minuteIndex: 530, hasFormatting: true }, { minuteIndex: 530, groupId: 'legacy_dental' }]) {
+    assert.equal(analyzeCellSelection([cell]).canReset, true);
+  }
+  assert.equal(analyzeCellSelection([{ minuteIndex: 530, groupId: 'legacy_dental' }]).canClear, false);
 });

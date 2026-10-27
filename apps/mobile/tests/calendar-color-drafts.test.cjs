@@ -48,3 +48,22 @@ test('an absent focused draft does not manufacture one after a color import', ()
   const f = fixture(); f.remove(); assert.equal(f.observer.canImport([entry]), true);
   f.observer.onImported([{ ...entry, categoryId: 'after' }]); assert.equal(f.rebases.length, 0); assert.equal(f.changes, 1);
 });
+
+test('a guarded full calendar import rebases changed text and clears a vacated source draft', () => {
+  const f = fixture(); assert.equal(f.observer.canImport([entry]), true);
+  f.observer.onImported([{ ...entry, text: 'New calendar note', categoryId: 'after', blockId: 'same-event' }], true);
+  assert.equal(f.rebases[0].text, 'New calendar note'); assert.equal(f.rebases[0].keepColor, false);
+  const removed = fixture(); assert.equal(removed.observer.canImport([entry]), true);
+  removed.observer.onImported([{ ...entry, text: '', categoryId: 'unaccounted', blockId: '' }], true);
+  assert.equal(removed.rebases[0].text, ''); assert.equal(removed.rebases[0].keepColor, false);
+});
+
+test('full imports preserve blank event members but never replace text typed after the reviewed snapshot', () => {
+  const f = fixture(); assert.equal(f.observer.canImport([entry]), true);
+  f.observer.onImported([{ ...entry, text: '', blockId: 'same-event' }], true);
+  assert.equal(f.rebases[0].keepColor, true);
+  const changed = fixture(); assert.equal(changed.observer.canImport([entry]), true);
+  changed.edit({ text: 'Typing now', revision: 4 });
+  changed.observer.onImported([{ ...entry, text: 'Calendar note', blockId: 'same-event' }], true);
+  assert.equal(changed.rebases.length, 0);
+});

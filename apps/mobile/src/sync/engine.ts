@@ -3,7 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 
 import {
   acknowledgeInlineMinuteLink, acknowledgeUploaded, deferInlineMinuteLink, getActivityTitleForEntries, getDayEntries, getDaySegments, getDocumentsForUpload, getEntriesBetween,
-  getEntriesForBlock, getPendingInlineMinuteLinks, getSetting, getSyncDocuments, hasSeenSyncFile,
+  getEntriesForBlock, getPendingInlineMinuteLinks, getSetting, getSpreadsheetCells, getSyncDocuments, hasSeenSyncFile,
   markSyncFileSeen, mergeSyncDocuments, putSyncDocument, remapActivityProjections, replaceProjectedMinutes, recolorExpectedMinuteEntries, setSetting,
   type PendingInlineMinuteLink,
 } from '../data/database';
@@ -13,11 +13,11 @@ import { categoryProviderColor, ensureSourceColorCategory, listCategories } from
 import type { ActivitySegment, MinuteEntry, PlannedEvent } from '../types';
 import { addDays, dateKey, localDateAtMinute, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
 import { getAccounts } from './accounts';
-import { isActivityGroupId } from '../utils/cell-format';
+import { CELL_FORMAT_PREFIX, cellEventLabel, formatFromDocument, isActivityGroupId } from '../utils/cell-format';
 import { matchActivityTranslation } from '../utils/activity-translation';
 import { calendarColor, sourceEventColor } from '../utils/calendar-cell-color';
-import { formatCalendarMinuteLog } from '../utils/calendar-minute-log';
-import { makeCalendarDescription, readCalendarDescription } from '../utils/calendar-description';
+import { formatCalendarMinuteLog, parseCompactCalendarMinuteLog } from '../utils/calendar-minute-log';
+import { makeCalendarDescription, makeCompactCalendarDescription, readCalendarDescription } from '../utils/calendar-description';
 import { ACCOUNT_PLAN_READ_LEASE_MS, accountPlanReadDeadline, accountPlanScope, accountPlanScopeIdentity,
   decodeAccountPlanCache, encodeAccountPlanCache, type AccountPlanScope } from '../utils/account-plan-cache';
 import { clearLedgerKeyCache, decryptBatch, encryptBatch, hashValue, parseProjectedMinutes } from './codec';
@@ -38,7 +38,7 @@ let rerunRequested = false;
 let requestedSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let projectionLinkChain: Promise<void> = Promise.resolve();
 let colorImportObserver: { canImport: (entries: readonly MinuteEntry[]) => boolean;
-  onImported?: (entries: readonly MinuteEntry[]) => void } | null = null;
+  onImported?: (entries: readonly MinuteEntry[], replaceText?: boolean) => void } | null = null;
 let colorReconciliationChain: Promise<void> = Promise.resolve();
 
 /** The app installs a raw-draft guard; source readers themselves never mutate the ledger. */
@@ -48,7 +48,9 @@ export function requireCalendarColorImportCurrent(entries: readonly MinuteEntry[
     throw new Error('A linked minute is being edited. Finish that edit before importing its calendar color.');
   }
 }
-export function notifyCalendarColorImported(entries: readonly MinuteEntry[]) { colorImportObserver?.onImported?.(entries); }
+export function notifyCalendarColorImported(entries: readonly MinuteEntry[], replaceText = false) {
+  colorImportObserver?.onImported?.(entries, replaceText);
+}
 export function localActivityColorHash(entries: readonly MinuteEntry[]) {
   return hashValue([...new Set(entries.map((entry) => `${entry.categoryId}:${categoryById(entry.categoryId).color.toUpperCase()}`))].sort());
 }
@@ -435,6 +437,7 @@ async function linkActuals(
   let sourceUsed = false;
   for (const value of dates) {
     for (const segment of await getDaySegments(value)) {
+      if (!segment.activityTitle && !projections.some((item) => item.state !== 'deleted' && item.blockId === segment.blockId)) continue;
       if (edited && !linkedBlocks.has(segment.blockId)) continue;
       if (projections.some((p) => p.state === 'conflict' && p.blockId === segment.blockId)) continue;
       const intersectsSource = sourcePlan &&
@@ -555,10 +558,10 @@ function providerWriteColors(projection: Projection, categoryId: string) {
 
 function buildWrite(projection: Projection, segment: ActivitySegment): CalendarEventWrite {
   const preserved = projection.baseEvent ? readCalendarDescription(projection.baseEvent, projection.id).preserved : '';
-  const description = makeCalendarDescription(preserved, formatCalendarMinuteLog(segment.entries), 2);
+  const description = makeCompactCalendarDescription(preserved, segment.entries);
   const zone = projection.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   return { title: segment.activityTitle ?? projection.title ??
-      (projection.sourceEventId ? projection.baseEvent?.title : undefined) ??
+      projection.baseEvent?.title ??
       (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
     ...description,
     start: zonedMinuteToInstant(segment.dateKey, segment.startMinute, zone),
@@ -591,21 +594,36 @@ function localProjectionUnchanged(projection: Projection, segment: ActivitySegme
       (segment.entries[0]?.text.slice(0, 100) || categoryById(segment.categoryId).name),
     googleColorId: mapping.colorId, googleEventLabelId: mapping.eventLabelId,
     microsoftCategories: mapping.categoryName ? [mapping.categoryName] : undefined };
-  const candidates = [write, previousWrite];
+  const preserved = projection.baseEvent ? readCalendarDescription(projection.baseEvent, projection.id).preserved : '';
+  // Older writers included blank minute timestamps. Their removal is a
+  // formatting upgrade, not a concurrent local edit of the activity.
+  const oldEmptyLines = makeCalendarDescription(preserved, formatCalendarMinuteLog(segment.entries), 2);
+  const candidates = [write, previousWrite, { ...write, ...oldEmptyLines }, { ...previousWrite, ...oldEmptyLines }];
   if (candidates.some((candidate) => localWriteHash(candidate) === projection.baseLocalHash)) return true;
   if (projection.baseEvent?.descriptionLog?.version !== 1) return false;
-  const preserved = readCalendarDescription(projection.baseEvent, projection.id).preserved;
   const oldLog = segment.entries.map((entry) => `${minuteLabel(entry.minuteIndex, true)}  ${entry.text}`).join('\n');
   return candidates.some((candidate) =>
     localWriteHash({ ...candidate, ...makeCalendarDescription(preserved, oldLog, 1) }) === projection.baseLocalHash);
 }
-function partitionActivity(entries: MinuteEntry[]) {
+async function partitionActivity(entries: MinuteEntry[]) {
   const civil = (day: string, minute: number) => Date.parse(`${day}T00:00:00Z`) + minute * 60000;
+  const labels = new Map<string, ReturnType<typeof cellEventLabel>>();
+  for (const day of new Set(entries.map((entry) => entry.dateKey))) {
+    const formats = new Map((await getSyncDocuments(`${CELL_FORMAT_PREFIX}${day}:`)).map((document) =>
+      [Number(document.key.slice(`${CELL_FORMAT_PREFIX}${day}:`.length)), formatFromDocument(document.value)]));
+    for (const entry of entries.filter((item) => item.dateKey === day)) {
+      labels.set(`${entry.dateKey}:${entry.minuteIndex}`, cellEventLabel(formats.get(entry.minuteIndex) ?? {}, entry.blockId));
+    }
+  }
   const groups: MinuteEntry[][] = [];
   for (const entry of entries) {
     const previousGroup = groups.at(-1);
     const previous = previousGroup?.at(-1);
-    if (previous && previous.categoryId === entry.categoryId &&
+    const label = labels.get(`${entry.dateKey}:${entry.minuteIndex}`);
+    const previousLabel = previous && labels.get(`${previous.dateKey}:${previous.minuteIndex}`);
+    const sameBorder = label && previousLabel && label.id === previousLabel.id && label.title === previousLabel.title;
+    const sameUnbordered = !label && !previousLabel && previous?.categoryId === entry.categoryId;
+    if (previous && (sameBorder || sameUnbordered) &&
         civil(entry.dateKey, entry.minuteIndex) - civil(previous.dateKey, previous.minuteIndex) === 60000) previousGroup!.push(entry);
     else groups.push([entry]);
   }
@@ -619,7 +637,7 @@ async function reanchorMovedActivities(projections: Projection[], linkedBlocks: 
   for (const blockId of linkedBlocks) {
     if (!isActivityGroupId(blockId)) continue;
     const members = await getEntriesForBlock(blockId);
-    const groups = partitionActivity(members);
+    const groups = await partitionActivity(members);
     if (!groups.length) continue;
     const current = groups.map((group) => ({ key: `${group[0]!.dateKey}:${group[0]!.minuteIndex}`,
       dateKey: group[0]!.dateKey, startMinute: group[0]!.minuteIndex,
@@ -654,7 +672,7 @@ async function getProjectionSegment(projection: Projection) {
       dateKey(addDays(projection.endDateKey ?? projection.dateKey, 1))))
       .filter((entry) => entry.blockId === projection.blockId);
   const civil = (day: string, minute: number) => Date.parse(`${day}T00:00:00Z`) + minute * 60000;
-  const groups = partitionActivity(entries);
+  const groups = await partitionActivity(entries);
   const start = civil(projection.dateKey, projection.startMinute);
   const end = civil(projection.endDateKey ?? projection.dateKey, projection.endMinute);
   const selected = groups.find((group) => civil(group[0]!.dateKey, group[0]!.minuteIndex) <= end &&
@@ -677,6 +695,9 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
   const expectedSegment = await getProjectionSegment(projection);
   const entries: { dateKey: string; minuteIndex: number; text: string; categoryId: string }[] = [];
   if (event && !event.deleted) {
+    if (event.id !== projection.eventId || event.calendarId !== projection.calendarId) {
+      throw new Error('The linked calendar event identity changed. Review it before importing.');
+    }
     if (event.allDay) throw new Error('Choose a timed event before importing it into minute rows.');
     const start = new Date(event.start);
     const end = new Date(event.end);
@@ -698,9 +719,10 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
     }
     const body = parts.log ?? event.description;
     // Timestamp prose in an original event is preserved as notes, never inferred to be our generated log.
-    const lines = parts.log == null ? [] : parseProjectedMinutes(body, {
-      legacyMetadata: false, ranges: event.descriptionLog?.version === 2,
-    });
+    const lines = parts.log == null || !body ? [] : event.descriptionLog?.version === 3 ?
+      parseCompactCalendarMinuteLog(body, event.descriptionLog) : parseProjectedMinutes(body, {
+        legacyMetadata: false, ranges: event.descriptionLog?.version === 2,
+      });
     if (parts.format === 'clean' && body.trim() && !/^\d{1,2}:[0-5]\d(?:\s*(?:AM|PM))?[ \t]+/i.test(body)) {
       throw new Error('This calendar description contains notes before its minute log. Review it before importing.');
     }
@@ -723,16 +745,51 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
       if (seenSlots.has(key)) throw new Error('The repeated daylight-saving hour needs distinct minute identities before import.');
       seenSlots.add(key);
       const lookup = unchangedLog ? ((minute - shift) % 1440 + 1440) % 1440 : minute;
-      const text = lineByMinute.get(lookup) ??
-        (lines.length ? event.title : [event.title, offset === 0 ? body.trim() : ''].filter(Boolean).join('\n'));
+      // Event titles belong to the activity label, never to every minute's
+      // independent note. Missing or cleared notes remain genuinely blank.
+      const text = lineByMinute.get(lookup) ?? (lines.length || offset !== 0 ? '' : body);
       entries.push({ dateKey: day, minuteIndex: minute, text, categoryId: category });
     }
   }
+  const coordinates = new Map<string, Set<number>>();
+  for (const entry of [...(expectedSegment?.entries ?? []), ...entries]) {
+    const minutes = coordinates.get(entry.dateKey) ?? new Set<number>();
+    minutes.add(entry.minuteIndex); coordinates.set(entry.dateKey, minutes);
+  }
+  const expectedFormats = [];
+  const guardedEntries: MinuteEntry[] = [];
+  for (const [day, minutes] of coordinates) {
+    for (const cell of await getSpreadsheetCells({ dateKey: day,
+      startMinute: Math.min(...minutes), endMinute: Math.max(...minutes) })) {
+      if (!minutes.has(cell.minuteIndex)) continue;
+      expectedFormats.push({ dateKey: day, minuteIndex: cell.minuteIndex, format: cell.format, version: cell.version });
+      guardedEntries.push({ id: cell.entry?.id ?? '', dateKey: day, minuteIndex: cell.minuteIndex,
+        text: cell.entry?.text ?? '', categoryId: cell.entry?.categoryId ?? 'unaccounted',
+        blockId: cell.entry?.blockId ?? projection.blockId, source: cell.entry?.source ?? 'imported',
+        createdAt: cell.entry?.createdAt ?? '', updatedAt: cell.entry?.updatedAt ?? '' });
+    }
+  }
+  const latestAccount = (await getAccounts()).find((item) => item.id === projection.accountId);
+  if (!latestAccount?.consent.calendarRead || !latestAccount.consent.importCalendarEdits) {
+    throw new Error('Calendar edit import permission changed. Refresh the account connection.');
+  }
+  const guard = () => requireCalendarColorImportCurrent(guardedEntries);
+  guard();
   await replaceProjectedMinutes({ blockId: projection.blockId, previousDate: projection.dateKey,
     previousEndDate: projection.endDateKey,
     previousStart: projection.startMinute, previousEnd: projection.endMinute,
     expectedEntries: expectedSegment?.entries ?? [], expectedActivityTitle: expectedSegment?.activityTitle,
+    expectedFormats, beforeCommitGuard: guard, clearPreviousFormats: true,
     activityTitle: event?.title, entries });
+  const importedEntries: MinuteEntry[] = [];
+  for (const [day, minutes] of coordinates) {
+    const current = new Map((await getDayEntries(day)).map((entry) => [entry.minuteIndex, entry]));
+    for (const minute of minutes) {
+      importedEntries.push(current.get(minute) ?? { id: '', dateKey: day, minuteIndex: minute,
+        text: '', categoryId: 'unaccounted', blockId: '', source: 'imported', createdAt: '', updatedAt: '' });
+    }
+  }
+  notifyCalendarColorImported(importedEntries, true);
   if (!event || event.deleted) {
     await saveProjection({ ...projection, state: 'deleted', baseEvent: event, baseLocalHash: null });
     return;
@@ -846,8 +903,10 @@ export async function canAcknowledgeInlineMinuteLink(ticket: PendingInlineMinute
   if (!ticket.requiresAccountWriter) return true;
   const entry = (await getDayEntries(ticket.dateKey)).find((item) => item.minuteIndex === ticket.minuteIndex);
   if (!entry) return true;
+  const projections = (await listProjections()).filter((projection) => projection.state !== 'deleted' && projection.blockId === entry.blockId);
+  if (!projections.length && !await getActivityTitleForEntries([entry])) return true;
   const accounts = await getAccounts();
-  return (await listProjections()).some((projection) => projection.state !== 'deleted' && projection.blockId === entry.blockId &&
+  return projections.some((projection) =>
     accounts.some((account) => account.id === projection.accountId && account.consent.calendarWrite));
 }
 
@@ -877,7 +936,11 @@ async function runSync(): Promise<AccountSyncStatus> {
         try {
           const permitted = (await getAccounts()).some((item) => item.consent.calendarWrite &&
             (item.provider === 'google' || item.provider === 'microsoft'));
-          if (ticket.requiresAccountWriter && !permitted) { await deferInlineMinuteLink(ticket); continue; }
+          if (ticket.requiresAccountWriter && !permitted) {
+            if (await canAcknowledgeInlineMinuteLink(ticket)) await acknowledgeInlineMinuteLink(ticket);
+            else await deferInlineMinuteLink(ticket);
+            continue;
+          }
           await linkActualsToAccounts(ticket.affectedDates, null,
             { dateKey: ticket.dateKey, minuteIndex: ticket.minuteIndex });
           if (await canAcknowledgeInlineMinuteLink(ticket)) await acknowledgeInlineMinuteLink(ticket);

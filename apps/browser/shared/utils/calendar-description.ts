@@ -1,12 +1,13 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
+import { compactCalendarMinuteLog, type CompactMinuteLayout } from './calendar-minute-log';
 
-export type DescriptionLog = {
-  version: 1 | 2;
+type DescriptionLogBase = {
   offset: number;
   prefixHash: string;
   logHash: string;
 };
+export type DescriptionLog = DescriptionLogBase & ({ version: 1 | 2 } | ({ version: 3 } & CompactMinuteLayout));
 
 const MAX_OFFSET = 2_000_000;
 const BEGIN_LOG = '--- Context minutes ---';
@@ -18,12 +19,25 @@ const reviewError = () => new Error(REVIEW_MESSAGE);
 export function isDescriptionLog(value: unknown): value is DescriptionLog {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const fields = Object.keys(value);
-  if (fields.length !== 4 || fields.some((key) => !['version', 'offset', 'prefixHash', 'logHash'].includes(key))) return false;
   const candidate = value as Record<string, unknown>;
-  return (candidate.version === 1 || candidate.version === 2) && typeof candidate.offset === 'number' &&
+  const compact = candidate.version === 3;
+  const allowed = ['version', 'offset', 'prefixHash', 'logHash', ...(compact ? ['minuteMask', 'startsHash'] : [])];
+  if (fields.length !== allowed.length || fields.some((key) => !allowed.includes(key))) return false;
+  return (candidate.version === 1 || candidate.version === 2 || compact) &&
+    (!compact || typeof candidate.minuteMask === 'string' && /^[a-f0-9]{360}$/.test(candidate.minuteMask) &&
+      typeof candidate.startsHash === 'string' && /^[a-f0-9]{64}$/.test(candidate.startsHash)) && typeof candidate.offset === 'number' &&
     Number.isSafeInteger(candidate.offset) && candidate.offset >= 0 && candidate.offset <= MAX_OFFSET &&
     typeof candidate.prefixHash === 'string' && /^[a-f0-9]{64}$/.test(candidate.prefixHash) &&
     typeof candidate.logHash === 'string' && /^[a-f0-9]{64}$/.test(candidate.logHash);
+}
+
+export function makeCompactCalendarDescription(preserved: string,
+  entries: readonly { dateKey: string; minuteIndex: number; text: string }[], includeMeridiem = true):
+  { description: string; descriptionLog: DescriptionLog & { version: 3 } } {
+  const compact = compactCalendarMinuteLog(entries, includeMeridiem);
+  const ordinary = makeCalendarDescription(preserved, compact.log, 2);
+  return { description: ordinary.description,
+    descriptionLog: { ...ordinary.descriptionLog, version: 3, minuteMask: compact.minuteMask, startsHash: compact.startsHash } };
 }
 
 /** Ownership lives in provider metadata; the visible description contains only the
@@ -81,6 +95,9 @@ export function readCalendarDescription(event: DescriptionEvent, expectedProject
   const ownsEvent = Boolean(expectedProjectionId) && event.projectionId === expectedProjectionId;
   if (ownsEvent && event.descriptionLog !== undefined) {
     if (!isDescriptionLog(event.descriptionLog)) throw reviewError();
+    // Clearing the visible description is an intentional provider edit, even
+    // when its previous private offset still points beyond the now-empty text.
+    if (event.description === '') return { preserved: '', log: '', format: 'clean' };
     const { offset, prefixHash } = event.descriptionLog;
     if (offset > event.description.length || (offset > 0 &&
         (offset < 2 || event.description.slice(offset - 2, offset) !== '\n\n'))) throw reviewError();

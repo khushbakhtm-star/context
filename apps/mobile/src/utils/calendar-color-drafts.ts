@@ -28,10 +28,10 @@ export function calendarColorDraftObserver(store: DraftStore, active: () => bool
         if (draft) reviewed.set(key(entry), draft);
         else reviewed.delete(key(entry));
       }
-      while (reviewed.size > 1440) reviewed.delete(reviewed.keys().next().value!);
+      while (reviewed.size > 2880) reviewed.delete(reviewed.keys().next().value!);
       return true;
     },
-    onImported(entries: readonly MinuteEntry[]) {
+    onImported(entries: readonly MinuteEntry[], replaceText = false) {
       const rebases: InlineMinuteValue[] = [];
       for (const entry of entries) {
         const captured = reviewed.get(key(entry));
@@ -40,12 +40,13 @@ export function calendarColorDraftObserver(store: DraftStore, active: () => bool
         const current = store.get(entry.dateKey, entry.minuteIndex);
         if (!active() || !current || !clean(current) || current.revision !== captured.revision ||
             current.savedRevision !== captured.savedRevision || current.text !== captured.text ||
-            current.categoryId !== captured.categoryId || current.keepColor !== captured.keepColor || entry.text !== captured.text) {
+            current.categoryId !== captured.categoryId || current.keepColor !== captured.keepColor ||
+            !replaceText && entry.text !== captured.text) {
           skipped = true;
           continue;
         }
-        rebases.push({ dateKey: entry.dateKey, minuteIndex: entry.minuteIndex, text: current.text,
-          categoryId: entry.categoryId, keepColor: current.keepColor });
+        rebases.push({ dateKey: entry.dateKey, minuteIndex: entry.minuteIndex, text: replaceText ? entry.text : current.text,
+          categoryId: entry.categoryId, keepColor: replaceText ? Boolean(entry.blockId && !entry.text.trim()) : current.keepColor });
       }
       if (rebases.length) store.rebaseCommitted(rebases);
       if (active()) changed();

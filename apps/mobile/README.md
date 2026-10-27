@@ -31,14 +31,14 @@ and phone plans use a stable display order instead of changing with request comp
   remain visible. Double-tapping a cell focuses this same box. Text saves after a short pause,
   when leaving the cell, and when the app leaves the foreground. The first checkmark saves the
   latest draft, closes the keyboard and replaces the box with **Bold**, **Italic**, **Underline**,
-  text-color and fill-color controls. The second checkmark closes those controls while keeping the
+  text-color, fill-color and event-border controls. The second checkmark closes those controls while keeping the
   cell selected. A failed save keeps the draft available for retry.
 - While editing in the bottom box, hold the text to use the phone's selection handles and native
   **Cut / Copy / Paste** actions on part of the text. Edit another cell, place the caret, then use native
   **Paste**. These actions transfer text only; each cell keeps its own activity, fill, and formatting.
   Close editing with the keyboard checkmark before holding a cell for whole-cell actions.
 - Hold a selected cell outside text editing to open the compact cell-action menu. Blank selections
-  offer **Cut / Copy / Paste**. **Clear**, **AutoFill**, **Group** and **Ungroup** appear only when
+  offer **Cut / Copy / Paste**. **Clear**, **AutoFill**, **Group**, **Ungroup** and **Reset cells** appear only when
   relevant to the selection; formatting controls appear after saving the bottom text box. The menu
   fits its visible actions instead of filling unused width. Menu actions use one completed
   tap even while the grid was scrolling or the keyboard was open. You can tap another minute cell
@@ -55,12 +55,18 @@ and phone plans use a stable display order instead of changing with request comp
   time. **Clear** removes minute text while retaining its fill, formatting, and group membership.
   Both color palettes start with **Reset**. Text Reset restores the default text color while keeping
   the words. Fill Reset removes the fill without erasing words or group membership.
-- Choose **Group** for a selected range, enter its activity title in the compact inline bar, choose a
-  fill with the circle, and press **Group**. Every minute keeps its own note, including distinct notes
-  within the same activity. Blank group members count toward the activity's time. **Ungroup** removes
-  the selected minutes from that activity; any remaining portions above and below become separate
-  groups. Hold a grouped cell longer, then drag to move the complete activity to another minute or
-  day, preserving its minute notes and formatting.
+- Only named, bordered blocks create new calendar events. Notes outside a border stay private in
+  Context. Existing linked events retain their calendar identity and borders. Calendar event titles
+  appear once on the border; the individual minute cells contain only their own notes.
+- Choose **Group** from a cell selection or the outside-border icon in the formatting bar. Enter an
+  event title, choose a fill with the circle, and confirm with the checkmark. A single blank minute
+  can also start an event. Every minute keeps its own note; blank members count toward the event's
+  duration. Redefining a single event's border retains its existing calendar linkage.
+- **Ungroup** detaches selected minutes without erasing their notes. **Reset cells** detaches them
+  and clears all text, formatting and fill. Remaining event portions become separately bordered
+  blocks; the first remaining portion retains the original approved calendar event. These actions
+  are undoable. **Clear** remains text-only. Hold a grouped cell longer, then drag to move the whole
+  event to another minute or day, preserving its title, minute notes and formatting.
 - Hold a recorded cell or selected minute range longer, then drag its preview to another minute or
   visible date. The source stays intact until a successful drop. Occupied destinations require
   **Replace** confirmation, and one **Undo** restores both locations. Moving part of a named group
@@ -183,9 +189,11 @@ without reviving deleted minutes. This version does not promise background deliv
 is terminated. Do not use different passphrases for the same ledger; changing keys requires a future
 explicit migration workflow.
 
-Calendar descriptions can compact consecutive identical notes into time ranges while the private
-ledger keeps every minute editable. Update both participating Android phones to 0.1.13 before
-exchanging version-two calendar descriptions; older clients refuse this newer compact format.
+Calendar descriptions list each note with its first minute timestamp. Consecutive exactly identical
+notes appear once, while blank minutes remain blank and each private minute stays editable. Hidden,
+bounded layout metadata preserves repeated notes and gaps on round trips; the visible description
+contains no Context bookkeeping. Update both participating phones to 0.1.20 before exchanging this
+version-three format. Older clients hold an unsupported format for review rather than guess its cells.
 
 The storage implementations are Google Drive's private app-data area, Microsoft's OneDrive app
 folder, and an existing dedicated HTTPS WebDAV folder. Storage access does not require granting

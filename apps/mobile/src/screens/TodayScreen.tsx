@@ -16,7 +16,7 @@ import { flushPendingActuals, loadPlannedEventsResult, openPlannedEvent, reconci
 import { ensureSourceColorCategory, listSelectableActivityCategories } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits,
   subscribeInlineMinuteLinkWarnings } from '../services/inline-minutes';
-import { applyCellFormat, clearTextMinuteRange, colorMinuteRange, resetMinuteFill, copyMinuteRange, cutMinuteRange, editInlineMinute,
+import { applyCellFormat, clearTextMinuteRange, colorMinuteRange, resetMinuteFill, resetMinuteCells, copyMinuteRange, cutMinuteRange, editInlineMinute,
   fillMinuteRange, getDayActivityGroups, getDayCellFormats, getSpreadsheetClipboard, groupMinuteRange, pasteMinuteRange,
   prepareMinutePaste, prepareExternalMinutePaste, pasteExternalMinuteRange,
   getMovableActivityGroup, prepareActivityGroupMove, moveActivityGroup, ungroupMinuteRange,
@@ -45,7 +45,7 @@ import {
   type CalendarDayCount, type CalendarMinuteSelection,
 } from '../utils/calendar-grid';
 import {
-  addDays, dateKey, formatDayHeading, MINUTES_PER_DAY, minuteIndexForDate, minuteLabel, parseDateKey,
+  addDays, calendarMinuteRange, dateKey, formatDayHeading, MINUTES_PER_DAY, minuteIndexForDate, minuteLabel, parseDateKey,
 } from '../utils/time';
 
 const MINUTE_ITEMS = Array.from({ length: MINUTES_PER_DAY }, (_, index) => index);
@@ -1211,7 +1211,7 @@ export function TodayScreen({
     setRangeEnd(end);
     rangeEndRef.current = end; setRangeColorChosen(false);
     const anchorText = inlineMinuteDrafts.get(selection.dateKey, selection.minuteIndex)?.text ?? selection.entry?.text ?? '';
-    setRangeTitle(group?.title ?? anchorText.split(/\r?\n/, 1)[0]!.trim().slice(0, 200));
+    setRangeTitle(group?.title ?? selection.plan?.title ?? anchorText.split(/\r?\n/, 1)[0]!.trim().slice(0, 200));
     setRangeColorId(group?.categoryId ?? inlineMinuteDrafts.get(selection.dateKey, selection.minuteIndex)?.categoryId ??
       selection.entry?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted');
     setToolbarError(null); setInlineEditing(false); setCellMenuOpen(false); setRangeSelecting(true); setGroupComposerOpen(false);
@@ -1291,7 +1291,7 @@ export function TodayScreen({
         readPlans: (value) => dayDataRef.current[value]?.plans ?? [], currentState });
       if (!selection || !calendarSelectionIsCurrent(request, currentState())) return;
       inlineMinuteDrafts.activate({ dateKey: day, minuteIndex: minute,
-        text: selection.entry?.text ?? selection.plan?.title ?? '',
+        text: selection.entry?.text ?? '',
         categoryId: selection.entry?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted',
         keepColor: Boolean(selection.entry && !selection.entry.text.trim()) });
       setActionError(null);
@@ -1563,9 +1563,8 @@ export function TodayScreen({
       const draft = draftsByKey.get(inlineMinuteKey(selectedRange.dateKey, minuteIndex));
       const entry = index?.entriesByMinute.get(minuteIndex);
       const format = dayData[selectedRange.dateKey]?.formats?.get(minuteIndex) ?? {};
-      return { minuteIndex, text: draft?.text ?? index?.entriesByMinute.get(minuteIndex)?.text ??
-        index?.plansByMinute.get(minuteIndex)?.[0]?.title ?? '', groupId: groups?.get(minuteIndex)?.blockId,
-        hasFill: Boolean(entry && !format.noFill),
+      return { minuteIndex, text: draft?.text ?? entry?.text ?? '', groupId: groups?.get(minuteIndex)?.blockId,
+        hasFill: Boolean(!format.noFill && (entry || index?.plansByMinute.get(minuteIndex)?.[0]?.color)),
         hasFormatting: Boolean(format.bold || format.italic || format.underline || format.textColor) };
     }), inlineSelection?.minuteIndex);
   }, [selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute, indexedDays, indexedGroups, draftsByKey, inlineSelection?.minuteIndex]);
@@ -1615,6 +1614,10 @@ export function TodayScreen({
   async function openCurrentRangeOptions(command?: CellCommandSelection) {
     const selection = command?.selection ?? inlineSelectionRef.current;
     if (selection && await prepareOptions(selection)) {
+      const group = indexedGroups.get(selection.dateKey)?.get(selection.minuteIndex);
+      const note = inlineMinuteDrafts.get(selection.dateKey, selection.minuteIndex)?.text ?? selection.entry?.text ?? '';
+      setRangeTitle(group?.title ?? selection.plan?.title ?? note.split(/\r?\n/, 1)[0]!.trim().slice(0, 200));
+      setRangeColorId(group?.categoryId ?? selection.entry?.categoryId ?? selection.plan?.categoryId ?? rangeColorId);
       setInlineEditing(false); setCellMenuOpen(false); setGroupPaletteOpen(false); setGroupComposerOpen(true);
       cellActivationRef.current = null;
       const token = selectionTokenRef.current;
@@ -1732,6 +1735,20 @@ export function TodayScreen({
     markLocalChange([range.dateKey]);
     const applied = await runSpreadsheetTool(async () => {
       await ungroupMinuteRange(range); await refreshLocalEntries(range.dateKey);
+    });
+    if (applied && selectionStillCurrent(selection, token, generation)) closeRangeOptions();
+  }
+
+  async function resetSelection(command?: CellCommandSelection) {
+    const range = command?.range ?? parsedRange();
+    const selection = command?.selection ?? inlineSelectionRef.current;
+    if (!range || !selection || !await prepareOptions(selection)) return;
+    const token = selectionTokenRef.current;
+    const generation = navigationGenerationRef.current;
+    recordExplicitColor(range.dateKey, range.startMinute, range.endMinute);
+    markLocalChange([range.dateKey]);
+    const applied = await runSpreadsheetTool(async () => {
+      await resetMinuteCells(range); await refreshLocalEntries(range.dateKey);
     });
     if (applied && selectionStillCurrent(selection, token, generation)) closeRangeOptions();
   }
@@ -1929,9 +1946,11 @@ export function TodayScreen({
       {groupComposerOpen && inlineSelection ? <View style={styles.groupComposer}>
         <View style={styles.groupComposerRow}>
           <TextInput ref={groupTitleInputRef} value={rangeTitle} onChangeText={setRangeTitle} maxLength={200}
-            accessibilityLabel="Activity title for selected minutes" placeholder="Activity title" placeholderTextColor={colors.muted}
+            editable={!toolBusy && !spreadsheetState.busy}
+            accessibilityLabel="Activity title for selected minutes" placeholder="Event title" placeholderTextColor={colors.muted}
             returnKeyType="done" onSubmitEditing={() => Keyboard.dismiss()} style={styles.groupTitleInput} />
           <Pressable accessibilityRole="button" accessibilityLabel="Choose group fill color"
+            disabled={toolBusy || spreadsheetState.busy}
             accessibilityState={{ expanded: groupPaletteOpen }} onPress={() => { Keyboard.dismiss(); setGroupPaletteOpen((value) => !value); }}
             style={styles.groupComposerButton}>
             <View style={[styles.groupColorDot, { backgroundColor: groupColor.color }]} />
@@ -1940,9 +1959,10 @@ export function TodayScreen({
             disabled={toolBusy || spreadsheetState.busy || !groupHasGoogleColor || !rangeTitle.trim()}
             onPress={() => void groupSelection()} style={[styles.groupComposerButton,
               (!groupHasGoogleColor || !rangeTitle.trim()) && styles.groupActionDisabled]}>
-            <Text style={styles.rangeActionText}>Group</Text>
+            <Text style={styles.rangeActionText}>✓</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Cancel grouping" onPress={cancelGroupComposer} style={styles.groupComposerButton}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Cancel grouping" disabled={toolBusy || spreadsheetState.busy}
+            onPress={cancelGroupComposer} style={styles.groupComposerButton}>
             <Text style={styles.rangeActionText}>×</Text>
           </Pressable>
         </View>
@@ -2034,9 +2054,12 @@ export function TodayScreen({
               const rangeSelected = rangeSelecting && selectedRange?.dateKey === day &&
                 minute >= selectedRange.startMinute && minute <= selectedRange.endMinute;
               const group = indexedGroups.get(day)?.get(minute);
-              const groupStarts = group?.startMinute === minute;
-              const groupColor = group ? categoryById(group.categoryId).color : undefined;
+              const planBounds = plan && !plan.allDay ? calendarMinuteRange(plan.startDate, plan.endDate, day) : null;
               const format = dayData[day]?.formats?.get(minute) ?? {};
+              const outline = group ?? (!format.noFill && plan && planBounds ? { title: plan.title,
+                startMinute: planBounds.startMinute, endMinute: planBounds.endMinuteExclusive - 1 } : undefined);
+              const groupStarts = outline?.startMinute === minute;
+              const groupColor = group ? categoryById(group.categoryId).color : undefined;
               const previewColor = rangeSelected && rangeColorChosen && groupHasGoogleColor ? categoryById(rangeColorId).color : undefined;
               const solidColor = calendarCellColor({ previewColor, actualColor: color,
                 hasActual: Boolean(hasDraftValue || entry), groupColor, planColor: plan?.color, noFill: format.noFill });
@@ -2049,13 +2072,13 @@ export function TodayScreen({
                 fontStyle: format.italic ? 'italic' as const : 'normal' as const,
                 textDecorationLine: format.underline ? 'underline' as const : 'none' as const,
                 color: format.textColor ?? defaultTextColor };
-              const displayedText = draft?.text ?? entry?.text ?? plan?.title;
+              const displayedText = draft?.text ?? entry?.text ?? '';
               const isCurrent = day === today && minute === currentMinute;
               return (
                 <Pressable key={day} accessibilityRole="button"
                   accessibilityState={{ selected: inline || rangeSelected }}
                   accessibilityLabel={dayLabels.get(day) + ', ' + timeLabel(minute) +
-                    (group ? ', ' + group.title : '') + (displayedText ? ', ' + displayedText : ', empty cell')}
+                    (outline ? ', ' + outline.title : '') + (displayedText ? ', ' + displayedText : ', empty cell')}
                   accessibilityHint={rangeSelecting
                     ? 'Hold selected cells for actions. Drag the selection handle to change the range.'
                     : group ? 'Tap to select. Double tap to edit in the bottom text bar. Hold for actions, or hold longer and drag to move this activity.' : 'Tap to select. Double tap to edit in the bottom text bar. Hold for cell actions.'}
@@ -2098,9 +2121,9 @@ export function TodayScreen({
                     inline && styles.editingCell]}>
                   <View pointerEvents="none" style={[styles.cellBackground,
                     solidColor ? { backgroundColor: solidColor } : null]} />
-                  {group ? <View pointerEvents="none" style={[styles.activityOutline,
-                    { borderColor: titleTextColor + '80' }, minute === group.startMinute && styles.activityFirstCell,
-                    minute === group.endMinute && styles.activityLastCell]} /> : null}
+                  {outline ? <View pointerEvents="none" style={[styles.activityOutline,
+                    { borderColor: titleTextColor }, minute === outline.startMinute && styles.activityFirstCell,
+                    minute === outline.endMinute && styles.activityLastCell]} /> : null}
                   {spreadsheetState.clipboard?.mode === 'cut' && spreadsheetState.clipboard.range.dateKey === day &&
                     minute >= spreadsheetState.clipboard.range.startMinute && minute <= spreadsheetState.clipboard.range.endMinute
                     ? <View pointerEvents="none" style={styles.cutCellOutline} /> : null}
@@ -2109,9 +2132,9 @@ export function TodayScreen({
                         !displayedText && styles.placeholder, groupStarts && { maxWidth: noteWidth }, textStyle]}>
                       {displayedText ?? ''}
                     </Text>}
-                  {group && groupStarts ? <View pointerEvents="none"
+                  {outline && groupStarts ? <View pointerEvents="none"
                     style={[styles.activityBadge, { left: noteWidth + 9, width: badgeWidth, borderColor: titleTextColor + '80' }]}>
-                    <Text numberOfLines={1} style={[styles.activityTitle, { color: titleTextColor }]}>{group.title}</Text>
+                    <Text numberOfLines={1} style={[styles.activityTitle, { color: titleTextColor }]}>{outline.title}</Text>
                   </View> : null}
                   {isCurrent ? <View pointerEvents="none" style={styles.currentLine}>
                     <View style={styles.currentDot} />
@@ -2175,6 +2198,7 @@ export function TodayScreen({
             onCopy={() => void dispatchCellCommand((scope) => captureSelectedCells('copy', scope))}
             onAutoFill={cellPolicy.canAutoFill ? () => void dispatchCellCommand(autoFillSelection) : undefined}
             onClear={cellPolicy.canClear ? () => void dispatchCellCommand(clearSelection) : undefined}
+            onReset={cellPolicy.canReset ? () => void dispatchCellCommand(resetSelection) : undefined}
             onGroup={cellPolicy.canGroup ? () => void dispatchCellCommand(openCurrentRangeOptions) : undefined}
             onUngroup={cellPolicy.canUngroup ? () => void dispatchCellCommand(ungroupSelection) : undefined}
             onPaste={() => void dispatchCellCommand(pasteSelectedCells)} canPaste
@@ -2195,7 +2219,7 @@ export function TodayScreen({
         <View accessibilityLabel={entryBarMode === 'entry' ? 'Minute text entry bar' : 'Minute formatting bar'}
           style={[styles.bottomBar, entryBarMode === 'format' && !formatPalette && styles.compactBottomBar]}>
           {entryBarMode === 'entry' ? <View style={styles.entryBarRow}>
-            <TextInput ref={inlineInputRef} value={selectedDraft?.text ?? inlineSelection.entry?.text ?? inlineSelection.plan?.title ?? ''}
+            <TextInput ref={inlineInputRef} value={selectedDraft?.text ?? inlineSelection.entry?.text ?? ''}
               editable={!spreadsheetState.busy && !toolBusy} contextMenuHidden={false} rejectResponderTermination={false}
               multiline scrollEnabled maxLength={50000} returnKeyType="done" submitBehavior="submit"
               accessibilityLabel={dayLabels.get(inlineSelection.dateKey) + ', ' + timeLabel(inlineSelection.minuteIndex) + ', minute text'}
@@ -2270,6 +2294,11 @@ export function TodayScreen({
                 disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
                 onPress={() => { Keyboard.dismiss(); setFormatPalette((value) => value === 'cell' ? null : 'cell'); }} style={styles.bottomTool}>
                 <View style={[styles.groupColorDot, { backgroundColor: menuFillColor }]} />
+              </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="Apply event border" accessibilityHint="Name the selected minutes as one calendar event without changing their notes."
+                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
+                onPress={() => void dispatchCellCommand(openCurrentRangeOptions)} style={styles.bottomTool}>
+                <View style={styles.eventBorderIcon}><View style={styles.eventBorderIconLine} /></View>
               </Pressable>
               <Pressable accessibilityRole="button" accessibilityLabel="Finish formatting"
                 disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
@@ -2394,10 +2423,12 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     dayCell: { height: rowHeight, justifyContent: 'center', paddingLeft: 5, paddingRight: 4,
       borderRightWidth: 1, borderBottomWidth: 1, borderColor: gridLine },
     cellBackground: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: grid },
+    eventBorderIcon: { width: 24, height: 24, borderWidth: 2.5, borderColor: colors.ink, justifyContent: 'center' },
+    eventBorderIconLine: { height: StyleSheet.hairlineWidth, backgroundColor: colors.muted },
     activityOutline: { position: 'absolute', left: 1, right: 1, top: 0, bottom: 0,
-      borderLeftWidth: 1.5, borderRightWidth: 1.5 },
-    activityFirstCell: { borderTopWidth: 1.5 },
-    activityLastCell: { borderBottomWidth: 1.5 },
+      borderLeftWidth: 2.5, borderRightWidth: 2.5 },
+    activityFirstCell: { borderTopWidth: 2.5 },
+    activityLastCell: { borderBottomWidth: 2.5 },
     activityBadge: { position: 'absolute', top: 2, bottom: 2, justifyContent: 'center', paddingLeft: 4,
       borderLeftWidth: 1, backgroundColor: 'transparent' },
     activityTitle: { color: colors.ink, fontSize: 11, fontWeight: '600' },

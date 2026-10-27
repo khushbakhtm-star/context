@@ -1,8 +1,8 @@
-import { acknowledgeInlineMinuteLink, deferInlineMinuteLink, deleteMinuteEntry, getMinuteEntry, getPendingInlineMinuteLinks, saveMinuteRange } from '../data/database';
+import { acknowledgeInlineMinuteLink, deferInlineMinuteLink, deleteMinuteEntry, getMinuteEntry, getPendingInlineMinuteLinks, getSpreadsheetCells, saveMinuteRange } from '../data/database';
 import { canAcknowledgeInlineMinuteLink, linkActualsToAccounts, requestAccountSynchronization } from '../sync/engine';
 import type { MinuteEntry } from '../types';
 import { InlineMinuteDrafts, type InlineMinuteValue } from '../utils/inline-minute-drafts';
-import { isActivityGroupId } from '../utils/cell-format';
+import { cellEventLabel, isActivityGroupId } from '../utils/cell-format';
 
 export type InlineMinuteCommit = {
   dateKey: string;
@@ -14,7 +14,11 @@ export type InlineMinuteCommit = {
 
 export const inlineMinuteDrafts = new InlineMinuteDrafts<InlineMinuteCommit>(async (value) => {
   const previous = !value.text.trim() && !value.keepColor ? await getMinuteEntry(value.dateKey, value.minuteIndex) : null;
-  const keepColor = value.keepColor || isActivityGroupId(previous?.blockId);
+  const previousCell = previous && !isActivityGroupId(previous.blockId)
+    ? (await getSpreadsheetCells({ dateKey: value.dateKey, startMinute: value.minuteIndex, endMinute: value.minuteIndex }))[0]
+    : undefined;
+  const label = previous && cellEventLabel(previousCell?.format ?? {}, previous.blockId);
+  const keepColor = value.keepColor || isActivityGroupId(previous?.blockId) || Boolean(previous && label?.id === previous.blockId);
   const affectedDates = value.text.trim() || keepColor
     ? await saveMinuteRange({ dateKey: value.dateKey, startMinute: value.minuteIndex,
       durationMinutes: 1, text: value.text, categoryId: value.categoryId, allowEmptyText: keepColor,

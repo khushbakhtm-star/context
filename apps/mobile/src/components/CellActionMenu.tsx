@@ -13,6 +13,7 @@ export type CellActionMenuProps = {
   onCopy: () => void;
   onAutoFill?: () => void;
   onClear?: () => void;
+  onReset?: () => void;
   onGroup?: () => void;
   onUngroup?: () => void;
   onEvent?: () => void;
@@ -39,7 +40,7 @@ export type CellActionMenuProps = {
   onTouchActiveChange?: (active: boolean) => void;
 };
 
-export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGroup, onUngroup, onEvent, onPaste,
+export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onReset, onGroup, onUngroup, onEvent, onPaste,
   canPaste = Boolean(onPaste), onClose, format = {}, textColor, fillColor, colorChoices = [], selectedColorId,
   onToggleBold, onToggleItalic, onToggleUnderline, onTextColor, onCellColor, onResetCellColor, error, maxHeight, maxWidth, width,
   onWidthChange, onHeightChange, onTouchActiveChange,
@@ -85,6 +86,7 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onGro
     ...(onAutoFill ? [{ label: 'AutoFill', accessibilityLabel: 'Auto fill selected minute cells', onPress: onAutoFill, disabled: busy }] : []),
     ...(onGroup ? [{ label: 'Group', accessibilityLabel: 'Group selected minute cells', onPress: onGroup, disabled: busy }] : []),
     ...(onUngroup ? [{ label: 'Ungroup', accessibilityLabel: 'Ungroup selected minute cells', onPress: onUngroup, disabled: busy }] : []),
+    ...(onReset ? [{ label: 'Reset cells', accessibilityLabel: 'Reset selected minute cells', onPress: onReset, disabled: busy }] : []),
     ...(onEvent ? [{ label: 'Event', accessibilityLabel: 'Open source calendar event details', onPress: onEvent, disabled: busy }] : []),
   ];
   const hasFormatting = Boolean(onToggleBold || onToggleItalic || onToggleUnderline || onTextColor || onCellColor);

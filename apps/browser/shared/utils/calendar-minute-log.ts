@@ -1,4 +1,6 @@
 import { minuteLabel } from './time';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 
 type LogEntry = { dateKey: string; minuteIndex: number; text: string };
 export type CalendarMinuteLine = { minuteIndex: number; text: string };
@@ -104,6 +106,75 @@ export function parseCalendarMinuteLog(description: string): CalendarMinuteLine[
       const entry = { minuteIndex, text };
       entries.push(entry); current.push(entry);
     }
+  }
+  return entries;
+}
+
+export type CompactMinuteLayout = { minuteMask: string; startsHash: string };
+const hashStarts = (minutes: number[]) => bytesToHex(sha256(utf8ToBytes(JSON.stringify(minutes))));
+
+/** The visible log contains only the first timestamp of each consecutive exact
+ * repeat. A bounded private occupancy mask preserves blank gaps on round trips;
+ * it never adds implementation labels to the event description. */
+export function compactCalendarMinuteLog(entries: readonly LogEntry[], includeMeridiem = true):
+  CompactMinuteLayout & { log: string } {
+  if (entries.length > 1440) throw new Error('Split activities longer than 24 hours before synchronizing.');
+  const mask = new Uint8Array(180);
+  const heads: LogEntry[] = [];
+  let previous: LogEntry | undefined;
+  let previousTime = -Infinity;
+  let firstTime: number | undefined;
+  for (const entry of entries) {
+    const instant = civil(entry);
+    if (instant <= previousTime) throw new Error('Minute notes must be in chronological order.');
+    firstTime ??= instant;
+    if (instant - firstTime >= 1440) throw new Error('Split activities longer than 24 hours before synchronizing.');
+    if (entry.text.trim()) {
+      const byte = entry.minuteIndex >> 3;
+      mask[byte] = (mask[byte] ?? 0) | (1 << (entry.minuteIndex & 7));
+      if (!previous || instant !== previousTime + 1 || previous.text !== entry.text || !previous.text.trim()) heads.push(entry);
+    }
+    previous = entry; previousTime = instant;
+  }
+  return { log: heads.map((entry) => formatCalendarMinuteLog([entry], includeMeridiem)).join('\n'),
+    minuteMask: bytesToHex(mask), startsHash: hashStarts(heads.map((entry) => entry.minuteIndex)) };
+}
+
+/** A changed note is importable; a changed timestamp structure needs review
+ * rather than guessing how many private minute cells it should overwrite. */
+export function parseCompactCalendarMinuteLog(description: string, layout: CompactMinuteLayout): CalendarMinuteLine[] {
+  if (!/^[a-f0-9]{360}$/.test(layout.minuteMask) || !/^[a-f0-9]{64}$/.test(layout.startsHash)) {
+    throw new Error('The calendar minute layout needs review.');
+  }
+  if (description.replace(/\r\n/g, '\n').split('\n').some((line) => !line.startsWith('    ') && rangeLine.test(line))) {
+    throw new Error('The calendar minute timestamps changed. Review the description before importing.');
+  }
+  const heads = parseCalendarMinuteLog(description);
+  if (hashStarts(heads.map((entry) => entry.minuteIndex)) !== layout.startsHash) {
+    throw new Error('The calendar minute timestamps changed. Review the description before importing.');
+  }
+  const bytes = Array.from({ length: 180 }, (_, index) => parseInt(layout.minuteMask.slice(index * 2, index * 2 + 2), 16));
+  const occupied = (minute: number) => Boolean(bytes[minute >> 3]! & (1 << (minute & 7)));
+  const seen = new Set<number>();
+  const entries: CalendarMinuteLine[] = [];
+  let travelled = 0;
+  for (let index = 0; index < heads.length; index++) {
+    const head = heads[index]!;
+    const next = heads[index + 1];
+    const distance = next ? (next.minuteIndex - head.minuteIndex + 1440) % 1440 : 1440 - travelled;
+    if (distance < 1 || travelled + distance > 1440 || !occupied(head.minuteIndex)) {
+      throw new Error('The calendar minute layout needs review.');
+    }
+    for (let offset = 0; offset < distance; offset++) {
+      const minuteIndex = (head.minuteIndex + offset) % 1440;
+      if (!occupied(minuteIndex)) break;
+      if (seen.has(minuteIndex)) throw new Error('The calendar minute layout needs review.');
+      entries.push({ minuteIndex, text: head.text }); seen.add(minuteIndex);
+    }
+    travelled += distance;
+  }
+  for (let minute = 0; minute < 1440; minute++) {
+    if (occupied(minute) !== seen.has(minute)) throw new Error('The calendar minute layout needs review.');
   }
   return entries;
 }

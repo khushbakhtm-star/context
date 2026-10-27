@@ -1,10 +1,13 @@
 import { hashValue, validateBatch } from '../shared/sync/codec';
-import { cellFormatKey, formatFromDocument, isActivityGroupId } from '../shared/utils/cell-format';
+import { cellFormatKey, cellEventLabel, formatFromDocument, isActivityGroupId } from '../shared/utils/cell-format';
 import { applyDocumentValues, minuteKey, type BrowserLedgerState, type DocumentValueChange, type UndoEdit } from './ledger';
 
 export type FormatCoordinate = { day: string; minute: number };
 export type BrowserFill = { categoryId?: string; color: string; name?: string; providerColorId?: string; accountId?: string };
 export type BrowserFormatPatch = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string | null; fill?: BrowserFill | null };
+// Same documented CalendarApp.Color fallback as the phone; provider palettes may extend it.
+export const GOOGLE_ACTIVITY_COLORS = ['#2952A3', '#8D6F47', '#4E5D6C', '#865A5A', '#5A6986', '#0D7813', '#5229A3',
+  '#528800', '#88880E', '#6E6E41', '#BE6D00', '#B1365F', '#705770', '#7A367A', '#A32929', '#B1440E', '#29527A', '#4A716C', '#28754E', '#1B887A', '#AB8B00'] as const;
 const COLOR = /^#[0-9A-F]{6}$/i;
 const CATEGORY_ID = /^[A-Za-z0-9_-]{1,160}$/;
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -75,7 +78,7 @@ export function formatCells(state: BrowserLedgerState, coords: readonly FormatCo
     if (patch.fill === null) {
       format.noFill = true;
       if (minute) {
-        const keep = String(minute.text ?? '').trim().length > 0 || isActivityGroupId(minute.blockId);
+        const keep = String(minute.text ?? '').trim().length > 0 || isActivityGroupId(minute.blockId) || Boolean(cellEventLabel(normalized, String(minute.blockId ?? '')));
         changes.push({ key, value: keep ? { ...structuredClone(minute), categoryId: 'unaccounted',
           updatedAt: minute.categoryId === 'unaccounted' ? minute.updatedAt : timestamp } : null });
       }
@@ -115,71 +118,122 @@ function formatValue(existing: Record<string, unknown> | null | undefined, forma
   return Object.keys(format).length || opaqueEnvelope ? { ...structuredClone(existing ?? {}), kind: 'minuteFormat', format } : null;
 }
 
-/** A deliberate Group creates only local ledger membership; the phone remains
- * responsible for any separately authorized calendar projection. */
-export function groupSelection(state: BrowserLedgerState, coords: readonly FormatCoordinate[], input: { title: string; fill?: BrowserFill },
-  allowedColors: readonly string[], now = Date.now()): { state: BrowserLedgerState; undo: UndoEdit } {
-  const selected = consecutiveSelection(coords);
-  if (!input || typeof input.title !== 'string' || !input.title.trim() || input.title.trim().length > 200 ||
-      !Number.isFinite(now) || !Number.isFinite(new Date(now).getTime())) throw new Error('Enter an activity title of up to 200 characters.');
+function selectedEventIds(state: BrowserLedgerState, coords: readonly FormatCoordinate[]) {
   const map = new Map(state.documents.map((doc) => [doc.key, doc]));
-  for (const coordinate of selected) {
-    const minute = map.get(minuteKey(coordinate.day, coordinate.minute))?.value;
-    const format = formatFromDocument(map.get(cellFormatKey(coordinate.day, coordinate.minute))?.value);
-    if (isActivityGroupId(minute?.blockId) || format.activityGroup) throw new Error('Ungroup the whole existing activity before grouping these minutes.');
-  }
-  const fill = input.fill ? categoryForFill(state, input.fill, allowedColors, now) : null;
-  const first = selected[0]!; const firstMinute = map.get(minuteKey(first.day, first.minute))?.value;
-  const categoryId = fill?.id ?? (typeof firstMinute?.categoryId === 'string' ? firstMinute.categoryId : 'unaccounted');
-  const id = `activity_${crypto.randomUUID().replaceAll('-', '')}`; const title = input.title.trim(); const timestamp = new Date(now).toISOString();
-  const changes: DocumentValueChange[] = fill?.change ? [fill.change] : [];
-  for (const coordinate of selected) {
-    const key = minuteKey(coordinate.day, coordinate.minute); const minute = map.get(key)?.value;
-    const formatKey = cellFormatKey(coordinate.day, coordinate.minute); const existing = map.get(formatKey)?.value;
-    changes.push({ key, value: minute ? { ...structuredClone(minute), blockId: id, categoryId, updatedAt: timestamp } : {
-      id: `browser_${crypto.randomUUID().replaceAll('-', '')}`, dateKey: coordinate.day, minuteIndex: coordinate.minute,
-      text: '', categoryId, blockId: id, source: 'manual', createdAt: timestamp, updatedAt: timestamp,
-    } });
-    const format = formatEnvelope(existing); delete format.noFill; format.activityGroup = { id, title };
-    changes.push({ key: formatKey, value: formatValue(existing, format) });
-  }
-  return applyDocumentValues(state, changes, now);
+  return new Set(coords.flatMap((point) => {
+    const minute = map.get(minuteKey(point.day, point.minute))?.value;
+    const label = cellEventLabel(formatFromDocument(map.get(cellFormatKey(point.day, point.minute))?.value), String(minute?.blockId ?? ''));
+    return minute && (label || isActivityGroupId(minute.blockId)) ? [String(minute.blockId)] : [];
+  }));
 }
 
-/** Partial calendar-group detachment needs the phone's split/relink workflow.
- * The browser safely supports only complete locally visible group membership. */
-export function ungroupSelection(state: BrowserLedgerState, coords: readonly FormatCoordinate[], now = Date.now()):
+/** Capture exact members as well as selected cells before an asynchronous edit.
+ * A newly arrived outside member must not be silently absorbed by a stale split. */
+export function eventSelectionKeys(state: BrowserLedgerState, coords: readonly FormatCoordinate[]): string[] {
+  const ids = selectedEventIds(state, coords);
+  const points = new Map(coords.map((point) => [minuteKey(point.day, point.minute), point]));
+  for (const doc of state.documents) if (doc.key.startsWith('minute:') && doc.value && ids.has(String(doc.value.blockId))) {
+    points.set(doc.key, { day: String(doc.value.dateKey), minute: Number(doc.value.minuteIndex) });
+  }
+  if (points.size > 10_000) throw new Error('Select fewer event minutes before changing these borders.');
+  return [...new Set([...points.values()].flatMap((point) => [minuteKey(point.day, point.minute), cellFormatKey(point.day, point.minute)]))].sort();
+}
+export function eventSelectionFingerprint(state: BrowserLedgerState, coords: readonly FormatCoordinate[]) {
+  const revisions = new Map(state.documents.map((doc) => [doc.key, doc.revision]));
+  return hashValue(eventSelectionKeys(state, coords).map((key) => [key, revisions.get(key) ?? null]));
+}
+
+function eventSelection(state: BrowserLedgerState, coords: readonly FormatCoordinate[], mode: 'group' | 'ungroup' | 'reset',
+  now: number, input?: { title: string; fill?: BrowserFill }, allowedColors: readonly string[] = []):
   { state: BrowserLedgerState; undo: UndoEdit } {
-  const selected = consecutiveSelection(coords); const selectedKeys = new Set(selected.map((coordinate) => minuteKey(coordinate.day, coordinate.minute)));
-  const map = new Map(state.documents.map((doc) => [doc.key, doc])); const groups = new Set<string>();
-  for (const coordinate of selected) {
-    const minute = map.get(minuteKey(coordinate.day, coordinate.minute))?.value;
-    const label = formatFromDocument(map.get(cellFormatKey(coordinate.day, coordinate.minute))?.value).activityGroup;
-    if (isActivityGroupId(minute?.blockId)) groups.add(minute.blockId);
-    if (label) groups.add(label.id);
-  }
-  if (!groups.size) return applyDocumentValues(state, [], now);
-  for (const doc of state.documents) {
-    if (doc.key.startsWith('minute:') && doc.value && groups.has(String(doc.value.blockId)) && !selectedKeys.has(doc.key)) {
-      throw new Error('Select the whole activity before ungrouping it.');
+  const selected = consecutiveSelection(coords);
+  if (!Number.isFinite(now) || !Number.isFinite(new Date(now).getTime())) throw new Error('Use a valid edit time.');
+  const map = new Map(state.documents.map((doc) => [doc.key, doc]));
+  const selectedKeys = new Set(selected.map((point) => minuteKey(point.day, point.minute)));
+  const ids = selectedEventIds(state, selected); const allIds = new Set(ids);
+  if (mode === 'ungroup' && !ids.size) return applyDocumentValues(state, [], now);
+  eventSelectionKeys(state, selected);
+  const targetId = mode === 'group' ? ids.size === 1 ? [...ids][0]! : `activity_${crypto.randomUUID().replaceAll('-', '')}` : null;
+  if (targetId) allIds.add(targetId);
+  const changes = new Map<string, DocumentValueChange>();
+  const set = (key: string, value: Record<string, unknown> | null) => changes.set(key, { key, value });
+  const timestamp = new Date(now).toISOString();
+  const withLabel = (format: Record<string, unknown>, id: string, title: string) => {
+    delete format.activityGroup; delete format.calendarEvent;
+    format[isActivityGroupId(id) ? 'activityGroup' : 'calendarEvent'] = { id, title }; return format;
+  };
+  const civil = (value: Record<string, unknown>) => Date.parse(String(value.dateKey) + 'T00:00:00Z') / 60000 + Number(value.minuteIndex);
+  for (const id of ids) {
+    const labelFor = (value: Record<string, unknown>) => cellEventLabel(formatFromDocument(map.get(cellFormatKey(String(value.dateKey),
+      Number(value.minuteIndex)))?.value), id);
+    const selectedTitles = new Set(selected.flatMap((point) => {
+      const value = map.get(minuteKey(point.day, point.minute))?.value;
+      const label = value?.blockId === id ? labelFor(value) : null;
+      return label ? [label.title] : [];
+    }));
+    // Ordinary legacy block IDs can also belong to unrelated, unbordered notes.
+    // Only the exact selected border may participate in its split.
+    const members = state.documents.filter((doc) => doc.key.startsWith('minute:') && doc.value?.blockId === id &&
+      (isActivityGroupId(id) || selectedTitles.has(labelFor(doc.value)?.title ?? '')))
+      .sort((a, b) => civil(a.value!) - civil(b.value!));
+    if (members.length > 1440) throw new Error('Select an event of at most 24 hours before changing its border.');
+    let run: typeof members = []; let runIndex = 0;
+    const finish = () => {
+      if (!run.length) return;
+      const title = labelFor(run[0]!.value!)?.title ?? 'Activity';
+      const nextId = runIndex++ === 0 && targetId !== id ? id : `activity_${crypto.randomUUID().replaceAll('-', '')}`;
+      allIds.add(nextId);
+      for (const doc of run) {
+        set(doc.key, { ...structuredClone(doc.value!), blockId: nextId, updatedAt: timestamp });
+        const key = cellFormatKey(String(doc.value!.dateKey), Number(doc.value!.minuteIndex)); const previous = map.get(key)?.value;
+        set(key, formatValue(previous, withLabel(formatEnvelope(previous), nextId, title)));
+      }
+      run = [];
+    };
+    for (const doc of members.filter((doc) => !selectedKeys.has(doc.key))) {
+      if (run.length && (civil(doc.value!) !== civil(run.at(-1)!.value!) + 1 ||
+          labelFor(doc.value!)?.title !== labelFor(run.at(-1)!.value!)?.title)) finish();
+      run.push(doc);
     }
-    const label = formatFromDocument(doc.value).activityGroup;
-    if (doc.key.startsWith('category:minuteFormat:') && label && groups.has(label.id)) {
-      const coordinateKey = doc.key.replace('category:minuteFormat:', 'minute:');
-      if (!selectedKeys.has(coordinateKey)) throw new Error('Select the whole activity before ungrouping it.');
+    finish();
+  }
+  const fill = input?.fill ? categoryForFill(state, input.fill, allowedColors, now) : null;
+  if (fill?.change) set(fill.change.key, fill.change.value);
+  const firstMinute = map.get(minuteKey(selected[0]!.day, selected[0]!.minute))?.value;
+  const categoryId = fill?.id ?? String(firstMinute?.categoryId ?? 'unaccounted');
+  for (const point of selected) {
+    const key = minuteKey(point.day, point.minute); const minute = map.get(key)?.value;
+    const formatKey = cellFormatKey(point.day, point.minute); const existing = map.get(formatKey)?.value;
+    if (mode === 'reset') { set(key, null); set(formatKey, { kind: 'minuteFormat', format: { noFill: true } }); }
+    else if (mode === 'group') {
+      set(key, minute ? { ...structuredClone(minute), blockId: targetId!, categoryId, updatedAt: timestamp } : {
+        id: `browser_${crypto.randomUUID().replaceAll('-', '')}`, dateKey: point.day, minuteIndex: point.minute,
+        text: '', categoryId, blockId: targetId!, source: 'manual', createdAt: timestamp, updatedAt: timestamp,
+      });
+      const format = formatEnvelope(existing); delete format.noFill;
+      set(formatKey, formatValue(existing, withLabel(format, targetId!, input!.title.trim())));
+    } else if (minute && ids.has(String(minute.blockId))) {
+      set(key, { ...structuredClone(minute), blockId: `browser_${crypto.randomUUID().replaceAll('-', '')}`, updatedAt: timestamp });
+      const format = formatEnvelope(existing); delete format.activityGroup; delete format.calendarEvent;
+      set(formatKey, formatValue(existing, format));
     }
   }
-  const timestamp = new Date(now).toISOString(); const changes: DocumentValueChange[] = [];
-  for (const coordinate of selected) {
-    const key = minuteKey(coordinate.day, coordinate.minute); const minute = map.get(key)?.value;
-    const formatKey = cellFormatKey(coordinate.day, coordinate.minute); const existing = map.get(formatKey)?.value;
-    const label = formatFromDocument(existing).activityGroup;
-    if (minute && groups.has(String(minute.blockId))) changes.push({ key,
-      value: { ...structuredClone(minute), blockId: `browser_${crypto.randomUUID().replaceAll('-', '')}`, updatedAt: timestamp } });
-    if (label && groups.has(label.id)) {
-      const format = formatEnvelope(existing); delete format.activityGroup;
-      changes.push({ key: formatKey, value: formatValue(existing, format) });
-    }
-  }
-  return applyDocumentValues(state, changes, now);
+  const result = applyDocumentValues(state, [...changes.values()], now);
+  result.undo.blockGuards = [...allIds].map((blockId) => ({ blockId, members: result.state.documents
+    .filter((doc) => doc.key.startsWith('minute:') && doc.value?.blockId === blockId)
+    .map(({ key, revision }) => ({ key, revision })).sort((a, b) => a.key.localeCompare(b.key)) }));
+  return result;
+}
+
+/** Calendar writes remain the phone's separately authorized responsibility. */
+export function groupSelection(state: BrowserLedgerState, coords: readonly FormatCoordinate[], input: { title: string; fill?: BrowserFill },
+  allowedColors: readonly string[], now = Date.now()) {
+  if (!input || typeof input.title !== 'string' || !input.title.trim() || input.title.trim().length > 200) throw new Error('Enter an activity title of up to 200 characters.');
+  return eventSelection(state, coords, 'group', now, input, allowedColors);
+}
+export function ungroupSelection(state: BrowserLedgerState, coords: readonly FormatCoordinate[], now = Date.now()) {
+  return eventSelection(state, coords, 'ungroup', now);
+}
+export function resetCellsSelection(state: BrowserLedgerState, coords: readonly FormatCoordinate[], now = Date.now()) {
+  return eventSelection(state, coords, 'reset', now);
 }

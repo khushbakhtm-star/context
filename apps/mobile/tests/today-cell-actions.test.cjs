@@ -54,6 +54,9 @@ function screen(t, options = {}) {
     getDayCellFormats: options.readFormats ?? (async () => new Map()), getDayActivityGroups: options.readGroups ?? (async () => []),
     editInlineMinute: (...args) => drafts.edit(...args), getSpreadsheetClipboard: () => clipboard,
     resetMinuteFill: async (range) => command('reset-fill', range),
+    resetMinuteCells: async (range) => { command('reset-cells', range); for (let minute = range.startMinute; minute <= range.endMinute; minute++) {
+      rows.delete(`${range.dateKey}:${minute}`); drafts.rebaseCommitted([{ dateKey: range.dateKey, minuteIndex: minute,
+        text: '', categoryId: 'unaccounted', keepColor: false }]); } },
     applyCellFormat: async (range, patch) => command('format', { ...range, patch }),
     colorMinuteRange: async (range, categoryId) => command('color', { ...range, categoryId }),
     ungroupMinuteRange: async (range) => command('ungroup', range),
@@ -244,6 +247,42 @@ function plan(id, minute, account = false) {
     ...(account ? { accountEvent: { accountId: 'account', event: {} } } : {}) };
 }
 
+test('a calendar event has one titled border while its minute editors start with independent blank notes', async (t) => {
+  const event = { ...plan('Appointment', 530), endDate: new Date(2026, 9, 25, 10, 20), color: '#F4511E' };
+  const h = screen(t, { readNative: async () => ({ plans: [event], failures: [] }) });
+  await h.start();
+  assert.equal(h.text(530), ''); assert.equal(h.text(531), '');
+  assert.ok(h.cell(530).props.accessibilityLabel.includes('Appointment'));
+  const textNodes = (node) => !node || typeof node !== 'object' ? [] : [
+    ...(node.type === 'Text' ? [node.props.children] : []), ...[node.props?.children].flat(Infinity).flatMap(textNodes)];
+  assert.equal(textNodes(h.cell(530)).filter((text) => text === 'Appointment').length, 1);
+  assert.equal(textNodes(h.cell(531)).filter((text) => text === 'Appointment').length, 0);
+  await h.tap(531); assert.equal(h.input(531).value, '');
+  h.input(531).onChangeText('Find parking'); await h.settle();
+  assert.equal(h.text(531), 'Find parking'); assert.equal(h.text(530), '');
+});
+
+test('the bottom border button names even one blank minute without copying the title into its note', async (t) => {
+  const h = screen(t, { colors: [{ id: 'family', name: 'Tangerine', color: '#F4511E' }] });
+  await h.start(); await h.tap(600); h.action('Save minute text and show formatting').onPress(); await h.settle();
+  h.action('Apply event border').onPress(); await h.settle();
+  h.action('Activity title for selected minutes').onChangeText('Appointment'); await h.settle();
+  h.action('Choose group fill color').onPress(); await h.settle(); h.palette().onCellColor('family'); await h.settle();
+  h.action('Create group from selected minutes').onPress(); await h.settle();
+  assert.equal(h.calls.at(-1).action, 'group'); assert.equal(h.calls.at(-1).title, 'Appointment');
+  assert.equal(h.calls.at(-1).startMinute, 600); assert.equal(h.calls.at(-1).endMinute, 600);
+  assert.equal(h.text(600), '');
+});
+
+test('Reset cells executes on one tap for a text-free colored cell while Clear remains text-only', async (t) => {
+  const h = screen(t); h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: '', categoryId: 'family', blockId: 'note' });
+  await h.start(); await h.hold(600);
+  assert.equal(h.menu().onClear, undefined); assert.equal(typeof h.menu().onReset, 'function');
+  h.menu().onReset(); await h.settle();
+  assert.equal(h.calls.filter((call) => call.action === 'reset-cells').length, 1);
+  assert.equal(h.rows.has(`${h.day}:600`), false); assert.equal(h.text(600), '');
+});
+
 test('calendar source failures report to Sync without an inline banner and clear on recovery and unmount', async (t) => {
   let nativeFailed = true, accountFailed = true; const warnings = [];
   const h = screen(t, {
@@ -291,7 +330,8 @@ test('saved notes and cached plans paint while both live providers remain pendin
   r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Saved offline note', categoryId: 'work', blockId: 'note' });
   await r.start();
   assert.ok(nativeReads && accountReads, 'the live reads really started and remain unresolved');
-  assert.equal(r.text(600), 'Saved offline note'); assert.equal(r.text(601), 'Cached event');
+  assert.equal(r.text(600), 'Saved offline note'); assert.equal(r.text(601), '');
+  assert.ok(r.cell(601).props.accessibilityLabel.includes('Cached event'));
   await r.refresh(); assert.equal(r.text(600), 'Saved offline note', 'foreground refresh also finishes without those providers');
 });
 
@@ -309,7 +349,8 @@ test('native plans display before slow color reconciliation without hiding saved
   const r = screen(t, { readNative: async () => ({ plans: [plan('Native event', 601)], failures: [] }),
     reconcileColors: () => { colorReads++; return never; } });
   r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Local text', categoryId: 'work', blockId: 'note' });
-  await r.start(); assert.ok(colorReads); assert.equal(r.text(600), 'Local text'); assert.equal(r.text(601), 'Native event');
+  await r.start(); assert.ok(colorReads); assert.equal(r.text(600), 'Local text'); assert.equal(r.text(601), '');
+  assert.ok(r.cell(601).props.accessibilityLabel.includes('Native event'));
 });
 
 test('offline refresh retains known calendar plans and current local notes', async (t) => {
@@ -321,7 +362,9 @@ test('offline refresh retains known calendar plans and current local notes', asy
     readAccount: async () => ({ plans: [cached], failures: offline ? [{ accountId: 'account', code: 'timeout' }] : [], fromCache: offline }) });
   r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Local text', categoryId: 'work', blockId: 'note' });
   await r.start(); offline = true; await r.refresh(); await r.settle();
-  assert.equal(r.text(600), 'Local text'); assert.equal(r.text(601), 'Native cached'); assert.equal(r.text(602), 'Account cached');
+  assert.equal(r.text(600), 'Local text'); assert.equal(r.text(601), ''); assert.equal(r.text(602), '');
+  assert.ok(r.cell(601).props.accessibilityLabel.includes('Native cached'));
+  assert.ok(r.cell(602).props.accessibilityLabel.includes('Account cached'));
 });
 
 test('Basil source color stays stable when native and account refreshes finish in different orders', async (t) => {
@@ -334,15 +377,15 @@ test('Basil source color stays stable when native and account refreshes finish i
     readAccount: () => new Promise((done) => { finishAccount = done; }) });
   const fill = () => r.cell(629).props.children[0].props.style.filter(Boolean)
     .filter((style) => style.backgroundColor).at(-1)?.backgroundColor;
-  await r.start(); assert.equal(r.text(629), 'Pray'); assert.equal(fill(), '#51B749');
+  await r.start(); assert.equal(r.text(629), ''); assert.ok(r.cell(629).props.accessibilityLabel.includes('Pray')); assert.equal(fill(), '#51B749');
   finishNative({ plans: [nativePlan], failures: [] }); await r.settle();
   assert.equal(fill(), '#51B749');
   finishAccount({ plans: [accountPlan], failures: [], fromCache: false }); await r.settle();
-  assert.equal(fill(), '#51B749'); assert.equal(r.text(629), 'Pray');
+  assert.equal(fill(), '#51B749'); assert.equal(r.text(629), ''); assert.ok(r.cell(629).props.accessibilityLabel.includes('Pray'));
   await r.refresh();
   finishAccount({ plans: [accountPlan], failures: [], fromCache: false }); await r.settle();
   finishNative({ plans: [nativePlan], failures: [] }); await r.settle();
-  assert.equal(fill(), '#51B749'); assert.equal(r.text(629), 'Pray');
+  assert.equal(fill(), '#51B749'); assert.equal(r.text(629), ''); assert.ok(r.cell(629).props.accessibilityLabel.includes('Pray'));
 });
 
 test('late provider and color reloads cannot replace a newer inline edit', async (t) => {
@@ -365,9 +408,9 @@ test('revoked native access removes cached plans while keeping saved local notes
         return { plans: [], failures: [{ calendarId: 'native', code: 'ERR_MISSING_CALENDAR_PERMISSION' }] };
       } });
     r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Local note kept', categoryId: 'work', blockId: 'note' });
-    await r.start(); assert.equal(r.text(601), 'Private native plan'); revoked = true;
+    await r.start(); assert.equal(r.text(601), ''); assert.ok(r.cell(601).props.accessibilityLabel.includes('Private native plan')); revoked = true;
     await r.refresh(); await r.settle();
-    assert.notEqual(r.text(601), 'Private native plan'); assert.equal(r.text(600), 'Local note kept');
+    assert.ok(!r.cell(601).props.accessibilityLabel.includes('Private native plan')); assert.equal(r.text(600), 'Local note kept');
   }
 });
 

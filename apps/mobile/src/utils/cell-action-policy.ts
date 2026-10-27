@@ -13,6 +13,7 @@ export type CellActionPolicy = {
   kind: 'empty' | 'single-text' | 'uniform-text' | 'mixed-text';
   sourceMinute: number | null;
   canClear: boolean;
+  canReset: boolean;
   canAutoFill: boolean;
   canGroup: boolean;
   canFormat: boolean;
@@ -46,8 +47,9 @@ export function analyzeCellSelection(cells: readonly CellActionPolicyCell[], pre
     kind: !hasText ? 'empty' : !multiple ? 'single-text' : uniqueTexts.size === 1 ? 'uniform-text' : 'mixed-text',
     sourceMinute: source?.minuteIndex ?? null,
     canClear: hasText,
+    canReset: hasText || groupIds.length > 0 || selected.some((cell) => cell.hasFill || cell.hasFormatting),
     canAutoFill: multiple && uniqueTexts.size === 1,
-    canGroup: multiple && hasText,
+    canGroup: selected.length > 0,
     canFormat: hasText || selected.some((cell) => cell.hasFill || cell.hasFormatting),
     canUngroup: groupIds.length > 0,
     groupIds,

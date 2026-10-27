@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "source": "Context mobile 0.1.17 reviewed source",
+  "source": "Context mobile reviewed calendar title/border and compact-description protocol source",
   "lineEndings": "LF",
   "files": [
     {
@@ -10,8 +10,8 @@
     },
     {
       "path": "utils/cell-format.ts",
-      "bytes": 3117,
-      "sha256": "68f0dfa78d07db1795de224d7fd26dbbbb6738848944c4ed3d1eef57bd050c16"
+      "bytes": 4009,
+      "sha256": "17baced0057e06257d4bd8c3bea9e1d2c6f449a2f5afb5716bad69790117f867"
     },
     {
       "path": "utils/calendar-cell-color.ts",
@@ -20,13 +20,13 @@
     },
     {
       "path": "utils/calendar-minute-log.ts",
-      "bytes": 5424,
-      "sha256": "4479b541c92556b2a2d1e073d22d9eb3fe40052b9c8c929ea7261fc71b1c58bd"
+      "bytes": 9370,
+      "sha256": "7c4c77352c107136a027d0a022e848f543641ea548f42e9afd2435b4281b10cf"
     },
     {
       "path": "utils/calendar-description.ts",
-      "bytes": 6355,
-      "sha256": "f253a6c39262fe6bf7d31fd60011c94c8437c6f17f2c5166bfdd694d851ef5b9"
+      "bytes": 7700,
+      "sha256": "f997f973213eb0fe840c16b549c50de19674132668fcf1d80b239a56c2b52120"
     },
     {
       "path": "sync/codec.ts",

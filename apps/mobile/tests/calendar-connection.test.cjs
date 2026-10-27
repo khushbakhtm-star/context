@@ -11,6 +11,21 @@ function transpile(filename) {
   }).outputText;
 }
 
+function loadUtility(name, cache = new Map()) {
+  const filename = path.join(__dirname, '../src/utils', name + '.ts');
+  if (cache.has(filename)) return cache.get(filename);
+  const module = { exports: {} }; cache.set(filename, module.exports);
+  vm.runInNewContext(transpile(filename), { module, exports: module.exports, Date, Intl,
+    TextEncoder, TextDecoder, Uint8Array, Map, Set, Error, console,
+    require(specifier) {
+      if (specifier.startsWith('@noble/')) return require(specifier);
+      if (specifier.startsWith('./')) return loadUtility(specifier.slice(2), cache);
+      throw new Error(`Unexpected pure calendar utility import: ${specifier}`);
+    },
+  }, { filename });
+  cache.set(filename, module.exports); return module.exports;
+}
+
 function calendarRuntime(overrides = {}) {
   const state = {
     platform: 'android', permission: 'granted',
@@ -58,10 +73,11 @@ function calendarRuntime(overrides = {}) {
       if (name === './categories' || name === '../sync/engine' || name === '../sync/codec') return {};
       if (name === '../theme') return { categoryById: () => ({ name: 'Activity' }) };
       if (name === '../utils/time') return timeModule.exports;
-      if (name === '../utils/calendar-minute-log') return require('../src/utils/calendar-minute-log.ts');
-      if (name === '../utils/cell-format') return require('../src/utils/cell-format.ts');
-      if (name === '../utils/activity-translation') return require('../src/utils/activity-translation.ts');
-      if (name === '../utils/calendar-cell-color') return require('../src/utils/calendar-cell-color.ts');
+      if (name === '../utils/calendar-description') return loadUtility('calendar-description');
+      if (name === '../utils/calendar-minute-log') return loadUtility('calendar-minute-log');
+      if (name === '../utils/cell-format') return loadUtility('cell-format');
+      if (name === '../utils/activity-translation') return loadUtility('activity-translation');
+      if (name === '../utils/calendar-cell-color') return loadUtility('calendar-cell-color');
       if (name === '../../modules/context-calendar-colors') return { getEventColorsAsync: async () => ({}) };
       throw new Error(`Unexpected calendar test import: ${name}`);
     },

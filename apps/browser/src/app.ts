@@ -1,12 +1,14 @@
 import { dateKey, addDays, minuteLabel, parseDateKey, startOfWeek } from '../shared/utils/time';
-import { formatFromDocument, cellFormatKey } from '../shared/utils/cell-format';
+import { cellEventLabel, formatFromDocument, cellFormatKey } from '../shared/utils/cell-format';
 import { calendarCellColor } from '../shared/utils/calendar-cell-color';
 import { BrowserStore } from './store';
 import { GoogleConnection, type BrowserPlan } from './google';
 import { editCells, getMinute, minuteKey, pastedChanges, undoEdit, type CellChange, type UndoEdit } from './ledger';
 import { flushBrowserText } from './editor';
 import { serializeSpreadsheetCells } from '../shared/utils/spreadsheet-paste';
-import { formatCells, groupSelection, ungroupSelection, type BrowserFormatPatch } from './formatting';
+import { eventSelectionFingerprint, formatCells, groupSelection, ungroupSelection, resetCellsSelection,
+  GOOGLE_ACTIVITY_COLORS, type BrowserFormatPatch, type BrowserFill } from './formatting';
+import { minuteCellPresentation } from './cell-presentation';
 import { effectiveTextColor } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
 
@@ -30,6 +32,8 @@ const entryInput = element<HTMLTextAreaElement>('minute-entry');
 const composerViewport = bindComposerViewport(window, main, [element('entry-bar'), element('format-bar')]);
 let liveFillColors: { color: string; providerColorId: string }[] = [];
 let groupSelectionStamp: string | null = null;
+let groupSelectionRevision: string | null = null;
+let groupFillOptions: BrowserFill[] = [];
 let viewGeneration = 0; let drag: { day: string; minute: number } | null = null; let rangeEnd: { day: string; minute: number } | null = null;
 let firstRendered = -1;
 const settings = { appearance: 'system', clock: '12' };
@@ -50,7 +54,7 @@ function updateBars() {
   document.body.classList.toggle('has-entry-bar', Boolean(store && entryBarMode === 'entry'));
   document.body.classList.toggle('has-format-bar', Boolean(store && entryBarMode === 'format'));
   composerViewport.refresh();
-  for (const id of ['save-text', 'format-bold', 'format-italic', 'format-underline', 'format-text-color', 'format-fill', 'finish-format']) element<HTMLButtonElement>(id).disabled = commandBusy;
+  for (const id of ['save-text', 'format-bold', 'format-italic', 'format-underline', 'format-text-color', 'format-fill', 'format-border', 'finish-format']) element<HTMLButtonElement>(id).disabled = commandBusy;
   if (!store || entryBarMode !== 'format') return;
   const map = new Map(store.state.documents.map((doc) => [doc.key, doc])); let coords;
   try { coords = selectionCells(); } catch { return; }
@@ -64,7 +68,25 @@ function updateBars() {
 }
 function mirrorDraft() {
   if (!editor) return; const node = cell(editor.day, editor.minute);
-  if (node) { node.textContent = editor.input.value; node.classList.remove('planned'); node.setAttribute('aria-label', `${editor.day}, ${minuteLabel(editor.minute, clock12)}, ${editor.input.value}`); }
+  if (node) { setCellNote(node, editor.input.value); node.classList.remove('planned'); node.setAttribute('aria-label', `${editor.day}, ${minuteLabel(editor.minute, clock12)}, ${editor.input.value}`); }
+}
+function setCellNote(node: HTMLElement, text: string) {
+  const note = node.querySelector<HTMLElement>('.cell-note');
+  if (note) note.textContent = text; else node.textContent = text;
+}
+function openGroup() {
+  if (!store) return;
+  groupSelectionStamp = selectionStamp(); groupSelectionRevision = eventSelectionFingerprint(store.state, selectionCells());
+  const entry = getMinute(store.state, selected.day, selected.minute)?.value;
+  const format = formatFromDocument(store.state.documents.find((doc) => doc.key === cellFormatKey(selected.day, selected.minute))?.value);
+  element<HTMLInputElement>('group-title').value = cellEventLabel(format, String(entry?.blockId ?? ''))?.title ?? String(entry?.text ?? '').slice(0, 200);
+  groupFillOptions = [...importedFillOptions(), ...liveFillColors, ...GOOGLE_ACTIVITY_COLORS.map((color) => ({ color, name: color }))];
+  const colors = element<HTMLSelectElement>('group-color'); colors.replaceChildren();
+  groupFillOptions.forEach((fill, index) => { const option = document.createElement('option'); option.value = String(index);
+    option.textContent = fill.name ?? fill.color; colors.append(option); });
+  const current = groupFillOptions.findIndex((fill) => fill.categoryId === entry?.categoryId);
+  colors.value = String(current >= 0 ? current : groupFillOptions.findIndex((fill) => fill.color === '#5A6986'));
+  element<HTMLDialogElement>('group-dialog').showModal();
 }
 function closeCellMenu() { element('cell-menu').hidden = true; }
 async function cellCommand(work: () => Promise<void>) {
@@ -101,17 +123,26 @@ async function showCellMenu(x: number, y: number) {
   const sameDay = coords.every((point) => point.day === coords[0]!.day);
   const hasGroup = coords.some((point) => {
     const minute = getMinute(store!.state, point.day, point.minute)?.value;
-    return /^activity_[A-Za-z0-9_-]+$/.test(String(minute?.blockId ?? '')) || Boolean(formatFromDocument(store!.state.documents.find((doc) => doc.key === cellFormatKey(point.day, point.minute))?.value).activityGroup);
+    return /^activity_[A-Za-z0-9_-]+$/.test(String(minute?.blockId ?? '')) || Boolean(cellEventLabel(formatFromDocument(store!.state.documents.find((doc) => doc.key === cellFormatKey(point.day, point.minute))?.value), String(minute?.blockId ?? '')));
   });
-  if (sameDay && coords.length > 1 && !hasGroup) add('Group', async () => { groupSelectionStamp = selectionStamp(); element<HTMLInputElement>('group-title').value = distinct[0]?.slice(0, 200) ?? ''; element<HTMLDialogElement>('group-dialog').showModal(); });
+  if (sameDay) add('Group', async () => { openGroup(); });
   if (sameDay && hasGroup) add('Ungroup', async () => { await mutateSelection((state, points) => ungroupSelection(state, points)); });
+  const resettable = coords.some((point) => {
+    const minute = getMinute(store!.state, point.day, point.minute)?.value;
+    const format = formatFromDocument(store!.state.documents.find((doc) => doc.key === cellFormatKey(point.day, point.minute))?.value);
+    return Boolean(String(minute?.text ?? '').length || minute && !format.noFill ||
+      Object.keys(format).some((key) => key !== 'noFill') || !format.noFill && planForMinute(point.day, point.minute));
+  });
+  if (sameDay && resettable) add('Reset cells', async () => { await mutateSelection((state, points) => resetCellsSelection(state, points)); });
   menu.hidden = false; menu.style.left = `${Math.max(6, Math.min(x, innerWidth - menu.offsetWidth - 6))}px`; menu.style.top = `${Math.max(6, Math.min(y, innerHeight - menu.offsetHeight - 6))}px`;
 }
 async function mutateSelection(make: (state: BrowserStore['state'], coords: { day: string; minute: number }[]) => { state: BrowserStore['state']; undo: UndoEdit }) {
   if (!store) throw new Error('Unlock your ledger first.'); const active = store; const stamp = selectionStamp(); const coords = selectionCells();
+  const eventRevision = eventSelectionFingerprint(active.state, coords);
   const expected = new Map(coords.flatMap((point) => [minuteKey(point.day, point.minute), cellFormatKey(point.day, point.minute)]).map((key) => [key, active.state.documents.find((doc) => doc.key === key)?.revision]));
   let result: ReturnType<typeof make> | undefined;
   await active.update((state) => { if (store !== active || selectionStamp() !== stamp) throw new Error('The selection changed. Try again.');
+    if (eventSelectionFingerprint(state, coords) !== eventRevision) throw new Error('This activity changed. Select its cells again.');
     const map = new Map(state.documents.map((doc) => [doc.key, doc.revision])); for (const [key, revision] of expected) if (map.get(key) !== revision) throw new Error('These cells changed. Select them again.');
     result = make(state, coords); return result.state; });
   if (result!.undo.after.length) undo = result!.undo; render(); void synchronize(false);
@@ -133,7 +164,7 @@ function importedFillOptions() {
 async function formatSelection(patch: BrowserFormatPatch) {
   if (!store || entryBarMode !== 'format') return; const active = store; const stamp = selectionStamp(); const coords = selectionCells();
   const expected = new Map(coords.flatMap((point) => [minuteKey(point.day, point.minute), cellFormatKey(point.day, point.minute)]).map((key) => [key, active.state.documents.find((doc) => doc.key === key)?.revision]));
-  const allowed = [...importedFillOptions().map((value) => value.color), ...liveFillColors.map((value) => value.color)]; let result: ReturnType<typeof formatCells> | undefined;
+  const allowed = [...GOOGLE_ACTIVITY_COLORS, ...importedFillOptions().map((value) => value.color), ...liveFillColors.map((value) => value.color)]; let result: ReturnType<typeof formatCells> | undefined;
   await active.update((state) => {
     if (store !== active || selectionStamp() !== stamp || entryBarMode !== 'format') throw new Error('The selection changed. Choose the format again.');
     const map = new Map(state.documents.map((doc) => [doc.key, doc.revision]));
@@ -202,9 +233,14 @@ function render() {
       const doc = docs.get(minuteKey(date, minute)); const value = doc?.value; const format = formatFromDocument(docs.get(cellFormatKey(date, minute))?.value);
       const plan = planForMinute(date, minute);
       const draft = editor?.day === date && editor.minute === minute ? editor.input.value : undefined;
-      if (draft !== undefined) node.textContent = draft;
-      else if (value) node.textContent = String(value.text ?? '');
-      else if (plan) { node.textContent = plan.title; node.classList.add('planned'); }
+      const presentation = minuteCellPresentation(docs, date, minute, planForMinute);
+      if (presentation.borderId) { node.classList.add('event-cell');
+        if (presentation.first) { node.classList.add('event-first'); const title = document.createElement('span'); title.className = 'cell-event-title';
+          title.textContent = `▣ ${presentation.title ?? ''}`; title.setAttribute('aria-label', `Activity: ${presentation.title ?? ''}`); node.append(title); }
+        if (presentation.last) node.classList.add('event-last');
+      }
+      const note = document.createElement('span'); note.className = 'cell-note'; note.textContent = draft ?? presentation.text; node.append(note);
+      if (presentation.planned) node.classList.add('planned');
       const category = value ? docs.get(`category:${value.categoryId}`)?.value : undefined;
       const background = calendarCellColor({ hasActual: Boolean(value), actualColor: typeof category?.color === 'string' ? category.color : undefined, planColor: plan?.color, noFill: format.noFill });
       if (background) { node.style.backgroundColor = background; node.classList.add('recorded'); }
@@ -254,7 +290,7 @@ async function saveEditor(showFormat = false) {
 function beginEdit(date: string, minute: number, initial?: string, focus = false) {
   if (!store) { options.showModal(); return; }
   if (editor) { if (editor.day === date && editor.minute === minute) { if (initial !== undefined) { editor.input.value = initial; mirrorDraft(); } if (focus || initial !== undefined) editor.input.focus(); return; } void saveEditor().then(() => beginEdit(date, minute, initial, focus)).catch(report); return; }
-  const node = cell(date, minute); if (!node) return; select({ day: date, minute }); const document = getMinute(store.state, date, minute); const original = String(document?.value?.text ?? planForMinute(date, minute)?.title ?? '');
+  const node = cell(date, minute); if (!node) return; select({ day: date, minute }); const document = getMinute(store.state, date, minute); const original = String(document?.value?.text ?? '');
   entryInput.value = initial ?? original; entryInput.setAttribute('aria-label', `Minute text for ${minuteLabel(minute, clock12)} on ${date}`);
   editor = { input: entryInput, day: date, minute, revision: document?.revision, original, saving: null }; entryBarMode = 'entry'; updateBars(); mirrorDraft();
   node.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
@@ -365,11 +401,18 @@ for (const key of ['bold', 'italic', 'underline'] as const) element(`format-${ke
 element('format-text-color').onclick = () => { if (entryBarMode === 'format' && !commandBusy) element<HTMLDialogElement>('text-color-dialog').showModal(); };
 element('apply-text-color').onclick = () => { const value = element<HTMLInputElement>('text-color').value; void cellCommand(async () => { await formatSelection({ textColor: value }); element<HTMLDialogElement>('text-color-dialog').close(); }); };
 element('format-fill').onclick = showFillOptions;
+element('format-border').onclick = () => {
+  if (!store || entryBarMode !== 'format' || commandBusy) return;
+  try { openGroup(); } catch (error) { report(error); }
+};
 element('reset-fill').onclick = () => { void cellCommand(async () => { await formatSelection({ fill: null }); element<HTMLDialogElement>('fill-dialog').close(); }); };
 element('load-fill-colors').onclick = () => { void cellCommand(async () => { if (!connection.canReadCalendars()) await connect(true); liveFillColors = await connection.activityColors(); showFillOptions(); }); };
 element<HTMLFormElement>('group-form').onsubmit = (event) => { event.preventDefault(); const title = element<HTMLInputElement>('group-title').value; const stamp = groupSelectionStamp;
   void cellCommand(async () => { if (!stamp || selectionStamp() !== stamp) throw new Error('The selection changed. Choose Group again.');
-    await mutateSelection((state, coords) => groupSelection(state, coords, { title }, [])); element<HTMLDialogElement>('group-dialog').close(); groupSelectionStamp = null; entryBarMode = 'format'; updateBars(); }); };
+    if (!store || eventSelectionFingerprint(store.state, selectionCells()) !== groupSelectionRevision) throw new Error('This activity changed. Choose Group again.');
+    const fill = groupFillOptions[Number(element<HTMLSelectElement>('group-color').value)]; if (!fill) throw new Error('Choose an activity color.');
+    await mutateSelection((state, coords) => groupSelection(state, coords, { title, fill }, groupFillOptions.map((value) => value.color)));
+    element<HTMLDialogElement>('group-dialog').close(); groupSelectionStamp = null; groupSelectionRevision = null; entryBarMode = 'format'; updateBars(); }); };
 document.addEventListener('pointerup', () => { drag = null; if (cellHoldTimer) clearTimeout(cellHoldTimer); });
 document.addEventListener('pointercancel', () => { drag = null; if (cellHoldTimer) clearTimeout(cellHoldTimer); });
 document.addEventListener('pointerdown', (event) => { if (event.target instanceof Node && !element('cell-menu').contains(event.target)) closeCellMenu(); });

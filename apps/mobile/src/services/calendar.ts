@@ -5,8 +5,10 @@ import { getEventColorsAsync } from '../../modules/context-calendar-colors';
 
 import {
   deleteSyncBinding,
-  getDaySegments,
+  getDayCalendarSegments,
   getEntriesForBlock,
+  getActivityTitleForEntries,
+  getSpreadsheetCells,
   getPendingSyncDates,
   getPendingSyncDatesFor,
   getSyncBindings,
@@ -18,15 +20,17 @@ import {
   markSyncDateFailed,
   saveSyncBinding,
   recolorExpectedMinuteEntries,
+  replaceProjectedMinutes,
   setSetting,
 } from '../data/database';
 import { categoryById } from '../theme';
-import type { ActivitySegment, CalendarPreferences, DeviceCalendar, PlannedEvent, SyncBinding } from '../types';
-import { addDays, dateKey, localDateAtMinute, minuteLabel, parseDateKey } from '../utils/time';
+import type { ActivitySegment, CalendarPreferences, DeviceCalendar, MinuteEntry, PlannedEvent, SyncBinding } from '../types';
+import { addDays, dateKey, localDateAtMinute, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
 import { isActivityGroupId } from '../utils/cell-format';
 import { bindingInterval, matchActivityTranslation } from '../utils/activity-translation';
 import { calendarColor, nativeEventColor } from '../utils/calendar-cell-color';
-import { formatCalendarMinuteLog } from '../utils/calendar-minute-log';
+import { formatCalendarMinuteLog, parseCalendarMinuteLog, parseCompactCalendarMinuteLog } from '../utils/calendar-minute-log';
+import { makeCompactCalendarDescription, isDescriptionLog, type DescriptionLog } from '../utils/calendar-description';
 import { getAccounts } from '../sync/accounts';
 import { hasConfiguredAccountCalendarWriter } from './calendar-write-routing';
 import { ensureSourceColorCategory, listCategories } from './categories';
@@ -130,6 +134,7 @@ export class CalendarReadError extends Error {
 let calendarReadChain: Promise<void> = Promise.resolve();
 let calendarReadDiagnostics: CalendarReadDiagnostics | null = null;
 const verifiedNativeEventColors = new WeakMap<PlannedEvent, boolean>();
+const verifiedNativeSelections = new WeakMap<readonly PlannedEvent[], { dateKey: string; calendarIds: readonly string[] }>();
 
 /** Metadata only: no event titles, descriptions, attendees, or account labels are retained. */
 export function getCalendarReadDiagnostics(): CalendarReadDiagnostics | null {
@@ -267,6 +272,7 @@ export function loadPlannedEventsResult(
     calendarReadDiagnostics = { dateKey: value, checkedAt: new Date().toISOString(),
       selectedCalendarIds: selectedIds, calendars: statuses, totalPlans: plans.length,
       failedCalendarCount: failures.length };
+    if (!failures.length) verifiedNativeSelections.set(plans, { dateKey: value, calendarIds: selectedIds });
     return { plans, failures };
   };
   const job = calendarReadChain.then(work, work);
@@ -291,7 +297,9 @@ let nativeColorChain: Promise<void> = Promise.resolve();
  * read. Listing calendar plans, including Print's reads, remains strictly read-only. */
 export function reconcileLinkedNativeColors(value: string, plans: readonly PlannedEvent[], calendars: readonly DeviceCalendar[]): Promise<string[]> {
   const work = async () => {
-    const changed = new Set<string>();
+    const read = verifiedNativeSelections.get(plans);
+    const selectedCalendars = read?.dateKey === value ? calendars.filter((calendar) => read.calendarIds.includes(calendar.id)) : [];
+    const changed = new Set(await importLinkedNativeEdits(value, selectedCalendars));
     const owned = await accountOwnedCalendarBlocks();
     await listCategories();
     for (const binding of await getSyncBindings(value)) {
@@ -338,6 +346,15 @@ export function reconcileLinkedNativeColors(value: string, plans: readonly Plann
       const affected = await recolorExpectedMinuteEntries(entries, category.id, { key, value: {
         version: 1, calendarId: binding.calendarId, eventId: binding.eventId, remoteColor: color,
         localColorHash: localActivityColorHash(next) } satisfies NativeColorReceipt }, guard);
+      const writeKey = nativeWriteReceiptKey(binding.calendarId, binding.eventId);
+      const writeReceipt = await getSetting<NativeWriteReceipt | null>(writeKey, null);
+      if (writeReceipt?.version === 2) {
+        const title = await getActivityTitleForEntries(next);
+        const segment: ActivitySegment = { ...interval, segmentKey: binding.segmentKey, blockId: binding.blockId,
+          categoryId: category.id, entries: next, ...(title ? { activityTitle: title } : {}) };
+        // Color-only imports are acknowledged local state, not a pending edit.
+        await setSetting(writeKey, { ...writeReceipt, localHash: nativeLocalHash(segment) });
+      }
       for (const day of affected) changed.add(day);
       notifyCalendarColorImported(next);
     }
@@ -420,18 +437,21 @@ function segmentTitle(segment: ActivitySegment) {
   return `${first.slice(0, 61).trimEnd()}...`;
 }
 
-function eventDetails(segment: ActivitySegment) {
+function eventDetails(segment: ActivitySegment, sourceTitle?: string) {
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const sourceLabel = sourceTitle === undefined ? undefined : sourceTitle.trim().slice(0, 200) || 'Untitled event';
   return {
-    title: segmentTitle(segment),
+    title: segment.activityTitle && segment.activityTitle !== sourceLabel
+      ? segment.activityTitle : sourceTitle !== undefined ? sourceTitle : segmentTitle(segment),
     startDate: localDateAtMinute(segment.dateKey, segment.startMinute),
     endDate: localDateAtMinute(segment.dateKey, segment.endMinute + 1),
     timeZone,
-    notes: formatCalendarMinuteLog(segment.entries),
+    notes: makeCompactCalendarDescription('', segment.entries).description,
   };
 }
 
-type NativeWriteReceipt = { version: 1; calendarId: string; eventId: string; contentHash: string };
+type NativeWriteReceipt = { version: 1 | 2; calendarId: string; eventId: string; contentHash: string;
+  localHash?: string; sourceTitle?: string; descriptionLog?: DescriptionLog };
 const nativeWriteReceiptKey = (calendarId: string, eventId: string) =>
   `calendar.native-write.v1.${encodeURIComponent(calendarId)}.${encodeURIComponent(eventId)}`;
 function nativeEventContentHash(event: { title?: unknown; notes?: unknown; startDate?: unknown; endDate?: unknown;
@@ -445,13 +465,19 @@ function nativeEventContentHash(event: { title?: unknown; notes?: unknown; start
     notes: typeof event.notes === 'string' ? event.notes.replace(/\r\n/g, '\n') : '', start, end,
     allDay: event.allDay === true, recurring });
 }
-async function recordNativeWrite(calendarId: string, eventId: string, segment: ActivitySegment) {
-  await setSetting(nativeWriteReceiptKey(calendarId, eventId), { version: 1, calendarId, eventId,
-    contentHash: nativeEventContentHash(eventDetails(segment)) } satisfies NativeWriteReceipt);
+function nativeLocalHash(segment: ActivitySegment) {
+  return hashValue({ blockId: segment.blockId, activityTitle: segment.activityTitle ?? null,
+    entries: segment.entries.map(({ dateKey, minuteIndex, text, categoryId }) => ({ dateKey, minuteIndex, text, categoryId })) });
 }
-async function requireUnchangedNativeEvent(binding: SyncBinding) {
-  let event: { calendarId: string; title?: unknown; notes?: unknown; startDate?: unknown; endDate?: unknown;
-    allDay?: unknown; recurrenceRule?: unknown };
+async function recordNativeWrite(calendarId: string, eventId: string, segment: ActivitySegment,
+  details = eventDetails(segment)) {
+  await setSetting(nativeWriteReceiptKey(calendarId, eventId), { version: 2, calendarId, eventId,
+    contentHash: nativeEventContentHash(details), localHash: nativeLocalHash(segment), sourceTitle: details.title.slice(0, 200),
+    descriptionLog: makeCompactCalendarDescription('', segment.entries).descriptionLog } satisfies NativeWriteReceipt);
+}
+type NativeBoundEvent = { calendarId: string; title?: unknown; notes?: unknown; startDate?: unknown; endDate?: unknown;
+  allDay?: unknown; recurrenceRule?: unknown; displayColor?: unknown; eventColor?: unknown; color?: unknown };
+async function readNativeBoundEvent(binding: SyncBinding): Promise<NativeBoundEvent | null> {
   try {
     if (Platform.OS === 'android' && typeof CalendarRead.ExpoCalendarEvent?.get === 'function') {
       const read = calendarReadChain.then(async () => {
@@ -462,29 +488,168 @@ async function requireUnchangedNativeEvent(binding: SyncBinding) {
           startDate: current.startDate, endDate: current.endDate, allDay: current.allDay, recurrenceRule: current.recurrenceRule };
       });
       calendarReadChain = read.then(() => undefined, () => undefined);
-      event = await read;
-    } else event = await Calendar.getEventAsync(binding.eventId);
+      return await read;
+    } else return await Calendar.getEventAsync(binding.eventId);
   }
-  catch (error) { if (isEventNotFoundError(error)) return; throw error; }
+  catch (error) { if (isEventNotFoundError(error)) return null; throw error; }
+}
+async function requireUnchangedNativeEvent(binding: SyncBinding) {
+  const event = await readNativeBoundEvent(binding);
+  if (!event) return null;
   if (event.calendarId !== binding.calendarId) throw new Error('A linked calendar event changed calendars. Review it before synchronizing.');
   const key = nativeWriteReceiptKey(binding.calendarId, binding.eventId);
   const receipt = await getSetting<NativeWriteReceipt | null>(key, null);
   const contentHash = nativeEventContentHash(event);
   if (receipt) {
-    if (receipt.version !== 1 || receipt.calendarId !== binding.calendarId || receipt.eventId !== binding.eventId ||
+    if (![1, 2].includes(receipt.version) || receipt.calendarId !== binding.calendarId || receipt.eventId !== binding.eventId ||
         !/^[a-f0-9]{64}$/.test(receipt.contentHash) || receipt.contentHash !== contentHash) {
       throw new Error('This linked event was edited in your calendar. Its title, times and notes were kept. Review and link those changes before synchronizing this activity.');
     }
   } else {
-    // Older native copies have only an exact private event ID and their bound
-    // interval. A moved/resized event is not the old slot's disposable copy.
+    // An exact ID and unchanged interval alone cannot prove that remote words
+    // are still our previous write. Never manufacture a baseline from them.
     const interval = bindingInterval(binding.segmentKey, binding.blockId);
     if (!interval || event.allDay || readEventDate(event.startDate).getTime() !== localDateAtMinute(interval.dateKey, interval.startMinute).getTime() ||
         readEventDate(event.endDate).getTime() !== localDateAtMinute(interval.dateKey, interval.endMinute + 1).getTime()) {
       throw new Error('This linked event moved or changed duration in your calendar. It was kept. Review and link its new time before synchronizing or resetting the old cells.');
     }
-    await setSetting(key, { version: 1, calendarId: binding.calendarId, eventId: binding.eventId, contentHash } satisfies NativeWriteReceipt);
+    const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === interval.dateKey &&
+      entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute);
+    const activityTitle = await getActivityTitleForEntries(entries);
+    const segment: ActivitySegment = { segmentKey: binding.segmentKey, blockId: binding.blockId, dateKey: interval.dateKey,
+      startMinute: interval.startMinute, endMinute: interval.endMinute, entries, categoryId: entries[0]?.categoryId ?? 'unaccounted',
+      ...(activityTitle ? { activityTitle } : {}) };
+    const current = eventDetails(segment);
+    const compactMatches = entries.length > 0 && nativeEventContentHash(current) === contentHash;
+    const legacyMatches = entries.length > 0 && nativeEventContentHash({ ...current,
+      notes: formatCalendarMinuteLog(entries) }) === contentHash;
+    if (!compactMatches && !legacyMatches) {
+      throw new Error('This linked event has no verified write baseline and may have been edited in your calendar. Review it before synchronizing.');
+    }
+    await setSetting(key, { version: 2, calendarId: binding.calendarId, eventId: binding.eventId, contentHash,
+      localHash: nativeLocalHash(segment), sourceTitle: current.title.slice(0, 200),
+      ...(compactMatches ? { descriptionLog: makeCompactCalendarDescription('', entries).descriptionLog } : {}) } satisfies NativeWriteReceipt);
   }
+  return event;
+}
+
+/** Only a private exact event binding can import edits. Reading/listing plans
+ * never adopts events by their title, time, color, or description. */
+async function importLinkedNativeEdits(value: string, calendars: readonly DeviceCalendar[]) {
+  const changed = new Set<string>();
+  const owned = await accountOwnedCalendarBlocks();
+  for (const binding of await getSyncBindings(value)) {
+    if (owned.has(binding.blockId) || !calendars.some((calendar) => calendar.id === binding.calendarId)) continue;
+    const receiptKey = nativeWriteReceiptKey(binding.calendarId, binding.eventId);
+    const receipt = await getSetting<NativeWriteReceipt | null>(receiptKey, null);
+    if (!receipt) continue; // Legacy unproven copies remain protected by the write guard.
+    if (![1, 2].includes(receipt.version) || receipt.calendarId !== binding.calendarId || receipt.eventId !== binding.eventId ||
+        !/^[a-f0-9]{64}$/.test(receipt.contentHash) ||
+        (receipt.version === 2 && (!receipt.localHash || !/^[a-f0-9]{64}$/.test(receipt.localHash))) ||
+        (receipt.descriptionLog !== undefined && !isDescriptionLog(receipt.descriptionLog))) {
+      throw new Error('This linked calendar receipt needs review before importing edits.');
+    }
+    const remote = await readNativeBoundEvent(binding);
+    if (!remote || nativeEventContentHash(remote) === receipt.contentHash) continue;
+    if (remote.calendarId !== binding.calendarId) throw new Error('A linked calendar event changed calendars. Review its new calendar.');
+    const interval = bindingInterval(binding.segmentKey, binding.blockId);
+    if (!interval) throw new Error('This linked activity has an invalid time. Review its calendar link.');
+    const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === interval.dateKey &&
+      entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute);
+    const activityTitle = await getActivityTitleForEntries(entries);
+    const current: ActivitySegment = { segmentKey: binding.segmentKey, blockId: binding.blockId, dateKey: interval.dateKey,
+      startMinute: interval.startMinute, endMinute: interval.endMinute, categoryId: entries[0]?.categoryId ?? 'unaccounted', entries,
+      ...(activityTitle ? { activityTitle } : {}) };
+    // V1 recorded only the exact provider write hash. Reconstruct that original
+    // format from CURRENT local rows; equality proves no local note/time/title edit.
+    const unchanged = receipt.version === 2 ? nativeLocalHash(current) === receipt.localHash :
+      entries.length > 0 && nativeEventContentHash({ ...eventDetails(current), notes: formatCalendarMinuteLog(current.entries) }) === receipt.contentHash;
+    if (!unchanged) throw new Error('This linked event was edited in your calendar and in Context. Review both versions before synchronizing.');
+    const start = readEventDate(remote.startDate); const end = readEventDate(remote.endDate);
+    const endInclusive = new Date(end.getTime() - 1);
+    const rule = remote.recurrenceRule;
+    const recurring = typeof rule === 'string' ? Boolean(rule.trim()) : rule && typeof rule === 'object'
+      ? Object.values(rule).some((item) => item !== null && item !== undefined && item !== '') : Boolean(rule);
+    if (remote.allDay || recurring || dateKey(start) !== dateKey(endInclusive) ||
+        start.getSeconds() || start.getMilliseconds() || end.getSeconds() || end.getMilliseconds() || end <= start) {
+      throw new Error('This linked calendar edit needs review: use one timed, non-recurring activity within a day.');
+    }
+    const nextDay = dateKey(start); const nextStart = minuteIndexForDate(start); const nextEnd = minuteIndexForDate(endInclusive);
+    const otherBindings = await getSyncBindingsForBlock(binding.blockId);
+    if (otherBindings.some((other) => other.segmentKey !== binding.segmentKey && (() => {
+      const part = bindingInterval(other.segmentKey, other.blockId);
+      return !part || part.dateKey === nextDay && part.startMinute <= nextEnd && part.endMinute >= nextStart;
+    })())) throw new Error('This calendar edit overlaps another linked part of the activity. Review both event times.');
+    if ((await getEntriesForBlock(binding.blockId)).some((entry) => entry.dateKey === nextDay &&
+      entry.minuteIndex >= nextStart && entry.minuteIndex <= nextEnd && !(entry.dateKey === interval.dateKey &&
+        entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute))) {
+      throw new Error('This calendar edit overlaps another recorded part of the activity. Review the minute cells.');
+    }
+    const notes = typeof remote.notes === 'string' ? remote.notes.replace(/\r\n/g, '\n') : '';
+    let parsed: { minuteIndex: number; text: string }[] = [];
+    if (notes.trim()) {
+      // New ordinary prose is one minute's note, never a replacement event title.
+      if (receipt.descriptionLog?.version === 3) parsed = parseCompactCalendarMinuteLog(notes, receipt.descriptionLog);
+      else if (/^\d{1,2}:[0-5]\d(?:[ \t]*(?:AM|PM))?(?:[ \t]|$)/i.test(notes)) parsed = parseCalendarMinuteLog(notes);
+      else parsed = [{ minuteIndex: nextStart, text: notes }];
+    }
+    const noteMap = new Map<number, string>();
+    const stillOldCoordinates = nextDay !== interval.dateKey || nextStart !== interval.startMinute;
+    const oldCoordinates = stillOldCoordinates && parsed.every((item) => item.minuteIndex >= interval.startMinute && item.minuteIndex <= interval.endMinute);
+    for (const item of parsed) {
+      const index = oldCoordinates ? nextStart + item.minuteIndex - interval.startMinute : item.minuteIndex;
+      if (index < nextStart || index > nextEnd) throw new Error('The edited calendar notes are outside this activity. Review the minute timestamps.');
+      noteMap.set(index, item.text);
+    }
+    const title = typeof remote.title === 'string' && remote.title.trim() ? remote.title : 'Untitled event';
+    const labelTitle = title.trim().slice(0, 200);
+    const colorValues = await getEventColorsAsync([binding.calendarId], start.getTime(), end.getTime());
+    const exactColor = calendarColor(colorValues[`${binding.eventId}@${start.getTime()}`]) ?? calendarColor(colorValues[binding.eventId]) ??
+      calendarColor(remote.displayColor) ?? calendarColor(remote.eventColor) ?? calendarColor(remote.color);
+    const categoryId = exactColor ? (await ensureSourceColorCategory({ color: exactColor, name: title,
+      provider: 'device', calendarId: binding.calendarId })).id : current.categoryId;
+    const imported = Array.from({ length: nextEnd - nextStart + 1 }, (_, offset) => ({ dateKey: nextDay,
+      minuteIndex: nextStart + offset, text: noteMap.get(nextStart + offset) ?? '', categoryId }));
+    const snapshotRanges = [{ dateKey: interval.dateKey, startMinute: interval.startMinute, endMinute: interval.endMinute },
+      { dateKey: nextDay, startMinute: nextStart, endMinute: nextEnd }];
+    const snapshots = [...new Map((await Promise.all(snapshotRanges.map(async (range) =>
+      (await getSpreadsheetCells(range)).map((cell) => ({ dateKey: range.dateKey, cell }))))).flat()
+      .map((snapshot) => [`${snapshot.dateKey}:${snapshot.cell.minuteIndex}`, snapshot] as const)).values()];
+    const expectedFormats = snapshots.map(({ dateKey, cell }) => ({ dateKey, minuteIndex: cell.minuteIndex,
+      format: cell.format, version: cell.version }));
+    const guardEntries: MinuteEntry[] = snapshots.map(({ dateKey, cell }) => ({ id: '', dateKey, minuteIndex: cell.minuteIndex,
+      text: '', categoryId: 'unaccounted', blockId: '', source: 'manual', createdAt: '', updatedAt: '', ...cell.entry }));
+    const nextBinding = { ...binding, dateKey: nextDay,
+      segmentKey: `${nextDay}:${binding.blockId}:${nextStart}-${nextEnd}` };
+    const nextSegment: ActivitySegment = { ...current, segmentKey: nextBinding.segmentKey, dateKey: nextDay,
+      startMinute: nextStart, endMinute: nextEnd, categoryId, activityTitle: labelTitle,
+      entries: imported.map((entry, index) => ({ ...entries[Math.min(index, entries.length - 1)]!, ...entry,
+        blockId: binding.blockId })) };
+    const beforeCommitGuard = () => requireCalendarColorImportCurrent(guardEntries);
+    beforeCommitGuard();
+    if (await getCalendarPermissionStatus() !== 'granted') throw new Error('Calendar access changed. Retry after allowing calendar reading.');
+    if ((await accountOwnedCalendarBlocks()).has(binding.blockId)) continue;
+    const latestRemote = await readNativeBoundEvent(binding);
+    if (!latestRemote || latestRemote.calendarId !== binding.calendarId ||
+        nativeEventContentHash(latestRemote) !== nativeEventContentHash(remote)) {
+      throw new Error('This calendar event changed again while importing it. Refresh before retrying.');
+    }
+    await replaceProjectedMinutes({ blockId: binding.blockId, previousDate: interval.dateKey, previousStart: interval.startMinute,
+      previousEnd: interval.endMinute, expectedEntries: entries, expectedActivityTitle: activityTitle, activityTitle: labelTitle,
+      entries: imported, expectedFormats, beforeCommitGuard, expectedBinding: binding, nextBinding, clearPreviousFormats: true,
+      localReceipt: { key: receiptKey, value: { version: 2, calendarId: binding.calendarId, eventId: binding.eventId,
+        contentHash: nativeEventContentHash(remote), localHash: nativeLocalHash(nextSegment), sourceTitle: labelTitle,
+        ...(receipt.descriptionLog?.version === 3 && notes.trim() ? { descriptionLog: receipt.descriptionLog } :
+          !notes.trim() ? { descriptionLog: makeCompactCalendarDescription('', imported).descriptionLog } : {}) } } });
+    changed.add(interval.dateKey); changed.add(nextDay);
+    const importedRows = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === nextDay &&
+      entry.minuteIndex >= nextStart && entry.minuteIndex <= nextEnd);
+    const nextCoordinates = new Set(importedRows.map((entry) => `${entry.dateKey}:${entry.minuteIndex}`));
+    const removedRows = entries.filter((entry) => !nextCoordinates.has(`${entry.dateKey}:${entry.minuteIndex}`))
+      .map((entry) => ({ ...entry, text: '', categoryId: 'unaccounted', blockId: '' }));
+    notifyCalendarColorImported([...removedRows, ...importedRows], true);
+  }
+  return [...changed];
 }
 
 type NativeCreateIntent = { version: 1; calendarId: string; blockId: string; segmentKey: string; eventId: string | null };
@@ -535,12 +700,13 @@ async function createSegmentEvent(
       event.notes?.split(/\r?\n/).includes(blockMarker),
     );
   if (existing) {
-    await requireUnchangedNativeEvent({ calendarId, eventId: existing.id, blockId: segment.blockId,
+    const source = await requireUnchangedNativeEvent({ calendarId, eventId: existing.id, blockId: segment.blockId,
       segmentKey: segment.segmentKey, dateKey: segment.dateKey, updatedAt: '' });
     await requireNativeWriteAuthority(segment.blockId, canContinue);
-    const updatedId = await Calendar.updateEventAsync(existing.id, eventDetails(segment));
+    const details = eventDetails(segment, typeof source?.title === 'string' ? source.title : undefined);
+    const updatedId = await Calendar.updateEventAsync(existing.id, details);
     const eventId = updatedId || existing.id;
-    await recordNativeWrite(calendarId, eventId, segment);
+    await recordNativeWrite(calendarId, eventId, segment, details);
     claimedEventIds.add(eventId);
     return eventId;
   }
@@ -558,12 +724,13 @@ async function createSegmentEvent(
     if (!await boundEventIsDefinitelyMissing(intent.eventId)) {
       const recorded = await Calendar.getEventAsync(intent.eventId);
       if (recorded.calendarId !== calendarId) throw new Error('The unfinished calendar update belongs to a different calendar.');
-      await requireUnchangedNativeEvent({ calendarId, eventId: intent.eventId, blockId: segment.blockId,
+      const source = await requireUnchangedNativeEvent({ calendarId, eventId: intent.eventId, blockId: segment.blockId,
         segmentKey: segment.segmentKey, dateKey: segment.dateKey, updatedAt: '' });
       await requireNativeWriteAuthority(segment.blockId, canContinue);
-      const updatedId = await Calendar.updateEventAsync(intent.eventId, eventDetails(segment));
+      const details = eventDetails(segment, typeof source?.title === 'string' ? source.title : undefined);
+      const updatedId = await Calendar.updateEventAsync(intent.eventId, details);
       const recoveredId = updatedId || intent.eventId;
-      await recordNativeWrite(calendarId, recoveredId, segment);
+      await recordNativeWrite(calendarId, recoveredId, segment, details);
       if (recoveredId !== intent.eventId) await setSetting(intentKey, { ...intent, eventId: recoveredId });
       claimedEventIds.add(recoveredId);
       return recoveredId;
@@ -618,7 +785,7 @@ async function updateOrReplaceEvent(
   claimedEventIds: Set<string>,
   canContinue: () => boolean,
 ): Promise<ReconciliationResult> {
-  await requireUnchangedNativeEvent(binding);
+  const source = await requireUnchangedNativeEvent(binding);
   if (binding.calendarId !== targetCalendarId) {
     // Create first so changing the destination can never erase the only remote copy.
     const replacementId = await createSegmentEvent(
@@ -661,8 +828,9 @@ async function updateOrReplaceEvent(
 
   await requireNativeWriteAuthority(segment.blockId, canContinue);
   try {
-    const updatedId = await Calendar.updateEventAsync(binding.eventId, eventDetails(segment));
-    await recordNativeWrite(targetCalendarId, updatedId || binding.eventId, segment);
+    const details = eventDetails(segment, typeof source?.title === 'string' ? source.title : undefined);
+    const updatedId = await Calendar.updateEventAsync(binding.eventId, details);
+    await recordNativeWrite(targetCalendarId, updatedId || binding.eventId, segment, details);
     return { eventId: updatedId || binding.eventId, action: 'updated' };
   } catch (updateError) {
     if (!canContinue()) throw new ProjectionCancelledError();
@@ -701,8 +869,13 @@ export async function syncActualDay(
   if (isWeb()) return { created: 0, updated: 0, removed: 0 };
   if (await hasConfiguredAccountCalendarWriter()) return { created: 0, updated: 0, removed: 0, deferred: true };
   const owned = await accountOwnedCalendarBlocks();
-  const allSegments = await getDaySegments(value);
-  const segments = allSegments.filter((segment) => !owned.has(segment.blockId));
+  const allSegments = await getDayCalendarSegments(value);
+  const initialBindings = await getSyncBindings(value);
+  const legacyBoundBlocks = new Set(initialBindings.map((binding) => binding.blockId));
+  // Ordinary minute notes belong only to the private ledger. A deliberate
+  // bordered activity or an existing exact legacy binding is a calendar event.
+  const segments = allSegments.filter((segment) => !owned.has(segment.blockId) &&
+    (Boolean(segment.activityTitle) || legacyBoundBlocks.has(segment.blockId)));
   for (const blockId of new Set(segments.filter((segment) => isActivityGroupId(segment.blockId)).map((segment) => segment.blockId))) {
     const members = await getEntriesForBlock(blockId);
     if (!members.every((entry) => entry.dateKey === value)) continue;
@@ -729,7 +902,7 @@ export async function syncActualDay(
   }
   const allBindings = await getSyncBindings(value);
   const bindings = allBindings.filter((binding) => !owned.has(binding.blockId));
-  const deferred = allSegments.length !== segments.length || allBindings.length !== bindings.length;
+  const deferred = allSegments.some((segment) => owned.has(segment.blockId)) || allBindings.length !== bindings.length;
   const unused = new Map(bindings.map((binding) => [binding.segmentKey, binding]));
   const claimedEventIds = new Set(
     bindings
@@ -808,7 +981,7 @@ export async function syncActualDay(
       const members = await getEntriesForBlock(binding.blockId);
       const existing = await getSyncBindingsForBlock(binding.blockId);
       const previous = existing.map((item) => bindingInterval(item.segmentKey, binding.blockId));
-      const current = (await Promise.all([...new Set(members.map((member) => member.dateKey))].map(getDaySegments)))
+      const current = (await Promise.all([...new Set(members.map((member) => member.dateKey))].map(getDayCalendarSegments)))
         .flat().filter((segment) => segment.blockId === binding.blockId).map((segment) => ({ key: segment.segmentKey,
           dateKey: segment.dateKey, startMinute: segment.startMinute, endMinute: segment.endMinute }));
       const mapping = previous.every((interval) => interval != null) ? matchActivityTranslation(previous, current) : null;

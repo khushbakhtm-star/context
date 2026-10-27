@@ -1,0 +1,1 @@
+Create calendar events from named, bordered minute blocks. Keep event titles separate from individual minute notes. Reset cells removes selected minutes from an event and clears their text and formatting. Import calendar moves, colors and cleared descriptions without restoring stale notes. Show consecutive repeated notes once at their first timestamp.
