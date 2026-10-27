@@ -1,0 +1,109 @@
+name: Context unsigned Wear OS watch preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact reviewed Context watch 0.1.9 source commit
+        required: true
+        default: 9c213ad36d0175d215c943aa9bf1c2ffed9db1d0
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: context-unsigned-watch-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CONTEXT_SOURCE_COMMIT: 9c213ad36d0175d215c943aa9bf1c2ffed9db1d0
+  EXPO_PUBLIC_CONTEXT_DISTRIBUTION: store
+  EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL: standalone
+  EAS_BUILD_PROFILE: wear-preview
+  EAS_BUILD_PLATFORM: android
+  CONTEXT_WEAR_BUILD: '1'
+  EXPO_NO_TELEMETRY: '1'
+
+jobs:
+  unsigned-watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Reject any unreviewed source input
+        env:
+          REQUESTED_SOURCE: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          test "$REQUESTED_SOURCE" = "$CONTEXT_SOURCE_COMMIT"
+          [[ "$CONTEXT_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          echo "CONTEXT_PREVIEW_REPORTS=$RUNNER_TEMP/context-watch-preview" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/context-watch-preview"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.CONTEXT_SOURCE_COMMIT }}
+          path: release
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.19.0
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17.0.21+9
+      - name: Install pinned Corepack and pnpm
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/context-node-tools" --ignore-scripts --no-audit --no-fund corepack@0.36.0
+          tools="$RUNNER_TEMP/context-node-tools/node_modules/.bin"
+          "$tools/corepack" enable --install-directory "$tools"
+          "$tools/corepack" prepare pnpm@11.25.0 --activate
+          echo "$tools" >> "$GITHUB_PATH"
+      - name: Install exact Android SDK and Gradle
+        run: |
+          set -euo pipefail
+          bootstrap="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$bootstrap"
+          printf 'y\n%.0s' {1..100} | "$bootstrap" --sdk_root="$ANDROID_HOME" --licenses > "$CONTEXT_PREVIEW_REPORTS/android-licenses.txt"
+          "$bootstrap" --sdk_root="$ANDROID_HOME" 'cmdline-tools;23.0'
+          sdkmanager="$ANDROID_HOME/cmdline-tools/23.0/bin/sdkmanager"
+          "$sdkmanager" --sdk_root="$ANDROID_HOME" 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'
+          "$sdkmanager" --sdk_root="$ANDROID_HOME" --list_installed > "$CONTEXT_PREVIEW_REPORTS/android-packages.txt"
+          curl --fail --location --retry 3 https://services.gradle.org/distributions/gradle-9.4.1-bin.zip -o "$RUNNER_TEMP/context-gradle.zip"
+          printf '%s  %s\n' '2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb' "$RUNNER_TEMP/context-gradle.zip" | sha256sum --check -
+          unzip -q "$RUNNER_TEMP/context-gradle.zip" -d "$RUNNER_TEMP/context-gradle"
+          echo "$RUNNER_TEMP/context-gradle/gradle-9.4.1/bin" >> "$GITHUB_PATH"
+      - name: Install locked dependencies and generate Android
+        working-directory: release/apps/mobile
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CONTEXT_SOURCE_COMMIT"
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+          node scripts/google-oauth-preflight.cjs
+          printf '%s  %s\n' 'fd958ca9b434d114ccc70c010d5404b537d49cd6ff09e239c917793ef4872991' 'node_modules/expo/template.tgz' | sha256sum --check -
+          corepack pnpm exec expo prebuild --platform android --no-install --template "$(pwd)/node_modules/expo/template.tgz"
+      - name: Disable signing only in the generated watch project
+        run: python3 controller/.github/scripts/watch-preview.py prepare --source release --reports "$CONTEXT_PREVIEW_REPORTS"
+      - name: Test and assemble the unsigned native watch APK
+        working-directory: release/apps/mobile/android
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --max-workers=2 :wear:test :wear:assembleRelease 2>&1 | tee "$CONTEXT_PREVIEW_REPORTS/gradle-build.log"
+      - name: Align and verify the actual unsigned artifact
+        run: python3 controller/.github/scripts/watch-preview.py verify --source release --reports "$CONTEXT_PREVIEW_REPORTS"
+      - name: Upload unsigned APK and build receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: context-0.1.9-watch-unsigned
+          path: ${{ runner.temp }}/context-watch-preview/
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
