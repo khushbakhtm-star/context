@@ -247,7 +247,7 @@ def verify(source, reports, receipt):
         dex_files = {name: archive.read(name) for name in names if re.fullmatch(r"classes(?:[2-9]|[1-9][0-9]+)?\.dex", name)}
         classes = verify_required_class_definitions(dex_files, MODULES)
     if (f"package: name='{APP_ID}' versionCode='{CODE}' versionName='{VERSION}'" not in identity or
-            "uses-feature: name='android.hardware.type.watch'" not in identity or "sdkVersion:'30'" not in identity):
+            "uses-feature: name='android.hardware.type.watch'" not in identity or not re.search(r"^(?:minSdkVersion|sdkVersion):'30'\s*$", identity, re.M)):
         raise ValueError("Actual watch package/version/required feature/minimum SDK differs")
     tests = {"cases": 0, "failures": 0, "errors": 0, "skipped": 0}
     test_files = list((mobile / "android/wear/build/test-results").glob("test*/TEST-*.xml"))
