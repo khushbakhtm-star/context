@@ -159,17 +159,20 @@ def tile_preview_verified(xml, links, require_content=True):
 
 
 def tile_preview_versions(links):
-    versions = {}
+    values = []
     for item in links["preview"]["files"]:
         config = item["configuration"]
         if not re.fullmatch(r"(?:v[1-9][0-9]*)?", config):
             raise ValueError("Unexpected non-version Tile preview configuration")
-        versions[item["member"]] = int(config[1:]) if config else 0
-    supported = [version for version in versions.values() if version <= 30]
+        values.append((item["member"], int(config[1:]) if config else 0))
+    supported = [version for _, version in values if version <= 30]
     if not supported:
         raise ValueError("No Tile preview drawable applies to the minimum SDK")
     minimum_choice = max(supported)
-    return {member: version >= minimum_choice for member, version in versions.items()}
+    result = {}
+    for member, version in values:
+        result[member] = result.get(member, False) or version >= minimum_choice
+    return result
 
 
 def tile_manifest_verified(xml, resources):
@@ -180,7 +183,7 @@ def tile_manifest_verified(xml, resources):
     block = blocks[0]
     if not ("com.google.android.wearable.permission.BIND_TILE_PROVIDER" in block and
             "androidx.wear.tiles.action.BIND_TILE_PROVIDER" in block and "androidx.wear.tiles.PREVIEW" in block and
-            re.search(r'android:exported[^\n]*0xffffffff', block)):
+            re.search(r'android:exported[^=\n]*=\s*(?:\(type 0x12\))?(?:true|0xffffffff)(?=\s|$)', block)):
         raise ValueError("Compiled Tile service permission/action/preview/export status is invalid")
     preview = tile_resource_files(resources)["preview"]
     previews = [item for item in element_blocks(block, "meta-data") if "androidx.wear.tiles.PREVIEW" in item]
@@ -188,7 +191,7 @@ def tile_manifest_verified(xml, resources):
         raise ValueError("Compiled Tile preview must point to its approved-emblem drawable")
     activities = [block for block in element_blocks(xml, "activity") if
                   re.search(r'android:name[^\n]*="(?:com\.context\.minuteledger\.wear\.MinuteActivity|\.MinuteActivity)"', block)]
-    if len(activities) != 1 or not re.search(r'android:launchMode[^\n]*(?:0x1|"singleTop")', activities[0]):
+    if len(activities) != 1 or not re.search(r'android:launchMode[^=\n]*=\s*(?:\(type 0x10\))?(?:0x1|1|"singleTop")(?=\s|$)', activities[0]):
         raise ValueError("Compiled MinuteActivity must use singleTop")
     return True
 
