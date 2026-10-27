@@ -70,6 +70,7 @@ type Props = {
   dataVersion: number;
   focusRequest: FocusRequest;
   onFocusConsumed: (token?: number) => void;
+  onFocusedMinuteChange?: (point: { dateKey: string; minuteIndex: number }) => void;
   onDataChanged: () => void;
   onOpenSettings: () => void;
   onSyncWarningChange?: (message: string | null) => void;
@@ -88,7 +89,7 @@ type Props = {
 
 export function TodayScreen({
   activeDate, onDateChange, calendars, preferences, dataVersion, focusRequest,
-  onFocusConsumed, onDataChanged, onOpenSettings, onSyncWarningChange, dayCount = 1, onDayCountChange, selectedDates, dateSelectionOpen = false,
+  onFocusConsumed, onFocusedMinuteChange, onDataChanged, onOpenSettings, onSyncWarningChange, dayCount = 1, onDayCountChange, selectedDates, dateSelectionOpen = false,
   zoom = 1, onZoomChange, clockFormat = '12h', onCreatePlan, viewResetToken = 0, onPeriodSwipe,
 }: Props) {
   const { colors, resolvedMode } = useAppTheme();
@@ -138,6 +139,10 @@ export function TodayScreen({
   const horizontalOffset = useRef(new Animated.Value(0)).current;
   const horizontalOffsetRef = useRef(0);
   const verticalOffsetRef = useRef(0);
+  const manualFocusScroll = useRef(false);
+  const focusedDayRef = useRef(activeDate);
+  const focusCallbackRef = useRef(onFocusedMinuteChange);
+  focusCallbackRef.current = onFocusedMinuteChange;
   const positionedViewRef = useRef(false);
   const gridViewportRef = useRef<ComponentRef<typeof View>>(null);
   const minuteViewportRef = useRef<ComponentRef<typeof View>>(null);
@@ -1134,8 +1139,11 @@ export function TodayScreen({
   }, []);
 
   useEffect(() => {
-    if (!editorRef.current) jumpToMinute(visibleDaysRef.current.includes(dateKey(new Date()))
-      ? minuteIndexForDate(new Date()) : 9 * 60);
+    const explicit = focusRequest && visibleDaysRef.current.includes(focusRequest.dateKey) ? focusRequest : null;
+    const day = explicit?.dateKey ?? (visibleDaysRef.current.includes(activeDate) ? activeDate : visibleDaysRef.current[0]!);
+    const minute = explicit?.minuteIndex ?? (visibleDaysRef.current.includes(dateKey(new Date())) ? minuteIndexForDate(new Date()) : 9 * 60);
+    focusedDayRef.current = day; focusCallbackRef.current?.({ dateKey: day, minuteIndex: minute });
+    if (!editorRef.current && !explicit) jumpToMinute(minute);
     // Changing the viewed range positions the ledger; refreshes and clock ticks do not move it.
   }, [navigationKey, jumpToMinute]);
 
@@ -1272,6 +1280,8 @@ export function TodayScreen({
       setActionError(null);
       setEditor(null);
       setInlineSelection(selection);
+      focusedDayRef.current = day;
+      focusCallbackRef.current?.({ dateKey: day, minuteIndex: minute });
       setInlineEditing(editText);
       setEntryBarMode('entry'); setFormatPalette(null);
       setCellMenuOpen(false);
@@ -1366,6 +1376,8 @@ export function TodayScreen({
   useEffect(() => {
     if (!focusRequest || !days.includes(focusRequest.dateKey) || focusTokenRef.current === focusRequest.token) return;
     focusTokenRef.current = focusRequest.token;
+    focusedDayRef.current = focusRequest.dateKey;
+    focusCallbackRef.current?.({ dateKey: focusRequest.dateKey, minuteIndex: focusRequest.minuteIndex });
     jumpToMinute(focusRequest.minuteIndex);
     const focusToken = focusRequest.token;
     if (focusRequest.openEditor === false) { onFocusConsumed(focusToken); return; }
@@ -1955,7 +1967,16 @@ export function TodayScreen({
         initialNumToRender={24} maxToRenderPerBatch={24} windowSize={9} keyboardShouldPersistTaps="always"
         keyboardDismissMode="on-drag" removeClippedSubviews={false}
         scrollEnabled={!pinching && !rangeDragging && !groupDragging} scrollEventThrottle={16}
+        onScrollBeginDrag={() => { manualFocusScroll.current = true; }}
+        onScrollEndDrag={() => { manualFocusScroll.current = false; }}
+        onMomentumScrollBegin={() => { manualFocusScroll.current = true; }}
+        onMomentumScrollEnd={() => { manualFocusScroll.current = false; }}
         onScroll={(event) => {
+          if (manualFocusScroll.current && !inlineEditingRef.current && !rangeSelecting && !rangeDragRef.current && !groupDragRef.current) {
+            const day = visibleDaysRef.current.includes(focusedDayRef.current) ? focusedDayRef.current : visibleDaysRef.current[0]!;
+            focusCallbackRef.current?.({ dateKey: day, minuteIndex: Math.max(0, Math.min(1439,
+              Math.floor(event.nativeEvent.contentOffset.y / gridLayoutRef.current.rowHeight))) });
+          }
           if (Math.abs(event.nativeEvent.contentOffset.y - verticalOffsetRef.current) > 0.5) cellActivationRef.current = null;
           verticalOffsetRef.current = event.nativeEvent.contentOffset.y; positionFillHandle();
         }}

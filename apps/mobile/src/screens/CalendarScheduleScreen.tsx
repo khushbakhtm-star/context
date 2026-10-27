@@ -10,12 +10,13 @@ import type { ActivitySegment, CalendarPreferences, DeviceCalendar, PlannedEvent
 import { calendarViewDates } from '../utils/calendar-view-mode';
 import { isDateKey } from '../utils/date-selection';
 import { scheduleAgendaItems, scheduleDescription, scheduleTimeRange, type ScheduleAgendaItem } from '../utils/schedule-agenda';
-import { dateKey, formatDayHeading, minuteIndexForDate, parseDateKey } from '../utils/time';
+import { dateKey, formatDayHeading, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
 import { createCalendarListFocus, type CalendarViewFocusRequest } from '../utils/calendar-list-focus';
 
 type Props = {
   focusRequest?: CalendarViewFocusRequest | null;
   activeDate: string;
+  onFocusedMinuteChange?: (point: { dateKey: string; minuteIndex: number }) => void;
   selectedDates?: readonly string[] | null;
   calendars: DeviceCalendar[];
   preferences: CalendarPreferences;
@@ -38,18 +39,33 @@ function accessDenied(error: unknown) {
 }
 
 export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, clockFormat,
-  onOpenMinute, onVisibleMonthChange, onSyncWarningChange }: Props) {
+  onOpenMinute, onVisibleMonthChange, onSyncWarningChange, onFocusedMinuteChange }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const daysKey = calendarViewDates('schedule', activeDate, selectedDates).join('|');
   const days = useMemo(() => daysKey ? daysKey.split('|') : [], [daysKey]);
   const list = useRef<FlatList<string>>(null);
   const listFocus = useMemo(() => createCalendarListFocus(() => list.current, () => AppState.currentState === 'active'), []);
+  const pendingFocus = useRef<{ dateKey: string; minuteIndex: number; token: number; offset?: number } | null>(null);
+  const focusedCallback = useRef(onFocusedMinuteChange); focusedCallback.current = onFocusedMinuteChange;
+  const focusedMinute = useMemo(() => {
+    if (Number.isInteger(focusRequest?.minuteIndex) && focusRequest!.minuteIndex! >= 0 && focusRequest!.minuteIndex! < 1440)
+      return focusRequest!.minuteIndex!;
+    const current = new Date();
+    return (focusRequest?.dateKey ?? activeDate) === dateKey(current) ? minuteIndexForDate(current) : 9 * 60;
+  }, [focusRequest?.token, focusRequest?.dateKey, focusRequest?.minuteIndex, activeDate]);
   useEffect(() => {
-    if (focusRequest && isDateKey(focusRequest.dateKey)) listFocus.request(days.indexOf(focusRequest.dateKey));
-    return () => listFocus.cancel();
-  }, [focusRequest?.token, focusRequest?.dateKey, daysKey, listFocus]);
+    const index = focusRequest && isDateKey(focusRequest.dateKey) ? days.indexOf(focusRequest.dateKey) : -1;
+    pendingFocus.current = index >= 0 ? { dateKey: focusRequest!.dateKey, minuteIndex: focusedMinute, token: focusRequest!.token } : null;
+    if (index >= 0) {
+      requestDays.current([focusRequest!.dateKey]); listFocus.request(index);
+      focusedCallback.current?.({ dateKey: focusRequest!.dateKey, minuteIndex: focusedMinute });
+    }
+    return () => { pendingFocus.current = null; listFocus.cancel(); };
+  }, [focusRequest?.token, focusRequest?.dateKey, focusedMinute, daysKey, listFocus]);
   const [data, setData] = useState<Record<string, DayState>>({});
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const focusedMinuteRef = useRef(focusedMinute); focusedMinuteRef.current = focusedMinute;
   const requestDays = useRef<(days: string[]) => void>(() => {});
   const visibleDays = useRef<string[]>([]);
   const visibleMonthCallback = useRef(onVisibleMonthChange);
@@ -63,6 +79,9 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
     visibleDays.current = visible;
     requestDays.current(visible);
     visibleMonthCallback.current?.(`${visible[0]!.slice(0, 7)}-01`);
+    const pending = pendingFocus.current;
+    if (!pending || visible.includes(pending.dateKey)) focusedCallback.current?.({
+      dateKey: pending?.dateKey ?? visible[0]!, minuteIndex: pending?.minuteIndex ?? focusedMinuteRef.current });
   }).current;
 
   useEffect(() => {
@@ -143,7 +162,8 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
     };
     requestDays.current = enqueueDays;
     const visible = visibleDays.current.filter((day) => positions.has(day));
-    enqueueDays(visible.length ? visible : days.slice(0, 3));
+    const focusDay = pendingFocus.current?.dateKey;
+    enqueueDays(focusDay && positions.has(focusDay) ? [focusDay] : visible.length ? visible : days.slice(0, 3));
     return () => { cancelled = true; pools.forEach((pool) => { pool.queue.length = 0; }); };
   }, [daysKey, calendarKey, preferenceKey, dataVersion]);
 
@@ -155,16 +175,38 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
   useEffect(() => () => onSyncWarningChange?.(null), [onSyncWarningChange]);
   const openDay = (day: string) => {
     const now = new Date();
-    onOpenMinute(day, day === dateKey(now) ? minuteIndexForDate(now) : 9 * 60);
+    const minute = focusRequest?.dateKey === day ? focusedMinute : day === dateKey(now) ? minuteIndexForDate(now) : 9 * 60;
+    focusedCallback.current?.({ dateKey: day, minuteIndex: minute }); onOpenMinute(day, minute);
   };
-  return <View style={styles.container}>
+  function focusMarker(day: string) {
+    return <View key="focused-minute" accessibilityLabel={`Focused time ${formatDayHeading(day)}, ${minuteLabel(focusedMinute, clockFormat === '12h')}`}
+      onLayout={(event) => {
+        const pending = pendingFocus.current;
+        if (pending?.dateKey !== day || pending.token !== focusRequest?.token) return;
+        const offset = event.nativeEvent.layout.y;
+        if (Number.isFinite(offset)) { pending.offset = offset; listFocus.request(days.indexOf(day), -offset); }
+      }} style={styles.focusMarker}>
+      <Text numberOfLines={2} style={styles.focusMarkerText}>{new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+        .format(parseDateKey(day))} · {minuteLabel(focusedMinute, clockFormat === '12h')}</Text>
+    </View>;
+  }
+  const revealMeasuredFocus = () => {
+    const pending = pendingFocus.current;
+    if (pending?.offset != null) listFocus.request(days.indexOf(pending.dateKey), -pending.offset);
+  };
+  return <View style={styles.container} onLayout={(event) => setViewportHeight(Math.max(0, event.nativeEvent.layout.height))}>
     <FlatList ref={list} key={daysKey} data={days} extraData={data} keyExtractor={(day) => day}
-      onScrollToIndexFailed={listFocus.onFailure} onScrollBeginDrag={listFocus.cancel}
+      onScrollToIndexFailed={listFocus.onFailure} onScrollBeginDrag={() => { pendingFocus.current = null; listFocus.cancel(); }}
       maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
       initialNumToRender={5} maxToRenderPerBatch={5} windowSize={5}
       onViewableItemsChanged={onViewableItemsChanged} viewabilityConfig={viewability}
-      contentContainerStyle={styles.content} renderItem={({ item: day }) => {
+      onContentSizeChange={revealMeasuredFocus}
+      contentContainerStyle={[styles.content, { paddingBottom: Math.max(24, viewportHeight) }]} renderItem={({ item: day }) => {
         const state = data[day];
+        const items = state?.items ?? [];
+        const hasFocus = focusRequest?.dateKey === day && days.includes(day);
+        const nextFocusItem = items.findIndex((item) => !item.allDay && item.endMinute >= focusedMinute);
+        const markerIndex = nextFocusItem < 0 ? items.length : nextFocusItem;
         const heading = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
           .format(parseDateKey(day));
         return <View style={styles.day}>
@@ -174,19 +216,20 @@ export function CalendarScheduleScreen({ activeDate, focusRequest, selectedDates
           {(!state || !state.items.length && (!state.localReady || !state.deviceReady || !state.accountReady))
           ? <View style={styles.loading} accessibilityLabel={`Loading ${formatDayHeading(day)}`}>
             <ActivityIndicator size="small" color={colors.muted} />
-          </View> : state.items.length ? state.items.map((item) => {
+          </View> : state.items.length ? state.items.flatMap((item, itemIndex) => {
             const time = scheduleTimeRange(item, clockFormat);
             const description = scheduleDescription(item, clockFormat, 600);
-            return <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`${heading}, ${time}, ${item.title}`}
-              accessibilityHint="Open minute cells" onPress={() => onOpenMinute(day, item.startMinute)} style={styles.event}>
+            return [hasFocus && itemIndex === markerIndex ? focusMarker(day) : null, <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`${heading}, ${time}, ${item.title}`}
+              accessibilityHint="Open minute cells" onPress={() => { focusedCallback.current?.({ dateKey: day, minuteIndex: item.startMinute }); onOpenMinute(day, item.startMinute); }} style={styles.event}>
               <View style={[styles.eventMarker, { backgroundColor: item.color }]} />
               <View style={styles.eventContent}>
                 <Text maxFontSizeMultiplier={1.5} style={styles.eventTime}>{time}</Text>
                 <Text style={styles.eventTitle}>{item.title}</Text>
                 {description.trim() ? <Text numberOfLines={3} style={styles.description}>{description}</Text> : null}
               </View>
-            </Pressable>;
+            </Pressable>];
           }) : state.failed ? null : <Text style={styles.empty}>No events</Text>}
+          {hasFocus && markerIndex === items.length ? focusMarker(day) : null}
         </View>;
       }} />
   </View>;
@@ -198,6 +241,8 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   day: { paddingBottom: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.hairline },
   dayHeading: { minHeight: 48, justifyContent: 'center', paddingVertical: 10 },
   dayTitle: { color: colors.ink, fontSize: 16, fontWeight: '600' },
+  focusMarker: { minHeight: 36, justifyContent: 'center', paddingVertical: 6 },
+  focusMarkerText: { color: colors.ink, fontSize: 14, fontVariant: ['tabular-nums'], fontWeight: '600' },
   loading: { minHeight: 44, alignItems: 'flex-start', justifyContent: 'center' },
   event: { minHeight: 64, flexDirection: 'row', marginBottom: 8, borderRadius: 8, overflow: 'hidden', backgroundColor: colors.surface },
   eventMarker: { width: 4 },

@@ -14,9 +14,9 @@ const transpile = (source) => ts.transpileModule(source, { compilerOptions: {
 function header(props = {}) {
   const file = path.join(__dirname, 'calendar-header.test.cjs');
   const text = fs.readFileSync(file, 'utf8'); const prefix = text.slice(0, text.indexOf('\ntest('));
-  const alertStub = 'Alert: { alert() {} }'; assert.ok(prefix.includes(alertStub));
+  const alertStub = 'Alert: { alert: (...args) => calls.errors.push(args) }'; assert.ok(prefix.includes(alertStub));
   const module = { exports: {} }; const alerts = [];
-  vm.runInNewContext(prefix.replace(alertStub, 'Alert: { alert(...args) { observedAlerts.push(args); } }') +
+  vm.runInNewContext(prefix.replace(alertStub, 'Alert: { alert(...args) { calls.errors.push(args); observedAlerts.push(args); } }') +
     '\nmodule.exports = { headerHarness };', { module, exports: module.exports, __dirname,
       require, console, observedAlerts: alerts });
   return { ...module.exports.headerHarness(props), alerts };

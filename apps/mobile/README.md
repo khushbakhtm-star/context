@@ -89,16 +89,21 @@ and phone plans use a stable display order instead of changing with request comp
   popup. The bottom entry and formatting bars close after their respective checkmarks.
 - The top row contains the three-bar menu, previous arrow, current-view calendar icon, next arrow,
   **Undo**, **Redo**, and the two-arrow **Sync** icon. The calendar icon matches **Day**, **Week**,
-  **Month**, **Year**, or **Schedule**. Tap it once to return to now without changing that view or
-  pinch zoom: the minute grid reveals the current minute, Month/Year reveal today, and Schedule
-  positions today's heading at the top. A short delay distinguishes a single tap from a double-tap.
-  Double-tap the icon to choose **Day / Week / Month / Year / Schedule**; there is no separate
-  triangle button. Hold it to choose dates. **Pick** selects individual days; **Range** selects a
+  **Month**, **Year**, or **Schedule**. Tap it once to choose a view or open **Pick / Range**.
+  Double-tap to return to now without changing the view or pinch zoom: the minute grid reveals
+  the current minute, Month/Year reveal today, and Schedule reveals the current minute's position.
+  A short delay distinguishes the single tap from a double-tap. Switching views keeps the date
+  and minute you were working on; Schedule shows a non-event time marker at that position.
+  There is no separate triangle or long-press date shortcut. **Pick** selects individual days; **Range** selects a
   continuous span of up to 28 days. Up to seven selected days show minute columns; larger selections
   use a calendar overview. Going to now clears a custom date selection so today can be displayed.
 - Pinch changes only minute-row height. **Day** always fits one day and **Week** fits all seven days;
   column widths and the time rail remain fixed. Swipe horizontally to the previous or next day,
-  week, month or year for the chosen view. Zoom is remembered separately on each phone.
+  week or month for the chosen view. Month shows activity text and fill without start times or
+  empty placeholders; only today's day number is highlighted. Year initially fits all twelve
+  months across the available screen. Pinching enlarges text and reflows the months from three
+  columns to two, then one, with vertical scrolling and no horizontal overflow.
+  Zoom is remembered separately on each phone.
   Choose **12-hour** or **24-hour**
   only in **Settings**; the minute column fits the selected time labels, such as `13:11`. Light,
   dark, and system appearance are also available in Settings.
@@ -106,7 +111,12 @@ and phone plans use a stable display order instead of changing with request comp
   These four entries have matching monochrome icons.
   Explanations in Settings and account controls are available through their information icons.
   Calendar-load warnings appear as a small exclamation mark on **Sync**. Tap to retry or hold for
-  details. Settings has a back arrow to return to the calendar.
+  details. Secondary screens use matching back arrows to return to the calendar.
+  Settings section headings share the same size and weight. Selected appearance/time choices stay
+  highlighted; navigation rows and access status stay neutral. **Check connection**, **Check now**
+  and **Sync watch** use the same action-button style. **Calendars used for plans** initially shows
+  checked calendars; expand **Other calendars** to change the remaining choices. Expanding the list
+  does not change permissions or select a calendar.
   **Dashboard** shows recorded time
   by activity color for a day, week, month, or year, with minute/hour totals and percentages. Its
   **Recorded / Unrecorded** toggle distinguishes recorded activity from the remaining civil-minute

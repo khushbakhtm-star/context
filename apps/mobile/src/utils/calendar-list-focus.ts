@@ -1,4 +1,4 @@
-export type CalendarViewFocusRequest = { dateKey: string; token: number };
+export type CalendarViewFocusRequest = { dateKey: string; token: number; minuteIndex?: number };
 type CalendarList = {
   scrollToIndex: (options: { index: number; animated: boolean; viewPosition: number; viewOffset: number }) => void;
   scrollToOffset: (options: { offset: number; animated: boolean }) => void;

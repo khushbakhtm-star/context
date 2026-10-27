@@ -151,6 +151,7 @@ function AppController() {
   const viewWrites = useRef<Promise<unknown>>(Promise.resolve());
   const focusSequence = useRef(0);
   const [activeDate, setActiveDate] = useState(dateKey(new Date()));
+  const calendarFocusRef = useRef({ dateKey: activeDate, minuteIndex: minuteIndexForDate(new Date()) });
   const [dataVersion, setDataVersion] = useState(0);
   const [permissionStatus, setPermissionStatus] = useState('undetermined');
   const [calendars, setCalendars] = useState<DeviceCalendar[]>([]);
@@ -273,7 +274,11 @@ function AppController() {
         setDayCount(restoredMode === 'week' ? 7 : restoredMode === 'three-days' ? 3 : 1);
         setSelectedDateKeys(normalizedDates.length ? normalizedDates : null);
         setOverviewMonth(null);
-        if (normalizedDates.length) setActiveDate(normalizedDates[0]!);
+        const current = new Date();
+        const focusDay = normalizedDates[0] ?? dateKey(current);
+        const restoredFocus = { dateKey: focusDay, minuteIndex: focusDay === dateKey(current) ? minuteIndexForDate(current) : 9 * 60 };
+        calendarFocusRef.current = restoredFocus; setActiveDate(focusDay);
+        setFocusRequest({ ...restoredFocus, token: ++focusSequence.current, openEditor: false });
         setCalendarZoom(normalizeCalendarZoom(savedZoom));
         setClockFormat(savedClockFormat === '24h' ? '24h' : '12h');
         await refreshCalendars();
@@ -451,6 +456,7 @@ function AppController() {
   }
 
   function openSearchResult(result: SearchResult) {
+    calendarFocusRef.current = { dateKey: result.dateKey, minuteIndex: result.minuteIndex };
     changeDayCount(1);
     setActiveDate(result.dateKey);
     setFocusRequest({
@@ -519,14 +525,17 @@ function AppController() {
     }
   }
 
-  function changeViewMode(next: CalendarViewMode, anchor = activeDate) {
+  function changeViewMode(next: CalendarViewMode, anchor?: string) {
     return transitionFromCalendar(() => {
+      const focus = calendarFocusRef.current;
+      const targetDate = anchor ?? focus.dateKey;
+      calendarFocusRef.current = { dateKey: targetDate, minuteIndex: focus.minuteIndex };
       setViewMode(next);
-      setActiveDate(anchor);
+      setActiveDate(targetDate);
       setDayCount(next === 'week' ? 7 : next === 'three-days' ? 3 : 1);
       setSelectedDateKeys(null);
-      setOverviewMonth(next === 'month' || next === 'schedule' ? anchor.slice(0, 7) + '-01' : null);
-      setFocusRequest(null);
+      setOverviewMonth(next === 'month' || next === 'schedule' ? targetDate.slice(0, 7) + '-01' : null);
+      setFocusRequest({ dateKey: targetDate, minuteIndex: focus.minuteIndex, token: ++focusSequence.current, openEditor: false });
       setCalendarViewResetToken((token) => token + 1);
       changeCalendarZoom(1);
       setTab('today');
@@ -546,7 +555,8 @@ function AppController() {
     setSelectedDateKeys(dates);
     setOverviewMonth(dates[0]!.slice(0, 7) + '-01');
     setActiveDate(dates[0]!);
-    setFocusRequest(null);
+    calendarFocusRef.current = { ...calendarFocusRef.current, dateKey: dates[0]! };
+    setFocusRequest({ ...calendarFocusRef.current, token: ++focusSequence.current, openEditor: false });
     setCalendarViewResetToken((token) => token + 1);
     changeCalendarZoom(1);
     setDatePickerOpen(false);
@@ -558,7 +568,13 @@ function AppController() {
       }).catch(() => undefined);
   }
 
+  function returnToCalendar() {
+    setFocusRequest({ ...calendarFocusRef.current, token: ++focusSequence.current, openEditor: false });
+    setTab('today');
+  }
+
   function openCalendarMinute(day: string, minute: number) {
+    calendarFocusRef.current = { dateKey: day, minuteIndex: minute };
     changeDayCount(1);
     setActiveDate(day);
     setFocusRequest({ dateKey: day, minuteIndex: minute, token: ++focusSequence.current, openEditor: false });
@@ -569,6 +585,7 @@ function AppController() {
     return transitionFromCalendar(() => {
       const current = new Date();
       const today = dateKey(current);
+      calendarFocusRef.current = { dateKey: today, minuteIndex: minuteIndexForDate(current) };
       // Keep the current view and zoom. Clear a custom past-only selection so
       // the present can be displayed inside that same kind of view.
       setActiveDate(today);
@@ -586,6 +603,7 @@ function AppController() {
   function shiftCalendarView(target: CalendarNavigationTarget | null) {
     if (!target) return;
     setActiveDate(target.activeDate);
+    calendarFocusRef.current = { ...calendarFocusRef.current, dateKey: target.activeDate };
     setSelectedDateKeys(target.selectedDates);
     setOverviewMonth(target.overviewMonth);
     setFocusRequest(null);
@@ -655,6 +673,14 @@ function AppController() {
   const previousView = calendarViewModePageTarget(navigationState, -1);
   const nextView = calendarViewModePageTarget(navigationState, 1);
   const viewKind = calendarViewKind(viewMode, selectedDateKeys);
+  const calendarFocusScope = viewKind + '|' + activeDate + '|' + (selectedDateKeys?.join(',') ?? '') + '|' + calendarViewResetToken;
+  const calendarFocusScopeRef = useRef(calendarFocusScope);
+  calendarFocusScopeRef.current = calendarFocusScope;
+  const reportFocusedMinute = useMemo(() => (point: { dateKey: string; minuteIndex: number }) => {
+    if (calendarFocusScopeRef.current !== calendarFocusScope || !isDateKey(point.dateKey) ||
+        !Number.isInteger(point.minuteIndex) || point.minuteIndex < 0 || point.minuteIndex > 1439) return;
+    calendarFocusRef.current = { ...point };
+  }, [calendarFocusScope]);
   function swipeCalendarPeriod(direction: -1 | 1) {
     if (tab !== 'today' || datePickerOpen || viewChangingRef.current) return;
     const target = direction < 0 ? previousView : nextView;
@@ -815,7 +841,7 @@ function AppController() {
       <ApplicationFrame
         ready={ready}
         tab={tab}
-        onReturnToCalendar={() => setTab('today')}
+        onReturnToCalendar={returnToCalendar}
       >
         {!ready ? (
           <LoadingState
@@ -835,20 +861,21 @@ function AppController() {
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
                   onPrevious={() => shiftCalendarView(previousView)} onNext={() => shiftCalendarView(nextView)}
-                  onOpenDatePicker={() => setDatePickerOpen(true)} />
+                  onOpenDatePicker={() => void transitionFromCalendar(() => setDatePickerOpen(true), 'Could not choose dates')} />
                 <CalendarPeriodSwipe scope={viewKind + '|' + activeDate + '|' + (selectedDateKeys?.join(',') ?? '')}
-                  enabled={viewKind !== 'minutes' && !viewChanging && !datePickerOpen}
+                  enabled={viewKind !== 'minutes' && viewKind !== 'year' && !viewChanging && !datePickerOpen}
                   onPage={(direction) => void swipeCalendarPeriod(direction)}>
                 {viewKind === 'year' ? <CalendarYearScreen activeDate={activeDate} onOpenMinute={openCalendarMinute} focusRequest={focusRequest}
+                  onFocusedMinuteChange={reportFocusedMinute}
                   onOpenMonth={(month) => void changeViewMode('month', month)} /> : viewKind === 'schedule' ? <CalendarScheduleScreen
                   activeDate={activeDate} selectedDates={overviewDates} calendars={calendars}
                   preferences={accountCalendarWrites ? { ...preferences, syncActuals: false } : preferences}
                   dataVersion={dataVersion} clockFormat={clockFormat} onOpenMinute={openCalendarMinute}
                   onSyncWarningChange={reportCalendarSyncWarning}
-                  focusRequest={focusRequest}
+                  focusRequest={focusRequest} onFocusedMinuteChange={reportFocusedMinute}
                   onVisibleMonthChange={visibleOverviewMonthChanged}
                 /> : viewKind === 'month' ? <MonthOverview
-                  activeDate={activeDate} focusRequest={focusRequest}
+                  activeDate={activeDate} focusRequest={focusRequest} onFocusedMinuteChange={reportFocusedMinute}
                   onSyncWarningChange={reportCalendarSyncWarning}
                   selectedDates={overviewDates}
                   calendars={calendars}
@@ -865,7 +892,7 @@ function AppController() {
                   dataVersion={dataVersion}
                   onSyncWarningChange={reportCalendarSyncWarning}
                   focusRequest={focusRequest}
-                  onFocusConsumed={consumeFocus}
+                  onFocusConsumed={consumeFocus} onFocusedMinuteChange={reportFocusedMinute}
                   onDataChanged={dataChanged}
                   onOpenSettings={() => void navigate('settings')}
                   dayCount={dayCount}
@@ -965,13 +992,14 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const [gearMenuTop, setGearMenuTop] = useState(48);
   const [gearMenuLeft, setGearMenuLeft] = useState(8);
   const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
-  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'search' | 'reports'; sequence: number } | null>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'search' | 'reports' | 'dates'; sequence: number } | null>(null);
   const gearVisibleRef = useRef(false);
   const gearClosingRef = useRef(false);
   const headerMountedRef = useRef(true);
   const menuRequestSequence = useRef(0);
   const gearActionFrame = useRef<number | null>(null);
   const dispatchingGearAction = useRef(false);
+  const preparingViews = useRef(false);
   const { width, height } = useWindowDimensions();
   const [availableWidth, setAvailableWidth] = useState(width);
   const controlWidth = Math.max(40, Math.min(44, availableWidth / 7));
@@ -979,7 +1007,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const navigationBusy = viewChanging || syncing || historyPending || history.busy;
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
-  const binderActions = useRef({ single: onJumpToNow, double: () => {}, long: () => {} });
+  const binderActions = useRef({ single: () => {}, double: () => {}, long: () => {} });
   const binderPress = useMemo(() => createCalendarBinderPress({ allowed: () => headerMayNavigate(),
     single: () => binderActions.current.single(), double: () => binderActions.current.double(),
     long: () => binderActions.current.long() }), []);
@@ -1010,7 +1038,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
 
   function headerMayNavigate() {
     return headerMountedRef.current && AppState.currentState === 'active' && !navigationBusyRef.current &&
-      !historyOperation.current && !spreadsheetEditor.snapshot().busy && !dispatchingGearAction.current;
+      !historyOperation.current && !spreadsheetEditor.snapshot().busy && !dispatchingGearAction.current && !preparingViews.current;
   }
 
   useEffect(() => {
@@ -1077,16 +1105,22 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     return () => { if (timer) clearTimeout(timer); subscription.remove(); };
   }, []);
 
-  const currentDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(current);
-  const openPicker = () => {
-    if (!headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
-    invalidateMenus(); Keyboard.dismiss(); onOpenDatePicker();
-  };
-  const openViews = () => {
+  const openViews = async () => {
     if (!headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
     invalidateMenus();
     const sequence = menuRequestSequence.current;
-    Keyboard.dismiss();
+    Keyboard.dismiss(); preparingViews.current = true;
+    try {
+      await flushInlineMinutes();
+      if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
+        throw new Error('Your current minute could not be saved. Try again.');
+      }
+    } catch (error) {
+      if (headerMountedRef.current && sequence === menuRequestSequence.current && AppState.currentState === 'active')
+        Alert.alert('Could not open calendar views', error instanceof Error ? error.message : 'Save your minute and try again.');
+      return;
+    } finally { preparingViews.current = false; }
+    if (sequence !== menuRequestSequence.current || !headerMayNavigate()) return;
     viewMenuAnchor.current?.measureInWindow((x, y, anchorWidth, anchorHeight) => {
       if (sequence !== menuRequestSequence.current || !headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
       setViewMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 304)));
@@ -1120,6 +1154,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     if (pending.action === 'settings') onOpenSettings();
     else if (pending.action === 'print') onPrint();
     else if (pending.action === 'search') onOpenSearch();
+    else if (pending.action === 'dates') onOpenDatePicker();
     else onOpenReports();
     // Also release the local lock when a transition finishes within the same React batch.
     gearActionFrame.current = requestAnimationFrame(() => {
@@ -1141,7 +1176,16 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       finishGearAction(sequence);
     });
   };
-  binderActions.current = { single: onJumpToNow, double: openViews, long: openPicker };
+  const chooseDateSelection = () => {
+    if (!headerMayNavigate() || !viewVisibleRef.current || viewClosingRef.current || pendingGearAction.current) return;
+    const sequence = ++menuRequestSequence.current;
+    pendingGearAction.current = { action: 'dates', sequence };
+    viewVisibleRef.current = false; viewClosingRef.current = true; setViewMenuOpen(false);
+    if (Platform.OS !== 'ios') gearActionFrame.current = requestAnimationFrame(() => {
+      gearActionFrame.current = null; viewClosingRef.current = false; finishGearAction(sequence);
+    });
+  };
+  binderActions.current = { single: openViews, double: onJumpToNow, long: () => {} };
   const viewLabel = CALENDAR_VIEW_OPTIONS.find((option) => option.mode === viewMode)?.label ?? 'Day';
 
   return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
@@ -1163,13 +1207,13 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
     </Pressable>
     <View ref={viewMenuAnchor} collapsable={false}>
-      <Pressable accessibilityRole="button" accessibilityLabel={`${viewLabel} view. Go to ${currentDate}, now`}
-        accessibilityHint="Double tap to change view. Touch and hold to choose dates."
+      <Pressable accessibilityRole="button" accessibilityLabel={`${viewLabel} view. Choose a view`}
+        accessibilityHint="Tap to change view. Double tap to go to the current minute."
         accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy, busy: viewChanging }} disabled={navigationBusy}
-        accessibilityActions={[{ name: 'showViews', label: 'Choose calendar view' }, { name: 'longpress', label: 'Choose dates' }]}
+        accessibilityActions={[{ name: 'showViews', label: 'Choose calendar view' }, { name: 'goToNow', label: 'Go to the current minute' }]}
         onAccessibilityAction={(event) => {
           if (event.nativeEvent.actionName === 'showViews') { binderPress.cancel(); openViews(); }
-          else if (event.nativeEvent.actionName === 'longpress') { binderPress.cancel(); openPicker(); }
+          else if (event.nativeEvent.actionName === 'goToNow' && headerMayNavigate()) { binderPress.cancel(); onJumpToNow(); }
         }}
         onPressIn={(event) => { if (event.nativeEvent.touches?.length > 1) binderPress.cancelPress(); else binderPress.pressIn(); }}
         onTouchStart={(event) => { if (event.nativeEvent.touches?.length > 1) binderPress.cancelPress(); }}
@@ -1249,7 +1293,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       </View>
     </Modal>
     <Modal visible={viewMenuOpen} transparent animationType="fade" statusBarTranslucent navigationBarTranslucent
-      onRequestClose={() => invalidateMenus()} onDismiss={() => { viewClosingRef.current = false; }}>
+      onRequestClose={() => invalidateMenus()} onDismiss={() => { viewClosingRef.current = false; if (Platform.OS === 'ios') finishGearAction(); }}>
       <View style={styles.viewMenuBackdrop}>
         <Pressable accessibilityRole="button" accessibilityLabel="Close calendar views"
           onPress={() => invalidateMenus()} style={StyleSheet.absoluteFill} />
@@ -1270,6 +1314,10 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
                 </Text>
               </Pressable>;
             })}
+            <Pressable accessibilityRole="button" accessibilityLabel="Pick or range dates" onPress={chooseDateSelection} style={styles.viewOption}>
+              <CalendarViewIcon mode="month" />
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Pick / Range</Text>
+            </Pressable>
           </ScrollView>
         </View>
       </View>
@@ -1307,19 +1355,11 @@ function ApplicationFrame({
         <View style={styles.screen}>
           {ready && tab !== 'today' ? (
             <View style={styles.screenHeader}>
-              {tab === 'settings' ? <Pressable accessibilityRole="button" accessibilityLabel="Back to calendar"
+              <Pressable accessibilityRole="button" accessibilityLabel="Back to calendar"
                 onPress={onReturnToCalendar} style={styles.menuButton}>
-                <Text accessible={false} style={styles.settingsBackArrow}>←</Text>
-              </Pressable> : null}
+                <CalendarHeaderIcon name="back" />
+              </Pressable>
               <Text accessibilityRole="header" style={styles.screenTitle}>{SCREEN_TITLES[tab]}</Text>
-              {tab !== 'settings' ? <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Back to calendar"
-                onPress={onReturnToCalendar}
-                style={styles.backButton}
-              >
-                <Text style={styles.backText}>Calendar</Text>
-              </Pressable> : null}
             </View>
           ) : null}
           {children}
@@ -1400,7 +1440,6 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   screenTitle: { flex: 1, marginLeft: 8, color: colors.ink, fontSize: 17, fontWeight: '600' },
   backButton: { minHeight: 44, paddingHorizontal: 10, justifyContent: 'center' },
   backText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
-  settingsBackArrow: { color: colors.graphite, fontSize: 26, lineHeight: 32 },
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.paper },
   loadingText: { marginTop: 14, color: colors.muted, fontSize: 13 },
   errorPanel: { width: '82%', maxWidth: 360, alignItems: 'center' },

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.17",
-  "sourceAndroidVersionCode": 18,
-  "sourceIosBuildNumber": "18",
+  "version": "0.1.18",
+  "sourceAndroidVersionCode": 19,
+  "sourceIosBuildNumber": "19",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context 0.1.17/code18 for explicit plain-text spreadsheet Paste from the phone system clipboard. Tab-separated columns and newline-separated rows map into minute cells; source spreadsheet styles and formula fidelity are not claimed. Preserve existing local-first loading, private whole-cell clipboard, permissions and calendar behavior. The new Expo Clipboard native module requires exact source-build sanitation and actual native class-definition checks in both phone editions. Final implementation tests/typecheck, exact source/controller pins, packaged clipboard/native/UI checks and signatures remain required before publication. Published 0.1.16 phone previews remain current; the watch companion stays 0.1.8. Keep public feeds on 0.1.16 until verified 0.1.17 artifacts are publicly available. Physical cross-app clipboard behavior, iOS/store distribution and official F-Droid catalog approval remain unverified. Correct account writer routing so consent without an actuals destination cannot suppress native exports. Exact durable block ownership prevents native/account write and color competition. Preserve known source titles/provider color identities on note-only updates; overlapping plan priority is deterministic across provider completion orders. Retain source permission checks and do not guess repairs to already changed remote titles."
+  "notes": "Prepare Context 0.1.18/code19 with matching back arrows, uniform Settings, collapsed unchecked calendars, uncluttered Month content, a fitted Year overview and focus-preserving view changes. A single binder tap chooses views/Pick/Range; a double tap returns to now. Permissions and synchronization consent are unchanged. The independent Wear companion 0.1.9/code100010 adds a current-minute Tile and foreground capture while preserving unfinished editor and dictation identities. Phone and watch releases require their own immutable source/controller pins, native assembly, signatures and permanent verification receipts. Keep public feeds on verified phone 0.1.17 and watch 0.1.8 until their new artifacts are actually published. Physical phone/watch behavior, iOS/store distribution and official F-Droid inclusion remain separate and unverified."
 }

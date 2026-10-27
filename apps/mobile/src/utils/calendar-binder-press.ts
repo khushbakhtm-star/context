@@ -1,7 +1,7 @@
 export const CALENDAR_BINDER_DOUBLE_TAP_MS = 300;
 
-/** Defer the Now shortcut until a second tap can claim the view menu. A second
- * touch-down pauses the first action so holding it can still open date selection. */
+/** Defer view choices until a second tap can claim Now. A second touch-down
+ * pauses the first action; a long hold consumes the gesture without navigation. */
 export function createCalendarBinderPress(actions: {
   allowed: () => boolean;
   single: () => void;

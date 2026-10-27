@@ -9,7 +9,9 @@ import type { AppColors } from '../theme';
 import type { ActivitySegment, CalendarPreferences, DeviceCalendar, PlannedEvent } from '../types';
 import { isDateKey, monthDateCells, normalizeSelectedDates } from '../utils/date-selection';
 import { monthAgendaItems, type MonthAgendaItem } from '../utils/month-agenda';
-import { addDays, dateKey, formatDayHeading, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
+import { addDays, dateKey, formatDayHeading, minuteIndexForDate, parseDateKey } from '../utils/time';
+import { calendarColor } from '../utils/calendar-cell-color';
+import { activityTextColor } from '../utils/minute-interactions';
 import { createCalendarListFocus, type CalendarViewFocusRequest } from '../utils/calendar-list-focus';
 
 type Props = {
@@ -23,6 +25,7 @@ type Props = {
   onOpenMinute: (day: string, minute: number) => void;
   onVisibleMonthChange?: (month: string) => void;
   onSyncWarningChange?: (message: string | null) => void;
+  onFocusedMinuteChange?: (focus: { dateKey: string; minuteIndex: number }) => void;
 };
 type DaySources = { sourceKey: string; segments: ActivitySegment[]; devicePlans: PlannedEvent[]; accountPlans: PlannedEvent[];
   localReady: boolean; deviceReady: boolean; accountReady: boolean; accountFresh: boolean;
@@ -36,8 +39,8 @@ function accessDenied(error: unknown) {
     typeof value.code === 'string' && /permission|denied|unauthori[sz]ed/i.test(value.code);
 }
 
-export function MonthOverview({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, clockFormat, onOpenMinute,
-  onVisibleMonthChange, onSyncWarningChange }: Props) {
+export function MonthOverview({ activeDate, focusRequest, selectedDates, calendars, preferences, dataVersion, onOpenMinute,
+  onVisibleMonthChange, onSyncWarningChange, onFocusedMinuteChange }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const daysKey = normalizeSelectedDates(selectedDates).join('|');
@@ -74,6 +77,13 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
   const calendarKey = JSON.stringify(calendars);
   const preferenceKey = JSON.stringify(preferences.selectedCalendarIds);
   const viewability = useRef({ itemVisiblePercentThreshold: 5 }).current;
+  const [today, setToday] = useState(() => dateKey(new Date()));
+  useEffect(() => {
+    const update = () => setToday(dateKey(new Date()));
+    const timer = setInterval(update, 60_000);
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') update(); });
+    return () => { clearInterval(timer); subscription.remove(); };
+  }, []);
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: { item: string }[] }) => {
     const visible = viewableItems.flatMap((item) => typeof item.item === 'string' && isDateKey(`${item.item}-01`) ? [item.item] : []);
     if (visible.length) {
@@ -88,9 +98,17 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
     const pools = Array.from({ length: 4 }, () => ({ running: 0, queue: [] as (() => Promise<void>)[] }));
     const queued = new Set<string>();
     const sourceKey = `${calendarKey}|${preferenceKey}`;
-    const compose = (day: string, value: DaySources): DayState => ({ ...value,
-      items: monthAgendaItems(day, value.segments, [...value.devicePlans, ...value.accountPlans]),
-      failed: value.localFailed || value.deviceFailed || value.accountFailed });
+    const compose = (day: string, value: DaySources): DayState => {
+      // Month shows the person's title or note, never an invented category label
+      // for a deliberately blank, colored minute. Other agenda views retain
+      // their own summary rules in the shared monthAgendaItems helper.
+      const actualTitles = new Map(value.segments.map((segment) => [`actual:${segment.segmentKey}`,
+        segment.activityTitle?.trim() || segment.entries.find((entry) => entry.text.trim())?.text.trim() || '']));
+      return { ...value,
+        items: monthAgendaItems(day, value.segments, [...value.devicePlans, ...value.accountPlans]).map((item) =>
+          item.kind === 'actual' ? { ...item, title: actualTitles.get(item.id) ?? '' } : item),
+        failed: value.localFailed || value.deviceFailed || value.accountFailed };
+    };
     const initial = (previous?: DayState): DaySources => ({ sourceKey, segments: previous?.segments ?? [],
       devicePlans: previous?.sourceKey === sourceKey ? previous.devicePlans : [],
       accountPlans: previous?.sourceKey === sourceKey ? previous.accountPlans : [],
@@ -163,7 +181,6 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
 
   const weekdays = useMemo(() => Array.from({ length: 7 }, (_, index) =>
     new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(addDays('2026-10-19', index))), []);
-  const today = dateKey(new Date());
   const warning = Object.values(data).some((day) => day.localFailed)
     ? 'Some saved activity could not load. Your saved ledger is unchanged. Tap Sync to retry.'
     : Object.values(data).some((day) => day.deviceFailed || day.accountFailed)
@@ -171,7 +188,16 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
   useEffect(() => { onSyncWarningChange?.(warning); }, [warning, onSyncWarningChange]);
   useEffect(() => () => onSyncWarningChange?.(null), [onSyncWarningChange]);
   const openDay = (day: string) => {
-    if (isDateKey(day)) onOpenMinute(day, day === dateKey(new Date()) ? minuteIndexForDate(new Date()) : 9 * 60);
+    if (!isDateKey(day)) return;
+    const minute = focusRequest?.dateKey === day && Number.isInteger(focusRequest.minuteIndex)
+      ? Math.max(0, Math.min(1439, focusRequest.minuteIndex!))
+      : day === dateKey(new Date()) ? minuteIndexForDate(new Date()) : 9 * 60;
+    onFocusedMinuteChange?.({ dateKey: day, minuteIndex: minute });
+    onOpenMinute(day, minute);
+  };
+  const openItem = (day: string, minute: number) => {
+    onFocusedMinuteChange?.({ dateKey: day, minuteIndex: minute });
+    onOpenMinute(day, minute);
   };
 
   return <View style={styles.container}>
@@ -198,30 +224,24 @@ export function MonthOverview({ activeDate, focusRequest, selectedDates, calenda
               const state = active ? data[cell.dateKey] : undefined;
               const items = state?.items ?? [];
               const heading = formatDayHeading(cell.dateKey);
-              return <View key={cell.dateKey} style={[styles.day, !active && styles.unselectedDay]}>
+              return <View key={cell.dateKey} style={styles.day}>
                 <Pressable accessibilityRole="button" accessibilityLabel={`Open ${heading}`} disabled={!isDateKey(cell.dateKey)}
                   accessibilityState={{ selected: cell.dateKey === activeDate }}
                   onPress={() => openDay(cell.dateKey)} style={styles.dateButton}>
-                  <View style={[styles.dateCircle, active && styles.selectedDate, cell.dateKey === activeDate && styles.focusedDate, cell.dateKey === today && styles.today]}>
+                  <View style={[styles.dateCircle, cell.inMonth && cell.dateKey === today && styles.today]}>
                     <Text maxFontSizeMultiplier={1.5} style={[styles.dayNumber, !cell.inMonth && styles.outsideMonth,
-                      cell.dateKey === today && styles.todayText]}>{cell.day}</Text>
+                      cell.inMonth && cell.dateKey === today && styles.todayText]}>{cell.day}</Text>
                   </View>
                 </Pressable>
-                {items.slice(0, 3).map((item) => {
-                  const time = item.allDay ? 'All day' : minuteLabel(item.startMinute, clockFormat === '12h');
-                  return <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`${heading}, ${time}, ${item.title}`}
-                    onPress={() => onOpenMinute(cell.dateKey, item.startMinute)}
-                    style={[styles.event, { borderLeftColor: item.color }]}>
-                    <Text numberOfLines={1} maxFontSizeMultiplier={1.5} style={styles.eventTime}>{time}</Text>
-                    <Text numberOfLines={2} maxFontSizeMultiplier={1.5} style={styles.eventTitle}>{item.title}</Text>
+                {items.map((item) => {
+                  const fill = calendarColor(item.color);
+                  return <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`${heading}, ${item.title}`}
+                    onPress={() => openItem(cell.dateKey, item.startMinute)}
+                    style={[styles.event, { backgroundColor: fill ?? colors.paper }]}>
+                    <Text numberOfLines={2} ellipsizeMode="clip" maxFontSizeMultiplier={1.5}
+                      style={[styles.eventTitle, { color: activityTextColor(fill, colors.ink) }]}>{item.title}</Text>
                   </Pressable>;
                 })}
-                {items.length > 3 ? <Pressable accessibilityRole="button" accessibilityLabel={`${items.length - 3} more events on ${heading}`}
-                  onPress={() => openDay(cell.dateKey)} style={styles.more}>
-                  <Text style={styles.moreText}>+{items.length - 3}</Text>
-                </Pressable> : null}
-                {active && !items.length && (!state || !state.localReady || !state.deviceReady || !state.accountReady)
-                  ? <Text accessibilityLabel={`Loading ${heading}`} style={styles.pending}>…</Text> : null}
                 <Pressable accessibilityRole="button" accessibilityLabel={`Open minutes for ${heading}`} disabled={!isDateKey(cell.dateKey)}
                   onPress={() => openDay(cell.dateKey)} style={styles.daySpace} />
               </View>;
@@ -241,21 +261,14 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   weekday: { flex: 1, color: colors.muted, fontSize: 11, textAlign: 'center', paddingVertical: 8 },
   day: { flex: 1, minWidth: 0, minHeight: 140, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline,
     backgroundColor: colors.surface, paddingHorizontal: 2, paddingBottom: 4 },
-  unselectedDay: { backgroundColor: colors.panel, opacity: 0.55 },
   dateButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   dateCircle: { minWidth: 28, minHeight: 28, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  selectedDate: { backgroundColor: colors.selectedDay },
-  focusedDate: { borderWidth: 1.5, borderColor: colors.graphite },
   today: { backgroundColor: colors.accent },
   dayNumber: { color: colors.ink, fontSize: 13, fontWeight: '600' },
   outsideMonth: { color: colors.muted },
   todayText: { color: colors.onAccent },
-  event: { minHeight: 44, paddingLeft: 3, paddingVertical: 3, marginBottom: 3, borderLeftWidth: 3,
+  event: { minHeight: 30, paddingHorizontal: 3, paddingVertical: 3, marginBottom: 3,
     borderRadius: 2, backgroundColor: colors.paper },
-  eventTime: { color: colors.muted, fontSize: 9, lineHeight: 12 },
   eventTitle: { color: colors.ink, fontSize: 10, lineHeight: 13 },
-  more: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 3 },
-  moreText: { color: colors.graphite, fontSize: 11 },
   daySpace: { flex: 1, minHeight: 12 },
-  pending: { color: colors.muted, textAlign: 'center', fontSize: 14 },
 });

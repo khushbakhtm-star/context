@@ -183,7 +183,7 @@ export function ReleaseUpdateSettings({ updates }: { updates: ReleaseUpdatesStat
       <View style={styles.settingRow}>
         <View style={styles.copy}>
           <View style={styles.settingsLabel}>
-            <Text style={styles.title}>Update checks</Text>
+            <Text accessibilityRole="header" style={styles.settingsTitle}>Update checks</Text>
             <InfoButton title="Update checks" message={updates.configured
               ? 'While Context is open, check this edition’s release feed. No ledger or account details are sent.'
               : 'Update checks become available when this edition has a configured public release feed.'} />
@@ -197,12 +197,12 @@ export function ReleaseUpdateSettings({ updates }: { updates: ReleaseUpdatesStat
       {updates.configured && updates.enabled ? (
         <View style={styles.settingsActions}>
           <Pressable accessibilityRole="button" disabled={updates.checking || updates.loading}
-            onPress={() => { void updates.checkNow(); }} style={styles.button}>
-            <Text style={styles.buttonText}>{updates.checking ? 'Checking…' : 'Check now'}</Text>
+            onPress={() => { void updates.checkNow(); }} style={styles.settingsButton}>
+            <Text style={styles.settingsButtonText}>{updates.checking ? 'Checking…' : 'Check now'}</Text>
           </Pressable>
           {updates.available ? (
-            <Pressable accessibilityRole="button" onPress={updates.openRelease} style={styles.button}>
-              <Text style={styles.buttonText}>{releaseButton(updates.available.channel)}</Text>
+            <Pressable accessibilityRole="button" onPress={updates.openRelease} style={styles.settingsButton}>
+              <Text style={styles.settingsButtonText}>{releaseButton(updates.available.channel)}</Text>
             </Pressable>
           ) : null}
         </View>
@@ -228,5 +228,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   settingRow: { flexDirection: 'row', alignItems: 'center' },
   settingsLabel: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   settingsActions: { marginTop: 12, flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  settingsTitle: { color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '600' },
+  settingsButton: { minHeight: 44, paddingHorizontal: 14, paddingVertical: 11, alignSelf: 'flex-start',
+    justifyContent: 'center', borderRadius: 8, backgroundColor: colors.accent },
+  settingsButtonText: { color: colors.onAccent, fontSize: 13, fontWeight: '600' },
   status: { marginTop: 10, color: colors.muted, fontSize: 12, lineHeight: 18 },
 });

@@ -36,7 +36,7 @@ export function WatchSettings() {
   return <View style={styles.card}>
     <View style={styles.heading}>
       <View style={styles.labelRow}>
-        <Text style={styles.title}>Paired watch</Text>
+        <Text accessibilityRole="header" style={styles.title}>Paired watch</Text>
         <InfoButton title="Paired watch" message={state.available
           ? 'Allow a paired Wear OS watch to read requested days and record minute notes. This starts off. Keep Context open on the phone to synchronize; notes remain saved on the watch while waiting.'
           : 'Watch connection is available in the Wear-enabled Android edition of Context.'} />
@@ -51,8 +51,9 @@ export function WatchSettings() {
         ? `${state.connectedNodeCount ? 'Paired watch connected' : 'Waiting for the paired watch'} · ${state.pendingCount} in the phone inbox`
         : 'Watch access is off.'}</Text>
       <Pressable accessibilityRole="button" disabled={busy || state.running || !state.enabled}
-        onPress={() => void run(async () => { await drainWearInbox(); await refreshWearStatus(); })} style={styles.button}>
-        <Text style={styles.buttonText}>{state.running ? 'Synchronizing…' : 'Sync watch now'}</Text>
+        onPress={() => void run(async () => { await drainWearInbox(); await refreshWearStatus(); })}
+        style={[styles.actionButton, (busy || state.running || !state.enabled) && styles.disabled]}>
+        <Text style={styles.actionButtonText}>{state.running ? 'Synchronizing…' : 'Sync watch now'}</Text>
       </Pressable>
       {error || state.error ? <Text accessibilityRole="alert" style={styles.error}>{error ?? state.error}</Text> : null}
       {state.conflicts.length ? <Text style={styles.reviewTitle}>Notes to review</Text> : null}
@@ -93,10 +94,14 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   card: { marginTop: 20, padding: 16, backgroundColor: colors.panel, borderColor: colors.hairline, borderWidth: 1, borderRadius: 14 },
   heading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   labelRow: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
-  title: { color: colors.ink, fontSize: 18, fontWeight: '600', flexShrink: 1 },
+  title: { color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '600', flexShrink: 1 },
   body: { marginTop: 8, color: colors.muted, fontSize: 13, lineHeight: 20 },
   button: { padding: 12, marginTop: 10, minHeight: 44, borderWidth: 1, borderColor: colors.hairline, borderRadius: 8 },
   buttonText: { color: colors.ink, fontSize: 14, fontWeight: '600' },
+  actionButton: { minHeight: 44, marginTop: 12, paddingHorizontal: 14, paddingVertical: 11, alignSelf: 'flex-start',
+    justifyContent: 'center', borderRadius: 8, backgroundColor: colors.accent },
+  actionButtonText: { color: colors.onAccent, fontSize: 13, fontWeight: '600' },
+  disabled: { opacity: 0.45 },
   error: { color: colors.danger, fontSize: 13, lineHeight: 20, marginTop: 10 },
   conflict: { marginTop: 12, borderTopWidth: 1, borderColor: colors.hairline, paddingTop: 12 },
   reviewTitle: { color: colors.ink, fontSize: 15, fontWeight: '600', marginTop: 18 },

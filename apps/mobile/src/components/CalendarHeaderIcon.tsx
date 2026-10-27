@@ -5,11 +5,14 @@ import { useAppTheme } from '../appearance';
 import type { AppColors } from '../theme';
 
 /** Decorative monochrome symbols; the containing button provides its accessible name. */
-export function CalendarHeaderIcon({ name }: { name: 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings' }) {
+export function CalendarHeaderIcon({ name }: { name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings' }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   return <View pointerEvents="none" accessible={false} style={styles.icon}>
-    {name === 'menu' ? <>{[4, 11, 18].map((top) => <View key={top} style={[styles.menuLine, { top }]} />)}</> : name === 'search' ? <>
+    {name === 'back' ? <>
+      <View style={styles.backShaft} /><View style={[styles.backArm, { top: 7, transform: [{ rotate: '-45deg' }] }]} />
+      <View style={[styles.backArm, { top: 15, transform: [{ rotate: '45deg' }] }]} />
+    </> : name === 'menu' ? <>{[4, 11, 18].map((top) => <View key={top} style={[styles.menuLine, { top }]} />)}</> : name === 'search' ? <>
       <View style={styles.searchRing} /><View style={styles.searchHandle} />
     </> : name === 'sync' ? <>
       <View style={styles.syncUpper} /><View style={styles.syncLower} />
@@ -37,6 +40,8 @@ export function CalendarHeaderIcon({ name }: { name: 'menu' | 'search' | 'report
 
 const createStyles = (colors: AppColors) => StyleSheet.create({
   icon: { width: 24, height: 24 },
+  backShaft: { position: 'absolute', left: 1, top: 11, width: 22, height: 2, borderRadius: 1, backgroundColor: colors.graphite },
+  backArm: { position: 'absolute', left: 0, width: 12, height: 2, borderRadius: 1, backgroundColor: colors.graphite },
   menuLine: { position: 'absolute', left: 1, width: 22, height: 2, borderRadius: 1, backgroundColor: colors.graphite },
   searchRing: { position: 'absolute', top: 1, left: 1, width: 16, height: 16,
     borderWidth: 2, borderColor: colors.graphite, borderRadius: 8 },

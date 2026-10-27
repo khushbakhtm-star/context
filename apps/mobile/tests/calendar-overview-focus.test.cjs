@@ -10,7 +10,7 @@ const ts = require('typescript');
 function screenHarness(t, kind, options = {}) {
   const sourceRoot = path.join(__dirname, '../src');
   const slots = [], effects = [], timers = new Map(), modules = new Map();
-  const calls = [], reads = [], nativeReads = [], cachedReads = [], accountReads = [], opened = [], warnings = [], pendingReads = new Map();
+  const calls = [], reads = [], nativeReads = [], cachedReads = [], accountReads = [], opened = [], focused = [], warnings = [], pendingReads = new Map();
   let hook = 0, dirty = false, tree, timerId = 0, now = 0;
   let dimensions = { width: 390, height: 844, fontScale: 1 };
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
@@ -42,6 +42,7 @@ function screenHarness(t, kind, options = {}) {
   };
   const native = { View: 'View', Text: 'Text', Pressable: 'Pressable', FlatList: 'FlatList', ScrollView: 'ScrollView',
     ActivityIndicator: 'ActivityIndicator', StyleSheet: { create: (value) => value, hairlineWidth: 0.5 },
+    PanResponder: { create: (panHandlers) => ({ panHandlers }) },
     useWindowDimensions: () => dimensions,
     AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) } };
   const resolvedSource = (relative) => path.join(sourceRoot, relative);
@@ -66,7 +67,9 @@ function screenHarness(t, kind, options = {}) {
         if (name === 'react/jsx-runtime') return { jsx: element, jsxs: element };
         if (name === 'react-native') return native;
         const resolved = path.resolve(path.dirname(filename), name);
-        if (resolved === resolvedSource('appearance')) return { useAppTheme: () => ({ colors: {} }) };
+        if (resolved === resolvedSource('appearance')) return { useAppTheme: () => ({ colors: {
+          paper: '#FFFFFF', ink: '#101010', accent: '#222222', onAccent: '#FFFFFF', selectedDay: '#DDDDDD',
+        } }) };
         if (resolved === resolvedSource('components/InfoButton')) return { InfoButton: 'InfoButton' };
         if (resolved === resolvedSource('data/database')) return { getDaySegments: readSegments };
         if (resolved === resolvedSource('services/calendar')) return { loadPlannedEventsResult: async (ids, day) => {
@@ -91,7 +94,8 @@ function screenHarness(t, kind, options = {}) {
   const props = { activeDate: '2026-10-25', focusRequest: { dateKey: '2026-10-25', token: 1 },
     selectedDates: kind === 'month' ? Array.from({ length: 31 }, (_, i) => `2026-10-${String(i + 1).padStart(2, '0')}`) : null,
     calendars: [], preferences: { selectedCalendarIds: [] }, dataVersion: 0, clockFormat: '24h',
-    onOpenMinute: (...values) => opened.push(values), onOpenMonth() {}, onSyncWarningChange: (message) => warnings.push(message), ...options.props };
+    onOpenMinute: (...values) => opened.push(values), onOpenMonth() {}, onFocusedMinuteChange: (value) => focused.push(value),
+    onSyncWarningChange: (message) => warnings.push(message), ...options.props };
   function render() { dirty = false; hook = 0; tree = Component(props); while (effects.length) effects.shift()(); return tree; }
   async function settle() { for (let i = 0; i < 35; i++) { await Promise.resolve(); if (dirty) render(); } }
   function nodes(node = tree) {
@@ -104,7 +108,7 @@ function screenHarness(t, kind, options = {}) {
   function unmount() { for (const slot of slots) { slot?.cleanup?.(); if (slot) slot.cleanup = undefined; } timers.clear(); }
   t.after(unmount);
   render();
-  return { props, calls, reads, nativeReads, cachedReads, accountReads, opened, warnings, pendingReads, render, settle, advance, nodes, find, unmount,
+  return { props, calls, reads, nativeReads, cachedReads, accountReads, opened, focused, warnings, pendingReads, render, settle, advance, nodes, find, unmount,
     list: () => find('FlatList'), get tree() { return tree; },
     setDimensions(value) { dimensions = { ...dimensions, ...value }; dirty = true; render(); },
     setProps(value) { Object.assign(props, value); render(); },
@@ -157,39 +161,67 @@ test('Month uses an already measured week when a new Now request arrives after l
   assert.equal(r.calls.at(-1).viewOffset, -710);
 });
 
-test('Year Now highlights today and uses measured October row offset in the two-column layout', (t) => {
+test('Year initially fits all twelve months and highlights today without horizontal scrolling', (t) => {
   const r = screenHarness(t, 'year');
   const months = r.nodes().find((node) => node.props.onLayout && [node.props.children].flat(Infinity)
     .some((child) => child?.key === '2026-10-01' && child.props.onLayout));
   const october = r.nodes().find((node) => node.key === '2026-10-01' && node.props.onLayout);
   assert.ok(months && october);
-  assert.equal(october.props.style[1].width, '48%');
+  assert.equal(october.props.style[1].width, (390 - 16 - 12) / 3);
+  const monthCards = r.nodes().filter((node) => /^2026-\d\d-01$/.test(node.key ?? '') && node.props.onLayout);
+  assert.equal(monthCards.length, 12);
+  assert.ok(monthCards.every((node) => node.props.style[1].width === october.props.style[1].width));
+  assert.equal(r.find('ScrollView').props.horizontal, false);
+  assert.equal(r.find('ScrollView').props.showsHorizontalScrollIndicator, false);
+  r.tree.props.onLayout({ nativeEvent: { layout: { width: 390, height: 700 } } }); r.render();
+  const measuredCard = r.nodes().find((node) => node.key === '2026-10-01' && node.props.onLayout);
+  assert.equal(measuredCard.props.style[1].height * 4 + 36 + 18 + 8, 700);
   const selected = r.nodes().filter((node) => node.type === 'Pressable' && node.props.accessibilityState?.selected);
   assert.equal(selected.length, 1);
   assert.match(selected[0].props.accessibilityLabel, /October 25/);
-  october.props.onLayout({ nativeEvent: { layout: { y: 1088 } } });
+  measuredCard.props.onLayout({ nativeEvent: { layout: { y: 1088 } } });
   assert.equal(r.calls.length, 0, 'wait for parent geometry too');
-  months.props.onLayout({ nativeEvent: { layout: { y: 58 } } });
-  assert.deepEqual(r.calls.map((call) => [call.method, call.y, call.animated]), [['scroll', 1146, false]]);
+  r.nodes().find((node) => node.props.onLayout && [node.props.children].flat(Infinity)
+    .some((child) => child?.key === '2026-10-01' && child.props.onLayout))
+    .props.onLayout({ nativeEvent: { layout: { y: 58 } } });
+  assert.ok(r.calls.every((call) => call.method === 'scroll' && call.y === 0 && call.animated === false),
+    'at the initial fit all months remain visible, so Now cannot scroll the year out of frame');
   selected[0].props.onPress();
   assert.deepEqual(r.opened, [['2026-10-25', 754]]);
   assert.equal(r.reads.length, 0, 'year renders civil dates without querying event sources');
 });
 
-test('Year waits for new geometry after a column change and respects a manual drag', (t) => {
+test('Year pinch reflows larger lettering and month heights within the viewport; single-finger scrolling retains control', (t) => {
   const r = screenHarness(t, 'year');
   const monthParent = () => r.nodes().find((node) => node.props.onLayout && [node.props.children].flat(Infinity)
     .some((child) => child?.key === '2026-10-01' && child.props.onLayout));
   const october = () => r.nodes().find((node) => node.key === '2026-10-01' && node.props.onLayout);
+  const cardWidth = october().props.style[1].width;
+  const cardHeight = october().props.style[1].height;
+  const fontBefore = r.find('Text', (node) => node.props.children === 25).props.style[1].fontSize;
+  const touch = (span, count = 2) => ({ nativeEvent: { touches: count === 2
+    ? [{ pageX: 0, pageY: 0 }, { pageX: span, pageY: 0 }] : [{ pageX: 0, pageY: 0 }] } });
+  assert.equal(r.tree.props.onStartShouldSetPanResponderCapture(touch(50, 1)), false);
+  assert.equal(r.tree.props.onMoveShouldSetPanResponderCapture(touch(50, 1)), false);
+  assert.equal(r.tree.props.onStartShouldSetPanResponderCapture(touch(50)), true);
+  r.tree.props.onPanResponderGrant(touch(50));
+  r.tree.props.onPanResponderMove(touch(100)); r.render();
+  assert.equal(october().props.style[1].width, 390 - 16);
+  assert.ok(october().props.style[1].width > cardWidth, 'zoomed month reflows to one viewport-wide column');
+  assert.equal(october().props.style[1].height, cardHeight * 2);
+  assert.equal(r.find('Text', (node) => node.props.children === 25).props.style[1].fontSize, fontBefore * 2);
+  assert.equal(r.calls.length, 0, 'pinching cancels prior automatic focus instead of repointing the viewport');
   monthParent().props.onLayout({ nativeEvent: { layout: { y: 50 } } });
   october().props.onLayout({ nativeEvent: { layout: { y: 1000 } } });
   r.setDimensions({ width: 320 });
-  assert.equal(october().props.style[1], false);
+  r.tree.props.onLayout({ nativeEvent: { layout: { width: 320, height: 600 } } }); r.render();
+  assert.equal(october().props.style[1].width, 320 - 16);
   monthParent().props.onLayout({ nativeEvent: { layout: { y: 70 } } });
-  assert.equal(r.calls.length, 1, 'old two-column offset is not reused');
+  assert.equal(r.calls.length, 0, 'manual pinch remains in control through new layout measurements');
   october().props.onLayout({ nativeEvent: { layout: { y: 2600 } } });
-  assert.equal(r.calls.at(-1).y, 2670);
+  assert.equal(r.calls.length, 0);
   r.setProps({ focusRequest: { dateKey: '2026-10-25', token: 2 } });
+  assert.ok(r.calls.at(-1).y > 0, 'a new explicit Now request can reveal its month after zooming');
   r.find('ScrollView').props.onScrollBeginDrag();
   const count = r.calls.length;
   october().props.onLayout({ nativeEvent: { layout: { y: 2800 } } });
@@ -241,6 +273,72 @@ function plan(day, title, minute = 540, calendarId = 'device') {
 }
 function dayTree(r, kind, day) { return r.list().props.renderItem({ item: kind === 'month' ? day.slice(0, 7) : day }); }
 function hasText(r, node, text) { return r.nodes(node).some((value) => value.type === 'Text' && value.props.children === text); }
+
+const flatStyle = (value) => Object.assign({}, ...[value].flat(Infinity).filter((item) => item && typeof item === 'object'));
+
+test('Month leaves loading and empty dates blank, highlights only today, and shows every activity title in its actual fill', async (t) => {
+  const day = '2026-10-25';
+  const blocked = deferred();
+  const r = screenHarness(t, 'month', { props: { activeDate: '2026-10-26', focusRequest: null,
+    selectedDates: [day, '2026-10-26'] },
+    plans: () => [], segments: (date) => date === day ? [segment(date, 'Recorded note')] : [],
+    accounts: () => blocked.promise,
+    device: (date) => ({ plans: date === day ? Array.from({ length: 5 }, (_, i) =>
+      ({ ...plan(date, `Activity ${i}`, 540 + i * 2), color: i % 2 ? '#FBD75B' : '#0B8043' })) : [], failures: [] }) });
+  let month = dayTree(r, 'month', day);
+  assert.equal(r.nodes(month).some((node) => node.props.accessibilityLabel?.startsWith('Loading ')), false);
+  assert.equal(hasText(r, month, '…'), false);
+  await r.settle(); month = dayTree(r, 'month', day);
+  const eventButtons = r.nodes(month).filter((node) => node.type === 'Pressable' &&
+    /, (?:Activity \d|Recorded note)$/.test(node.props.accessibilityLabel ?? ''));
+  assert.equal(eventButtons.length, 6, 'all titles remain visible without a +N or ellipsis substitute');
+  for (const button of eventButtons.filter((node) => node.props.accessibilityLabel.includes('Activity '))) {
+    assert.match(flatStyle(button.props.style).backgroundColor, /^#(?:FBD75B|0B8043)$/);
+    const texts = r.nodes(button).filter((node) => node.type === 'Text');
+    assert.equal(texts.length, 1, 'no start-time text is rendered before the title');
+    assert.equal(texts[0].props.numberOfLines, 2);
+    assert.equal(texts[0].props.ellipsizeMode, 'clip', 'long note previews are bounded without adding ellipsis placeholders');
+    assert.match(texts[0].props.children, /^Activity \d$/);
+    assert.match(flatStyle(texts[0].props.style).color, /^#(?:000000|FFFFFF)$/);
+  }
+  const dateButtons = r.nodes(month).filter((node) => node.type === 'Pressable' && /^Open (?!minutes)/.test(node.props.accessibilityLabel ?? ''));
+  const highlighted = dateButtons.filter((button) => r.nodes(button).some((node) => flatStyle(node.props.style).backgroundColor === '#222222'));
+  assert.equal(highlighted.length, 1);
+  assert.match(highlighted[0].props.accessibilityLabel, /October 25/);
+  const emptyDay = r.nodes(month).find((node) => node.key === '2026-10-26' && flatStyle(node.props.style).minHeight === 140);
+  assert.deepEqual(r.nodes(emptyDay).filter((node) => node.type === 'Text').map((node) => node.props.children), [26]);
+});
+
+test('Month and Year preserve an exact focused minute on a date tap and report explicit event focus', async (t) => {
+  for (const kind of ['month', 'year']) {
+    const r = screenHarness(t, kind, { props: { focusRequest: { dateKey: '2026-10-25', token: 4, minuteIndex: 530 } },
+      plans: (day) => [plan(day, 'Morning activity', 560)] });
+    await r.settle();
+    const tree = kind === 'month' ? dayTree(r, kind, '2026-10-25') : r.tree;
+    const day = r.nodes(tree).find((node) => node.type === 'Pressable' && /^Open Sunday, October 25/.test(node.props.accessibilityLabel ?? ''));
+    assert.ok(day); day.props.onPress();
+    assert.deepEqual(r.opened.at(-1), ['2026-10-25', 530]);
+    assert.equal(r.focused.at(-1).dateKey, '2026-10-25'); assert.equal(r.focused.at(-1).minuteIndex, 530);
+    if (kind === 'month') {
+      const event = r.nodes(tree).find((node) => node.type === 'Pressable' && node.props.accessibilityLabel?.endsWith(', Morning activity'));
+      assert.ok(event); event.props.onPress();
+      assert.deepEqual(r.opened.at(-1), ['2026-10-01', 560]);
+      assert.equal(r.focused.at(-1).minuteIndex, 560);
+    }
+  }
+});
+
+test('Month never substitutes a category name for an intentionally blank colored cell', async (t) => {
+  const day = '2026-10-25'; const blank = segment(day, '');
+  const r = screenHarness(t, 'month', { props: { selectedDates: [day] }, segments: () => [blank] });
+  await r.settle();
+  const tree = dayTree(r, 'month', day);
+  assert.equal(hasText(r, tree, 'Quality time with my people'), false);
+  const item = r.nodes(tree).find((node) => node.type === 'Pressable' && node.key === `actual:${blank.segmentKey}`);
+  assert.ok(item);
+  assert.match(flatStyle(item.props.style).backgroundColor, /^#[0-9a-f]{6}$/i);
+  assert.deepEqual(r.nodes(item).filter((node) => node.type === 'Text').map((node) => node.props.children), ['']);
+});
 
 test('Month and Schedule paint all requested local notes while both provider queues remain blocked', async (t) => {
   const days = Array.from({ length: 8 }, (_, index) => `2026-10-${String(index + 1).padStart(2, '0')}`);

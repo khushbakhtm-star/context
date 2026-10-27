@@ -45,6 +45,9 @@ export function SettingsScreen({
   const [checking, setChecking] = useState(false);
   const [calendarCheck, setCalendarCheck] = useState<CalendarReadDiagnostics | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
+  const [showOtherCalendars, setShowOtherCalendars] = useState(false);
+  const selectedCalendars = calendars.filter((calendar) => preferences.selectedCalendarIds.includes(calendar.id));
+  const otherCalendars = calendars.filter((calendar) => !preferences.selectedCalendarIds.includes(calendar.id));
   const checkToken = useRef(0);
   const selectedCalendarKey = preferences.selectedCalendarIds.join('|');
   useEffect(() => {
@@ -73,13 +76,39 @@ export function SettingsScreen({
     onChange({ ...preferences, selectedCalendarIds: [...selected] });
   }
 
+  function renderCalendar(calendar: DeviceCalendar, index: number, count: number) {
+    const selected = preferences.selectedCalendarIds.includes(calendar.id);
+    const writesHere = preferences.writeCalendarId === calendar.id;
+    return <View key={calendar.id} style={[styles.calendarRow, index === count - 1 && styles.lastRow]}>
+      <Pressable accessibilityRole="checkbox" accessibilityLabel={calendar.title}
+        accessibilityState={{ checked: selected }} onPress={() => toggleImported(calendar.id)} style={styles.calendarSelect}>
+        <View style={[styles.checkbox, selected && { borderColor: calendar.color, backgroundColor: calendar.color }]}>
+          {selected ? <Text style={styles.checkmark}>✓</Text> : null}
+        </View>
+        <View style={styles.calendarText}>
+          <Text style={styles.calendarTitle}>{calendar.title}</Text>
+          <Text style={styles.calendarSource}>{calendar.sourceName}{calendar.allowsModifications ? '' : ' · read only'}</Text>
+          {calendar.isVisible === false ? <Text style={styles.appearanceError}>Hidden in the phone calendar</Text> : null}
+          {calendar.isSynced === false ? <Text style={styles.appearanceError}>Phone calendar synchronization is off</Text> : null}
+        </View>
+      </Pressable>
+      {calendar.allowsModifications ? <Pressable accessibilityRole="button"
+        accessibilityLabel={writesHere ? `Stop using ${calendar.title} for actuals` : `Use ${calendar.title} for actuals`}
+        accessibilityState={{ selected: writesHere }}
+        onPress={() => onChange({ ...preferences, writeCalendarId: writesHere ? null : calendar.id })}
+        style={[styles.writeChoice, writesHere && styles.writeChoiceSelected]}>
+        <Text style={[styles.writeChoiceText, writesHere && styles.writeChoiceTextSelected]}>{writesHere ? 'Actuals' : 'Use'}</Text>
+      </Pressable> : null}
+    </View>;
+  }
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <View style={styles.headingRow}>
-        <Text style={styles.title}>Appearance</Text>
+        <Text accessibilityRole="header" style={styles.title}>Appearance</Text>
         <InfoButton title="Appearance" message="Match your phone’s appearance with System, or choose a light or dark screen." />
       </View>
-      <View accessibilityRole="radiogroup" style={styles.appearanceOptions}>
+      <View accessibilityRole="radiogroup" accessibilityLabel="Appearance" style={styles.appearanceOptions}>
         {(['system', 'light', 'dark'] as AppearanceMode[]).map((option) => (
           <Pressable
             key={option}
@@ -97,7 +126,7 @@ export function SettingsScreen({
       {persistenceError ? <Text style={styles.appearanceError}>{persistenceError}</Text> : null}
 
       <View style={styles.sectionHeadingRow}>
-        <Text style={styles.sectionTitle}>Time format</Text>
+        <Text accessibilityRole="header" style={styles.sectionTitle}>Time format</Text>
         <InfoButton title="Time format" message="Choose 12-hour time with AM/PM, such as 1:11 PM, or 24-hour time, such as 13:11. Your choice is saved for the minute grid and minute details." />
       </View>
       <View accessibilityRole="radiogroup" accessibilityLabel="Time format" style={styles.appearanceOptions}>
@@ -117,7 +146,7 @@ export function SettingsScreen({
       </View>
 
       <View style={styles.sectionHeadingRow}>
-        <Text style={styles.calendarHeading}>Phone calendars</Text>
+        <Text accessibilityRole="header" style={styles.calendarHeading}>Phone calendars</Text>
         <InfoButton title="Phone calendars" message={"Show plans from calendars connected to this phone. Add or enable Google, iCloud, Outlook or Exchange in your phone’s Calendar settings first. Teams and Zoom meetings normally appear through their Google or Outlook event.\n\nThe phone-calendar connection publishes separate Context activity events. An account connection can also replace a selected original occurrence and import edits when allowed. A configured account Actuals destination takes over new activity publishing; enabling account write permission alone does not. Existing linked activities keep their approved connection."} />
       </View>
 
@@ -125,7 +154,7 @@ export function SettingsScreen({
         <Pressable accessibilityRole="button" onPress={onOpenAccounts} style={styles.navigationAction}>
           <Text style={styles.accountTitle}>Accounts & synchronization</Text>
         </Pressable>
-        <InfoButton onDark title="Accounts & synchronization" message={"Connect the same storage account and ledger passphrase on both phones to synchronize your encrypted private ledger. Calendar descriptions remain readable in that calendar and follow its sharing settings.\n\nAccount calendar connections can import event edits and replace selected original plans when allowed. Choose an Actuals destination to publish new activities through that account; write permission alone does not replace the phone-calendar connection."} />
+        <InfoButton title="Accounts & synchronization" message={"Connect the same storage account and ledger passphrase on both phones to synchronize your encrypted private ledger. Calendar descriptions remain readable in that calendar and follow its sharing settings.\n\nAccount calendar connections can import event edits and replace selected original plans when allowed. Choose an Actuals destination to publish new activities through that account; write permission alone does not replace the phone-calendar connection."} />
       </View>
 
       <View style={styles.categoriesButton}>
@@ -142,8 +171,8 @@ export function SettingsScreen({
             {hasAccess ? 'Calendar access allowed' : 'Calendar access'}
           </Text>
         </View>
-        <InfoButton onDark title="Calendar access" message="Calendar access lets Context read your selected plans and write the confirmed activity blocks you choose to synchronize. Your phone requests permission only when you tap Allow. Refresh reloads the calendars available on this phone." />
-        <Pressable onPress={hasAccess ? onRefreshCalendars : onRequestAccess} style={styles.smallButton}>
+        <InfoButton title="Calendar access" message="Calendar access lets Context read your selected plans and write the confirmed activity blocks you choose to synchronize. Your phone requests permission only when you tap Allow. Refresh reloads the calendars available on this phone." />
+        <Pressable accessibilityRole="button" onPress={hasAccess ? onRefreshCalendars : onRequestAccess} style={styles.smallButton}>
           <Text style={styles.smallButtonText}>{hasAccess ? 'Refresh' : 'Allow'}</Text>
         </Pressable>
       </View>
@@ -151,51 +180,21 @@ export function SettingsScreen({
       {hasAccess ? (
         <>
           <View style={styles.sectionHeadingRow}>
-            <Text style={styles.sectionTitle}>Calendars used for plans</Text>
+            <Text accessibilityRole="header" style={styles.sectionTitle}>Calendars used for plans</Text>
             <InfoButton title="Calendars used for plans" message={"Check the calendars you want to appear in Day. When creating an event in Google Calendar, save it in one of these checked calendars. Events refresh when you return to Context.\n\nTap Use to choose the calendar for actual activity blocks. The selected calendar is marked Actuals. A read-only calendar can supply plans but cannot receive activity blocks."} />
           </View>
           <View style={styles.calendarCard}>
-            {calendars.map((calendar, index) => {
-              const selected = preferences.selectedCalendarIds.includes(calendar.id);
-              const writesHere = preferences.writeCalendarId === calendar.id;
-              return (
-                <View
-                  key={calendar.id}
-                  style={[styles.calendarRow, index === calendars.length - 1 && styles.lastRow]}
-                >
-                  <Pressable onPress={() => toggleImported(calendar.id)} style={styles.calendarSelect}>
-                    <View
-                      style={[
-                        styles.checkbox,
-                        selected && { borderColor: calendar.color, backgroundColor: calendar.color },
-                      ]}
-                    >
-                      {selected ? <Text style={styles.checkmark}>✓</Text> : null}
-                    </View>
-                    <View style={styles.calendarText}>
-                      <Text style={styles.calendarTitle}>{calendar.title}</Text>
-                      <Text style={styles.calendarSource}>
-                        {calendar.sourceName}{calendar.allowsModifications ? '' : ' · read only'}
-                      </Text>
-                      {calendar.isVisible === false ? <Text style={styles.appearanceError}>Hidden in the phone calendar</Text> : null}
-                      {calendar.isSynced === false ? <Text style={styles.appearanceError}>Phone calendar synchronization is off</Text> : null}
-                    </View>
-                  </Pressable>
-                  {calendar.allowsModifications ? (
-                    <Pressable
-                      onPress={() =>
-                        onChange({ ...preferences, writeCalendarId: writesHere ? null : calendar.id })
-                      }
-                      style={[styles.writeChoice, writesHere && styles.writeChoiceSelected]}
-                    >
-                      <Text style={[styles.writeChoiceText, writesHere && styles.writeChoiceTextSelected]}>
-                        {writesHere ? 'Actuals' : 'Use'}
-                      </Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              );
-            })}
+            {selectedCalendars.map((calendar, index) => renderCalendar(calendar, index, selectedCalendars.length))}
+            {otherCalendars.length ? <>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Other calendars (${otherCalendars.length})`}
+                accessibilityHint="Shows or hides unchecked calendars"
+                accessibilityState={{ expanded: showOtherCalendars }}
+                onPress={() => setShowOtherCalendars((value) => !value)} style={styles.calendarDropdown}>
+                <Text style={styles.calendarDropdownText}>Other calendars ({otherCalendars.length})</Text>
+                <Text accessible={false} style={styles.calendarDropdownArrow}>{showOtherCalendars ? '⌃' : '⌄'}</Text>
+              </Pressable>
+              {showOtherCalendars ? otherCalendars.map((calendar, index) => renderCalendar(calendar, index, otherCalendars.length)) : null}
+            </> : null}
             {calendars.length === 0 ? (
               <View style={styles.headingRow}>
                 <Text style={styles.noCalendars}>No calendars found</Text>
@@ -206,7 +205,7 @@ export function SettingsScreen({
 
           <View style={styles.notice}>
             <View style={styles.headingRow}>
-              <Text style={styles.noticeTitle}>Check calendar connection</Text>
+              <Text accessibilityRole="header" style={styles.sectionTitle}>Check calendar connection</Text>
               <InfoButton title="Check calendar connection" message="Check which events your selected phone calendars provide for the displayed date. Results show event counts and reading errors without displaying event titles or descriptions. If an event is missing, check its calendar’s visibility and synchronization in your calendar app, then refresh Context’s calendar list." />
             </View>
             <Text style={styles.noticeBody}>{formatDayHeading(activeDate)}</Text>
@@ -256,7 +255,7 @@ export function SettingsScreen({
 const createStyles = (colors: AppColors) => StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.paper },
   content: { padding: 20, paddingBottom: 40 },
-  title: { flex: 1, marginTop: 5, color: colors.ink, fontSize: 28, fontWeight: '700' },
+  title: { flex: 1, color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '600' },
   headingRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   sectionHeadingRow: { flexDirection: 'row', alignItems: 'center', marginTop: 24, gap: 4 },
   navigationAction: { flex: 1, minHeight: 56, padding: 16, justifyContent: 'center' },
@@ -267,32 +266,34 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   appearanceText: { color: colors.graphite, fontSize: 14, fontWeight: '600' },
   appearanceTextSelected: { color: colors.onAccent },
   appearanceError: { marginTop: 8, color: colors.danger, fontSize: 12, lineHeight: 18 },
-  calendarHeading: { flex: 1, color: colors.ink, fontSize: 21, fontWeight: '600' },
+  calendarHeading: { flex: 1, color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '600' },
   accountButton: { flexDirection: 'row', alignItems: 'center', marginTop: 12, paddingRight: 4,
-    backgroundColor: colors.accent, borderRadius: 14 },
-  accountTitle: { color: colors.onAccent, fontSize: 15, fontWeight: '700' },
+    backgroundColor: colors.surface, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
+  accountTitle: { color: colors.graphite, fontSize: 14, fontWeight: '600' },
   categoriesButton: { flexDirection: 'row', alignItems: 'center', marginTop: 10, paddingRight: 4,
-    backgroundColor: colors.panel, borderRadius: 14,
+    backgroundColor: colors.surface, borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
-  categoriesTitle: { color: colors.graphite, fontSize: 14, fontWeight: '700' },
+  categoriesTitle: { color: colors.graphite, fontSize: 14, fontWeight: '600' },
   permissionCard: {
     flexDirection: 'row',
     alignItems: 'center',
     marginTop: 22,
     padding: 15,
     borderRadius: 15,
-    backgroundColor: colors.accent,
+    backgroundColor: colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.hairline,
   },
   statusDot: { width: 10, height: 10, marginRight: 12, borderRadius: 5, backgroundColor: '#9A7653' },
-  statusDotGranted: { backgroundColor: '#92A697' },
+  statusDotGranted: { backgroundColor: colors.muted },
   permissionCopy: { flex: 1 },
-  permissionTitle: { color: colors.onAccent, fontSize: 14, fontWeight: '700' },
+  permissionTitle: { color: colors.graphite, fontSize: 14, fontWeight: '500' },
   smallButton: { marginLeft: 4, minHeight: 44, paddingHorizontal: 12, paddingVertical: 9, justifyContent: 'center',
-    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.onAccentMuted, borderRadius: 9 },
-  smallButtonText: { color: colors.onAccent, fontSize: 12, fontWeight: '700' },
-  sectionTitle: { flex: 1, color: colors.ink, fontSize: 16, fontWeight: '700' },
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 9 },
+  smallButtonText: { color: colors.graphite, fontSize: 13, fontWeight: '600' },
+  sectionTitle: { flex: 1, color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '600' },
   checkConnectionButton: { minHeight: 44, marginTop: 12, paddingHorizontal: 14, alignSelf: 'flex-start',
-    justifyContent: 'center', borderRadius: 8, backgroundColor: colors.accent },
+    paddingVertical: 11, justifyContent: 'center', borderRadius: 8, backgroundColor: colors.accent },
   checkConnectionButtonText: { color: colors.onAccent, fontSize: 13, fontWeight: '600' },
   calendarCheckRow: { marginTop: 14 },
   calendarCard: {
@@ -311,6 +312,10 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     borderBottomColor: colors.hairline,
   },
   lastRow: { borderBottomWidth: 0 },
+  calendarDropdown: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline },
+  calendarDropdownText: { flex: 1, color: colors.graphite, fontSize: 14, fontWeight: '500' },
+  calendarDropdownArrow: { color: colors.muted, fontSize: 20, width: 24, textAlign: 'center' },
   calendarSelect: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingVertical: 11 },
   checkbox: { width: 20, height: 20, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: colors.silver, borderRadius: 6 },
   checkmark: { color: colors.white, fontSize: 13, fontWeight: '800' },

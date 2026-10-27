@@ -15,7 +15,7 @@ function declaration(name) {
 const transpile = (source) => ts.transpileModule(source, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
 } }).outputText;
-function headerHarness(props = {}) {
+function headerHarness(props = {}, options = {}) {
   let clock = 1000; let nextTimer = 0; const timers = new Map();
   const fixed = new Date(2026, 9, 26, 13, 11, 0);
   class ClockDate extends Date { constructor(...args) { super(...(args.length ? args : [fixed.getTime() + clock])); } static now() { return clock; } }
@@ -35,7 +35,7 @@ function headerHarness(props = {}) {
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => value === b[index]);
   const listeners = new Set(); const state = { currentState: 'active', addEventListener: (_name, callback) => { listeners.add(callback); return { remove: () => listeners.delete(callback) }; } };
   const dimensions = { width: 360, height: 500 };
-  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, sync: 0, modes: [] };
+  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, sync: 0, modes: [], errors: [] };
   const history = { canUndo: true, canRedo: true, busy: false };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   const module = { exports: {} };
@@ -49,9 +49,10 @@ function headerHarness(props = {}) {
     useAppTheme: () => ({ colors: { paper: '#FFFFFF', graphite: '#333333', muted: '#777777' } }),
     useWindowDimensions: () => dimensions,
     createCalendarBinderPress: binderModule.exports.createCalendarBinderPress,
-    spreadsheetEditor: { snapshot: () => history, subscribe: () => () => {} }, flushInlineMinutes: async () => {},
+    spreadsheetEditor: { snapshot: () => history, subscribe: () => () => {} }, flushInlineMinutes: options.flush ?? (async () => {}),
+    inlineMinuteDrafts: { snapshot: () => options.drafts ?? [] },
     undoSpreadsheetEdit: async () => {}, redoSpreadsheetEdit: async () => {},
-    Keyboard: { dismiss() {} }, Alert: { alert() {} }, AppState: state, Platform: { OS: 'android' },
+    Keyboard: { dismiss() {} }, Alert: { alert: (...args) => calls.errors.push(args) }, AppState: state, Platform: { OS: options.os ?? 'android' },
     StyleSheet: { create: (value) => value, absoluteFill: {}, hairlineWidth: 0.5 },
     ScrollView: 'ScrollView', View: 'View', Text: 'Text', Pressable: 'Pressable', Modal: 'Modal',
     ActivityIndicator: 'ActivityIndicator', CalendarViewIcon: 'CalendarViewIcon', CalendarHeaderIcon: 'CalendarHeaderIcon',
@@ -75,61 +76,82 @@ function headerHarness(props = {}) {
   }
   const press = (button) => { button.props.onPressIn?.({ nativeEvent: { touches: [{}] } }); button.props.onPress(); };
   render();
-  return { calls, advance, render, nodes, press, binder: () => nodes().find((node) => /^.* view\. Go to /.test(node.props.accessibilityLabel ?? '')),
+  return { calls, advance, render, nodes, press, binder: () => nodes().find((node) => /^.* view\. Choose a view/.test(node.props.accessibilityLabel ?? '')),
+    async settle() { for (let i = 0; i < 25; i++) await Promise.resolve(); render(); },
     changeHeight: (height) => { dimensions.height = height; render(); },
     background: () => { state.currentState = 'background'; for (const listener of listeners) listener('background'); },
     unmount: () => { for (const cleanup of cleanups) cleanup(); },
   };
 }
 
-test('actual header single tap waits for double tap, which opens view choices without also jumping to Now', () => {
-  const h = headerHarness({ viewMode: 'week' });
-  assert.equal(h.binder().props.children.props.mode, 'week');
-  h.press(h.binder()); h.advance(299); assert.equal(h.calls.now, 0); h.advance(1); assert.equal(h.calls.now, 1);
-  h.press(h.binder()); h.advance(100); h.press(h.binder()); h.advance(400); h.render();
-  assert.equal(h.calls.now, 1);
-  const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible);
-  assert.ok(menu);
+test('single binder tap opens choices after saving; double tap goes only to Now', async () => {
+  const h = headerHarness({ viewMode: 'week' }); assert.equal(h.binder().props.children.props.mode, 'week');
+  h.press(h.binder()); h.advance(299); assert.equal(h.calls.now, 0); h.advance(1); await h.settle();
+  const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible); assert.ok(menu);
   assert.deepEqual(h.nodes(menu).filter((node) => node.type === 'Pressable' && / view$/.test(node.props.accessibilityLabel ?? ''))
     .map((node) => node.props.accessibilityLabel), ['Day view', 'Week view', 'Month view', 'Year view', 'Schedule view']);
   h.nodes(menu).find((node) => node.props.accessibilityLabel === 'Month view').props.onPress();
-  assert.deepEqual(h.calls.modes, ['month']); h.advance(400); assert.equal(h.calls.now, 1);
+  assert.deepEqual(h.calls.modes, ['month']); assert.equal(h.calls.now, 0);
+  const double = headerHarness(); double.press(double.binder()); double.advance(100); double.press(double.binder());
+  double.advance(400); await double.settle(); assert.equal(double.calls.now, 1);
+  assert.equal(double.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
 });
 
-test('actual header long press and lifecycle cancellation never run a delayed Now action', () => {
+test('long hold consumes the binder gesture and lifecycle cancellation never opens choices or dates', async () => {
   const h = headerHarness(); h.press(h.binder()); h.advance(100);
   const binder = h.binder(); binder.props.onPressIn({ nativeEvent: { touches: [{}] } });
-  h.advance(450); binder.props.onLongPress(); binder.props.onLongPress(); binder.props.onPress(); h.advance(500);
-  assert.equal(h.calls.picker, 1); assert.equal(h.calls.now, 0);
-  h.press(h.binder()); h.background(); h.advance(400); assert.equal(h.calls.now, 0);
+  h.advance(450); binder.props.onLongPress(); binder.props.onLongPress(); binder.props.onPress(); h.advance(500); await h.settle();
+  assert.equal(h.calls.picker, 0); assert.equal(h.calls.now, 0);
+  assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
+  h.press(h.binder()); h.background(); h.advance(400); await h.settle();
+  assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
   const active = headerHarness(); active.press(active.binder()); active.unmount(); active.advance(400); assert.equal(active.calls.now, 0);
 });
 
-test('a second down before the threshold can release after it and still opens only the view menu', () => {
+test('second down pauses the single action so its later release still goes only to Now', async () => {
   const h = headerHarness(); h.press(h.binder()); h.advance(250);
   const binder = h.binder(); binder.props.onPressIn({ nativeEvent: { touches: [{}] } });
-  h.advance(200); assert.equal(h.calls.now, 0, 'second down pauses the pending single action');
-  binder.props.onPress(); h.advance(400); h.render();
-  assert.equal(h.calls.now, 0); assert.ok(h.nodes().some((node) => node.type === 'Modal' && node.props.visible));
+  h.advance(200); assert.equal(h.calls.now, 0); binder.props.onPress(); h.advance(400); await h.settle();
+  assert.equal(h.calls.now, 1); assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
 });
 
-test('a paused second touch released outside cannot fire an old Now on a later tap', () => {
+test('canceled second release cannot cause a later stray action and Pick / Range is an ordinary menu option', async () => {
   const h = headerHarness(); h.press(h.binder()); h.advance(100);
   const binder = h.binder(); binder.props.onPressIn({ nativeEvent: { touches: [{}] } });
-  h.advance(250); binder.props.onTouchEnd(); h.advance(0); h.advance(600);
-  assert.equal(h.calls.now, 0);
-  binder.props.onPressIn({ nativeEvent: { touches: [{}] } }); assert.equal(h.calls.now, 0);
-  binder.props.onTouchEnd(); binder.props.onPress(); h.advance(300); assert.equal(h.calls.now, 1);
-  binder.props.onAccessibilityAction({ nativeEvent: { actionName: 'longpress' } });
-  binder.props.onAccessibilityAction({ nativeEvent: { actionName: 'longpress' } });
-  assert.equal(h.calls.picker, 2, 'semantic date actions have no physical release and must remain repeatable');
+  h.advance(250); binder.props.onTouchEnd(); h.advance(0); h.advance(600); await h.settle(); assert.equal(h.calls.now, 0);
+  h.press(h.binder()); h.advance(300); await h.settle();
+  const option = h.nodes().find((node) => node.props.accessibilityLabel === 'Pick or range dates'); assert.ok(option);
+  option.props.onPress(); assert.equal(h.calls.picker, 0); h.advance(0); assert.equal(h.calls.picker, 1);
 });
 
-test('touching another header control immediately cancels pending Now before its eventual release', () => {
+test('touching another header control cancels the delayed view action', async () => {
   const h = headerHarness(); h.press(h.binder()); h.advance(100);
   const sync = h.nodes().find((node) => node.props.accessibilityLabel === 'Sync attached calendars');
-  sync.props.onPressIn(); h.advance(400); assert.equal(h.calls.now, 0);
+  sync.props.onPressIn(); h.advance(400); await h.settle();
+  assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
   sync.props.onPress(); assert.equal(h.calls.sync, 1);
+});
+
+test('view choices wait for the dated draft acknowledgement and refuse a failed save', async () => {
+  let release; const wait = new Promise((resolve) => release = resolve);
+  const h = headerHarness({}, { flush: () => wait }); h.press(h.binder()); h.advance(300); await h.settle();
+  assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
+  release(); await h.settle(); assert.ok(h.nodes().some((node) => node.type === 'Modal' && node.props.visible));
+  const failed = headerHarness({}, { drafts: [{ error: true, revision: 1, savedRevision: 0 }] });
+  failed.press(failed.binder()); failed.advance(300); await failed.settle(); assert.equal(failed.calls.errors.length, 1);
+  assert.equal(failed.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
+});
+
+test('iOS opens Pick / Range only after the view sheet dismisses and cancels a stale background handoff', async () => {
+  const h = headerHarness({}, { os: 'ios' }); h.press(h.binder()); h.advance(300); await h.settle();
+  const modal = h.nodes().find((node) => node.type === 'Modal' && node.props.visible);
+  h.nodes(modal).find((node) => node.props.accessibilityLabel === 'Pick or range dates').props.onPress();
+  h.advance(0); assert.equal(h.calls.picker, 0); modal.props.onDismiss(); assert.equal(h.calls.picker, 1);
+  modal.props.onDismiss(); assert.equal(h.calls.picker, 1);
+  const stale = headerHarness({}, { os: 'ios' }); stale.press(stale.binder()); stale.advance(300); await stale.settle();
+  const old = stale.nodes().find((node) => node.type === 'Modal' && node.props.visible);
+  stale.nodes(old).find((node) => node.props.accessibilityLabel === 'Pick or range dates').props.onPress();
+  stale.background(); old.props.onDismiss(); assert.equal(stale.calls.picker, 0);
 });
 
 test('actual hamburger menu orders Dashboard, Print, Search, Settings and dispatches after dismissal', () => {
@@ -147,12 +169,12 @@ test('actual hamburger menu orders Dashboard, Print, Search, Settings and dispat
   }
 });
 
-test('actual binder cancellation rejects a cancelled/multitouch release and accessible view action opens choices directly', () => {
+test('actual binder cancellation rejects a cancelled/multitouch release and accessible view action opens choices directly', async () => {
   const h = headerHarness({ viewMode: 'schedule' }); const binder = h.binder();
   binder.props.onPressIn({ nativeEvent: { touches: [{}] } });
   binder.props.onTouchStart({ nativeEvent: { touches: [{}, {}] } }); binder.props.onPress(); h.advance(400);
   assert.equal(h.calls.now, 0);
-  binder.props.onAccessibilityAction({ nativeEvent: { actionName: 'showViews' } }); h.render();
+  binder.props.onAccessibilityAction({ nativeEvent: { actionName: 'showViews' } }); await h.settle();
   assert.ok(h.nodes().some((node) => node.type === 'Modal' && node.props.visible));
   assert.equal(h.calls.now, 0);
 });
@@ -166,7 +188,7 @@ test('actual App Now callback preserves Day/Week/Month/Year/Schedule and zoom wh
     class FixedDate extends Date { constructor(...args) { super(...(args.length ? args : [fixed.getTime()])); } }
     const module = { exports: {} };
     vm.runInNewContext(transpile(jump.getText(appSource) + '\nexport { jumpToCurrentMinute };'), {
-      module, exports: module.exports, Date: FixedDate, viewMode: mode, focusSequence: { current: 40 }, viewWrites: { current: Promise.resolve() },
+      module, exports: module.exports, Date: FixedDate, viewMode: mode, calendarFocusRef: { current: {} }, focusSequence: { current: 40 }, viewWrites: { current: Promise.resolve() },
       transitionFromCalendar: async (change) => change(), dateKey: () => '2026-10-26', minuteIndexForDate: () => 791,
       setActiveDate: (value) => { values.date = value; }, setSelectedDateKeys: (value) => { values.selected = value; },
       setOverviewMonth: (value) => { values.month = value; }, setFocusRequest: (value) => { values.focus = value; },

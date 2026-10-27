@@ -36,7 +36,7 @@ function renderFrame(tab, onReturnToCalendar = () => {}) {
   });
   const module = { exports: {} };
   vm.runInNewContext(transpile([...declarations, 'export { ApplicationFrame };'].join('\n')), {
-    module, exports: module.exports, ...native, ...hooks, StyleSheet: style, Platform: { OS: 'android' },
+    module, exports: module.exports, ...native, ...hooks, CalendarHeaderIcon: 'CalendarHeaderIcon', StyleSheet: style, Platform: { OS: 'android' },
     useAppTheme: () => ({ colors, resolvedMode: 'light' }),
     require: (name) => { assert.equal(name, 'react/jsx-runtime'); return { jsx, jsxs: jsx, Fragment: 'Fragment' }; },
   });
@@ -68,21 +68,27 @@ function renderSettings(permissionStatus = 'granted') {
   return { tree, calls, list: nodes(tree) };
 }
 
-test('actual Settings frame places a 44-point back arrow before the title and returns to calendar', () => {
+test('actual Settings frame places the shared 44-point back icon before the title and returns to calendar', () => {
   let returned = 0; const tree = renderFrame('settings', () => returned++);
   const list = nodes(tree); const back = list.find((node) => node.props.accessibilityLabel === 'Back to calendar');
-  assert.equal(textOf(back), '←'); assert.equal(back.props.style.width, 44); assert.equal(back.props.style.height, 44);
+  assert.equal(back.props.children.type, 'CalendarHeaderIcon'); assert.equal(back.props.children.props.name, 'back');
+  assert.equal(back.props.style.width, 44); assert.equal(back.props.style.height, 44);
   const header = list.find((node) => node.type === 'View' && node.props.children?.includes(back));
   const children = header.props.children.filter(Boolean);
   assert.equal(children[0], back); assert.equal(children[1].props.accessibilityRole, 'header');
-  assert.equal(textOf(children[1]), 'Settings'); assert.equal(textOf(header), '←Settings');
+  assert.equal(textOf(children[1]), 'Settings'); assert.equal(textOf(header), 'Settings');
   back.props.onPress(); assert.equal(returned, 1);
 });
 
-test('other secondary frame navigation stays available and the Day grid gains no extra header', () => {
+test('every secondary frame uses a left back icon without Calendar text and the Day grid gains no extra header', () => {
   for (const tab of ['reports', 'search', 'accounts', 'categories']) {
-    const back = nodes(renderFrame(tab)).find((node) => node.props.accessibilityLabel === 'Back to calendar');
-    assert.equal(textOf(back), 'Calendar');
+    const tree = renderFrame(tab); const list = nodes(tree);
+    const back = list.find((node) => node.props.accessibilityLabel === 'Back to calendar');
+    assert.equal(back.props.children.type, 'CalendarHeaderIcon'); assert.equal(back.props.children.props.name, 'back');
+    assert.equal(back.props.style.width, 44); assert.equal(back.props.style.height, 44);
+    const header = list.find((node) => node.type === 'View' && node.props.children?.includes(back));
+    assert.equal(header.props.children.filter(Boolean)[0], back);
+    assert.equal(list.some((node) => node.type === 'Text' && textOf(node) === 'Calendar'), false);
   }
   assert.equal(nodes(renderFrame('today')).some((node) => node.props.accessibilityLabel === 'Back to calendar'), false);
 });
@@ -103,4 +109,24 @@ test('Settings merges duplicate Privacy info while preserving native and account
   assert.equal(h.list.filter((node) => node.props.accessibilityLabel === 'Write actual activity blocks').length, 1);
   const denied = renderSettings('denied'); const allow = denied.list.find((node) => node.type === 'Pressable' && textOf(node) === 'Allow');
   await allow.props.onPress(); assert.equal(denied.calls.allow, 1);
+});
+
+
+test('the shared back arrow uses the same two-point monochrome strokes as the other header icons', () => {
+  const file = path.join(mobile, 'src/components/CalendarHeaderIcon.tsx'); const module = { exports: {} };
+  vm.runInNewContext(transpile(fs.readFileSync(file, 'utf8')), { module, exports: module.exports, require(name) {
+    if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
+    if (name === 'react') return hooks;
+    if (name === 'react-native') return { View: 'View', StyleSheet: style };
+    if (name === '../appearance') return { useAppTheme: () => ({ colors }) };
+    throw Error(`Unexpected header icon import: ${name}`);
+  } });
+  const tree = module.exports.CalendarHeaderIcon({ name: 'back' });
+  assert.equal(tree.props.accessible, false); assert.equal(tree.props.pointerEvents, 'none');
+  assert.equal(tree.props.style.width, 24); assert.equal(tree.props.style.height, 24);
+  const lines = nodes(tree).filter((node) => node.type === 'View' && node !== tree).map((node) => Object.assign({}, ...[node.props.style].flat()));
+  assert.equal(lines.length, 3);
+  assert.ok(lines.every((line) => line.height === 2 && line.backgroundColor === colors.graphite));
+  assert.equal(lines.filter((line) => line.width === 22).length, 1);
+  assert.equal(lines.filter((line) => line.width === 12).length, 2);
 });
