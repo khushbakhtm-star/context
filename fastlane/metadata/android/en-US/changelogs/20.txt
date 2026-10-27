@@ -1,0 +1,1 @@
+Keep the minute text box visible above the keyboard while typing and selecting text. Preserve the current draft and cursor when the keyboard opens, changes size, or closes. Improve browser keyboard positioning. The separate Watch 0.1.10 update saves confirmed dictation automatically.
