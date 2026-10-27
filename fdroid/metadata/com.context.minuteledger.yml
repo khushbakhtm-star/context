@@ -1,4 +1,4 @@
-# Context 0.1.18/code19 source candidate; new independent verification is pending.
+# Context 0.1.19/code20 source candidate; new independent verification is pending.
 # Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
@@ -31,10 +31,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.18
-    versionCode: 19
+  - versionName: 0.1.19
+    versionCode: 20
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: 39ef515e053ec9af23ce6a92b7c4290c33f6d220
+    commit: 488b37e0c7bb2a07456af48a8f00b7ab3e3300ba
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -67,11 +67,11 @@ Builds:
 
 MaintainerNotes: |-
   New independent verification of this exact source is pending. Keep the build disabled.
-  Historical 0.1.17 results do not establish this version builds or passes scans.
+  Historical 0.1.18 results do not establish this version builds or passes scans.
   The source-input inventory reviews 28 packages, 109 exact removable inputs and
   five source patches, including eight unused Print/Sharing/Clipboard publications or archives.
   All Expo Android modules and core compile from source. Optional Google Wear
-  inputs (31 reviewed files) are removed by exact hashes, including Tile sources,
+  inputs (33 reviewed files) are removed by exact hashes, including Tile sources,
   resources and watch version metadata; Android calendar-color source is retained.
   Only the documented official Linux Hermes compiler scanner exception remains.
   The recipe pins Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, Gradle 9.4.1,
@@ -82,5 +82,5 @@ MaintainerNotes: |-
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.18
-CurrentVersionCode: 19
+CurrentVersion: 0.1.19
+CurrentVersionCode: 20
