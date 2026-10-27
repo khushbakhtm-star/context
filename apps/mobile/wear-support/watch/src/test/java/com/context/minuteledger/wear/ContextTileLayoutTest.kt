@@ -47,8 +47,21 @@ class ContextTileLayoutTest {
     @Test fun repeatedTileRequestsHaveNoClockOrPrivateContentAndKeepAStableResourcesVersion() {
         val first = tile(); val second = tile()
         assertEquals(ContextTileLayout.RESOURCES_VERSION, first.resourcesVersion)
-        assertEquals(first.toProto(), second.toProto())
-        assertEquals(1, first.tileTimeline!!.timelineEntries.size)
-        assertNull(first.tileTimeline!!.timelineEntries.single().validity)
+        assertEquals(first.resourcesVersion, second.resourcesVersion)
+        for (snapshot in listOf(first, second)) {
+            assertEquals(1, snapshot.tileTimeline!!.timelineEntries.size)
+            val entry = snapshot.tileTimeline!!.timelineEntries.single()
+            assertNull(entry.validity)
+            val box = entry.layout!!.root as LayoutElementBuilders.Box
+            val column = box.contents.single() as LayoutElementBuilders.Column
+            assertEquals("Context", (column.contents[0] as LayoutElementBuilders.Text).text!!.value)
+            val record = column.contents[2] as LayoutElementBuilders.Box
+            assertEquals("Record now", (record.contents.single() as LayoutElementBuilders.Text).text!!.value)
+            val action = box.modifiers!!.clickable!!.onClick as ActionBuilders.LaunchAction
+            assertEquals("com.context.minuteledger.wear.MinuteActivity", action.androidActivity!!.className)
+            assertEquals(setOf(ContextTileLayout.ACTION_EXTRA), action.androidActivity!!.keyToExtraMapping.keys)
+            assertEquals(ContextTileLayout.RECORD_NOW,
+                (action.androidActivity!!.keyToExtraMapping[ContextTileLayout.ACTION_EXTRA] as ActionBuilders.AndroidStringExtra).value)
+        }
     }
 }
