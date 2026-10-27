@@ -1,92 +1,117 @@
 # Context F-Droid submission preparation
 
-The owner authorized a public MIT source release and a request for F-Droid review. This checkout
-contains an upstream listing and a disabled build candidate. It is not an accepted F-Droid listing,
-and the source release does not itself install an APK.
+The owner authorized a public MIT source release and a request for F-Droid review. The current
+verified source candidate is **0.1.17 / Android code 18**, pinned to
+[`9fb9d951d1757631aa826f5cc132de8e7dfe4c30`](https://github.com/khushbakhtm-star/context/commit/9fb9d951d1757631aa826f5cc132de8e7dfe4c30).
+Both independent build/scanner jobs passed; the publisher-signed FOSS preview and durable
+source-to-DEX evidence are [public](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.17).
+See [`FDROID_VERIFICATION.md`](FDROID_VERIFICATION.md) for exact receipts and preserved history.
 
-The existing public request is [Context RFP 4667](https://gitlab.com/fdroid/rfp/-/work_items/4667).
-Use that request for further evidence rather than creating another. The current verified FOSS
-candidate is 0.1.13/code 14. Both independent build/scanner jobs passed, the publisher-signed
-FOSS preview and durable evidence are public, and the existing request now records those results.
-See [`FDROID_VERIFICATION.md`](FDROID_VERIFICATION.md) for the exact receipts and historical checks.
-Official inclusion, server-toolchain approval, signing and catalog publication remain pending.
+The existing request is [Context RFP 4667](https://gitlab.com/fdroid/rfp/-/work_items/4667).
+Update that request with current evidence instead of creating another. Independent verification
+and a publisher release do **not** mean F-Droid has accepted, signed or listed the application.
+Official inclusion assessment, server-toolchain approval, signing and catalog publication remain
+pending; the published build candidate stays disabled.
 
 ## Prepared material
 
 - `fastlane/metadata/android/en-US/` at the repository root contains the title, descriptions,
-  version-code changelogs, and a byte-for-byte copy of the approved Context logo.
-- `apps/mobile/fdroid/com.context.minuteledger.yml.template` declares MIT, current `Calendar & Agenda`
-  and `Time Tracker` categories, and `NonFreeNet` for optional Microsoft services.
-- `apps/mobile/fdroid/prepare-submission.cjs` checks the local listing and can generate a candidate
-  metadata file and packaging request for a real public source URL and immutable release commit.
-  It preserves the disabled native build. It does not publish source or contact F-Droid.
+  version-code changelogs and a byte-for-byte copy of the approved Context logo.
+- [`fdroid/metadata/com.context.minuteledger.yml`](../../../fdroid/metadata/com.context.minuteledger.yml)
+  is the tested disabled 0.1.17/code18 candidate with the exact public source pin.
+- `apps/mobile/fdroid/com.context.minuteledger.yml.template` is reusable scaffolding, with MIT,
+  `Calendar & Agenda`, `Time Tracker` and `NonFreeNet` for optional Microsoft services. Generated
+  template output is a draft, not a replacement for the exact tested recipe and its receipts.
+- `apps/mobile/fdroid/prepare-submission.cjs` checks listing inputs and can generate a source-specific
+  candidate under `tmp/fdroid-submission/<commit>/`. It does not publish source or contact F-Droid.
 
 No screenshots have been supplied. Add only genuine captures from the installed native app under
-`fastlane/metadata/android/en-US/images/phoneScreenshots/`; do not label a design mockup as a capture.
-Screenshots are useful listing material, and missing graphics can affect discovery, but they are
-not a substitute for testing the app.
+`fastlane/metadata/android/en-US/images/phoneScreenshots/`; do not label a mockup as a capture.
+Screenshots do not replace runtime testing or maintainer approval.
+
+## Current public evidence
+
+[Run 40490567930](https://github.com/khushbakhtm-star/context/actions/runs/40490567930), controller
+`0e664023faafb73941015fca13fdd9cf9ff0e1c2`, passed metadata lint, structured source scanning
+(**zero errors, zero warnings**), integrated F-Droid recipe/APK scanning, and separate unsigned
+native assembly/APK scanning. Both jobs recorded 108 actual removals, five source patches and
+21 exact optional Wear-source removals. The inventory reviews 28 packages and 109 removable
+paths; the Windows-only input absent on Linux explains the difference.
+
+Print, Sharing, Clipboard and the SDK-only calendar-color module were verified as actual APK
+class definitions using the exact R8 mapping and generated registration evidence. The source
+build uses no broad scanner exclusion: only the documented hash-verified official Linux Hermes
+compiler exception remains.
+
+The [FOSS preview APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.17/context-0.1.17-foss-preview.apk)
+is 78,213,023 bytes, SHA-256
+`0ab23399d40c8a0f72a71889b2548ebb02ff7fa5909788027d2f26ca75562c8a`.
+It uses the existing publisher certificate, with official v2/v3 signature verification, 16 KiB
+alignment and protected-content preservation checks. It is not signed by F-Droid.
+The [permanent evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.17/context-0.1.17-foss-build-evidence.zip)
+contains 23 checked entries, 7,723,235 bytes, SHA-256
+`82a6ea3fa543f22203bc48698567169b505248cf50b3b1ee74edc29921c85638`.
+This preserves review evidence beyond expiring GitHub Actions artifacts.
+
+The [source-tag workflow 40492679557](https://github.com/khushbakhtm-star/context/actions/runs/40492679557)
+passed at the exact application source. TypeScript, 648 full-suite tests and 119 focused tests
+passed. These checks do not establish physical phone gestures, live clipboard/calendar flows,
+printing, two-phone behavior or independent-machine byte reproducibility.
 
 ## Release and request
 
-Publish the source, license, approved assets, lockfile, and listing in a real public repository.
-Use a source-only prerelease while native verification remains pending. Do not upload private
-ledger exports, credentials, account tokens, keystores, or generated working folders. Confirm that
-the released source has the same version/code values as the metadata, then tag that exact
-application commit. The verified current source is `v0.1.13` / Android code `14`; later releases
-must increase their version and build numbers.
+Keep source, MIT license, approved assets, lockfile and listing public. Do not upload private
+ledger exports, credentials, account tokens, keystores or generated working folders. The current
+tag `v0.1.17` resolves to the source above and matches code18. Later application releases must
+increase their version/build numbers; do not repoint a published tag to a new implementation.
 
-From the repository root, check the listing:
+From the repository root, listing validation remains available:
 
 ```sh
 node apps/mobile/fdroid/prepare-submission.cjs --check
 ```
 
-After a real public source repository exists, supply its actual URLs and the full local release
-commit hash. The following arguments are placeholders to replace, not a ready-to-run command:
+For later releases, supply actual public URLs and the exact locally available application commit
+to the helper; review its generated draft against the tested recipe. The arguments below are
+placeholders, not a ready-to-run publication command:
 
 ```sh
 node apps/mobile/fdroid/prepare-submission.cjs --repo PUBLIC_HTTPS_REPOSITORY_URL --issues PUBLIC_ISSUES_URL --releases PUBLIC_RELEASES_URL --commit FULL_RELEASE_COMMIT_HASH
 ```
 
-The helper verifies the release commit exists locally and contains the required source/listing
-files, and writes under `tmp/fdroid-submission/<commit>/`. Verify the repository can be cloned
-anonymously and that tag `v0.1.0` resolves to the supplied commit. The helper cannot prove that an
-HTTPS URL is public or that the remote has the intended commit.
+Verify anonymous cloning, the exact release tag and source/native identity independently. A helper
+cannot prove a remote URL is public or that its intended commit is present. Use the existing RFP
+for current receipts and reviewer questions. A later tested metadata merge request belongs in
+[fdroiddata](https://gitlab.com/fdroid/fdroiddata); local generation creates neither a request nor
+an accepted catalog listing.
 
-Use the generated `REQUEST_FOR_PACKAGING.md` in the [F-Droid submission queue](https://gitlab.com/fdroid/rfp/-/issues/new)
-after signing in to the owner's GitLab account. It explicitly discloses the unverified build and
-new-project status so a reviewer can advise on packaging. Keep unchecked evidence as unchecked.
-The more complete route is a tested metadata merge request to
-[fdroiddata](https://gitlab.com/fdroid/fdroiddata); generated local files do not create either request.
+## Official build review still needed
 
-## Native build verification still needed
+The independent Linux build is complete for this source, with Node 24.19.0, Corepack 0.36.0,
+pnpm 11.25.0, Gradle 9.4.1, Android platform 37.0/Build Tools 37.0.0, NDK 27.1.12297006
+and CMake 3.22.1. Approval/provisioning on F-Droid's official builders remains separate.
+Retain the exact source pin and disabled flag in the public candidate while that review proceeds.
 
-Use a clean Linux checkout of the release commit and the F-Droid source-build steps in
-[`DISTRIBUTION.md`](DISTRIBUTION.md). Record the server image, Node/pnpm provisioning, JDK, Android
-SDK/NDK, build commands, APK hash, scanner output, and device results. The candidate names the
-locally used Node 24.19.0 and pnpm 11.25.0 but does not install them on an F-Droid server. Determine
-the accepted pinned toolchain through the first real native build.
-
-In a separate fdroiddata checkout with fdroidserver installed, place the generated candidate at
-`metadata/com.context.minuteledger.yml`, then run:
+A reviewer can validate an isolated fdroiddata checkout with fdroidserver 2.4.5 and the current
+candidate at `metadata/com.context.minuteledger.yml`, for example:
 
 ```sh
 fdroid rewritemeta com.context.minuteledger
 fdroid lint com.context.minuteledger
-fdroid scanner --force --exit-code com.context.minuteledger:1
+fdroid scanner --force --exit-code com.context.minuteledger:18
 ```
 
-The build entry stays disabled until a packager has resolved the toolchain and actual scanner
-findings. Remove its `disable` field in that review checkout only when ready to attempt:
+Only an ephemeral review/build copy removes `disable` when actually attempting the recipe.
+Official server testing belongs to the maintainer-approved build environment:
 
 ```sh
-fdroid build --server com.context.minuteledger:1
+fdroid build --server com.context.minuteledger:18
 ```
 
-No fdroidserver validation or unsigned native build is claimed by the listing checks. Do not add
-blanket scanner exclusions. F-Droid must review the complete dependency graph, including native
-build tooling. Optional Microsoft services are disclosed even when the publisher has not yet
-configured Microsoft sign-in; offline use and user-selected WebDAV remain alternatives.
+Preserve the complete dependency graph and exact sanitation audits. Optional Microsoft services
+remain disclosed; local Android-calendar access and user-selected WebDAV remain alternatives.
+The FOSS phone edition omits native Google sign-in and optional Wear transport. Source/native
+packaging checks do not substitute for testing the installed app or approving its inclusion.
 
 ## Project age and actual users
 
