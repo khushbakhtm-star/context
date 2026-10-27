@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CONTEXT_SOURCE_COMMIT: 39ef515e053ec9af23ce6a92b7c4290c33f6d220
+  CONTEXT_SOURCE_COMMIT: 488b37e0c7bb2a07456af48a8f00b7ab3e3300ba
   FDROID_DATA_COMMIT: dbd57558e5e687a018116b4242c42dd52d00124a
   FDROID_SERVER_SHA256: f9b52646264c732678e32e37e23a995db20cc61d45622dda5830ce23255547f4
   FDROID_SERVER_SDIST: https://files.pythonhosted.org/packages/f4/d8/7beac4add64c4b3d03dac01a073dc7c6beb69a7adbd4215bc8def3075d46/fdroidserver-2.4.5.tar.gz
