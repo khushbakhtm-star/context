@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The tile picker shows the approved Context emblem, with no private ledger content. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle"><solid android:color="#000000" /></shape>
+    </item>
+    <item android:width="160dp" android:height="160dp" android:gravity="center" android:drawable="@drawable/context_logo" />
+</layer-list>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="context_tile_label">Context</string>
+    <string name="context_tile_record_now">Record now</string>
+    <string name="context_tile_description">Open Context at the current minute to record an activity</string>
+</resources>

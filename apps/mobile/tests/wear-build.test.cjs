@@ -22,7 +22,7 @@ function fixture(t) {
 function plugin() {
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(root, 'plugins/with-context-wear.cjs'), 'utf8'), {
-    module, process,
+    module, process, Buffer,
     require(name) {
       if (name === 'expo/config-plugins') return { withSettingsGradle: (_, callback) => callback,
         withDangerousMod: (_, callback) => callback };
@@ -32,7 +32,7 @@ function plugin() {
   return module.exports;
 }
 
-test('watch project generation carries the release identity, approved logo and independent native module', (t) => {
+test('watch project generation carries its independent release identity, approved logo and native module', (t) => {
   const output = fixture(t);
   const project = plugin();
   const settings = project.includeWear('rootProject.name = "Context"\n');
@@ -41,8 +41,12 @@ test('watch project generation carries the release identity, approved logo and i
   project.generateWear(root, output, { version: '0.9.0', android: { versionCode: 91 } });
   const gradle = fs.readFileSync(path.join(output, 'wear/build.gradle'), 'utf8');
   assert.match(gradle, /applicationId 'com\.context\.minuteledger'/);
-  assert.match(gradle, /versionCode 100091 as int/);
-  assert.match(gradle, /versionName "0\.9\.0"/);
+  assert.match(gradle, /versionCode 100010 as int/);
+  assert.match(gradle, /versionName "0\.1\.9"/);
+  assert.deepEqual(JSON.parse(JSON.stringify(project.readWatchVersion(root))), { version: '0.1.9', versionCode: 100010 });
+  project.generateWear(root, output, { version: '22.1.0', android: { versionCode: 500 } });
+  assert.equal(fs.readFileSync(path.join(output, 'wear/build.gradle'), 'utf8'), gradle,
+    'phone version changes cannot silently change the watch package identity');
   assert.match(gradle, /credentials\.json/);
   assert.match(gradle, /EAS_BUILD_WORKINGDIR/);
   assert.doesNotMatch(gradle, /debug\.keystore|signingConfigs\.debug|com\.facebook\.react/);
@@ -51,7 +55,22 @@ test('watch project generation carries the release identity, approved logo and i
   const manifest = fs.readFileSync(path.join(output, 'wear/src/main/AndroidManifest.xml'), 'utf8');
   assert.match(manifest, /android\.hardware\.type\.watch/);
   assert.doesNotMatch(manifest, /RECORD_AUDIO/);
-  assert.throws(() => project.generateWear(root, output, { version: '0.9.0', android: {} }), /versionCode/);
+  assert.doesNotThrow(() => project.generateWear(root, output, {}), 'phone metadata is not a watch version source');
+});
+
+test('missing or malformed independent watch metadata fails before creating any generated watch output', (t) => {
+  const input = fixture(t); const output = fixture(t); const project = plugin();
+  fs.mkdirSync(path.join(input, 'wear-support/watch'), { recursive: true });
+  const file = path.join(input, 'wear-support/watch/version.json');
+  assert.throws(() => project.generateWear(input, output), /independent version/);
+  for (const content of ['{', '{}', '[]', JSON.stringify({ version: '0.1.9', versionCode: 9 }),
+    JSON.stringify({ version: '0.1.9', versionCode: 100010.5 }), JSON.stringify({ version: '0.1.9', versionCode: 2100000001 }),
+    JSON.stringify({ version: '0.1.9"; malicious()', versionCode: 100010 }),
+    JSON.stringify({ version: '0.1.9', versionCode: 100010, phoneCode: 18 })]) {
+    fs.writeFileSync(file, content);
+    assert.throws(() => project.generateWear(input, output), /watch version|watch versionCode|independent watch|reserved Android/);
+    assert.equal(fs.existsSync(path.join(output, 'wear')), false);
+  }
 });
 
 test('watch cloud profile retains remote signing and uploads only the native watch APK', () => {

@@ -39,7 +39,7 @@
     },
     {
       "path": "plugins/with-context-wear.cjs",
-      "sha256": "3e3adbe76eae37ea39747d2740012f4e2687bd8ca88623eda8a06f01071279b4"
+      "sha256": "0463b74d05b31dac8b1b0f4ae3d20eeefe8bc98d8f43b12df76a4191c285f2ae"
     },
     {
       "path": "wear-support/PROTOCOL.md",
@@ -47,15 +47,27 @@
     },
     {
       "path": "wear-support/README.md",
-      "sha256": "bdebc66d0d9b9d5b5a7edf07b7c6e8844a71f90ce77e0f984699e32bb31e5a57"
+      "sha256": "11c92ea064576dbb0dcb0bfc814d17965e19f37c2deada082822df429272465f"
     },
     {
       "path": "wear-support/watch/build.gradle",
-      "sha256": "476a43f41cdbf067ed2caaa04e2287dfa6e02cdc1247130dd8bedda5bec1b15e"
+      "sha256": "f2818b50a6bf504cdef3a44b1c1034002d8778a43a6ae7183af2c517e3be2928"
     },
     {
       "path": "wear-support/watch/src/main/AndroidManifest.xml",
-      "sha256": "0007e689a7358192121128c82b061070448be3317562fd4d73460ded163a0908"
+      "sha256": "87b9bf310ab66385f469d3fedb432e619f87a2d4e056893fb67243078357d706"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/ContextTileLayout.kt",
+      "sha256": "806beb92ededce71e4c0dea89ce7a9133206cabb01027cd28dff28a1f3003392"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/ContextTileService.kt",
+      "sha256": "91258932e370bfb6012ff41e2af97ca9039fbbd3bf32a7a7553e1577319a43fb"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/LaunchPolicy.kt",
+      "sha256": "7234eae28bbb356c2cefb31e89b9baf1190af32976cc1d2c76b69b5f1a704a98"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/LedgerRules.kt",
@@ -63,7 +75,11 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/MinuteActivity.kt",
-      "sha256": "f4779b9c9802ed2cb63100b493f1eca2a679ac42117e2155c2f1f89f8a751b8b"
+      "sha256": "7149447ee47235943d76d1fecc6cf55949afa3c03366faf61fa2b82e5bb44aa5"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/SpeechSessionGuard.kt",
+      "sha256": "308c04cf8ce1e1bbb044e1f76a0604436ae049fd00d260fba162007a29b52046"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchLayout.kt",
@@ -78,12 +94,36 @@
       "sha256": "c419e3d650e93878c8029aad5034c5be8cf37e584a6b50d72930920a80cc01d2"
     },
     {
+      "path": "wear-support/watch/src/main/res/drawable/context_tile_preview.xml",
+      "sha256": "41b77c12578e9bde13415a439c5afca5e64804bb7c4c1510e00374c2bb45c72b"
+    },
+    {
+      "path": "wear-support/watch/src/main/res/values/tile_strings.xml",
+      "sha256": "16bd6b4099e1f73a1a412e48776f752d7c9f1527fd7035a3f4712bbcc01c10f1"
+    },
+    {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/ContextTileLayoutTest.kt",
+      "sha256": "6aae2a5ea02d9c0fdc6af804c8e307a27339497e4080ad8433058afff8652492"
+    },
+    {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMLaunchPolicyTest.kt",
+      "sha256": "1ca2274a0b8cd7283c14ec3f6271d2ca9292010c49e7687b8305a7cfc8858272"
+    },
+    {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMSpeechSessionGuardTest.kt",
+      "sha256": "67c7482a16aff993a0e7fb3d27f35e312b99b2118b129cac8d40fb1462e10fa8"
+    },
+    {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/LedgerRulesTest.kt",
       "sha256": "120448be685c6d92d9def8c53b5da60dce385d29639a336bd86342e5d83a2a42"
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/WatchLayoutTest.kt",
       "sha256": "a02794ee0552124965136afce91feb14862085711bced0199846850bde03bb45"
+    },
+    {
+      "path": "wear-support/watch/version.json",
+      "sha256": "1239528b6f3b32b5afe25d27a7aa97428340581f1b2173317d1d1009728ba968"
     }
   ]
 }

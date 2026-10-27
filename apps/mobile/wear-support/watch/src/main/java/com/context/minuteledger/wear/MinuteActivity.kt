@@ -49,6 +49,22 @@ class MinuteActivity : Activity() {
     private var editing: Coordinate? = null
     private var editor: EditText? = null
     private var editorDialog: Dialog? = null
+    private var editorSession: EditorSession? = null
+    private var restoringEditor = false
+    private data class RestoredEditor(val session: EditorSession, val text: String, val initialText: String,
+        val autoNow: Boolean, val inputFocused: Boolean)
+    private var pendingRestore: RestoredEditor? = null
+    private var pendingSpeech: SpeechSession? = null
+    private var nextSpeechRequest = SPEECH
+    private var preserveSpeechResume = false
+    private val pickers = mutableSetOf<Dialog>()
+    private var deferredNow = false
+    private var visible = false
+    private var resumed = false
+    private var wasStopped = false
+    private var editorAutoNow = false
+    private var editorInitialText = ""
+    private var launchGeneration = 0
     private var displayedEntries = emptyMap<Int, JSONObject>()
     private var displayedPending = emptyMap<Int, JSONObject>()
     private var twelveHourClock = false
@@ -73,6 +89,10 @@ class MinuteActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = WatchStore(this)
+        restoringEditor = savedInstanceState?.containsKey("editorText") == true
+        deferredNow = savedInstanceState?.getBoolean("deferredNow", false) ?: false
+        nextSpeechRequest = savedInstanceState?.getInt("nextSpeechRequest", SPEECH) ?: SPEECH
+        preserveSpeechResume = savedInstanceState?.getBoolean("preserveSpeechResume", false) ?: false
         savedInstanceState?.let {
             selected = Coordinate(it.getString("date") ?: selected.dateKey, it.getInt("minute", selected.minuteIndex))
             followingNow = it.getBoolean("follow", true)
@@ -83,8 +103,7 @@ class MinuteActivity : Activity() {
         dateButton = button("", "Choose ledger date") { chooseDate() }
         dates.addView(dateButton, LinearLayout.LayoutParams(0, dp(WatchLayout.HEADER), 1f))
         dates.addView(button("Now", "Return to the current minute") {
-            selected = now(); followingNow = true; render(); centerMinute()
-            WatchTransport.requestDay(this, selected.dateKey); WatchTransport.synchronize(this, selected.dateKey)
+            applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
         }, LinearLayout.LayoutParams(dp(42), dp(WatchLayout.HEADER)))
         root.addView(dates)
         status = label("", 10f).apply { setTextColor(MUTED); maxLines = 1; gravity = Gravity.CENTER }
@@ -94,11 +113,13 @@ class MinuteActivity : Activity() {
             divider = null; isVerticalScrollBarEnabled = false; clipToPadding = false
             setPadding(0, 0, 0, dp(30)); setBackgroundColor(BACKGROUND)
             setOnItemClickListener { _, _, position, _ ->
+                cancelPendingLaunch()
                 followingNow = false; selected = Coordinate(selected.dateKey, position); render(); openEditor(selected)
             }
             setOnScrollListener(object : AbsListView.OnScrollListener {
                 override fun onScrollStateChanged(view: AbsListView?, state: Int) {
                     if (state == AbsListView.OnScrollListener.SCROLL_STATE_TOUCH_SCROLL) {
+                        cancelPendingLaunch()
                         followingNow = false; touchBrowsing = true
                     } else if (state == AbsListView.OnScrollListener.SCROLL_STATE_IDLE && touchBrowsing) {
                         val middle = list.pointToPosition(list.width / 2, list.height / 2)
@@ -116,25 +137,111 @@ class MinuteActivity : Activity() {
         savedInstanceState?.getString("editorText")?.let { text ->
             val target = Coordinate(savedInstanceState.getString("editorDate") ?: selected.dateKey,
                 savedInstanceState.getInt("editorMinute", selected.minuteIndex))
-            list.post { openEditor(target, text) }
+            val session = EditorSession(target, savedInstanceState.getBoolean("editorBaseKnown", false),
+                savedInstanceState.getString("editorExpectedVersion"), savedInstanceState.getString("editorCategory"),
+                savedInstanceState.getString("editorPendingId"),
+                savedInstanceState.getString("editorSessionId") ?: java.util.UUID.randomUUID().toString(),
+                savedInstanceState.getString("editorPendingText"), savedInstanceState.getString("editorPendingCategory"))
+            pendingRestore = RestoredEditor(session, text, savedInstanceState.getString("editorInitialText") ?: text,
+                savedInstanceState.getBoolean("editorAutoNow", false), savedInstanceState.getBoolean("editorInputFocused", false))
+            editorSession = session; editing = target
+            if (savedInstanceState.containsKey("speechRequest")) {
+                val speech = SpeechSession(savedInstanceState.getInt("speechRequest"),
+                    savedInstanceState.getString("speechSessionId") ?: session.sessionId, target)
+                if (SpeechSessionGuard.accepts(speech, speech.requestCode, session)) pendingSpeech = speech
+            }
         }
     }
 
     override fun onStart() {
         super.onStart()
+        visible = true
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, IntentFilter(WatchTransport.ACTION_CHANGED), RECEIVER_NOT_EXPORTED)
         else @Suppress("DEPRECATION") registerReceiver(receiver, IntentFilter(WatchTransport.ACTION_CHANGED))
         handler.post(ticker)
         WatchTransport.synchronize(this, selected.dateKey); WatchTransport.requestDay(this, selected.dateKey)
     }
     override fun onStop() {
+        visible = false; wasStopped = true; launchGeneration++
         handler.removeCallbacks(ticker); unregisterReceiver(receiver); super.onStop()
+    }
+    override fun onResume() {
+        super.onResume(); resumed = true
+        if (wasStopped && !preserveSpeechResume && editor?.hasFocus() != true) discardPristineNowEditor()
+        preserveSpeechResume = false
+        wasStopped = false
+        if (pendingRestore != null) list.post { restoreEditor() }
+        applyLaunch(LaunchTrigger.ON_START)
+    }
+    override fun onPause() {
+        resumed = false; launchGeneration++; super.onPause()
+    }
+    override fun onDestroy() {
+        visible = false; resumed = false; launchGeneration++
+        editorDialog?.dismiss(); pickers.toList().forEach { it.dismiss() }
+        super.onDestroy()
+    }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == RECORD_NOW || intent.getStringExtra(LAUNCH_ACTION) == RECORD_NOW ||
+            intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER)) {
+            discardPristineNowEditor()
+            applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
+        }
     }
     override fun onSaveInstanceState(out: Bundle) {
         out.putString("date", selected.dateKey); out.putInt("minute", selected.minuteIndex); out.putBoolean("follow", followingNow)
+        out.putBoolean("deferredNow", deferredNow); out.putInt("nextSpeechRequest", nextSpeechRequest)
+        out.putBoolean("preserveSpeechResume", preserveSpeechResume)
         editing?.let { out.putString("editorDate", it.dateKey); out.putInt("editorMinute", it.minuteIndex)
-            out.putString("editorText", editor?.text?.toString() ?: "") }
+            out.putString("editorText", editor?.text?.toString() ?: pendingRestore?.text ?: "") }
+        editorSession?.let {
+            out.putBoolean("editorBaseKnown", it.baseKnown); out.putString("editorExpectedVersion", it.expectedVersion)
+            out.putString("editorCategory", it.chosenCategory); out.putString("editorPendingId", it.pendingOperationId)
+            out.putString("editorSessionId", it.sessionId)
+            out.putString("editorPendingText", it.pendingText); out.putString("editorPendingCategory", it.pendingCategory)
+        }
+        out.putString("editorInitialText", pendingRestore?.initialText ?: editorInitialText)
+        out.putBoolean("editorAutoNow", pendingRestore?.autoNow ?: editorAutoNow)
+        out.putBoolean("editorInputFocused", pendingRestore?.inputFocused ?: (editor?.hasFocus() == true))
+        pendingSpeech?.let { out.putInt("speechRequest", it.requestCode); out.putString("speechSessionId", it.editorSessionId) }
         super.onSaveInstanceState(out)
+    }
+    private fun restoreEditor() {
+        val saved = pendingRestore ?: return
+        if (!visible || !resumed || isFinishing || isDestroyed) return
+        openEditor(saved.session.coordinate, saved.text, saved.session, saved.autoNow, saved.initialText, saved.inputFocused)
+        pendingRestore = null; restoringEditor = false
+    }
+    private fun discardPristineNowEditor() {
+        if (!LaunchPolicy.mayReplacePristineAutoEditor(editorAutoNow, editor?.text?.toString(), editorInitialText,
+            editorSession?.chosenCategory != null, LaunchState(editing != null, restoringEditor,
+                pendingSpeech != null, pickers.isNotEmpty(), deferredNow))) return
+        val previous = editorDialog ?: return
+        // Clear ownership first: a queued old onDismiss must not erase the next editor.
+        editorDialog = null; editor = null; editing = null; editorSession = null
+        previous.dismiss()
+    }
+    private fun cancelPendingLaunch() { launchGeneration++; deferredNow = false }
+    private fun applyLaunch(trigger: LaunchTrigger) {
+        val decision = LaunchPolicy.decide(trigger, LaunchState(editing != null, restoringEditor,
+            pendingSpeech != null, pickers.isNotEmpty(), deferredNow))
+        deferredNow = decision.deferredNow
+        if (!decision.resetToNow) return
+        // Retain this request if backgrounding or an editor/picker delays its posted work.
+        deferredNow = true
+        val generation = ++launchGeneration
+        list.post {
+            if (!visible || !resumed || isFinishing || isDestroyed || generation != launchGeneration ||
+                editing != null || restoringEditor || pendingSpeech != null || pickers.isNotEmpty()) return@post
+            selected = decision.target(selected, ::now); followingNow = true
+            deferredNow = false
+            render(); centerMinute()
+            // Show the cached editor immediately; requesting the phone never gates entry.
+            openEditor(selected, autoNow = true)
+            WatchTransport.requestDay(this, selected.dateKey); WatchTransport.synchronize(this, selected.dateKey)
+        }
     }
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         if (editing == null && event.action == MotionEvent.ACTION_SCROLL &&
@@ -150,11 +257,13 @@ class MinuteActivity : Activity() {
     }
 
     private fun changeDay(amount: Long) {
+        cancelPendingLaunch()
         followingNow = false
         selected = Coordinate(LocalDate.parse(selected.dateKey).plusDays(amount).toString(), selected.minuteIndex)
         render(); centerMinute(); WatchTransport.requestDay(this, selected.dateKey)
     }
     private fun moveMinute(amount: Int) {
+        cancelPendingLaunch()
         followingNow = false; val previousDay = selected.dateKey; selected = selected.move(amount)
         render(); centerMinute()
         if (previousDay != selected.dateKey) WatchTransport.requestDay(this, selected.dateKey)
@@ -226,7 +335,8 @@ class MinuteActivity : Activity() {
         }
     }
 
-    private fun openEditor(target: Coordinate, restored: String? = null) {
+    private fun openEditor(target: Coordinate, restored: String? = null, restoredSession: EditorSession? = null,
+        autoNow: Boolean = false, restoredInitialText: String? = null, restoreInputFocus: Boolean = false) {
         editorDialog?.dismiss(); followingNow = false
         val day = store.day(target.dateKey)
         val cached = store.cachedEntry(target.dateKey, target.minuteIndex)
@@ -234,9 +344,18 @@ class MinuteActivity : Activity() {
         if (pending != null && pending.optString("status") != "pending" && restored == null) {
             reviewConflict(pending); return
         }
-        val original = pending?.getJSONObject("operation") ?: cached
+        val pendingOperation = pending?.getJSONObject("operation")
+        val original = pendingOperation ?: cached
         val known = cached != null || (day != null && !day.optBoolean("partial", false))
         val version = cached?.optString("version")?.takeIf { it.isNotEmpty() && it != "null" } ?: "[null,null]"
+        val pendingVersion = pendingOperation?.optString("expectedVersion")?.takeUnless { it.isEmpty() || it == "null" }
+        val pendingCategory = pendingOperation?.optString("categoryId")?.takeUnless { it.isEmpty() || it == "null" }
+        var session = restoredSession ?: if (pendingOperation != null) EditorSession(target,
+            pendingOperation.optBoolean("baseKnown", false), pendingVersion, pendingCategory,
+            pendingOperation.optString("operationId"), pendingText = pendingOperation.getString("text"),
+            pendingCategory = pendingCategory)
+        else EditorSession(target, known, if (known) version else null)
+        editorSession = session
         val content = column().apply { setPadding(dp(26), dp(WatchLayout.TOP), dp(26), dp(WatchLayout.EDITOR_BOTTOM)) }
         val body = column()
         val scrolling = android.widget.ScrollView(this).apply { isFillViewport = true; addView(body) }
@@ -256,10 +375,14 @@ class MinuteActivity : Activity() {
             }
             filters = arrayOf(InputFilter.LengthFilter(50_000)); setPadding(dp(5), dp(9), dp(5), dp(5))
         }
+        editorAutoNow = autoNow; editorInitialText = restoredInitialText ?: input.text.toString()
         body.addView(input, LinearLayout.LayoutParams(-1, dp(WatchLayout.TEXT_FIELD)))
-        var chosenCategory: String? = null
         var colorButton: Button? = null
-        colorButton = button("Keep color", "Choose activity color") {
+        val chosenName = day?.optJSONArray("categories")?.let { categories ->
+            (0 until categories.length()).map { categories.getJSONObject(it) }
+                .firstOrNull { it.optString("id") == session.chosenCategory }?.optString("name")
+        }
+        colorButton = button(chosenName ?: "Keep color", "Choose activity color") {
             val categories = day?.optJSONArray("categories")
             val choices = (0 until (categories?.length() ?: 0)).map { categories!!.getJSONObject(it) }
                 .filter { it.optBoolean("selectable", true) }
@@ -271,20 +394,26 @@ class MinuteActivity : Activity() {
                 picker.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
                 val dialog = fullDialog(picker)
                 choices.forEach { category -> options.addView(button(category.getString("name"), category.getString("name")) {
-                    chosenCategory = category.getString("id"); colorButton?.text = category.getString("name"); dialog.dismiss()
+                    session = session.copy(chosenCategory = category.getString("id")); editorSession = session
+                    colorButton?.text = category.getString("name"); dialog.dismiss()
                 }.apply { setTextColor(runCatching { Color.parseColor(category.getString("color")) }.getOrDefault(ACCENT)) }) }
-                dialog.show()
+                showPicker(dialog)
             }
         }
         val tools = row()
         tools.addView(colorButton, LinearLayout.LayoutParams(0, dp(WatchLayout.INPUT_TOOLS), 1f))
         tools.addView(button("Dictate", "Dictate a note for this selected minute") {
             try {
+                val request = nextSpeechRequest
+                nextSpeechRequest = if (request >= 65535) SPEECH else request + 1
+                pendingSpeech = SpeechSession(request, session.sessionId, target)
                 @Suppress("DEPRECATION")
                 startActivityForResult(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    .putExtra(RecognizerIntent.EXTRA_PROMPT, "${target.dateKey} ${timeLabel(target.minuteIndex)}"), SPEECH)
-            } catch (_: android.content.ActivityNotFoundException) { toast("Dictation is unavailable. Tap the note to type.") }
+                    .putExtra(RecognizerIntent.EXTRA_PROMPT, "${target.dateKey} ${timeLabel(target.minuteIndex)}"), request)
+            } catch (_: android.content.ActivityNotFoundException) {
+                pendingSpeech = null; toast("Dictation is unavailable. Tap the note to type.")
+            }
         }, LinearLayout.LayoutParams(0, dp(WatchLayout.INPUT_TOOLS), 1f))
         body.addView(tools)
         val actions = row()
@@ -292,18 +421,25 @@ class MinuteActivity : Activity() {
         actions.addView(button("Save", "Save this minute on the watch") {
             try {
                 val text = input.text.toString().trim()
-                if (pending == null || text != pending.getJSONObject("operation").getString("text") || chosenCategory != null) {
-                    store.save(target, text, chosenCategory, known, if (known) version else null)
+                if (session.needsSave(text)) {
+                    store.save(session.coordinate, text, session.chosenCategory, session.baseKnown, session.expectedVersion)
                 }
                 editorDialog?.dismiss(); render(); WatchTransport.sendPending(this)
             } catch (_: Exception) { toast("Could not save. Keep this editor open and try again.") }
         }, LinearLayout.LayoutParams(0, dp(WatchLayout.ACTIONS), 1f))
         content.addView(actions)
         editing = target; editor = input
-        editorDialog = fullDialog(content).apply {
-            setOnDismissListener { editing = null; editor = null; editorDialog = null }
-            show()
+        val dialog = fullDialog(content)
+        editorDialog = dialog
+        dialog.setOnDismissListener {
+            if (editorDialog === dialog && editorSession?.sessionId == session.sessionId) {
+                editing = null; editor = null; editorDialog = null; editorSession = null; pendingSpeech = null
+                if (visible && !isChangingConfigurations) applyLaunch(LaunchTrigger.EDITOR_CLOSED)
+            }
         }
+        dialog.show()
+        if (autoNow && !restoreInputFocus) { body.isFocusableInTouchMode = true; body.requestFocus() }
+        else if (restoreInputFocus) input.requestFocus()
     }
     private fun reviewConflict(record: JSONObject) {
         val operation = record.getJSONObject("operation")
@@ -315,18 +451,24 @@ class MinuteActivity : Activity() {
         val dialog = fullDialog(content)
         content.addView(button("Back", "Keep both versions and return to the ledger") { dialog.dismiss() },
             LinearLayout.LayoutParams(-1, dp(32)))
-        dialog.show()
+        showPicker(dialog)
     }
     @Deprecated("Uses the system speech activity for compatibility with Wear OS 3 and later")
     override fun onActivityResult(request: Int, result: Int, data: Intent?) {
         super.onActivityResult(request, result, data)
-        if (request == SPEECH && result == RESULT_OK && editing != null) {
-            data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let {
-                editor?.setText(it); editor?.setSelection(editor?.text?.length ?: 0)
+        if (!SpeechSessionGuard.accepts(pendingSpeech, request, editorSession)) return
+        preserveSpeechResume = !resumed
+        pendingSpeech = null
+        if (result == RESULT_OK) {
+            data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { text ->
+                val restore = pendingRestore
+                if (restore != null) pendingRestore = restore.copy(text = text)
+                else { editor?.setText(text); editor?.setSelection(editor?.text?.length ?: 0) }
             }
         }
     }
     private fun chooseDate() {
+        cancelPendingLaunch()
         val content = column().apply { setPadding(dp(26), dp(WatchLayout.TOP), dp(26), dp(WatchLayout.EDITOR_BOTTOM)) }
         val body = column()
         val scrolling = android.widget.ScrollView(this).apply { isFillViewport = true; addView(body) }
@@ -349,11 +491,20 @@ class MinuteActivity : Activity() {
         actions.addView(button("Go", "Open the entered ledger date") {
             try {
                 val date = LocalDate.parse(input.text.toString().trim())
+                cancelPendingLaunch()
                 selected = Coordinate(date.toString(), selected.minuteIndex); followingNow = false
                 dialog.dismiss(); render(); centerMinute(); WatchTransport.requestDay(this, selected.dateKey)
             } catch (_: Exception) { input.error = "Use YYYY-MM-DD" }
         }, LinearLayout.LayoutParams(0, dp(WatchLayout.ACTIONS), 1f))
         content.addView(actions)
+        showPicker(dialog)
+    }
+    private fun showPicker(dialog: Dialog) {
+        pickers.add(dialog)
+        dialog.setOnDismissListener {
+            pickers.remove(dialog)
+            if (visible && !isChangingConfigurations) applyLaunch(LaunchTrigger.EDITOR_CLOSED)
+        }
         dialog.show()
     }
     private fun fullDialog(content: View): Dialog = Dialog(this).apply {
@@ -381,6 +532,8 @@ class MinuteActivity : Activity() {
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
     companion object {
+        private const val LAUNCH_ACTION = "com.context.minuteledger.action"
+        private const val RECORD_NOW = "com.context.minuteledger.action.RECORD_NOW"
         private const val SPEECH = 100
         private val BACKGROUND = Color.parseColor("#08090B")
         private val PANEL = Color.parseColor("#202024")

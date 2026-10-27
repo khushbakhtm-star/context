@@ -4,12 +4,23 @@
         android:icon="@drawable/context_logo" android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:supportsRtl="true">
         <meta-data android:name="com.google.android.wearable.standalone" android:value="false" />
-        <activity android:name=".MinuteActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+        <activity android:name=".MinuteActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service android:name=".ContextTileService" android:exported="true"
+            android:label="@string/context_tile_label" android:description="@string/context_tile_description"
+            android:icon="@drawable/context_logo"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <meta-data android:name="androidx.wear.tiles.PREVIEW" android:resource="@drawable/context_tile_preview" />
+            <meta-data android:name="tiles_schema_major_version" android:value="1" />
+            <meta-data android:name="tiles_schema_minor_version" android:value="0" />
+        </service>
         <service android:name=".WatchDataService" android:exported="true">
             <intent-filter>
                 <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
