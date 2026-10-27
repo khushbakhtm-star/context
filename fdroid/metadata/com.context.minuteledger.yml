@@ -1,4 +1,4 @@
-# Context 0.1.16/code17 source candidate; independent source-build checks passed.
+# Context 0.1.17/code18 source candidate; new independent verification is pending.
 # Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
@@ -31,10 +31,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.16
-    versionCode: 17
+  - versionName: 0.1.17
+    versionCode: 18
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: 7e43f1e59d389fdbcac2b057605d7928c0b22611
+    commit: 9fb9d951d1757631aa826f5cc132de8e7dfe4c30
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -66,38 +66,20 @@ Builds:
     output: android/app/build/outputs/apk/release/app-release-unsigned.apk
 
 MaintainerNotes: |-
-  Independent run 40415367808 passed both jobs for Context 0.1.16/code17.
-  Exact application source: 7e43f1e59d389fdbcac2b057605d7928c0b22611.
-  Tested controller: 1aeef5f7d97d276a95fb8ada1113a91ffe4f893e.
-  This source loads saved ledger notes independently of optional providers.
-  Month/Schedule use bounded separate ledger/cache/native/account queues.
-  Only a valid previously loaded account/day cache supplies offline plans,
-  scoped to current consent, identity, selected calendars and timezone bounds.
-  Account reads use a 10-second caller deadline and 60-second raw-read lease;
-  identity guards reject superseded results. Print retains strict source checks.
-  TypeScript, 535 full-suite and 95 focused tests passed. No physical 0.1.16
-  offline/calendar behavior or independent-machine reproducibility is claimed.
-  All 17 metadata and 15 native checks passed; source JSON reports 0 errors,
-  0 warnings and 7 informational entries. Actual audits in each job recorded
-  106 removed inputs, 5 source patches and 21 optional Wear-source removals.
-  The inventory reviews 27 packages and 107 removable paths; one Windows-only
-  input is absent on Linux. Expo Android modules and core compile from source.
-  Print/Sharing source builds and the SDK-only calendar-color bridge remain.
-  The sole scanner exception is the hash-verified official Linux Hermes compiler.
-  Durable R8 mapping/configuration/seeds/registration evidence: 23 entries,
-  7683764 ZIP bytes, SHA-256
-  758c9269d31b93eb064f36cfd0167406c9116d6e1c693c1194f62b11f942bf82.
-  Required Print, Sharing and calendar-color modules resolve to actual DEX
-  class definitions. Signed-preview checks include apksigner v2/v3,
-  16 KiB alignment and original publisher-certificate continuity.
-  Keep the build disabled pending official provisioning, policy assessment,
-  maintainer acceptance, signing and catalog publication. Existing packaging
-  request: fdroid/rfp issue 4667. Historical 0.1.15 receipts remain separate.
+  New independent verification of this exact source is pending. Keep the build disabled.
+  Historical 0.1.16 results do not establish this version builds or passes scans.
+  The source-input inventory reviews 28 packages, 109 exact removable inputs and
+  five source patches, including eight unused Print/Sharing/Clipboard publications or archives.
+  All Expo Android modules and core compile from source. Optional Google Wear
+  inputs are removed by exact hashes; Android calendar-color source is retained.
+  Only the documented official Linux Hermes compiler scanner exception remains.
   The recipe pins Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, Gradle 9.4.1,
   Android 37.0/Build Tools 37.0.0, NDK 27.1.12297006 and CMake 3.22.1.
-  See apps/mobile/docs/FDROID_VERIFICATION.md for exact receipts and asset links.
+  Official server provisioning, inclusion review, signing and catalog publication
+  remain pending. Existing packaging request: fdroid/rfp issue 4667.
+  See apps/mobile/docs/FDROID_VERIFICATION.md for exact verification receipts.
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.16
-CurrentVersionCode: 17
+CurrentVersion: 0.1.17
+CurrentVersionCode: 18
