@@ -6,7 +6,7 @@ on:
       source_commit:
         description: Exact reviewed Context watch 0.1.9 source commit
         required: true
-        default: 9c213ad36d0175d215c943aa9bf1c2ffed9db1d0
+        default: 142f2113a1638b78ee7a068196478e6b30ec9441
         type: string
 
 permissions:
@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CONTEXT_SOURCE_COMMIT: 9c213ad36d0175d215c943aa9bf1c2ffed9db1d0
+  CONTEXT_SOURCE_COMMIT: 142f2113a1638b78ee7a068196478e6b30ec9441
   EXPO_PUBLIC_CONTEXT_DISTRIBUTION: store
   EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL: standalone
   EAS_BUILD_PROFILE: wear-preview

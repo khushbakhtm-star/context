@@ -17,7 +17,7 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 
-SOURCE = "9c213ad36d0175d215c943aa9bf1c2ffed9db1d0"
+SOURCE = "142f2113a1638b78ee7a068196478e6b30ec9441"
 VERSION = "0.1.9"
 CODE = 100010
 APP_ID = "com.context.minuteledger"
