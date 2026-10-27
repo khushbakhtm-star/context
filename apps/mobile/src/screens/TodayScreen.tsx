@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
 import {
-  Alert, Animated, AppState, FlatList, Keyboard, KeyboardAvoidingView, Linking, PanResponder, Platform, Pressable, RefreshControl,
+  Alert, Animated, AppState, FlatList, Keyboard, KeyboardAvoidingView, Linking, PanResponder, Pressable, RefreshControl,
   ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
   type GestureResponderEvent, type NativeScrollEvent, type NativeSyntheticEvent,
 } from 'react-native';
@@ -147,6 +147,9 @@ export function TodayScreen({
   const gridViewportRef = useRef<ComponentRef<typeof View>>(null);
   const minuteViewportRef = useRef<ComponentRef<typeof View>>(null);
   const screenViewportRef = useRef<ComponentRef<typeof View>>(null);
+  const keyboardLayoutTopRef = useRef(0);
+  const keyboardMeasurementRef = useRef(0);
+  const [keyboardParentOffset, setKeyboardParentOffset] = useState(insets.top);
   const viewportMeasurementRef = useRef(0);
   const bodyWindowRef = useRef({ x: 0, y: insets.top + 110, height: 500 });
   const pendingZoomAnchorRef = useRef<(CalendarZoomAnchor & { generation: number }) | null>(null);
@@ -276,7 +279,21 @@ export function TodayScreen({
   const projectionConfigRef = useRef({ enabled: preferences.syncActuals, calendarId: preferences.writeCalendarId });
   projectionConfigRef.current = { enabled: preferences.syncActuals, calendarId: preferences.writeCalendarId };
 
+  function measureKeyboardOffset() {
+    const root = screenViewportRef.current;
+    if (!root) return;
+    const sequence = ++keyboardMeasurementRef.current;
+    const layoutTop = keyboardLayoutTopRef.current;
+    root.measureInWindow((_x, windowTop) => {
+      if (!mountedRef.current || sequence !== keyboardMeasurementRef.current || !Number.isFinite(windowTop)) return;
+      // Keyboard coordinates use the window; RN's avoiding frame uses its
+      // parent's coordinates. The header is already in that frame's y value.
+      setKeyboardParentOffset(windowTop - layoutTop);
+    });
+  }
+
   function measureMinuteViewport() {
+    measureKeyboardOffset();
     const root = screenViewportRef.current;
     const grid = gridViewportRef.current;
     const body = minuteViewportRef.current;
@@ -1854,8 +1871,12 @@ export function TodayScreen({
   }
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={insets.top + 44} onLayout={(event) => setViewportWidth(event.nativeEvent.layout.width)}>
+    <KeyboardAvoidingView style={styles.container} behavior="padding"
+      keyboardVerticalOffset={keyboardParentOffset} onLayout={(event) => {
+        const { width, y } = event.nativeEvent.layout;
+        keyboardLayoutTopRef.current = Number.isFinite(y) ? y : 0;
+        setViewportWidth(width); measureKeyboardOffset();
+      }}>
       <View ref={screenViewportRef} collapsable={false} style={styles.container} onLayout={measureMinuteViewport}>
       <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.timeMeasurement}>
         <Text key={measurementKey} style={[styles.minuteTime, styles.timeMeasurementText]} maxFontSizeMultiplier={1.4}

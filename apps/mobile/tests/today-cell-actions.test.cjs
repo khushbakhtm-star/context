@@ -11,7 +11,7 @@ function screen(t, options = {}) {
   const day = '2026-10-25'; let now = 10000; let hook = 0; let dirty = true; let tree;
   const slots = []; const effects = []; const timers = new Map(); const animationFrames = new Map(); let timerId = 0;
   const calls = []; const pastePreviews = []; const externalPreviews = []; const alerts = [];
-  const listeners = new Set(); const appStateListeners = new Set(); const rows = new Map(); const modules = new Map();
+  const listeners = new Set(); const appStateListeners = new Set(); const keyboardListeners = new Map(); const rows = new Map(); const modules = new Map();
   let systemReads = 0; let systemCopies = 0;
   let clipboard = null; let failure = null; let writeGate = null; let dismisses = 0;
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
@@ -33,12 +33,14 @@ function screen(t, options = {}) {
   class Value { constructor(value) { this.value = value; } setValue(value) { this.value = value; } }
   const native = { View: 'View', Text: 'Text', Pressable: 'Pressable', ScrollView: 'ScrollView', FlatList: 'FlatList',
     TextInput: 'TextInput', KeyboardAvoidingView: 'KeyboardAvoidingView', RefreshControl: 'RefreshControl',
-    Platform: { OS: 'android' }, StyleSheet: { create: (value) => value, hairlineWidth: 0.5 },
+    Platform: { OS: options.platform ?? 'android' }, StyleSheet: { create: (value) => value, hairlineWidth: 0.5 },
     useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
     Animated: { Value, View: 'AnimatedView', ScrollView: 'AnimatedScrollView', event: (_mapping, options) => options.listener,
       add: (left, right) => ({ get value() { return left.value + right.value; } }) },
     PanResponder: { create: (handlers) => ({ panHandlers: handlers }) },
-    Keyboard: { dismiss() { dismisses++; }, addListener: () => ({ remove() {} }) },
+    Keyboard: { dismiss() { dismisses++; }, addListener: (name, listener) => {
+      const list = keyboardListeners.get(name) ?? new Set(); keyboardListeners.set(name, list); list.add(listener);
+      return { remove() { list.delete(listener); } }; } },
     AppState: { currentState: 'active', addEventListener: (_event, listener) => {
       appStateListeners.add(listener); return { remove() { appStateListeners.delete(listener); } }; } },
     Alert: { alert(title, text, buttons) { alerts.push({ title, text });
@@ -225,6 +227,7 @@ function screen(t, options = {}) {
     async refresh() { const pending = find(tree, 'FlatList').props.refreshControl.props.onRefresh(); await settle(); return pending; },
     async navigate(date) { props.activeDate = date; dirty = true; await settle(); },
     async background() { native.AppState.currentState = 'background'; for (const listener of appStateListeners) listener('background'); await settle(); },
+    async keyboard(name, event) { for (const listener of keyboardListeners.get(name) ?? []) listener(event); await settle(); },
     input: (minute = 600, date = day) => labelled(tree,
       load(source('utils/time.ts')).formatDayHeading(date) + ', ' + load(source('utils/time.ts')).minuteLabel(minute, true) + ', minute text')?.props,
     bar: (mode) => labelled(tree, mode === 'format' ? 'Minute formatting bar' : 'Minute text entry bar')?.props,

@@ -8,6 +8,7 @@ import { flushBrowserText } from './editor';
 import { serializeSpreadsheetCells } from '../shared/utils/spreadsheet-paste';
 import { formatCells, groupSelection, ungroupSelection, type BrowserFormatPatch } from './formatting';
 import { effectiveTextColor } from './text-color';
+import { bindComposerViewport } from './composer-viewport';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const main = element('main'), grid = element('grid'), options = element<HTMLDialogElement>('options');
@@ -26,6 +27,7 @@ let entryBarMode: 'entry' | 'format' | null = null;
 let commandBusy = false;
 let cellHoldTimer: ReturnType<typeof setTimeout> | undefined; let cellHeld = false;
 const entryInput = element<HTMLTextAreaElement>('minute-entry');
+const composerViewport = bindComposerViewport(window, main, [element('entry-bar'), element('format-bar')]);
 let liveFillColors: { color: string; providerColorId: string }[] = [];
 let groupSelectionStamp: string | null = null;
 let viewGeneration = 0; let drag: { day: string; minute: number } | null = null; let rangeEnd: { day: string; minute: number } | null = null;
@@ -47,6 +49,7 @@ function updateBars() {
   element('entry-bar').hidden = !store || entryBarMode !== 'entry'; element('format-bar').hidden = !store || entryBarMode !== 'format';
   document.body.classList.toggle('has-entry-bar', Boolean(store && entryBarMode === 'entry'));
   document.body.classList.toggle('has-format-bar', Boolean(store && entryBarMode === 'format'));
+  composerViewport.refresh();
   for (const id of ['save-text', 'format-bold', 'format-italic', 'format-underline', 'format-text-color', 'format-fill', 'finish-format']) element<HTMLButtonElement>(id).disabled = commandBusy;
   if (!store || entryBarMode !== 'format') return;
   const map = new Map(store.state.documents.map((doc) => [doc.key, doc])); let coords;

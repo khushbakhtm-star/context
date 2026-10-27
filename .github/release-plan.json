@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.18",
-  "sourceAndroidVersionCode": 19,
-  "sourceIosBuildNumber": "19",
+  "version": "0.1.19",
+  "sourceAndroidVersionCode": 20,
+  "sourceIosBuildNumber": "20",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context 0.1.18/code19 with matching back arrows, uniform Settings, collapsed unchecked calendars, uncluttered Month content, a fitted Year overview and focus-preserving view changes. A single binder tap chooses views/Pick/Range; a double tap returns to now. Permissions and synchronization consent are unchanged. The independent Wear companion 0.1.9/code100010 adds a current-minute Tile and foreground capture while preserving unfinished editor and dictation identities. Phone and watch releases require their own immutable source/controller pins, native assembly, signatures and permanent verification receipts. Keep public feeds on verified phone 0.1.17 and watch 0.1.8 until their new artifacts are actually published. Physical phone/watch behavior, iOS/store distribution and official F-Droid inclusion remain separate and unverified."
+  "notes": "Prepare Context 0.1.19/code20 so the minute text bar stays visible above the keyboard while typing and selecting text. Preserve existing cell selection, live drafts and save/format behavior. Permissions and synchronization consent are unchanged. The independent Wear companion 0.1.10/code100011 saves confirmed dictation locally before queuing phone sync. Phone and watch releases require independent immutable source/controller pins, native assembly, signatures and verification receipts. Keep availability feeds on verified published artifacts until these new artifacts are public. Physical keyboard/dictation behavior, iOS/store distribution and official F-Droid inclusion require separate confirmation."
 }
