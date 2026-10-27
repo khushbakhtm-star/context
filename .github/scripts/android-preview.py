@@ -10,9 +10,9 @@ import struct
 import subprocess
 import zipfile
 
-SOURCE = "7e43f1e59d389fdbcac2b057605d7928c0b22611"
-VERSION = "0.1.16"
-CODE = 17
+SOURCE = "9fb9d951d1757631aa826f5cc132de8e7dfe4c30"
+VERSION = "0.1.17"
+CODE = 18
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned Wear-phone preview: local publisher signing is separate"
 NATIVE_RULE_MARKER = "# Context audited native module identities for packaging verification"
@@ -20,6 +20,7 @@ NATIVE_MODULES = (
     "expo.modules.print.PrintModule",
     "expo.modules.sharing.SharingModule",
     "expo.modules.contextcalendarcolors.ContextCalendarColorsModule",
+    "expo.modules.clipboard.ClipboardModule",
 )
 
 
@@ -118,7 +119,7 @@ def verify(source, reports, receipt):
         raise ValueError("The audited native module rules changed during the build")
     tools = Path(os.environ["ANDROID_HOME"]) / "build-tools/37.0.0"
     original = mobile / "android/app/build/outputs/apk/release/app-release-unsigned.apk"
-    apk = reports / "context-0.1.16-wear-phone-unsigned.apk"
+    apk = reports / "context-0.1.17-wear-phone-unsigned.apk"
     run([tools / "zipalign", "-P", "16", "-f", "4", original, apk])
     run([tools / "zipalign", "-c", "-P", "16", "-v", "4", apk])
     data = apk.read_bytes()
@@ -153,6 +154,7 @@ def verify(source, reports, receipt):
             "printNativeMarkerVerified": b"Lexpo/modules/print/PrintModule;",
             "sharingNativeMarkerVerified": b"Lexpo/modules/sharing/SharingModule;",
             "calendarColorNativeMarkerVerified": b"Lexpo/modules/contextcalendarcolors/ContextCalendarColorsModule;",
+            "clipboardNativeMarkerVerified": b"Lexpo/modules/clipboard/ClipboardModule;",
         }
         for name, marker in native_markers.items():
             if marker not in dex:
@@ -191,7 +193,7 @@ def main():
         # A failed verifier may have produced an aligned intermediate. Retain diagnostics,
         # but never let upload-artifact expose that APK as a usable unsigned build.
         if args.mode == "verify":
-            (reports / "context-0.1.16-wear-phone-unsigned.apk").unlink(missing_ok=True)
+            (reports / "context-0.1.17-wear-phone-unsigned.apk").unlink(missing_ok=True)
         receipt.update({"status": "failed", "scope": "Not a verified build; never install or publish this output.",
                         "error": str(error)})
         path.write_text(json.dumps(receipt, indent=2) + "\n")
