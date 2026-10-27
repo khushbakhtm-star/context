@@ -1,13 +1,113 @@
 # Installed-app update notices
 
 `latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
-phone 0.1.16 (build 17), available by 2026-10-26 at 23:01:16 UTC. The FOSS phone 0.1.16 (build 17) was available by 2026-10-26 at 23:05:32 UTC.
+phone 0.1.17 (build 18), available by 2026-10-27 at 10:59:04 UTC. The FOSS phone 0.1.17 (build 18) was available by 2026-10-27 at 11:03:13 UTC.
 The watch remains at 0.1.8, published on 2026-10-25 at 23:54:13 UTC. Official store entries remain absent pending actual
 availability. A source tag alone, unpublished upload, review submission, or queued release must not
 add a released entry.
 The release plan is separate from this feed. Commit an availability entry only after checking
 that an ordinary user in the intended audience can actually obtain that exact channel's release.
 When a rollout is limited, keep the entry out until availability matches the feed's audience.
+
+## Published 0.1.17 FOSS phone update
+
+[Download the 0.1.17 FOSS phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.17/context-0.1.17-foss-preview.apk)
+from the [public release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.17); both phone editions and all twelve checked files
+were available by **2026-10-27 at 11:03:13 UTC**. Choose **Update** over the installed Context to retain its ledger.
+This publisher-signed FOSS phone edition is code **18**. It omits native Google account sign-in
+and optional Wear transport. Use the Wear-enabled phone edition for a paired Galaxy Watch7 or
+native Google sign-in. The watch 0.1.8 binary is unchanged; this APK belongs on a phone.
+
+The [independent F-Droid build and scans](https://github.com/khushbakhtm-star/context/actions/runs/40490567930) used
+application source [`9fb9d951d1757631aa826f5cc132de8e7dfe4c30`](https://github.com/khushbakhtm-star/context/commit/9fb9d951d1757631aa826f5cc132de8e7dfe4c30) and controller `0e664023faafb73941015fca13fdd9cf9ff0e1c2`.
+The structured source scan reported **zero errors and zero warnings**; integrated recipe assembly
+and both APK scans passed. Audits matched **108 removed inputs,
+5 source patches and 21 Wear removals**.
+Actual Print, Sharing, Clipboard and calendar-color DEX class definitions were verified using the collected
+registration and R8 evidence where applicable. Official APK signatures, original publisher
+certificate, 16 KiB alignment and unchanged source-built protected content passed after signing.
+TypeScript, **648 full-suite tests** and **119 focused final tests** passed at that source.
+The [exact source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40492679557) also passed.
+
+Public release **425335458**, FOSS APK asset **681323222**: **78,213,023 bytes**,
+SHA-256 `0ab23399d40c8a0f72a71889b2548ebb02ff7fa5909788027d2f26ca75562c8a`. All twelve public assets match the locally verified files by size and digest. The current UI
+receipt identifies the exact application source. No superseded 0.1.17 receipt is included;
+earlier release evidence, including 0.1.14's preserved report, remains in the history.
+The [permanent evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.17/context-0.1.17-foss-build-evidence.zip) contains
+**23 checked files**, **7,723,235 bytes**,
+SHA-256 `82a6ea3fa543f22203bc48698567169b505248cf50b3b1ee74edc29921c85638`. It preserves source/native audits and class-definition evidence
+independently of expiring Actions artifacts.
+
+Use the FOSS Obtainium filter in [Android updates](ANDROID_UPDATES.md) for this phone edition.
+This publisher preview and independent scan success do **not** establish official F-Droid catalog
+acceptance. [Request #4667](https://gitlab.com/fdroid/rfp/-/work_items/4667) needs maintainer review.
+Select a minute to reveal bottom text entry with a live cell preview. The first checkmark
+saves the latest text, closes the keyboard and opens text/fill formatting; the second closes
+formatting while keeping the selection. Contextual Cut, Copy, Paste, Clear, AutoFill, Group
+and Ungroup apply only where relevant. Each grouped minute keeps its own note. Color Reset
+keeps words and group membership; holding recorded cells or a selected range longer lets you
+drag them to another minute or visible day, with occupied-target review and atomic Undo.
+Pinch changes row height while Day keeps one fixed column and Week keeps all seven.
+
+Explicit Paste imports plain-text spreadsheet rectangles from the phone system clipboard:
+rows become minutes and columns become consecutive dates. Quoted multiline notes and blank
+fields keep their positions. Source spreadsheet formatting and formula evaluation are not imported.
+
+Exact account ownership prevents two writers competing for one activity. Linked native events
+that were externally renamed, moved, resized or had their notes edited are held for review when
+the saved receipt detects the change; older receiptless bindings are protected against changed
+times. Stale old-cell synchronization or Reset cannot delete those detected moved events.
+Existing legacy changes without an earlier content receipt may require explicit review.
+Local-first reads and private whole-cell clipboard behavior remain available offline.
+The user's one-tap popup confirmation concerned 0.1.14 after updating, not a physical test of
+this binary. Physical gestures, calendar behavior, printing and two-phone synchronization
+remain unverified for this new binary. No new watch or iOS binary is announced.
+
+## Published 0.1.17 Wear-phone update
+
+[Download the 0.1.17 phone APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.17/context-0.1.17-wear-phone-preview.apk)
+from the [published release](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.17); the six verified phone files were available by **2026-10-27 at 10:59:04 UTC**.
+Choose **Update** over the installed Context to retain its ledger. This is the Wear-enabled
+phone edition, code **18**. The separate watch companion remains 0.1.8.
+
+Select a minute to reveal bottom text entry with a live cell preview. The first checkmark
+saves the latest text, closes the keyboard and opens text/fill formatting; the second closes
+formatting while keeping the selection. Contextual Cut, Copy, Paste, Clear, AutoFill, Group
+and Ungroup apply only where relevant. Each grouped minute keeps its own note. Color Reset
+keeps words and group membership; holding recorded cells or a selected range longer lets you
+drag them to another minute or visible day, with occupied-target review and atomic Undo.
+Pinch changes row height while Day keeps one fixed column and Week keeps all seven.
+
+Explicit Paste imports plain-text spreadsheet rectangles from the phone system clipboard:
+rows become minutes and columns become consecutive dates. Quoted multiline notes and blank
+fields keep their positions. Source spreadsheet formatting and formula evaluation are not imported.
+
+Exact account ownership prevents two writers competing for one activity. Linked native events
+that were externally renamed, moved, resized or had their notes edited are held for review when
+the saved receipt detects the change; older receiptless bindings are protected against changed
+times. Stale old-cell synchronization or Reset cannot delete those detected moved events.
+Existing legacy changes without an earlier content receipt may require explicit review.
+Local-first reads and private whole-cell clipboard behavior remain available offline.
+
+The user confirmed one-tap popup actions after installing 0.1.14. That is a limited observation
+of 0.1.14, not a physical test of this new binary or every gesture and calendar flow.
+
+Application source is [`9fb9d951d1757631aa826f5cc132de8e7dfe4c30`](https://github.com/khushbakhtm-star/context/commit/9fb9d951d1757631aa826f5cc132de8e7dfe4c30). TypeScript and
+**648 full-suite tests** and **119 focused final tests** passed.
+The [unsigned Android build](https://github.com/khushbakhtm-star/context/actions/runs/40490485899) used controller
+`95c199d0e3ce06530737209ba46feb56e5c2a4ed`; publisher signing stayed local. The
+[exact source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40492679557) passed at that application source.
+Public release **425335458**, APK asset **681317177**, matches the verified signed APK.
+All six phone assets match their local files by size and digest. The signed APK is
+**78,941,354 bytes**, SHA-256 `6f8af2647bab696ae1e4cd37e9d8c56c3988c6c06474b92dd1a9f959d1604825`.
+
+Receipts verify native identity, Google/Wear configuration, actual Print/Sharing/Clipboard/calendar-color
+class definitions, **74** packaged UI markers and **14** obsolete-control checks,
+official signatures, publisher-certificate continuity and 16 KiB alignment. These checks do not
+establish physical phone gestures, calendar synchronization or printing. No new FOSS, watch or
+iOS binary is announced by this phone receipt; official store and F-Droid catalog acceptance
+remain separate. The current UI receipt identifies the exact source; no superseded 0.1.17
+receipt is included. Earlier release receipts, including 0.1.14's preserved report, remain below.
 
 ## Published 0.1.16 FOSS phone update
 
