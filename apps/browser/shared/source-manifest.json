@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "source": "Context mobile 0.1.17 reviewed source",
+  "lineEndings": "LF",
+  "files": [
+    {
+      "path": "utils/time.ts",
+      "bytes": 2659,
+      "sha256": "fd0f077947556ef4b3772606ca6e8561a26560613b2aaf703bc306c747e8277c"
+    },
+    {
+      "path": "utils/cell-format.ts",
+      "bytes": 3117,
+      "sha256": "68f0dfa78d07db1795de224d7fd26dbbbb6738848944c4ed3d1eef57bd050c16"
+    },
+    {
+      "path": "utils/calendar-cell-color.ts",
+      "bytes": 1362,
+      "sha256": "358c683bf5e6c3ea818ab6bc70160368a2280e5b3fb99b8affe5e0e02e445175"
+    },
+    {
+      "path": "utils/calendar-minute-log.ts",
+      "bytes": 5424,
+      "sha256": "4479b541c92556b2a2d1e073d22d9eb3fe40052b9c8c929ea7261fc71b1c58bd"
+    },
+    {
+      "path": "utils/calendar-description.ts",
+      "bytes": 6355,
+      "sha256": "f253a6c39262fe6bf7d31fd60011c94c8437c6f17f2c5166bfdd694d851ef5b9"
+    },
+    {
+      "path": "sync/codec.ts",
+      "bytes": 12607,
+      "sha256": "4bbefa1706e628810428a236cb7714c7870670ee00777035f6db4e656c4b2e18"
+    },
+    {
+      "path": "utils/date-selection.ts",
+      "bytes": 2021,
+      "sha256": "649ba9bf4e914c3affc98d2e335f2816aa54ef7fbef029f71e0f675e1ec8d58f"
+    },
+    {
+      "path": "utils/spreadsheet-paste.ts",
+      "bytes": 5250,
+      "sha256": "cb611fd672d350abf4f222697ee110dcb9b9f3848a172b5f2dade4183a9164db"
+    },
+    {
+      "path": "sync/types.ts",
+      "bytes": 3874,
+      "sha256": "cf81b522c11c94e53e4f00e55847ef2466154e20e2fc734005cf84ab54ad7d4a"
+    },
+    {
+      "path": "types.ts",
+      "bytes": 1551,
+      "sha256": "ba8dd8ef80b56417c7358c6cc137678dbccd6f0c903788cbe13b3136e4295739"
+    }
+  ]
+}
