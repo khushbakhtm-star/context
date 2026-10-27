@@ -1,5 +1,9 @@
 # Context on Galaxy Watch7
 
+## Current matching releases
+
+Use the [Wear-enabled phone 0.1.19/code20](https://github.com/khushbakhtm-star/context/releases/download/v0.1.19/context-0.1.19-wear-phone-preview.apk) with the separately published [Watch 0.1.10/code100011](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
+
 This companion uses Wear OS. It opens at the current minute and lets you scroll earlier or later minutes, move between dates, and tap a minute to type or dictate a remembered activity. The editor keeps the selected date and minute while you write. **Now** returns to the current minute. A downloaded day is available offline.
 
 ## Matching phone edition
@@ -50,6 +54,6 @@ Official references: [Wear OS debugging](https://developer.android.com/training/
 
 The separate [Watch 0.1.10 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.10/context-0.1.10-wear-preview.apk) saves an accepted dictation
 result automatically to the minute opened by that editor. Keyboard entry still uses Save.
-Install as an Update on the watch; the phone stays at 0.1.18. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
+Install as an Update on the watch; use the Wear-enabled phone 0.1.19. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
 contains the exact source and automated build/package/signature receipts. Physical dictation
 and reconnect behavior still need checking after this watch update.

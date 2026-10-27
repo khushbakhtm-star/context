@@ -1,13 +1,25 @@
 # Installed-app update notices
 
-`latest.json` is the public availability feed. It announces the verified public Wear-enabled Android
-phone 0.1.18 (build 19), available by 2026-10-27 at 13:53:47 UTC. The FOSS phone 0.1.18 (build 19) was available by 2026-10-27 at 13:53:47 UTC.
-The separate watch 0.1.10 (code 100011) was published on 2026-10-27 at 18:34:20 UTC. Official store entries remain absent pending actual
-availability. A source tag alone, unpublished upload, review submission, or queued release must not
-add a released entry.
-The release plan is separate from this feed. Commit an availability entry only after checking
-that an ordinary user in the intended audience can actually obtain that exact channel's release.
-When a rollout is limited, keep the entry out until availability matches the feed's audience.
+Current phone availability: **0.1.19/code20** in both channels, verified at **2026-10-27 at 19:06:18 UTC**. Watch **0.1.10/code100011** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+
+## Published 0.1.19 phone updates
+
+Both phone editions, code20, and all twelve checked public assets were available by **2026-10-27 at 19:06:18 UTC**, release **425863818**. [Wear-enabled APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.19/context-0.1.19-wear-phone-preview.apk) (asset 682554647) and [FOSS APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.19/context-0.1.19-foss-preview.apk) (asset 682576669) update the existing installation. The separate Watch 0.1.10/code100011 remains the current matching watch release.
+
+Context 0.1.19 fixes keyboard avoidance for the minute text box. Typing and partial text selection retain their draft, cursor and selected minute while the layout moves.
+
+Choose **Update** over the existing phone installation. The Wear-enabled phone includes native Google sign-in and the optional watch bridge; the FOSS phone omits those native dependencies. The separate Watch 0.1.10 release remains independent.
+
+Source: [488b37e0c7bb2a07456af48a8f00b7ab3e3300ba](https://github.com/khushbakhtm-star/context/commit/488b37e0c7bb2a07456af48a8f00b7ab3e3300ba). TypeScript and 675 mobile tests passed, including 40 focused checks within that run. Static packaged checks cover 78 required UI labels and 15 obsolete labels. These are automated checks, not physical keyboard or live-calendar verification.
+
+- Wear-enabled phone: 78,953,642 bytes; SHA-256 `3746b1c115d3851891f55ac85d69efcc3cf6466edd9825c41c884605460d427a`.
+- FOSS phone: 78,225,311 bytes; SHA-256 `a2becc79816355eac74b71ba264e577ca94e2b03819f7bae4531b6d85d8591fd`.
+
+Both are code20, signed with the existing publisher certificate; official signatures, protected source-built content and 16 KiB alignment passed. [Independent F-Droid verification](https://github.com/khushbakhtm-star/context/actions/runs/40563208413) reported zero source errors/warnings and 108 removed inputs, 5 source patches and 33 reviewed Wear removals. The attached permanent evidence ZIP preserves 23 checked entries. This publisher preview does not establish official F-Droid catalog acceptance or Apple/Google store availability.
+
+The [phone build](https://github.com/khushbakhtm-star/context/actions/runs/40562325430) used controller `cdb4f0950077a7e9104b1de24b25054b1faf82ab`; FOSS used `a5b0066a8c03b907d96b0ca2bdafc09cb62ef3ef`. The [original tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40564739856) passed TypeScript and all 675 tests, then **failed upstream listing validation** because the immutable tag omitted changelogs/20.txt. [Main-branch metadata repair](https://github.com/khushbakhtm-star/context/commit/e4298e98f8f2c049e12874594a30c398a37b1016) adds only that changelog; a separate listing check passed. The complete mobile runtime subtree is unchanged. The tag and both APKs remain at 488b37e0c7bb2a07456af48a8f00b7ab3e3300ba; this is not a successful rerun of the original workflow.
+
+The [permanent FOSS evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.19/context-0.1.19-foss-build-evidence.zip) is **7,724,395 bytes**, SHA-256 `1a39622d0695203842856d413ddc62196ad57435c5848b120ab6e18d191c090a`. Public/local file sizes and digests match. No physical phone/watch, live account or store/catalog result is implied.
 
 ## Published 0.1.10 Watch update
 

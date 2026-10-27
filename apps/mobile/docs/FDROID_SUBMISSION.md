@@ -1,5 +1,17 @@
 # Context F-Droid submission preparation
 
+## Verified 0.1.19 candidate
+
+The current independent candidate is [0.1.19/code20](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.19), source [`488b37e0c7bb2a07456af48a8f00b7ab3e3300ba`](https://github.com/khushbakhtm-star/context/commit/488b37e0c7bb2a07456af48a8f00b7ab3e3300ba). Both phone editions and all twelve public evidence files match verified local sizes/digests. [Run 40563208413](https://github.com/khushbakhtm-star/context/actions/runs/40563208413), controller `a5b0066a8c03b907d96b0ca2bdafc09cb62ef3ef`, passed independent native and integrated recipe/APK scans. Structured source results: **0 errors, 0 warnings**, 7 information findings. Audits recorded 108 removals, 5 patches and 33 exact optional Wear-source removals.
+
+The FOSS APK is **78,225,311 bytes**, SHA-256 `a2becc79816355eac74b71ba264e577ca94e2b03819f7bae4531b6d85d8591fd`. [Permanent evidence](https://github.com/khushbakhtm-star/context/releases/download/v0.1.19/context-0.1.19-foss-build-evidence.zip) retains 23 checked entries, SHA-256 `1a39622d0695203842856d413ddc62196ad57435c5848b120ab6e18d191c090a`. Original publisher signatures, protected content, four actual native module class definitions and 16 KiB alignment passed. TypeScript and 675 mobile tests passed, including 40 focused named checks in that same run.
+
+Update [the existing request4667](https://gitlab.com/fdroid/rfp/-/work_items/4667). This independent publisher preview is **not** official catalog approval, F-Droid signing or a server reproducibility claim. Earlier candidate preparation below is preserved as historical context and does not supersede this current receipt.
+
+The [original tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40564739856) passed TypeScript and all 675 tests, then **failed upstream listing validation** because the immutable tag omitted changelogs/20.txt. [Main-branch metadata repair](https://github.com/khushbakhtm-star/context/commit/e4298e98f8f2c049e12874594a30c398a37b1016) adds only that changelog; a separate listing check passed. The complete mobile runtime subtree is unchanged. The tag and both APKs remain at 488b37e0c7bb2a07456af48a8f00b7ab3e3300ba; this is not a successful rerun of the original workflow.
+
+## Historical candidate preparation
+
 The owner authorized a public MIT source release and a request for F-Droid review. The current
 verified source candidate is **0.1.17 / Android code 18**, pinned to
 [`9fb9d951d1757631aa826f5cc132de8e7dfe4c30`](https://github.com/khushbakhtm-star/context/commit/9fb9d951d1757631aa826f5cc132de8e7dfe4c30).

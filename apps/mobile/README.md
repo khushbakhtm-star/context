@@ -1,5 +1,9 @@
 # Context mobile
 
+## Current published phone builds
+
+Phone **0.1.19/code20** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.19/context-0.1.19-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.19/context-0.1.19-foss-preview.apk) updates. The minute composer now accounts for the keyboard while retaining the selected minute, draft and cursor. Automated source/native checks passed; physical keyboard behavior still needs device confirmation. Use the Wear-enabled edition with the independent Watch 0.1.10 release.
+
 Context is an Android/iPhone minute ledger with direct Google and Microsoft account connections,
 encrypted ledger synchronization, and a device-calendar bridge for other calendars.
 
