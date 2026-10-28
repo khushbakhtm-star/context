@@ -2,6 +2,10 @@
 
 ## Current published phone builds
 
+Phone **0.1.21/code22** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.21/context-0.1.21-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.21/context-0.1.21-foss-preview.apk) updates. Minute editing stays available while synchronization runs; slow connections report a retryable state. Private-ledger unlocking preserves the existing encrypted format and permissions. Automated source/native checks passed; physical-phone and live-calendar behavior still need confirmation. Use the Wear-enabled edition with the independent Watch 0.1.10 release.
+
+## Previous phone release: 0.1.20
+
 Phone **0.1.20/code21** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.20/context-0.1.20-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.20/context-0.1.20-foss-preview.apk) updates. Only bordered activities create new calendar events. Event titles stay separate from minute notes; Reset cells and guarded source-edit imports preserve the remaining activity boundaries. Automated source/native checks passed; physical-phone and live-calendar behavior still need confirmation. Use the Wear-enabled edition with the independent Watch 0.1.10 release.
 
 ## Previous phone release: 0.1.19

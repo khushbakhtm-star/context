@@ -2,9 +2,13 @@
 
 ## Current matching releases
 
+Use the [Wear-enabled phone 0.1.21/code22](https://github.com/khushbakhtm-star/context/releases/download/v0.1.21/context-0.1.21-wear-phone-preview.apk) with the separately published [Watch 0.1.10/code100011](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
+
+## Previous matching releases: 0.1.20
+
 Use the [Wear-enabled phone 0.1.20/code21](https://github.com/khushbakhtm-star/context/releases/download/v0.1.20/context-0.1.20-wear-phone-preview.apk) with the separately published [Watch 0.1.10/code100011](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
 
-## Current matching releases
+## Previous matching releases: 0.1.19
 
 Use the [Wear-enabled phone 0.1.19/code20](https://github.com/khushbakhtm-star/context/releases/download/v0.1.19/context-0.1.19-wear-phone-preview.apk) with the separately published [Watch 0.1.10/code100011](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
 
@@ -58,6 +62,6 @@ Official references: [Wear OS debugging](https://developer.android.com/training/
 
 The separate [Watch 0.1.10 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.10/context-0.1.10-wear-preview.apk) saves an accepted dictation
 result automatically to the minute opened by that editor. Keyboard entry still uses Save.
-Install as an Update on the watch; use the Wear-enabled phone 0.1.20. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
+Install as an Update on the watch; use the Wear-enabled phone 0.1.21. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
 contains the exact source and automated build/package/signature receipts. Physical dictation
 and reconnect behavior still need checking after this watch update.
