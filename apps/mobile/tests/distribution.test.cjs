@@ -95,6 +95,7 @@ test('F-Droid account code can load and disconnect old Google settings without l
       if (name === './config') return { accountConfig: { distribution: 'fdroid' },
         assertGoogleConfiguration() { throw new Error('F-Droid Google connection is disabled'); } };
       if (name === './webdav') return {};
+      if (name === '../utils/account-request-deadline') return require('../src/utils/account-request-deadline.ts');
       if (name === '@react-native-google-signin/google-signin') {
         nativeLoads += 1;
         throw new Error('Native SDK intentionally absent');

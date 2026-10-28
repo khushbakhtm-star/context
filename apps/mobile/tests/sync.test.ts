@@ -1,11 +1,13 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
-import { randomBytes, webcrypto } from 'node:crypto';
+import { createCipheriv, pbkdf2, randomBytes, webcrypto } from 'node:crypto';
+import { promisify } from 'node:util';
 import test from 'node:test';
 
 import {
   compareRevisions,
+  clearLedgerKeyCache,
   decryptBatch,
   encryptBatch,
   hashValue,
@@ -29,6 +31,100 @@ const batch: SyncBatch = {
 };
 const passphrase = 'Context private ledger unlock phrase';
 const secureRandom = (length: number) => new Uint8Array(randomBytes(length));
+
+async function withoutSubtleCrypto<T>(run: () => Promise<T>): Promise<T> {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  Object.defineProperty(globalThis, 'crypto', { configurable: true, value: undefined });
+  try { return await run(); }
+  finally {
+    if (previous) Object.defineProperty(globalThis, 'crypto', previous);
+    else Reflect.deleteProperty(globalThis, 'crypto');
+  }
+}
+
+test('Hermes-compatible first-use encryption releases the event loop without changing the 600,000-round wire format', async () => withoutSubtleCrypto(async () => {
+  clearLedgerKeyCache();
+  const salt = new Uint8Array(16).fill(71);
+  const nonce = new Uint8Array(12).fill(93);
+  const phrase = 'Compatible private ledger \u0645\u0631\u062d\u0628\u0627 \ud83d\udcda';
+  let settled = false;
+  let ticksWhileWorking = 0;
+  const heartbeat = setInterval(() => { if (!settled) ticksWhileWorking += 1; }, 1);
+  let encoded: string;
+  try {
+    encoded = await encryptBatch(batch, phrase, (length) => length === 16 ? salt : nonce);
+  } finally {
+    settled = true;
+    clearInterval(heartbeat);
+  }
+  // A Promise-only/microtask yield cannot deliver even one timer until all
+  // PBKDF2 work finishes. Several real task turns also cover the long loop.
+  assert.ok(ticksWhileWorking >= 3, `Only ${ticksWhileWorking} input/timer opportunities during first-use encryption`);
+  const envelope = JSON.parse(encoded) as Record<string, unknown>;
+  assert.equal(envelope.iterations, 600_000);
+  const { ciphertext, ...header } = envelope;
+  const aad = Buffer.from(JSON.stringify(Object.fromEntries(Object.keys(header).sort().map((key) => [key, header[key]]))));
+  const key = await promisify(pbkdf2)(phrase, salt, 600_000, 32, 'sha256');
+  try {
+    const reference = createCipheriv('aes-256-gcm', key, nonce);
+    reference.setAAD(aad);
+    const bytes = Buffer.concat([reference.update(JSON.stringify(batch), 'utf8'), reference.final(), reference.getAuthTag()]);
+    assert.equal(ciphertext, bytes.toString('hex'), 'The derived key/AAD/ciphertext must match the existing envelope exactly');
+    clearLedgerKeyCache();
+    assert.deepEqual(await decryptBatch(JSON.stringify({ ...header, ciphertext: bytes.toString('hex') }), phrase), batch);
+  } finally { key.fill(0); }
+}));
+
+test('concurrent requests for the same salt get independent usable key copies', async () => {
+  clearLedgerKeyCache();
+  const fixedRandom = (length: number) => new Uint8Array(length).fill(124);
+  const encrypted = await Promise.all([
+    encryptBatch(batch, passphrase, fixedRandom), encryptBatch(batch, passphrase, fixedRandom),
+  ]);
+  assert.equal(encrypted[0], encrypted[1]);
+  assert.deepEqual(await decryptBatch(encrypted[0]!, passphrase), batch);
+});
+
+test('locking the ledger cancels active and queued KDF work and the next unlock still works', async () => withoutSubtleCrypto(async () => {
+  clearLedgerKeyCache();
+  const first = encryptBatch(batch, passphrase, (length) => new Uint8Array(length).fill(134));
+  const queued = encryptBatch(batch, passphrase, (length) => new Uint8Array(length).fill(135));
+  const settled = Promise.allSettled([first, queued]);
+  await new Promise<void>((resolve) => setTimeout(() => { clearLedgerKeyCache(); resolve(); }, 1));
+  const results = await settled;
+  for (const result of results) {
+    assert.equal(result.status, 'rejected');
+    if (result.status === 'rejected') assert.match(String(result.reason), /ledger was locked/);
+  }
+  const encoded = await encryptBatch(batch, passphrase, (length) => new Uint8Array(length).fill(134));
+  assert.deepEqual(await decryptBatch(encoded, passphrase), batch);
+}));
+
+test('locking between native derivation resolution and cache insertion cannot restore an old key', async () => {
+  clearLedgerKeyCache();
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  let nativeDerivations = 0;
+  Object.defineProperty(globalThis, 'crypto', { configurable: true, value: { subtle: {
+    importKey: async () => ({}),
+    deriveBits: () => {
+      nativeDerivations += 1;
+      // The first turn precedes deriveKeyBytes' continuation; the second runs
+      // after it resolves but before the caller can insert its result.
+      if (nativeDerivations === 1) queueMicrotask(() => queueMicrotask(clearLedgerKeyCache));
+      return Promise.resolve(new Uint8Array(32).fill(29).buffer);
+    },
+  } } });
+  try {
+    const fixedRandom = (length: number) => new Uint8Array(length).fill(148);
+    await assert.rejects(encryptBatch(batch, passphrase, fixedRandom), /ledger was locked/);
+    await encryptBatch(batch, passphrase, fixedRandom);
+    assert.equal(nativeDerivations, 2, 'Unlock must derive again instead of using an old-generation cached key');
+  } finally {
+    clearLedgerKeyCache();
+    if (previous) Object.defineProperty(globalThis, 'crypto', previous);
+    else Reflect.deleteProperty(globalThis, 'crypto');
+  }
+});
 
 test('encrypted ledger round trip preserves UTF-8, hides text, and authenticates ciphertext', async () => {
   const encoded = await encryptBatch(batch, passphrase, secureRandom);

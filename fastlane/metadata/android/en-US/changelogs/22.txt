@@ -1,0 +1,1 @@
+Keep recording and navigating while calendars synchronize. Slow account requests now time out safely, and encrypted ledger updates run in smaller batches without freezing input. Existing notes, event borders and encryption remain compatible. Pending updates are retained for retry.

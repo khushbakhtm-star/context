@@ -115,15 +115,23 @@ async function saveProjection(projection: Projection) {
   await putSyncDocument(`projection:${projection.id}`, sanitized(projection));
 }
 
-async function storageSync(account: ConnectedAccount, passphrase: string) {
+type StoragePassBudget = { downloads: number; uploads: number; verifiedPassphrase: boolean };
+const STORAGE_DOWNLOADS_PER_PASS = 8;
+const STORAGE_UPLOADS_PER_PASS = 4;
+class StorageDownloadPending extends Error {
+  constructor() { super('Private ledger download is continuing. Calendar changes will resume after its remaining updates are checked.'); }
+}
+
+async function storageSync(account: ConnectedAccount, passphrase: string, budget: StoragePassBudget) {
   const storage = createLedgerStorage(account);
   const storageKey = account.id;
   // Download first: a wrong passphrase must fail before any new encrypted files are uploaded.
   const files = await storage.listFiles();
-  let verifiedPassphrase = false;
   for (const file of files) {
     const seen = await hasSeenSyncFile(storageKey, file.id);
-    if (seen && verifiedPassphrase) continue;
+    if (seen && budget.verifiedPassphrase) continue;
+    if (budget.downloads >= STORAGE_DOWNLOADS_PER_PASS) throw new StorageDownloadPending();
+    budget.downloads++;
     let batch: SyncBatch;
     try { batch = await decryptBatch(await storage.readFile(file), passphrase); }
     catch (error) {
@@ -132,7 +140,7 @@ async function storageSync(account: ConnectedAccount, passphrase: string) {
       }
       throw error;
     }
-    verifiedPassphrase = true;
+    budget.verifiedPassphrase = true;
     if (seen) continue;
     await mergeSyncDocuments(batch.documents);
     await markSyncFileSeen(storageKey, file.id);
@@ -141,10 +149,10 @@ async function storageSync(account: ConnectedAccount, passphrase: string) {
   type Pending = { name: string; ciphertext: string; batch: SyncBatch };
   const pendingKey = `account.pendingBatch.${account.id}`;
   // Bound work per foreground pass; later passes continue without dropping unacknowledged rows.
-  for (let chunk = 0; chunk < 100; chunk += 1) {
+  while (budget.uploads < STORAGE_UPLOADS_PER_PASS) {
     let pending = await getSetting<Pending | null>(pendingKey, null);
     if (!pending) {
-      const documents = await getDocumentsForUpload(storageKey, 100);
+      const documents = await getDocumentsForUpload(storageKey, 500);
       if (!documents.length) break;
       // Drive multipart uploads have a small-file limit; ciphertext uses hexadecimal encoding.
       // Keep plaintext below 2 MiB and let larger journals continue in subsequent immutable files.
@@ -160,7 +168,9 @@ async function storageSync(account: ConnectedAccount, passphrase: string) {
     await storage.writeFile(pending.name, pending.ciphertext);
     await acknowledgeUploaded(storageKey, pending.batch.documents);
     await setSetting(pendingKey, null);
+    budget.uploads++;
   }
+  return !(await getSetting<Pending | null>(pendingKey, null)) && !(await getDocumentsForUpload(storageKey, 1)).length;
 }
 
 export type AccountPlansResult = { plans: PlannedEvent[];
@@ -914,6 +924,8 @@ async function runSync(): Promise<AccountSyncStatus> {
   publish({ running: true, message: 'Synchronizing accounts…' });
   const errors: string[] = [];
   const blockedAccounts = new Set<string>();
+  const storageBudgets = new Map<string, StoragePassBudget>();
+  let storagePending = false;
   try {
     const accounts = await getAccounts();
     const passphrase = await SecureStore.getItemAsync(PASSPHRASE_KEY);
@@ -921,9 +933,12 @@ async function runSync(): Promise<AccountSyncStatus> {
       try {
         if (account.consent.ledgerStorage) {
           if (!passphrase) throw new Error('Unlock the private ledger with the same passphrase on both phones.');
-          await storageSync(account, passphrase);
+          const budget = { downloads: 0, uploads: 0, verifiedPassphrase: false };
+          storageBudgets.set(account.id, budget);
+          if (!await storageSync(account, passphrase, budget)) storagePending = true;
         }
       } catch (error) {
+        if (error instanceof StorageDownloadPending) storagePending = true;
         blockedAccounts.add(account.id);
         errors.push(`${account.label}: ${error instanceof Error ? error.message : 'Storage sync failed.'}`);
       }
@@ -968,12 +983,20 @@ async function runSync(): Promise<AccountSyncStatus> {
     // Calendar imports are ledger mutations too, so send them to the other phone in this pass.
     for (const account of accounts) {
       if (!account.consent.ledgerStorage || !passphrase || blockedAccounts.has(account.id)) continue;
-      try { await storageSync(account, passphrase); }
-      catch (error) { errors.push(`${account.label}: ${error instanceof Error ? error.message : 'Upload failed.'}`); }
+      try {
+        const budget = storageBudgets.get(account.id) ?? { downloads: 0, uploads: 0, verifiedPassphrase: false };
+        if (!await storageSync(account, passphrase, budget)) storagePending = true;
+      }
+      catch (error) {
+        if (error instanceof StorageDownloadPending) storagePending = true;
+        errors.push(`${account.label}: ${error instanceof Error ? error.message : 'Upload failed.'}`);
+      }
     }
     const conflicts = (await listProjections()).filter((p) => p.state === 'conflict').length;
-    publish({ running: false, conflicts, lastSyncedAt: errors.length ? status.lastSyncedAt : new Date().toISOString(),
-      message: errors.length ? [...new Set(errors)].join('\n') : accounts.length ? 'Accounts synchronized' : 'Connect an account to sync your phones' });
+    if (storagePending) requestAccountSynchronization();
+    publish({ running: false, conflicts, lastSyncedAt: errors.length || storagePending ? status.lastSyncedAt : new Date().toISOString(),
+      message: errors.length ? [...new Set(errors)].join('\n') : storagePending ? 'Private ledger synchronization is continuing.' :
+        accounts.length ? 'Accounts synchronized' : 'Connect an account to sync your phones' });
   } catch (error) {
     publish({ running: false, message: error instanceof Error ? error.message : 'Synchronization will retry.' });
   }

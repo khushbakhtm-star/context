@@ -15,6 +15,7 @@ function loadWebDav(handler) {
     module, exports: module.exports, Headers, Response, URL, TextEncoder, TextDecoder,
     require(name) {
       if (name === 'expo/fetch') return { fetch: handler };
+      if (name === '../utils/account-request-deadline') return require('../src/utils/account-request-deadline.ts');
       throw new Error(`Unexpected WebDAV test import: ${name}`);
     },
   }), { filename });

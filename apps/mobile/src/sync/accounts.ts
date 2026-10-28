@@ -13,6 +13,7 @@ import {
 import type { AccountConsent, AccountProvider, ConnectedAccount } from './types';
 import { normalizeWebDavFolder, probeWebDavFolder } from './webdav';
 import type { WebDavCredentials } from './webdav';
+import { accountFetchWithDeadline, accountRequestDeadline } from '../utils/account-request-deadline';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -197,7 +198,7 @@ async function connectMicrosoft(consent: AccountConsent): Promise<ConnectedAccou
     },
     discovery,
   );
-  const profileResponse = await fetch('https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName', {
+  const profileResponse = await accountFetchWithDeadline('https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName', {
     headers: { Authorization: `Bearer ${tokens.accessToken}` },
   });
   if (!profileResponse.ok) throw new Error('Microsoft could not verify the connected account.');
@@ -288,13 +289,16 @@ async function ensureCurrentAccount(account: ConnectedAccount) {
   return saved;
 }
 
-async function acquireToken(account: ConnectedAccount, forceRefresh: boolean): Promise<string> {
+async function acquireToken(account: ConnectedAccount, forceRefresh: boolean, isCurrent: () => boolean): Promise<string> {
+  const requireCurrent = () => { if (!isCurrent()) throw new Error('This account connection request expired. Tap Sync to retry.'); };
   await ensureCurrentAccount(account);
+  requireCurrent();
   if (account.provider === 'webdav') throw new Error('WebDAV uses a stored app password, not an OAuth token.');
   if (account.provider === 'google') {
     const GoogleSignin = configureGoogle();
     if (!GoogleSignin.getCurrentUser()) {
       const restored = await GoogleSignin.signInSilently();
+      requireCurrent();
       if (restored.type !== 'success') throw new Error('Reconnect your Google account to continue syncing.');
     }
     if (GoogleSignin.getCurrentUser()?.user.id !== account.subject) {
@@ -302,9 +306,12 @@ async function acquireToken(account: ConnectedAccount, forceRefresh: boolean): P
     }
     if (forceRefresh) {
       const oldTokens = await GoogleSignin.getTokens();
+      requireCurrent();
       await GoogleSignin.clearCachedAccessToken(oldTokens.accessToken);
+      requireCurrent();
     }
     const tokens = await GoogleSignin.getTokens();
+    requireCurrent();
     // Native account selection could have changed while the token promise was resolving.
     if (GoogleSignin.getCurrentUser()?.user.id !== account.subject) {
       throw new Error('The active Google account changed during synchronization.');
@@ -312,6 +319,7 @@ async function acquireToken(account: ConnectedAccount, forceRefresh: boolean): P
     return tokens.accessToken;
   }
   const credential = await readCredential(account.id);
+  requireCurrent();
   if (!credential) throw new Error('Reconnect your Microsoft account to continue syncing.');
   if (!forceRefresh && credential.expiresAt > Date.now() + 60_000) return credential.accessToken;
   if (!credential.refreshToken) throw new Error('Reconnect Microsoft to renew access.');
@@ -319,19 +327,25 @@ async function acquireToken(account: ConnectedAccount, forceRefresh: boolean): P
     { clientId: accountConfig.microsoftClientId, refreshToken: credential.refreshToken },
     microsoftDiscovery(),
   );
+  requireCurrent();
   await writeCredential(account.id, {
     accessToken: tokens.accessToken,
     refreshToken: tokens.refreshToken ?? credential.refreshToken,
     expiresAt: (tokens.issuedAt + (tokens.expiresIn ?? 3600)) * 1000,
   });
   await ensureCurrentAccount(account);
+  requireCurrent();
   return tokens.accessToken;
 }
 
 function tokenFor(account: ConnectedAccount, forceRefresh = false) {
   const running = credentialRefreshes.get(account.id);
   if (running) return running;
-  const job = acquireToken(account, forceRefresh).finally(() => credentialRefreshes.delete(account.id));
+  let job: Promise<string>;
+  job = accountRequestDeadline((signal) => acquireToken(account, forceRefresh,
+    () => !signal.aborted && credentialRefreshes.get(account.id) === job)).finally(() => {
+    if (credentialRefreshes.get(account.id) === job) credentialRefreshes.delete(account.id);
+  });
   credentialRefreshes.set(account.id, job);
   return job;
 }
@@ -384,7 +398,7 @@ export async function accountFetch(
     }
     const headers = new Headers(init.headers);
     headers.set('Authorization', `Bearer ${token}`);
-    return fetch(url, { ...init, headers });
+    return accountFetchWithDeadline(url, { ...init, headers });
   };
   const response = await perform(await tokenFor(account));
   if (response.status !== 401) return response;

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "source": "Context mobile reviewed calendar title/border and compact-description protocol source",
+  "source": "Context mobile 0.1.17 reviewed source",
   "lineEndings": "LF",
   "files": [
     {
@@ -30,8 +30,8 @@
     },
     {
       "path": "sync/codec.ts",
-      "bytes": 12607,
-      "sha256": "4bbefa1706e628810428a236cb7714c7870670ee00777035f6db4e656c4b2e18"
+      "bytes": 16442,
+      "sha256": "ceb592875c84fcc3cfbf32df084ad1110b9ab7dad7329de8e74d7d4e91cd4817"
     },
     {
       "path": "utils/date-selection.ts",

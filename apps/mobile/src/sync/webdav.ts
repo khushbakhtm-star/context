@@ -1,6 +1,7 @@
 import { fetch as nativeFetch } from 'expo/fetch';
 
 import type { ConnectedAccount, LedgerStorage, StorageFile } from './types';
+import { accountFetchWithDeadline, accountRequestDeadline } from '../utils/account-request-deadline';
 
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_LISTING_BYTES = 4 * 1024 * 1024;
@@ -176,6 +177,7 @@ export function parseWebDavListing(xml: string, folderValue: string): StorageFil
 }
 
 async function limitedText(response: Response, limit = MAX_BODY_BYTES) {
+  return accountRequestDeadline(async (signal) => {
   if (Number(response.headers.get('Content-Length') ?? 0) > limit) throw new Error('The WebDAV response is too large.');
   if (!response.body) {
     const text = await response.text();
@@ -183,22 +185,27 @@ async function limitedText(response: Response, limit = MAX_BODY_BYTES) {
     return text;
   }
   const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener('abort', cancel, { once: true });
   const decoder = new TextDecoder();
   let size = 0;
   let text = '';
+  let finished = false;
   try {
     while (true) {
       const chunk = await reader.read();
-      if (chunk.done) break;
+      if (chunk.done) { finished = true; break; }
       size += chunk.value.byteLength;
       if (size > limit) throw new Error('The WebDAV response is too large.');
       text += decoder.decode(chunk.value, { stream: true });
     }
     return text + decoder.decode();
   } finally {
-    if (size > limit) await reader.cancel().catch(() => undefined);
+    signal.removeEventListener('abort', cancel);
+    if (!finished) void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+  });
 }
 
 async function request(folder: string, url: string, credentials: WebDavCredentials, init: RequestInit) {
@@ -210,7 +217,7 @@ async function request(folder: string, url: string, credentials: WebDavCredentia
   if (url !== base.toString()) scopedFileUrl(base.toString(), url);
   const headers = new Headers(init.headers);
   headers.set('Authorization', basicAuthorization(credentials));
-  const response = await nativeFetch(url, { ...init, headers, redirect: 'manual', credentials: 'omit' });
+  const response = await accountFetchWithDeadline(url, { ...init, headers, redirect: 'manual', credentials: 'omit' }, nativeFetch);
   if (response.status >= 300 && response.status < 400) {
     throw new Error('WebDAV redirects are disabled. Enter the final HTTPS folder URL shown by your provider.');
   }

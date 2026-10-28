@@ -4,6 +4,7 @@ import { getSetting, setSetting } from '../data/database';
 import { accountFetch, getAccounts, getWebDavCredentials } from './accounts';
 import type { ConnectedAccount, LedgerStorage, StorageFile } from './types';
 import { createWebDavStorage } from './webdav';
+import { accountFetchWithDeadline } from '../utils/account-request-deadline';
 
 const DRIVE = 'https://www.googleapis.com/drive/v3';
 const GRAPH = 'https://graph.microsoft.com/v1.0';
@@ -166,7 +167,7 @@ async function graphRead(account: ConnectedAccount, file: StorageFile) {
     throw new Error('Microsoft did not provide a secure ledger download URL.');
   }
   await requireStorageConsent(account);
-  const response = await fetch(downloadUrl);
+  const response = await accountFetchWithDeadline(downloadUrl);
   await expectSuccess(response, 'Downloading Microsoft ledger data');
   return response.text();
 }

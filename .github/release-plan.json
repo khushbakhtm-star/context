@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.20",
-  "sourceAndroidVersionCode": 21,
-  "sourceIosBuildNumber": "21",
+  "version": "0.1.21",
+  "sourceAndroidVersionCode": 22,
+  "sourceIosBuildNumber": "22",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context 0.1.20/code21 with explicit bordered calendar events and separate titles and minute notes. Only bordered blocks create new calendar events. Imported moves, cleared descriptions and colors preserve linked event identity and location; Reset cells detaches selected minutes and resets their contents and formatting. Consecutive repeated notes emit only their first timestamp. Independent native assembly, signatures and verification receipts are required before availability feeds change. Physical-device behavior, iOS/store distribution and official F-Droid inclusion require separate confirmation. The independent Wear companion remains 0.1.10/code100011."
+  "notes": "Prepare Context 0.1.21/code22 with responsive minute editing during calendar and private-ledger synchronization. Manual synchronization no longer holds the calendar view lock; slow account requests and response bodies have bounded waits. Existing encrypted ledgers retain PBKDF2-SHA256 at 600,000 iterations with cooperative input-friendly derivation and bounded storage passes. Pending downloads still block unsafe calendar writes and unfinished uploads remain queued. Independent native assembly, signatures and verification receipts are required before availability feeds change. Physical-device behavior, iOS/store distribution and official F-Droid inclusion require separate confirmation. The independent Wear companion remains 0.1.10/code100011."
 }

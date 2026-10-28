@@ -82,6 +82,7 @@ const DEFAULT_PREFERENCES: CalendarPreferences = {
 };
 
 class CalendarTransitionCancelled extends Error {}
+const MANUAL_SYNC_WAIT_MS = 35_000;
 
 /** Cancellation releases the UI while the existing read/save promise finishes safely. */
 function awaitCalendarTransition<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -712,8 +713,22 @@ function AppController() {
         throw new CalendarTransitionCancelled();
       }
     };
+    // A sync is background work, not a view transition. In particular, its
+    // network waits must never disable the minute grid or navigation.
+    const deadline = setTimeout(() => {
+      if (manualSyncAbortRef.current !== controller) return;
+      if (controllerMountedRef.current && lifecycleEpochRef.current === epoch && AppState.currentState === 'active') {
+        setManualSyncError('Synchronization is taking longer than expected. Saved minutes remain on this phone. You can keep editing.');
+      }
+      controller.abort();
+    }, MANUAL_SYNC_WAIT_MS);
     try {
-      await transitionFromCalendar(async () => {
+      await awaitCalendarTransition((async () => {
+        await flushInlineMinutes();
+        requireCurrent();
+        if (inlineMinuteDrafts.snapshot().some((draft) => draft.error)) {
+          throw new Error('Your current minute could not be saved. Try again.');
+        }
         requireCurrent();
         const available = await refreshCalendars();
         requireCurrent();
@@ -741,8 +756,14 @@ function AppController() {
         setDataVersion((version) => version + 1);
         colorDraftObserver.consumeSkipped();
         if (messages.length) throw new Error([...new Set(messages)].join('\n'));
-      }, 'Could not synchronize calendar', controller.signal, (message) => setManualSyncError(message));
+      })(), controller.signal);
+    } catch (error) {
+      if (!(error instanceof CalendarTransitionCancelled) && !controller.signal.aborted &&
+          controllerMountedRef.current && lifecycleEpochRef.current === epoch && AppState.currentState === 'active') {
+        setManualSyncError(error instanceof Error ? error.message : 'Synchronization will retry.');
+      }
     } finally {
+      clearTimeout(deadline);
       if (manualSyncAbortRef.current === controller) {
         manualSyncAbortRef.current = null;
         if (controllerMountedRef.current) setManualSyncing(false);
@@ -1004,7 +1025,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const [availableWidth, setAvailableWidth] = useState(width);
   const controlWidth = Math.max(40, Math.min(44, availableWidth / 7));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
-  const navigationBusy = viewChanging || syncing || historyPending || history.busy;
+  const navigationBusy = viewChanging || historyPending || history.busy;
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
   const binderActions = useRef({ single: () => {}, double: () => {}, long: () => {} });
@@ -1243,7 +1264,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel={syncing ? 'Synchronizing calendars' : syncError ? 'Calendar sync needs attention. Tap to retry' : 'Sync attached calendars'}
       accessibilityHint={syncError ? 'Touch and hold for sync details' : undefined}
-      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, busy: syncing }}
+      disabled={navigationBusy || syncing} accessibilityState={{ disabled: navigationBusy || syncing, busy: syncing }}
       onPressIn={() => { syncLongPress.current = false; binderPress.cancel(); }}
       onLongPress={() => { syncLongPress.current = true; if (syncError) Alert.alert('Calendar synchronization', syncError); }}
       accessibilityActions={syncError ? [{ name: 'longpress', label: 'Show sync details' }] : []}

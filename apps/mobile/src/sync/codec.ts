@@ -1,5 +1,5 @@
 import { gcm } from '@noble/ciphers/aes.js';
-import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
+import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js';
 import { parseCalendarMinuteLog } from '../utils/calendar-minute-log';
@@ -15,10 +15,15 @@ const REVISION_PATTERN = /^\d{16}:\d{8}:[A-Za-z0-9_-]{8,128}$/;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,160}$/;
 const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const derivedKeys = new Map<string, Uint8Array>();
+const pendingKeys = new Map<string, Promise<Uint8Array>>();
+let keyCacheGeneration = 0;
+let keyDerivationQueue: Promise<void> = Promise.resolve();
 
 export function clearLedgerKeyCache() {
+  keyCacheGeneration += 1;
   for (const key of derivedKeys.values()) key.fill(0);
   derivedKeys.clear();
+  pendingKeys.clear();
 }
 
 type RandomSource = (length: number) => Uint8Array | Promise<Uint8Array>;
@@ -189,22 +194,114 @@ function associatedData(envelope: Omit<EncryptedEnvelope, 'ciphertext'>) {
   return utf8ToBytes(canonicalJson(envelope));
 }
 
+/**
+ * RFC 8018 PBKDF2-HMAC-SHA256, one 32-byte block. A real task boundary lets
+ * Hermes/browser input and rendering run; noble 1.8's async KDF uses microtask
+ * yields, which do not release the UI event loop. The primitive and work factor
+ * are unchanged. Reuse noble's HMAC state rather than allocating per round.
+ */
+async function deriveKeyCooperatively(password: Uint8Array, salt: Uint8Array, requireCurrent: () => void) {
+  const prf = hmac.create(sha256, password);
+  const salted = prf.clone().update(salt);
+  let working: ReturnType<typeof prf.clone> | undefined;
+  const u = new Uint8Array(32);
+  const result = new Uint8Array(32);
+  const block = new Uint8Array([0, 0, 0, 1]);
+  let completed = false;
+  try {
+    requireCurrent();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    requireCurrent();
+    working = salted.clone();
+    working.update(block).digestInto(u);
+    result.set(u);
+    let quantumStart = Date.now();
+    for (let round = 1; round < ITERATIONS; round += 1) {
+      working = prf._cloneInto(working);
+      working.update(u).digestInto(u);
+      for (let byte = 0; byte < result.length; byte += 1) result[byte] = result[byte]! ^ u[byte]!;
+      // Check the clock in bounded chunks; every derivation shares one queue so
+      // concurrent cloud reads cannot multiply the main-thread work quantum.
+      if ((round & 255) === 0) {
+        const elapsed = Date.now() - quantumStart;
+        if (elapsed >= 8 || elapsed < 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          requireCurrent();
+          quantumStart = Date.now();
+        }
+      }
+    }
+    requireCurrent();
+    completed = true;
+    return result;
+  } finally {
+    prf.destroy();
+    salted.destroy();
+    working?.destroy();
+    password.fill(0);
+    u.fill(0);
+    block.fill(0);
+    if (!completed) result.fill(0);
+  }
+}
+
+async function deriveKeyBytes(passphrase: string, salt: Uint8Array, requireCurrent: () => void) {
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle?.importKey && subtle.deriveBits) {
+    // Standards-native WebCrypto runs the same PBKDF2 operation off the browser
+    // JS thread. Hermes without SubtleCrypto takes the cooperative path below.
+    const password = new Uint8Array(utf8ToBytes(passphrase));
+    let key: Uint8Array | undefined;
+    try {
+      requireCurrent();
+      const secret = await subtle.importKey('raw', password, 'PBKDF2', false, ['deriveBits']);
+      requireCurrent();
+      key = new Uint8Array(await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256',
+        iterations: ITERATIONS, salt: new Uint8Array(salt) }, secret, 256));
+      requireCurrent();
+      if (key.length !== 32) throw new Error('Secure ledger key derivation failed.');
+      return key;
+    } catch (error) {
+      key?.fill(0);
+      throw error;
+    } finally { password.fill(0); }
+  }
+  return deriveKeyCooperatively(utf8ToBytes(passphrase), salt, requireCurrent);
+}
+
 async function deriveKey(passphrase: string, salt: Uint8Array) {
   const cacheId = bytesToHex(sha256(utf8ToBytes(`${passphrase}\u0000${bytesToHex(salt)}`)));
   const cached = derivedKeys.get(cacheId);
   if (cached) return new Uint8Array(cached);
-  const key = await pbkdf2Async(sha256, utf8ToBytes(passphrase), salt, {
-    c: ITERATIONS,
-    dkLen: 32,
-    asyncTick: 10,
-  });
-  derivedKeys.set(cacheId, new Uint8Array(key));
-  if (derivedKeys.size > 24) {
-    const oldest = derivedKeys.keys().next().value!;
-    derivedKeys.get(oldest)!.fill(0);
-    derivedKeys.delete(oldest);
+  const generation = keyCacheGeneration;
+  const requireCurrent = () => {
+    if (generation !== keyCacheGeneration) throw new Error('The ledger was locked. Unlock it before synchronizing again.');
+  };
+  let pending = pendingKeys.get(cacheId);
+  if (!pending) {
+    pending = keyDerivationQueue.then(async () => {
+      requireCurrent();
+      const key = await deriveKeyBytes(passphrase, salt, requireCurrent);
+      try { requireCurrent(); }
+      catch (error) { key.fill(0); throw error; }
+      derivedKeys.set(cacheId, key);
+      if (derivedKeys.size > 24) {
+        const oldest = derivedKeys.keys().next().value!;
+        derivedKeys.get(oldest)!.fill(0);
+        derivedKeys.delete(oldest);
+      }
+      return key;
+    });
+    pendingKeys.set(cacheId, pending);
+    keyDerivationQueue = pending.then(() => undefined, () => undefined);
   }
-  return key;
+  try {
+    const key = await pending;
+    requireCurrent();
+    return new Uint8Array(key);
+  } finally {
+    if (pendingKeys.get(cacheId) === pending) pendingKeys.delete(cacheId);
+  }
 }
 
 /** AES-GCM authentication protects data and envelope parameters; no ledger text is uploaded. */
