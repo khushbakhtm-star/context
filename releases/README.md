@@ -1,6 +1,25 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.22/code23** in both channels, verified at **2026-10-28 at 02:49:01 UTC**. Watch **0.1.10/code100011** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability: **0.1.23/code24** in both channels, verified at **2026-10-28 at 04:07:24 UTC**. Watch **0.1.10/code100011** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+
+## Published 0.1.23 phone updates
+
+Both phone editions, code24, and all twelve checked public assets were available by **2026-10-28 at 04:07:24 UTC**, release **426246517**. [Wear-enabled APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.23/context-0.1.23-wear-phone-preview.apk) (asset 683752192) and [FOSS APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.23/context-0.1.23-foss-preview.apk) (asset 683765574) update the existing installation. The separate Watch 0.1.10/code100011 remains the current matching watch release.
+
+Context 0.1.23 adds guarded event-color writeback for linked Google phone calendars and uses verified writable event palettes. Individual linked activities needing review no longer block unrelated safe updates. Account color refreshes coalesce and stale reads cannot overwrite newer edits. Existing exact event identities remain intact when a single bordered activity moves or changes duration. Hold Sync for its actual step, including encryption preparation and network upload.
+
+Your local notes, event borders, titles and source-calendar conflict guards remain intact. Choose **Update** over the existing phone installation. The Wear-enabled phone includes native Google sign-in and the optional watch bridge; the FOSS phone omits those native dependencies. The separate Watch 0.1.10 release remains independent.
+
+Source: [4b622675f0d43c56637bbcf3e5171247e7ac57c0](https://github.com/khushbakhtm-star/context/commit/4b622675f0d43c56637bbcf3e5171247e7ac57c0). TypeScript and 813 mobile tests passed, including 57 focused checks within that run. Static packaged checks cover 80 required UI labels and 15 obsolete labels. These are automated checks, not physical-phone or live-calendar verification.
+
+- Wear-enabled phone: 79,068,330 bytes; SHA-256 `f1ab89706dfef56b270902e4fb79593068f17553b85f057e04c163ece0d7e82b`.
+- FOSS phone: 78,356,383 bytes; SHA-256 `58431b30d413b3c7656d540a4286565f5d87053e6171073dd0c45100eb8d1470`.
+
+Both are code24, signed with the existing publisher certificate; official signatures, protected source-built content and 16 KiB alignment passed. [Independent F-Droid verification](https://github.com/khushbakhtm-star/context/actions/runs/40628364636) reported zero source errors/warnings and 108 removed inputs, 5 source patches and 33 reviewed Wear removals. The attached permanent evidence ZIP preserves 23 checked entries. This publisher preview does not establish official F-Droid catalog acceptance or Apple/Google store availability.
+
+The [phone build](https://github.com/khushbakhtm-star/context/actions/runs/40628327937) used controller `8c5857f9ea4023ec1ed82727148509066c37b76d`; FOSS used `8c5857f9ea4023ec1ed82727148509066c37b76d`. The [source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40629651877) passed at the exact application source.
+
+The [permanent FOSS evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.23/context-0.1.23-foss-build-evidence.zip) is **7,748,915 bytes**, SHA-256 `28b86fb02a73587bbe22dc37ff6aaf184dfbb9a15026317a0c3dfd44c36badaa`. Public/local file sizes and digests match. No physical phone/watch, live account or store/catalog result is implied.
 
 ## Published 0.1.22 phone updates
 
