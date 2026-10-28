@@ -32,6 +32,7 @@ import {
   flushPendingActuals,
   getCalendarPermissionStatus,
   listDeviceCalendars,
+  NativeCalendarReconciliationError,
   reconcileLinkedCalendarColors,
   requestCalendarAccess,
 } from './src/services/calendar';
@@ -113,7 +114,9 @@ function accountSyncProgressText(status: AccountSyncStatus) {
   const phases = { idle: 'Account synchronization is ready.', 'checking-storage': 'Checking encrypted ledger storage.',
     downloading: 'Checking downloaded ledger updates.', uploading: 'Uploading encrypted ledger updates.',
     calendar: 'Synchronizing calendar activities.' };
-  const message = accountSyncContinues(status) && status.phase && status.phase !== 'idle' ? phases[status.phase] : status.message;
+  // The worker distinguishes key preparation from network upload even though
+  // both share a phase. Keep its actual step visible in Sync details.
+  const message = status.message || (status.phase ? phases[status.phase] : phases.idle);
   const progress = status.progress;
   const count = progress && Number.isSafeInteger(progress.completed) && progress.completed >= 0
     ? Number.isSafeInteger(progress.total) && progress.total! >= progress.completed
@@ -220,7 +223,7 @@ function AppController() {
         !current.syncActuals || !current.writeCalendarId || current.writeCalendarId !== requested.writeCalendarId) return;
     const result = await flushPendingActuals(current.writeCalendarId, dates, 90,
       { existingBindingsOnly: directWrites || current.accountCalendarWrites });
-    if (result.failed) throw new Error('Calendar projection remains queued.');
+    if (result.failed) throw new Error(result.reviewMessages?.join('\n') || 'Calendar projection remains queued.');
   }, () => controllerMountedRef.current && readyRef.current && AppState.currentState === 'active'), []);
   const [focusRequest, setFocusRequest] = useState<{
     dateKey: string;
@@ -252,7 +255,7 @@ function AppController() {
       if (!controllerMountedRef.current || epoch !== lifecycleEpochRef.current || AppState.currentState !== 'active') return;
       const current = calendarColorContextRef.current;
       try {
-        if (readyRef.current) await reconcileLinkedCalendarColors(current.dates, available, current.preferences);
+        if (readyRef.current) await reconcileLinkedCalendarColors(current.dates, available, current.preferences, { nativeOnly: true });
       } catch { /* Keep raw drafts and retry on the next foreground/manual refresh. */ }
       if (controllerMountedRef.current && epoch === lifecycleEpochRef.current && AppState.currentState === 'active') {
         setDataVersion((version) => version + 1);
@@ -408,7 +411,7 @@ function AppController() {
         if (!currentPass() || !accountReady) return;
         // Native preflight still precedes native writes. It no longer holds up
         // authenticated account synchronization or its storage validation.
-        try { await reconcileLinkedCalendarColors(current.dates, current.calendars, current.preferences); }
+        try { await reconcileLinkedCalendarColors(current.dates, current.calendars, current.preferences, { nativeOnly: true }); }
         catch { /* Retain the source guard; the native worker rechecks each binding. */ }
         if (currentPass()) nativeProjectionWork.resume();
       }
@@ -831,13 +834,17 @@ function AppController() {
         requireCurrent();
         const current = calendarColorContextRef.current;
         stage('linked-changes');
-        try { await reconcileLinkedCalendarColors(current.dates, available, current.preferences); }
+        try { await reconcileLinkedCalendarColors(current.dates, available, current.preferences, { nativeOnly: true }); }
         catch (error) {
           requireCurrent();
           messages.push(error instanceof Error ? error.message : 'Linked phone-calendar changes need review.');
-          setManualSyncError([...new Set(messages)].join('\n'));
-          setManualSyncNotice('Account work finished; linked phone-calendar updates remain queued for review.');
-          return; // Never write native events after failed or unfinished preflight.
+          if (!(error instanceof NativeCalendarReconciliationError)) {
+            setManualSyncError([...new Set(messages)].join('\n'));
+            setManualSyncNotice('Account work finished; linked phone-calendar updates remain queued for review.');
+            return; // A whole-source/permission failure still stops every native write.
+          }
+          // Individual binding reviews remain protected by the outbox's own
+          // fresh per-binding preflight. Other checked activities may proceed.
         }
         requireCurrent();
         const beforeWriterCheck = calendarProjectionConfigRef.current;
@@ -849,7 +856,8 @@ function AppController() {
           const result = await flushPendingActuals(config.writeCalendarId, [], 90,
             { existingBindingsOnly: config.accountCalendarWrites || directWrites });
           requireCurrent();
-          if (result.failed) messages.push('Some linked phone-calendar updates need review. Check calendar synchronization in Settings.');
+          if (result.failed) messages.push(...(result.reviewMessages?.length ? result.reviewMessages :
+            ['Some linked phone-calendar updates need review. Check calendar synchronization in Settings.']));
         }
         requireCurrent();
         setDataVersion((version) => version + 1);

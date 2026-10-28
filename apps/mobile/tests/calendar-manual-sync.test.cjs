@@ -8,6 +8,10 @@ const mobile = path.resolve(__dirname, '..');
 const file = path.join(mobile, 'App.tsx');
 const text = fs.readFileSync(file, 'utf8');
 const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const calendarFile = path.join(mobile, 'src/services/calendar.ts');
+const calendarSource = ts.createSourceFile(calendarFile, fs.readFileSync(calendarFile, 'utf8'), ts.ScriptTarget.Latest, true);
+const reviewError = calendarSource.statements.find((node) => node.name?.text === 'NativeCalendarReconciliationError');
+assert.ok(reviewError);
 const transpile = (value) => ts.transpileModule(value, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
 } }).outputText;
@@ -77,13 +81,16 @@ function app(options = {}) {
   };
   const nativeArgs = [];
   vm.runInNewContext(transpile([declaration('CalendarTransitionCancelled'), declaration('MANUAL_SYNC_WAIT_MS'),
+    reviewError.getText(calendarSource).replace(/^export\s+/, ''),
     ...['manualSyncStageText', 'accountSyncContinues', 'accountSyncFailure', 'accountSyncProgressText'].map(declaration),
     declaration('awaitCalendarTransition'), synchronize.getText(source),
     `const mount = (${mountEffect}); const lifecycle = (${lifecycleEffect});`,
-    'module.exports = { synchronizeCalendar, mount, lifecycle, deadline: MANUAL_SYNC_WAIT_MS };'].join('\n')), context, { filename: file });
+    'module.exports = { synchronizeCalendar, mount, lifecycle, deadline: MANUAL_SYNC_WAIT_MS, NativeCalendarReconciliationError, accountSyncProgressText };'].join('\n')), context, { filename: file });
   const api = context.module.exports;
   const cleanupMount = api.mount(), cleanupLifecycle = api.lifecycle();
   return { state, calls, drafts, timers, context, nativeArgs, deadline: api.deadline, sync: api.synchronizeCalendar,
+    reviewError: (message) => new api.NativeCalendarReconciliationError([{ blockId: 'review-block', message }]),
+    progressText: api.accountSyncProgressText,
     setStatus(value) { accountStatus = value; },
     advance(milliseconds) { clock += milliseconds;
       while (true) { const due = [...timers].find(([, timer]) => timer.at <= clock); if (!due) break;
@@ -115,7 +122,8 @@ test('accounts start before a hung phone read; the 35-second caller deadline rel
 
 test('an exact timed-out account promise can report its completion without resuming expired native work', async () => {
   const pending = deferred(); const h = app({ accounts: () => pending.promise,
-    status: success({ running: true, cycleComplete: false, phase: 'uploading', outcome: 'running', progress: { completed: 3, total: 8 } }) });
+    status: success({ running: true, cycleComplete: false, phase: 'uploading', outcome: 'running',
+      message: 'Uploading encrypted ledger updates…', progress: { completed: 3, total: 8 } }) });
   const work = h.sync(); await settle(); h.advance(35_000); await work;
   assert.match(h.state.notice, /Uploading encrypted ledger updates.*3 of 8/); assert.equal(h.state.error, null);
   pending.resolve(success()); await settle();
@@ -186,6 +194,32 @@ test('failed phone preflight cannot prevent independent account synchronization 
     await h.sync(); assert.equal(h.calls[1], 'accounts'); assert.equal(h.calls.includes('native'), false);
     assert.match(h.state.error, /Phone calendar review required/);
   }
+});
+
+test('an isolated binding review reaches guarded native outbox while preserving the review message', async () => {
+  let h;
+  const optionsSeen = [];
+  h = app({ reconcile: (...args) => { optionsSeen.push(args[3]); throw h.reviewError('This linked activity changed in both places.'); },
+    directWriter: true, native: () => ({ failed: 1, reviewMessages: ['Choose a connected event color.'] }),
+    projection: { syncActuals: true, writeCalendarId: 'calendar', accountCalendarWrites: true } });
+  await h.sync();
+  assert.deepEqual(JSON.parse(JSON.stringify(optionsSeen)), [{ nativeOnly: true }]);
+  assert.deepEqual(h.calls, ['flush', 'accounts', 'refresh', 'reconcile', 'writer', 'native', 'consumeSkipped']);
+  assert.equal(h.nativeArgs[0][3].existingBindingsOnly, true);
+  assert.match(h.state.error, /changed in both places/);
+  assert.match(h.state.error, /Choose a connected event color/);
+  assert.equal(h.state.dataVersion, 1);
+  assert.equal(h.state.syncing, false);
+});
+
+test('Sync details distinguish encryption preparation from actual network uploading', () => {
+  const h = app();
+  for (const message of ['Preparing encrypted ledger updates…', 'Uploading encrypted ledger updates…']) {
+    assert.equal(h.progressText(success({ running: true, outcome: 'running', phase: 'uploading',
+      message, progress: { completed: 0 } })), message + ' (0)');
+  }
+  assert.equal(h.progressText(success({ running: true, phase: 'downloading', message: '',
+    progress: { completed: 5, total: 8 } })), 'Checking downloaded ledger updates. (5 of 8)');
 });
 
 test('failed or incomplete account storage/provider cycles never permit native fallback writes', async () => {

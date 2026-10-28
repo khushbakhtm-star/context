@@ -13,7 +13,7 @@ import { CellActionMenu } from '../components/CellActionMenu';
 
 import { deleteMinuteEntry, getDayEntries, getMinuteEntry, saveMinuteRange } from '../data/database';
 import { flushPendingActuals, loadPlannedEventsResult, openPlannedEvent, reconcileLinkedNativeColors } from '../services/calendar';
-import { ensureSourceColorCategory, listSelectableActivityCategories } from '../services/categories';
+import { ensureSourceColorCategory, listSelectableActivityCategories, subscribeWritablePaletteChanges } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits,
   subscribeInlineMinuteLinkWarnings } from '../services/inline-minutes';
 import { applyCellFormat, clearTextMinuteRange, colorMinuteRange, resetMinuteFill, resetMinuteCells, copyMinuteRange, cutMinuteRange, editInlineMinute,
@@ -52,7 +52,7 @@ const MINUTE_ITEMS = Array.from({ length: MINUTES_PER_DAY }, (_, index) => index
 
 type FocusRequest = { dateKey: string; minuteIndex: number; token: number; openEditor?: boolean } | null;
 type DayData = { entries: MinuteEntry[]; plans: PlannedEvent[]; calendarReadError: boolean;
-  nativeReadError?: boolean; accountReadError?: boolean; colorReadError?: boolean;
+  nativeReadError?: boolean; accountReadError?: boolean; colorReadError?: boolean; colorReadCause?: string;
   formats?: Map<number, CellFormat>; formatReadError?: boolean; groups?: ActivityGroup[]; groupReadError?: boolean };
 type CellCommandSelection = { selection: CalendarMinuteSelection; range: MinuteCellRange; generation: number };
 function calendarAccessDenied(error: unknown) {
@@ -971,13 +971,14 @@ export function TodayScreen({
           try {
             const changed = await reconcileLinkedNativeColors(day, result.plans, calendars);
             if (!isCurrent()) return;
-            patchDay(day, (data) => ({ ...data, colorReadError: false }));
+            patchDay(day, (data) => ({ ...data, colorReadError: false, colorReadCause: undefined }));
             if (changed.length) {
               markLocalChange(changed);
               await Promise.allSettled(changed.filter((value) => requestedDays.includes(value)).map(readLocal));
               if (isCurrent()) setLoadError(ledgerErrors.size > 0);
             }
-          } catch { patchDay(day, (data) => ({ ...data, colorReadError: true })); }
+          } catch (error) { patchDay(day, (data) => ({ ...data, colorReadError: true,
+            colorReadCause: error instanceof Error && error.message ? error.message.slice(0, 1000) : undefined })); }
         } catch (error) { showPlans(day, 'native', [], true, calendarAccessDenied(error) ? new Set() : selectedNativeIds); }
       })();
       return local;
@@ -1033,9 +1034,18 @@ export function TodayScreen({
 
   useEffect(() => {
     let current = true;
-    void listSelectableActivityCategories().then((values) => { if (current) setAvailableColors(values); }).catch(() => {});
-    return () => { current = false; };
-  }, [dataVersion, cellMenuOpen, groupComposerOpen]);
+    let request = 0;
+    const refresh = () => {
+      const sequence = ++request;
+      const scope = inlineSelection ? { dateKey: inlineSelection.dateKey, minuteIndex: inlineSelection.minuteIndex } : undefined;
+      void listSelectableActivityCategories({ scope }).then((values) => {
+        if (current && sequence === request) setAvailableColors(values);
+      }).catch(() => {});
+    };
+    refresh();
+    const unsubscribe = subscribeWritablePaletteChanges(refresh);
+    return () => { current = false; request++; unsubscribe(); };
+  }, [dataVersion, cellMenuOpen, groupComposerOpen, inlineSelection?.dateKey, inlineSelection?.minuteIndex]);
 
   const inlineDrafts = useMemo(() => inlineMinuteDrafts.snapshot(), [inlineVersion]);
   const draftsByKey = useMemo(() => new Map(inlineDrafts.map((draft) => [draft.key, draft])), [inlineDrafts]);
@@ -1532,6 +1542,7 @@ export function TodayScreen({
     days.some((day) => dayData[day]?.nativeReadError) ? 'Phone-calendar events could not refresh. Check phone calendar access and the selected calendars in Settings.' : null,
     days.some((day) => dayData[day]?.accountReadError) ? 'Account-calendar events could not refresh. Check the account connection and calendar access in Settings.' : null,
     days.some((day) => dayData[day]?.colorReadError) ? 'Calendar colors could not refresh. Saved minute text and colors have been kept.' : null,
+    ...days.map((day) => dayData[day]?.colorReadError ? dayData[day]?.colorReadCause : null),
   ].filter(Boolean))].join('\n\n') || 'Calendar events could not refresh. Saved minute notes remain available.' : null;
   const calendarSyncWarning = [...new Set([
     inlineLinkWarning ? 'Your minute is saved on this phone, but account synchronization needs a retry.' : null,

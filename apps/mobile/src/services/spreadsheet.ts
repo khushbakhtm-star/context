@@ -401,7 +401,7 @@ class SpreadsheetEditor {
       return Promise.reject(new Error('Enter an activity title of up to 200 characters and choose a color.'));
     }
     return this.enqueue(async () => {
-      if (!(await listSelectableActivityCategories()).some((category) => category.id === input.categoryId)) {
+      if (!(await listSelectableActivityCategories({ writableOnly: false })).some((category) => category.id === input.categoryId)) {
         throw new Error('Choose a Google Calendar color before grouping these minutes.');
       }
       await this.editEventSelection(range, 'group', { title, categoryId: input.categoryId });
@@ -414,7 +414,7 @@ class SpreadsheetEditor {
   color(range: MinuteCellRange, categoryId: string) {
     validateMinuteCellRange(range);
     return this.enqueue(async () => {
-      if (!(await listSelectableActivityCategories()).some((category) => category.id === categoryId)) {
+      if (!(await listSelectableActivityCategories({ writableOnly: false })).some((category) => category.id === categoryId)) {
         throw new Error('Choose a Google Calendar color before coloring these minutes.');
       }
       const before = await readCells(range);

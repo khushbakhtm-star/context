@@ -1,0 +1,1 @@
+Linked Google phone-calendar events can receive selected colors from their exact writable palette. Individual event reviews no longer block unrelated safe updates. Refreshes coalesce and reject stale color results. Bordered activity moves preserve event identity. Sync details distinguish encryption preparation from uploading.

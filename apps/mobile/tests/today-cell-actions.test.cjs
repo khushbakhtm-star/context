@@ -124,7 +124,10 @@ function screen(t, options = {}) {
           getMinuteEntry: async (date, minute) => rows.get(`${date}:${minute}`) ? { ...rows.get(`${date}:${minute}`) } : null };
         if (resolved === source('services/calendar')) return { loadPlannedEventsResult: options.readNative ?? (async () => ({ plans: [], failures: [] })),
           reconcileLinkedNativeColors: options.reconcileColors ?? (async () => []), flushPendingActuals: async () => ({}) };
-        if (resolved === source('services/categories')) return { listSelectableActivityCategories: async () => options.colors ?? [] };
+        if (resolved === source('services/categories')) return {
+          listSelectableActivityCategories: options.readColors ?? (async () => options.colors ?? []),
+          subscribeWritablePaletteChanges: options.subscribePalette ?? (() => () => {}),
+        };
         if (resolved === source('services/inline-minutes')) return { inlineMinuteDrafts: drafts,
           flushInlineMinutes: () => drafts.flushAll(), retryInlineMinuteLinks: async () => {}, subscribeInlineMinuteCommits: (listener) => drafts.subscribeCommits((_value, result) => listener(result)),
           subscribeInlineMinuteLinkWarnings: () => () => {} };

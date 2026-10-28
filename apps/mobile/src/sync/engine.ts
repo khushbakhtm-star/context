@@ -43,6 +43,9 @@ let projectionLinkChain: Promise<void> = Promise.resolve();
 let colorImportObserver: { canImport: (entries: readonly MinuteEntry[]) => boolean;
   onImported?: (entries: readonly MinuteEntry[], replaceText?: boolean) => void } | null = null;
 let colorReconciliationChain: Promise<void> = Promise.resolve();
+const accountColorReads = new Map<string, Promise<string[]>>();
+const coreProjectionEpochs = new Map<string, number>();
+const activeCoreProjections = new Set<string>();
 
 /** The app installs a raw-draft guard; source readers themselves never mutate the ledger. */
 export function configureCalendarColorImports(observer: typeof colorImportObserver) { colorImportObserver = observer; }
@@ -327,10 +330,10 @@ const accountColorReceiptKey = (projection: Projection) => `calendar.color-recei
 type ColorReceipt = { version: 1; calendarId: string; eventId: string; remoteColor: string; localColorHash: string };
 
 async function importAccountColorOnly(account: ConnectedAccount, projection: Projection, event: RemoteCalendarEvent,
-  segment: ActivitySegment): Promise<boolean> {
+  segment: ActivitySegment, resolved?: { color: string | undefined; skipDisplayBootstrap?: boolean }): Promise<boolean> {
   if (!projection.baseEvent || !projection.eventId || event.id !== projection.eventId || event.calendarId !== projection.calendarId ||
       event.deleted || event.allDay || eventContentHash(event) !== eventContentHash(projection.baseEvent)) return false;
-  const color = await remoteActivityColor(account, event);
+  const color = resolved ? calendarColor(resolved.color)?.toUpperCase() : await remoteActivityColor(account, event);
   if (!color) return false;
   const receiptKey = accountColorReceiptKey(projection);
   const receipt = await getSetting<ColorReceipt | null>(receiptKey, null);
@@ -346,7 +349,9 @@ async function importAccountColorOnly(account: ConnectedAccount, projection: Pro
     if (!receipt && localProjectionUnchanged(projection, segment)) {
       await setSetting(receiptKey, { version: 1, calendarId: event.calendarId, eventId: event.id,
         remoteColor: color, localColorHash: localActivityColorHash(segment.entries) } satisfies ColorReceipt);
-      if (!projection.baseEvent.displayColor) await saveProjection({ ...projection, baseEvent: { ...projection.baseEvent, displayColor: color } });
+      if (!projection.baseEvent.displayColor && !resolved?.skipDisplayBootstrap) {
+        await saveProjection({ ...projection, baseEvent: { ...projection.baseEvent, displayColor: color } });
+      }
     }
     return false;
   }
@@ -375,34 +380,73 @@ async function importAccountColorOnly(account: ConnectedAccount, projection: Pro
     localColorHash: localActivityColorHash(nextEntries) } satisfies ColorReceipt }, guard);
   const localContentPending = !localProjectionUnchanged(projection, segment);
   const next = { ...projection, baseEvent: { ...event, displayColor: color },
-    state: localContentPending ? 'pending' as const : 'synced' as const, conflict: undefined };
+    state: localContentPending ? 'pending' as const : 'synced' as const, conflict: undefined,
+    baseColorSelection: { categoryId: category.id, color: category.color.toUpperCase() } };
   next.baseLocalHash = localContentPending ? null : localWriteHash(buildWrite(next, { ...segment, categoryId: category.id, entries: nextEntries }));
   await saveProjection(next);
   notifyCalendarColorImported(nextEntries);
   return true;
 }
 
-/** Explicit foreground reconciliation only: never creates/updates source events. */
-export function reconcileLinkedAccountColors(dates: readonly string[]): Promise<string[]> {
-  return serializeColorReconciliation(async () => {
+type AccountColorScope = { account: ConnectedAccount; identity: string; selectedCalendarIds: string[] };
+async function accountColorScopes(): Promise<AccountColorScope[]> {
+  const scopes: AccountColorScope[] = [];
+  for (const account of await getAccounts()) {
+    if (!account.consent.calendarRead || !account.consent.importCalendarEdits ||
+        (account.provider !== 'google' && account.provider !== 'microsoft')) continue;
+    const selectedCalendarIds = [...new Set((await getAccountPreferences(account.id)).selectedCalendarIds)].sort();
+    if (!selectedCalendarIds.length) continue;
+    scopes.push({ account, selectedCalendarIds, identity: hashValue({ id: account.id, subject: account.subject,
+      provider: account.provider, calendarRead: account.consent.calendarRead,
+      importCalendarEdits: account.consent.importCalendarEdits, selectedCalendarIds }) });
+  }
+  return scopes.sort((left, right) => left.account.id.localeCompare(right.account.id));
+}
+
+/** Explicit foreground reconciliation only: network reads never hold the commit
+ * queue, and identical foreground bursts share only their in-flight result. */
+export async function reconcileLinkedAccountColors(dates: readonly string[]): Promise<string[]> {
+  const normalized = [...new Set(dates)].sort();
+  if (normalized.length > 366 || normalized.some((day) => dateKey(parseDateKey(day)) !== day)) {
+    throw new Error('Choose at most one year of valid dates when refreshing linked colors.');
+  }
+  const scopes = await accountColorScopes();
+  const key = hashValue({ dates: normalized, scopes: scopes.map((scope) => scope.identity) });
+  const pending = accountColorReads.get(key);
+  if (pending) return pending;
+  const job = (async () => {
     const affected = new Set<string>();
-    const accounts = await getAccounts();
     await listCategories();
     for (const projection of await listProjections()) {
       if (!projection.eventId || projection.state === 'deleted' || projection.state === 'conflict' ||
-          !dates.some((day) => day >= projection.dateKey && day <= (projection.endDateKey ?? projection.dateKey))) continue;
-      const account = accounts.find((item) => item.id === projection.accountId);
-      if (!account?.consent.calendarRead || !account.consent.importCalendarEdits) continue;
-      const preferences = await getAccountPreferences(account.id);
-      if (!preferences.selectedCalendarIds.includes(projection.calendarId)) continue;
+          !normalized.some((day) => day >= projection.dateKey && day <= (projection.endDateKey ?? projection.dateKey))) continue;
+      const scope = scopes.find((item) => item.account.id === projection.accountId && item.selectedCalendarIds.includes(projection.calendarId));
+      if (!scope) continue;
       const segment = await getProjectionSegment(projection);
-      const event = await createCalendarAdapter(account).getEvent(projection.calendarId, projection.eventId);
-      if (segment && event && await importAccountColorOnly(account, projection, event, segment)) {
-        for (const entry of segment.entries) affected.add(entry.dateKey);
-      }
+      if (!segment) continue;
+      const projectionHash = hashValue(projection); const entriesHash = hashValue(segment.entries);
+      const epoch = coreProjectionEpochs.get(projection.id) ?? 0;
+      const event = await createCalendarAdapter(scope.account).getEvent(projection.calendarId, projection.eventId);
+      const color = event ? await remoteActivityColor(scope.account, event) : undefined;
+      if (!event) continue;
+      await serializeColorReconciliation(async () => {
+        if (activeCoreProjections.has(projection.id) || (coreProjectionEpochs.get(projection.id) ?? 0) !== epoch) return;
+        const currentScope = (await accountColorScopes()).find((item) => item.account.id === projection.accountId);
+        if (!currentScope || currentScope.identity !== scope.identity) return;
+        const current = (await listProjections()).find((item) => item.id === projection.id);
+        if (!current || hashValue(current) !== projectionHash) return;
+        const local = await getProjectionSegment(current);
+        if (!local || hashValue(local.entries) !== entriesHash) return;
+        if (await importAccountColorOnly(currentScope.account, current, event, local, { color })) {
+          for (const entry of local.entries) affected.add(entry.dateKey);
+        }
+      });
     }
     return [...affected];
-  });
+  })();
+  accountColorReads.set(key, job);
+  try { return await job; }
+  finally { if (accountColorReads.get(key) === job) accountColorReads.delete(key); }
 }
 
 /** Called after a local range save. Provider IDs come directly from the selected occurrence. */
@@ -579,6 +623,19 @@ function providerWriteColors(projection: Projection, categoryId: string) {
     googleColorId: mapping.colorId, googleEventLabelId: mapping.eventLabelId,
     microsoftCategories: mapping.categoryName ? [mapping.categoryName] : undefined,
   };
+  const category = CATEGORIES.find((item) => item.id === categoryId);
+  const selectedColor = calendarColor(category?.color)?.toUpperCase();
+  const acknowledged = projection.baseColorSelection;
+  const legacySourceColor = !acknowledged && category?.provider === 'google' && category.accountId === projection.accountId &&
+    category.calendarId === projection.calendarId && category.providerOriginalColor?.toUpperCase() === selectedColor &&
+    (!projection.baseEvent?.displayColor || projection.baseEvent.displayColor.toUpperCase() === selectedColor);
+  const explicitChange = acknowledged ? acknowledged.categoryId !== categoryId || acknowledged.color.toUpperCase() !== selectedColor :
+    Boolean(projection.baseEvent?.categoryId && projection.baseEvent.categoryId !== categoryId && !legacySourceColor);
+  const explicitNewChoice = !projection.baseEvent && Boolean(category && (category.id.startsWith('google_palette_') ||
+    category.id.startsWith('custom_') || category.provider));
+  if (provider === 'google' && (explicitChange || explicitNewChoice)) {
+    throw new Error('This selected color has no verified Google event or label mapping. Choose a writable Google event color before synchronizing.');
+  }
   // Recording a note does not choose a new provider color. Keep the exact known
   // event IDs/categories, including an inherited calendar default, on updates.
   if (projection.baseEvent) return {
@@ -589,7 +646,6 @@ function providerWriteColors(projection: Projection, categoryId: string) {
   // Native-calendar source colors have no account palette identity. For a new
   // actual, translate only an exact Google palette value; never guess an alias
   // between Google's native display colors and its legacy API color values.
-  const category = CATEGORIES.find((item) => item.id === categoryId);
   const exact = provider === 'google' && category ? CATEGORIES.find((item) =>
     item.provider === 'google' && item.accountId === projection.accountId && item.providerColorId &&
     calendarColor(item.providerOriginalColor ?? item.color)?.toUpperCase() === category.color.toUpperCase()) : undefined;
@@ -732,6 +788,7 @@ async function getProjectionSegment(projection: Projection) {
 }
 
 async function importCalendarEvent(projection: Projection, event: RemoteCalendarEvent | null) {
+  const importAccount = (await getAccounts()).find((item) => item.id === projection.accountId);
   const expectedSegment = await getProjectionSegment(projection);
   const entries: { dateKey: string; minuteIndex: number; text: string; categoryId: string }[] = [];
   if (event && !event.deleted) {
@@ -746,7 +803,7 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
       throw new Error('Calendar actuals must use minute boundaries and last at most 24 hours.');
     }
     const importedCategory = categoryForEvent(projection.accountId, event);
-    const account = (await getAccounts()).find((item) => item.id === projection.accountId);
+    const account = importAccount;
     const color = account ? await remoteActivityColor(account, event) : calendarColor(event.displayColor);
     const sourceCategory = color ? await ensureSourceColorCategory({ color, name: event.title,
       provider: account?.provider === 'google' ? 'google' : 'microsoft', accountId: projection.accountId,
@@ -809,7 +866,8 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
         createdAt: cell.entry?.createdAt ?? '', updatedAt: cell.entry?.updatedAt ?? '' });
     }
   }
-  const latestAccount = (await getAccounts()).find((item) => item.id === projection.accountId);
+  const latestAccount = (await getAccounts()).find((item) => item.id === projection.accountId &&
+    item.subject === importAccount?.subject && item.provider === importAccount?.provider);
   if (!latestAccount?.consent.calendarRead || !latestAccount.consent.importCalendarEdits) {
     throw new Error('Calendar edit import permission changed. Refresh the account connection.');
   }
@@ -839,7 +897,8 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
   const next = { ...projection, dateKey: first.dateKey, startMinute: first.minuteIndex,
     endDateKey: last.dateKey, endMinute: last.minuteIndex, title: event.title, baseEvent: event, state: 'synced' as const,
     conflict: undefined, anchorStart: event.start, anchorDate: first.dateKey,
-    anchorMinute: first.minuteIndex };
+    anchorMinute: first.minuteIndex, baseColorSelection: { categoryId: entries[0]!.categoryId,
+      color: categoryById(entries[0]!.categoryId).color.toUpperCase() } };
   const segment = await getProjectionSegment(next);
   next.baseLocalHash = segment ? localWriteHash(buildWrite(next, segment)) : null;
   await saveProjection(next);
@@ -847,18 +906,51 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
 
 async function reconcileProjection(account: ConnectedAccount, projection: Projection) {
   if (projection.state === 'deleted' || projection.state === 'conflict') return;
+  await serializeColorReconciliation(async () => {
+    coreProjectionEpochs.set(projection.id, (coreProjectionEpochs.get(projection.id) ?? 0) + 1);
+    activeCoreProjections.add(projection.id);
+  });
+  try { await reconcileCurrentProjection(account, projection); }
+  finally {
+    await serializeColorReconciliation(async () => {
+      activeCoreProjections.delete(projection.id);
+      coreProjectionEpochs.set(projection.id, (coreProjectionEpochs.get(projection.id) ?? 0) + 1);
+    });
+  }
+}
+
+async function reconcileCurrentProjection(account: ConnectedAccount, projection: Projection) {
   const adapter = createCalendarAdapter(account);
   let segment = await getProjectionSegment(projection);
   let write = segment ? buildWrite(projection, segment) : null;
   let localHash = write ? localWriteHash(write) : null;
   const remote = projection.eventId ? await adapter.getEvent(projection.calendarId, projection.eventId) : null;
+  let currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
+  if (!currentAccount?.consent.calendarRead) return;
+  const resolvedColor = remote ? await remoteActivityColor(currentAccount, remote) : undefined;
+  currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
+  if (!currentAccount?.consent.calendarRead) return;
+  segment = await getProjectionSegment(projection);
+  write = segment ? buildWrite(projection, segment) : null;
+  localHash = write ? localWriteHash(write) : null;
+  if (remote && segment) {
+    const expected = hashValue(projection); const expectedEntries = hashValue(segment.entries);
+    const imported = await serializeColorReconciliation(async () => {
+      const current = (await listProjections()).find((item) => item.id === projection.id);
+      const authorized = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.consent.calendarRead);
+      if (!current || hashValue(current) !== expected || !authorized) return false;
+      const local = await getProjectionSegment(current);
+      if (!local || hashValue(local.entries) !== expectedEntries) return false;
+      return importAccountColorOnly(authorized, current, remote, local, { color: resolvedColor, skipDisplayBootstrap: true });
+    });
+    if (imported) return;
+  }
+  const currentProjection = (await listProjections()).find((item) => item.id === projection.id);
+  if (!currentProjection || hashValue(currentProjection) !== hashValue(projection)) return;
   segment = await getProjectionSegment(projection);
   write = segment ? buildWrite(projection, segment) : null;
   localHash = write ? localWriteHash(write) : null;
   const localChanged = segment && write ? !localProjectionUnchanged(projection, segment, write) : localHash !== projection.baseLocalHash;
-  const currentAccount = (await getAccounts()).find((item) => item.id === account.id);
-  if (!currentAccount?.consent.calendarRead) return;
-  if (remote && segment && await importAccountColorOnly(currentAccount, projection, remote, segment)) return;
   const remoteChanged = projection.baseEvent
     ? !remote || eventHash(remote) !== eventHash(projection.baseEvent)
     : Boolean(remote);
@@ -876,7 +968,11 @@ async function reconcileProjection(account: ConnectedAccount, projection: Projec
     }
     return;
   }
-  if (!localChanged && projection.state === 'synced') return;
+  if (!localChanged && projection.state === 'synced') {
+    if (!projection.baseColorSelection && segment) await saveProjection({ ...projection,
+      baseColorSelection: { categoryId: segment.categoryId, color: categoryById(segment.categoryId).color.toUpperCase() } });
+    return;
+  }
   if (!currentAccount.consent.calendarWrite) return;
   if (projection.sourceEventId && !currentAccount.consent.replaceOccurrences) return;
   if (projection.pendingSourceScope === 'series' && !currentAccount.consent.editSeries) {
@@ -903,6 +999,7 @@ async function reconcileProjection(account: ConnectedAccount, projection: Projec
       }
     }
     await saveProjection({ ...projection, eventId: saved.id, baseEvent: saved,
+      baseColorSelection: { categoryId: segment!.categoryId, color: categoryById(segment!.categoryId).color.toUpperCase() },
       baseLocalHash: localHash, startMinute: segment!.startMinute, endMinute: segment!.endMinute,
       dateKey: segment!.entries[0]!.dateKey, endDateKey: segment!.entries.at(-1)!.dateKey,
       state: 'synced', conflict: undefined, pendingSourceScope: undefined,
@@ -1018,20 +1115,29 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
         else throw error;
       }
     }
-    const calendarProjections = (await listProjections()).filter((projection) => {
+    const eligibleProjections = (await listProjections()).filter((projection) => {
       const account = accounts.find((item) => item.id === projection.accountId);
       return account?.consent.calendarRead && !blockedAccounts.has(account.id);
     });
+    const ranked = await Promise.all(eligibleProjections.map(async (projection) => {
+      if (projection.state === 'pending') return { projection, priority: 0 };
+      try {
+        const segment = await getProjectionSegment(projection);
+        return { projection, priority: segment ? Number(localProjectionUnchanged(projection, segment)) : Number(projection.baseLocalHash === null) };
+      } catch { return { projection, priority: 0 }; }
+    }));
+    const calendarProjections = ranked.sort((left, right) => left.priority - right.priority ||
+      left.projection.id.localeCompare(right.projection.id)).map((item) => item.projection);
     let completedCalendars = 0;
     for (const projection of calendarProjections) {
       const account = accounts.find((item) => item.id === projection.accountId);
       if (!account?.consent.calendarRead || blockedAccounts.has(account.id)) continue;
       publish({ phase: 'calendar', progress: { completed: completedCalendars, total: calendarProjections.length },
         message: 'Synchronizing calendar activities…', cycleComplete: false });
-      try { await serializeColorReconciliation(async () => {
+      try {
         const current = (await listProjections()).find((item) => item.id === projection.id);
         if (current) await reconcileProjection(account, current);
-      }); }
+      }
       catch (error) { errors.push(`${account.label}: ${error instanceof Error ? error.message : 'Calendar sync failed.'}`); }
       completedCalendars++;
     }

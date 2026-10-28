@@ -21,7 +21,7 @@ test('calendar color module remains a standalone Android source module in the F-
   assert.doesNotMatch(gradle, /implementation|com\.google|repositories/);
 });
 
-test('calendar color module adds no permission and exposes only a bounded read operation off the UI thread', () => {
+test('calendar color module adds no permission and writes only exact event palette keys with a source comparison', () => {
   const manifest = fs.readFileSync(path.join(moduleRoot, 'android/src/main/AndroidManifest.xml'), 'utf8');
   assert.doesNotMatch(manifest, /uses-permission|service|provider|receiver/);
   const native = fs.readFileSync(path.join(moduleRoot, 'android/src/main/java/expo/modules/contextcalendarcolors/ContextCalendarColorsModule.kt'), 'utf8');
@@ -30,5 +30,17 @@ test('calendar color module adds no permission and exposes only a bounded read o
   assert.match(native, /\?\.use\s*\{\s*cursor\s*->/);
   assert.match(native, /ids\.toTypedArray\(\)/);
   assert.match(native, /MAX_ROWS/);
-  assert.doesNotMatch(native, /contentResolver\.(?:insert|update|delete)|requestPermissions|Log\.|println\(/);
+  assert.match(native, /AsyncFunction\("setEventColorAsync"\)/);
+  assert.match(native, /checkSelfPermission\(permission\)/);
+  assert.match(native, /requirePermission\(context, Manifest\.permission\.WRITE_CALENDAR\)/);
+  assert.match(native, /EVENT_COLOR_KEY, selected\.key/);
+  assert.match(native, /effectiveColor != expectedColor/);
+  assert.match(native, /predicates\.joinToString\(" AND "\), arguments\.toTypedArray\(\)/);
+  assert.match(native, /newAssertQuery\(CalendarContract\.Calendars\.CONTENT_URI\)/);
+  assert.match(native, /newAssertQuery\(CalendarContract\.Colors\.CONTENT_URI\)/);
+  assert.match(native, /applyBatch\(CalendarContract\.AUTHORITY, operations\)/);
+  assert.match(native, /changed != 1/);
+  assert.match(native, /TYPE_EVENT/);
+  assert.match(native, /"com\.google"/);
+  assert.doesNotMatch(native, /contentResolver\.(?:insert|delete)|put\(CalendarContract\.Events\.EVENT_COLOR[,)]|CALLER_IS_SYNCADAPTER|requestPermissions|Log\.|println\(/);
 });

@@ -79,6 +79,7 @@ function calendarRuntime(overrides = {}) {
       if (name === '../utils/calendar-minute-log') return loadUtility('calendar-minute-log');
       if (name === '../utils/cell-format') return loadUtility('cell-format');
       if (name === '../utils/activity-translation') return loadUtility('activity-translation');
+      if (name === '../utils/native-bound-retime') return loadUtility('native-bound-retime');
       if (name === '../utils/calendar-cell-color') return loadUtility('calendar-cell-color');
       throw new Error(`Unexpected calendar read test import: ${name}`);
     },

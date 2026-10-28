@@ -128,6 +128,7 @@ export type Projection = {
   anchorMinute?: number;
   baseEvent: RemoteCalendarEvent | null;
   baseLocalHash: string | null;
+  baseColorSelection?: { categoryId: string; color: string };
   state: 'pending' | 'synced' | 'conflict' | 'deleted';
   conflict?: string;
   pendingSourceScope?: 'occurrence' | 'series';

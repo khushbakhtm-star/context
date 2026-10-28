@@ -45,8 +45,8 @@
     },
     {
       "path": "sync/types.ts",
-      "bytes": 4381,
-      "sha256": "dc49fe91ff6de6eaf08499d28f27dc626002b1983acb12adc86b570268966e47"
+      "bytes": 4443,
+      "sha256": "939da7dfc46820baeedb2cae9d8d97a336fb3ff91acb385bda6342bd5d7be539"
     },
     {
       "path": "types.ts",

@@ -7,9 +7,9 @@ const crypto = require('node:crypto');
 const ts = require('typescript');
 const { setImmediate: nextTurn } = require('node:timers/promises');
 
-function categoriesRuntime({ calendars = [], handler = async () => new Response('{}') } = {}) {
+function categoriesRuntime({ calendars = [], handler = async () => new Response('{}'), accounts = [], nativePalette = [], preferences = {}, entries = [], bindings = [] } = {}) {
   const docs = new Map();
-  const settings = new Map();
+  const settings = new Map(Object.entries(preferences));
   const defaults = [{ id: 'sleep', name: 'Sleep', color: '#8B8199' },
     { id: 'unaccounted', name: 'Unaccounted', color: '#96938C' }];
   const cache = [...defaults];
@@ -32,13 +32,16 @@ function categoriesRuntime({ calendars = [], handler = async () => new Response(
       }
       if (name === 'expo-crypto') return { randomUUID: crypto.randomUUID };
       if (name === '../data/database') return {
+        getMinuteEntry: async (day, minute) => entries.find((entry) => entry.dateKey === day && entry.minuteIndex === minute),
+        getSyncBindingsForBlock: async (id) => bindings.filter((binding) => binding.blockId === id),
         getSetting: async (key, fallback) => settings.get(key) ?? fallback,
         setSetting: async (key, value) => settings.set(key, value),
         getSyncDocuments: async (prefix, excluded) => [...docs.entries()].filter(([key]) => key.startsWith(prefix) &&
           (!excluded || !key.startsWith(excluded))).map(([key, value]) => ({ key, value })),
         putSyncDocument: async (key, value) => docs.set(key, value),
       };
-      if (name === '../sync/accounts') return { accountFetch: handler };
+      if (name === '../sync/accounts') return { accountFetch: handler, getAccounts: async () => accounts };
+      if (name === '../../modules/context-calendar-colors') return { getEventPaletteAsync: async () => typeof nativePalette === 'function' ? nativePalette() : nativePalette };
       if (name === '../sync/providers') return { createCalendarAdapter: () => ({ listCalendars: async () => calendars }) };
       if (name === '../sync/codec') return { hashValue: (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex') };
       if (name === '../theme') return { CATEGORIES: cache, DEFAULT_CATEGORIES: defaults,
@@ -46,7 +49,7 @@ function categoriesRuntime({ calendars = [], handler = async () => new Response(
       throw new Error(`Unexpected category test import: ${name}`);
     },
   }, { filename });
-  return { api: module.exports, docs, cache };
+  return { api: module.exports, docs, cache, settings };
 }
 const account = (provider, categoryRead = true) => ({ id: `${provider}:user`, provider,
   consent: { calendarRead: true, categoryRead } });
@@ -243,8 +246,97 @@ test('Google mapping uses returned colors while mismatched local display overrid
   docs.set(`category:${first.id}`, { ...first, color: '#223344' });
   const custom = await api.createCategory({ name: 'Actual second Google shade', color: '#223344' });
   assert.equal(api.categoryProviderColor(custom.id, 'google', 'google:user', 'primary').colorId, '2');
-  assert.equal(api.categoryProviderColor(first.id, 'google', 'google:user', 'primary').colorId, '1',
-    'historical provider identity remains readable and unchanged');
+  assert.equal(api.categoryProviderColor(first.id, 'google', 'google:user', 'primary').colorId, '2',
+    'a deliberate display-color change maps only to the exact new provider shade');
+  assert.equal(docs.get(`category:${first.id}`).providerColorId, '1', 'historical stored provenance remains intact');
   assert.equal((await api.listSelectableActivityCategories()).some((category) => category.id === first.id), false);
   assert.equal((await api.listCategories()).find((category) => category.id === first.id).color, '#223344');
+});
+
+test('Google writers refresh verified event choices in the background without blocking the picker or offering calendar-only colors', async () => {
+  let release; const gate = new Promise((resolve) => { release = resolve; }); const requests = [];
+  const writer = { id: 'google:writer', subject: 'writer', provider: 'google', consent: { calendarRead: true, calendarWrite: true, categoryRead: true } };
+  const h = categoriesRuntime({ accounts: [writer], preferences: { 'account.calendars.google:writer': { writeCalendarId: 'target' } },
+    handler: async (_account, url) => { requests.push(url); await gate; return url.endsWith('/colors') ? json({ event: { 10: { background: '#51B749' } } }) :
+      json({ labelProperties: { eventLabels: [{ id: 'label', name: 'Target label', backgroundColor: '#123456' }] } }); } });
+  let notified = 0; const stop = h.api.subscribeWritablePaletteChanges(() => { notified++; });
+  const initial = await Promise.all(Array.from({ length: 15 }, () => h.api.listSelectableActivityCategories()));
+  assert.ok(initial.every((choices) => choices.length === 0), 'uncached account colors cannot pretend calendar-only hexes are writable event IDs');
+  assert.equal(requests.length, 1, 'the unresolved provider lookup is not awaited or duplicated by picker bursts');
+  release(); for (let turn = 0; turn < 20 && !notified; turn++) await nextTurn();
+  const choices = await h.api.listSelectableActivityCategories(); stop();
+  assert.ok(choices.some((category) => category.providerColorId === '10')); assert.ok(choices.some((category) => category.providerLabelId === 'label'));
+  assert.equal(choices.some((category) => category.id === 'google_palette_2952a3'), false);
+  assert.ok((await h.api.listCategories()).some((category) => category.id === 'google_palette_2952a3'), 'historical local categories are retained');
+  assert.equal(requests.length, 2); assert.ok(requests[1].includes('/target?')); assert.ok(notified > 0);
+  assert.ok((await h.api.listSelectableActivityCategories({ writableOnly: false })).some((category) => category.id === 'google_palette_2952a3'),
+    'offline data commands retain historical Google-proven categories');
+});
+
+test('selected native Google bindings use their exact native palette while account-owned cells use exact account identities', async () => {
+  const writer = { id: 'google:writer', subject: 'writer', provider: 'google', consent: { calendarRead: true, calendarWrite: true } };
+  const h = categoriesRuntime({ accounts: [writer], preferences: { 'calendar.preferences': { writeCalendarId: 'phone', selectedCalendarIds: ['phone'] } },
+    nativePalette: [{ calendarId: 'phone', key: 'native-key', color: '#0B8043' }], entries: [{ dateKey: '2026-10-25', minuteIndex: 600, blockId: 'native_block' },
+      { dateKey: '2026-10-25', minuteIndex: 601, blockId: 'account_block' }], bindings: [{ blockId: 'native_block', calendarId: 'phone' }],
+    handler: async () => json({ event: { 10: { background: '#51B749' } } }) });
+  h.docs.set('projection:owner', { accountId: writer.id, calendarId: 'account-cal', blockId: 'account_block', state: 'synced' });
+  await h.api.listSelectableActivityCategories(); for (let turn = 0; turn < 12; turn++) await nextTurn();
+  const native = await h.api.listSelectableActivityCategories({ scope: { dateKey: '2026-10-25', minuteIndex: 600 } });
+  const accountChoices = await h.api.listSelectableActivityCategories({ scope: { dateKey: '2026-10-25', minuteIndex: 601 } });
+  assert.ok(native.some((category) => category.color === '#0B8043')); assert.equal(native.some((category) => category.color === '#51B749'), false);
+  assert.ok(accountChoices.some((category) => category.color === '#51B749')); assert.equal(accountChoices.some((category) => category.color === '#0B8043'), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.api.categoryProviderColor(native[0].id, 'google', writer.id, 'account-cal'))), {},
+    'a native Basil key is never guessed to be a different API Basil hex');
+});
+
+test('a non-Google selected phone calendar does not erase the local Google-only palette when no writable native proof exists', async () => {
+  const h = categoriesRuntime({ preferences: { 'calendar.preferences': { writeCalendarId: 'other-provider' } } });
+  const choices = await h.api.listSelectableActivityCategories();
+  assert.ok(choices.some((category) => category.id === 'google_palette_2952a3'));
+  await h.api.importDeviceCategories([{ id: 'other-provider', title: 'Other calendar', color: '#123456' }]);
+  assert.ok((await h.api.listSelectableActivityCategories()).some((category) => category.id === 'google_palette_2952a3'));
+});
+
+
+test('a same-account label from another calendar maps only an exact verified target event shade', async () => {
+  const h = categoriesRuntime();
+  h.docs.set('category:source_label', { id: 'source_label', name: 'Source label', color: '#112233',
+    provider: 'google', accountId: 'google:writer', calendarId: 'source', providerLabelId: 'source-only', googleColorVerified: true });
+  h.docs.set('category:target_shade', { id: 'target_shade', name: 'Target event color', color: '#112233',
+    provider: 'google', accountId: 'google:writer', providerColorId: '7', googleColorVerified: true });
+  await h.api.listCategories();
+  assert.equal(h.api.categoryProviderColor('source_label', 'google', 'google:writer', 'target').colorId, '7');
+  assert.equal(h.api.categoryProviderColor('source_label', 'google', 'google:writer', 'source').eventLabelId, 'source-only');
+  assert.deepEqual(Object.keys(h.api.categoryProviderColor('source_label', 'google', 'google:other', 'target')), []);
+});
+
+test('late background account palettes cannot import or notify after disconnection, revocation or target changes', async () => {
+  for (const change of ['disconnect', 'revoke', 'target']) {
+    let release; const gate = new Promise((resolve) => { release = resolve; });
+    const writer = { id: 'google:writer', subject: 'writer', provider: 'google', consent: { calendarRead: true, calendarWrite: true, categoryRead: true } };
+    const accounts = [writer];
+    const h = categoriesRuntime({ accounts, preferences: { 'account.calendars.google:writer': { writeCalendarId: 'first' } },
+      handler: async (_account, url) => { await gate; return url.endsWith('/colors') ? json({ event: { 10: { background: '#51B749' } } }) :
+        json({ labelProperties: { eventLabels: [{ id: 'late-label', name: 'Old target', backgroundColor: '#123456' }] } }); } });
+    let notified = 0; h.api.subscribeWritablePaletteChanges(() => { notified++; });
+    await h.api.listSelectableActivityCategories();
+    if (change === 'disconnect') accounts.splice(0);
+    if (change === 'revoke') writer.consent.calendarWrite = false;
+    if (change === 'target') h.settings.set('account.calendars.google:writer', { writeCalendarId: 'second' });
+    release(); for (let turn = 0; turn < 20; turn++) await nextTurn();
+    assert.equal([...h.docs.values()].some((category) => category.accountId === writer.id), false, change);
+    assert.equal(notified, 0, change);
+    assert.ok((await h.api.listCategories()).some((category) => category.id === 'google_palette_2952a3'), 'historical cached choices remain');
+  }
+});
+
+test('late native palette results do not populate a newly selected phone calendar', async () => {
+  let release; const gate = new Promise((resolve) => { release = resolve; });
+  const h = categoriesRuntime({ preferences: { 'calendar.preferences': { writeCalendarId: 'old' } },
+    nativePalette: async () => { await gate; return [{ calendarId: 'old', key: 'old-shade', color: '#0B8043' }]; } });
+  let notified = 0; h.api.subscribeWritablePaletteChanges(() => { notified++; });
+  await h.api.listSelectableActivityCategories(); h.settings.set('calendar.preferences', { writeCalendarId: 'new' });
+  release(); for (let turn = 0; turn < 15; turn++) await nextTurn();
+  assert.equal([...h.docs.values()].some((category) => category.providerColorId === 'old-shade'), false);
+  assert.equal(notified, 0);
 });

@@ -20,7 +20,8 @@ const HEX = /^#[0-9a-f]{6}$/i;
 export function googleActivityColorValues(categories: readonly ActivityCategory[]): string[] {
   const colors = new Set<string>(GOOGLE_ACTIVITY_COLORS);
   for (const category of categories) {
-    if (category.provider !== 'google' || !category.accountId) continue;
+    const nativeEventColor = category.provider === 'device' && category.calendarId && category.providerColorId && category.googleColorVerified === true;
+    if (!nativeEventColor && (category.provider !== 'google' || !category.accountId)) continue;
     // Released event/label imports already used exact API backgrounds. Legacy
     // calendar-only imports could contain the adapter's invented display fallback.
     if (category.googleColorVerified !== true && !category.providerColorId && !category.providerLabelId) continue;

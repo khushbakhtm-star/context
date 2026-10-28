@@ -210,7 +210,7 @@ test('account plan display uses raw provider colors, then provider-original cate
 
 test('a newly recorded source-colored note survives SQLite reload and an explicit chosen color overrides it', async (t) => {
   const device = phone(t, cloud()); await prepare(device);
-  const source = await device.categories.ensureSourceColorCategory({ color: '#123456', name: 'Personal calendar · #123456',
+  const source = await device.categories.ensureSourceColorCategory({ color: '#123456', name: 'Personal calendar Â· #123456',
     calendarId: 'personal', provider: 'device' });
   device.inline.inlineMinuteDrafts.activate({ dateKey: day, minuteIndex: 759, text: 'Make coffee', categoryId: source.id, keepColor: false });
   device.sheet.editInlineMinute(day, 759, { text: 'Talk to Mum while making coffee' });
@@ -301,8 +301,10 @@ test('a new native-colored actual uses only an exact account Google palette iden
   await device.engine.linkActualsToAccounts([day]); await device.engine.synchronizeAccounts();
   const creates = remote.calls.filter((call) => call.type === 'create');
   assert.equal(creates.find((call) => call.write.title === 'Exact color').write.googleColorId, '10');
-  assert.equal(creates.find((call) => call.write.title === 'Display color').write.googleColorId, undefined,
-    'native Basil and legacy API Basil are not interchangeable without a provider identity');
+  assert.equal(creates.some((call) => call.write.title === 'Display color'), false,
+    'an unsupported native Basil shade is reviewed rather than falsely acknowledged as a default-color event');
+  assert.equal(device.engine.getAccountSyncStatus().outcome, 'error');
+  assert.match(device.engine.getAccountSyncStatus().message, /no verified Google event or label mapping/);
 });
 
 test('prior source-title/color baselines import a real remote edit without a normalization conflict', async (t) => {
@@ -333,8 +335,8 @@ test('a user calendar rename to Unaccounted is not guessed to be historical corr
 });
 
 function editFirstPrayerMinute(description, text) {
-  const range = '6:55 PM – 7:05 PM  Pray fardh';
-  if (description.includes(range)) return description.replace(range, `6:55 PM  ${text}\n6:56 PM – 7:05 PM  Pray fardh`);
+  const range = '6:55 PM â€“ 7:05 PM  Pray fardh';
+  if (description.includes(range)) return description.replace(range, `6:55 PM  ${text}\n6:56 PM â€“ 7:05 PM  Pray fardh`);
   assert.ok(description.includes('6:55 PM  Pray fardh'), 'the external-edit fixture must change a real compact start');
   return description.replace('6:55 PM  Pray fardh', `6:55 PM  ${text}`);
 }
@@ -702,6 +704,139 @@ test('account color import respects consent and the global uncommitted-draft gua
   device.engine.configureCalendarColorImports(null);
   await device.engine.reconcileLinkedAccountColors([day]);
   assert.notEqual((await device.db.getMinuteEntry(day, 1135)).categoryId, before[0].categoryId);
+});
+
+test('identical normalized account-color bursts share one remote pass and retry freshly after it completes', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t);
+  remote.edit('personal', original.id, { displayColor: '#123456' });
+  let release, started; const gate = new Promise((resolve) => { release = resolve; }); const reached = new Promise((resolve) => { started = resolve; });
+  let reads = 0; remote.onGet = async () => { reads++; started(); await gate; };
+  const bursts = Array.from({ length: 40 }, (_, index) => device.engine.reconcileLinkedAccountColors(index % 2 ? [day] : [day, day]));
+  await reached; release(); const results = await Promise.all(bursts);
+  assert.equal(reads, 1); assert.ok(results.every((dates) => JSON.stringify(dates) === JSON.stringify([day])));
+  remote.onGet = async () => { reads++; };
+  assert.deepEqual(plain(await device.engine.reconcileLinkedAccountColors([day])), []);
+  assert.equal(reads, 2, 'completed results are not retained as a permanent color cache'); remote.onGet = null;
+});
+
+test('an older color read cannot delay or undo a newer source write and its acknowledged projection', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t);
+  remote.edit('personal', original.id, { displayColor: '#123456' });
+  const get = remote.adapter.getEvent; let first = true, release, started;
+  const gate = new Promise((resolve) => { release = resolve; }); const reached = new Promise((resolve) => { started = resolve; });
+  remote.adapter.getEvent = async (...args) => { const event = await get(...args); if (first) { first = false; started(); await gate; } return event; };
+  const old = device.engine.reconcileLinkedAccountColors([day]); await reached;
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1136, text: 'Newest exact source note', categoryId: 'study' });
+  remote.edit('personal', original.id, { displayColor: '#654321' });
+  let timeout; try {
+    await Promise.race([(async () => { await device.engine.synchronizeAccounts(); await device.engine.synchronizeAccounts(); })(),
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('A held color read blocked the core writer')), 4000); })]);
+    const before = plain(await device.db.getDayEntries(day)); const projection = plain((await device.engine.listProjections())[0]);
+    assert.match(remote.events.get(`personal:${original.id}`).description, /Newest exact source note/);
+    const category = (await device.categories.listCategories()).find((item) => item.id === before[0].categoryId);
+    assert.equal(category.color, '#654321'); release();
+    assert.deepEqual(plain(await old), []); assert.deepEqual(plain(await device.db.getDayEntries(day)), before);
+    assert.deepEqual(plain((await device.engine.listProjections())[0]), projection);
+  } finally { clearTimeout(timeout); release(); await old.catch(() => {}); }
+});
+
+test('permission, calendar selection and account removal during a color read prevent its later local commit', async (t) => {
+  for (const revoke of ['import', 'selection', 'account']) {
+    const { device, remote, original } = await linkedColoredActivity(t); const before = plain(await device.db.getDayEntries(day));
+    remote.edit('personal', original.id, { displayColor: '#123456' });
+    let release, started; const gate = new Promise((resolve) => { release = resolve; }); const reached = new Promise((resolve) => { started = resolve; });
+    remote.onGet = async () => { started(); await gate; };
+    const read = device.engine.reconcileLinkedAccountColors([day]); await reached;
+    if (revoke === 'import') device.accounts[0].consent.importCalendarEdits = false;
+    else if (revoke === 'selection') await device.engine.setAccountPreferences('google:person', { selectedCalendarIds: [], writeCalendarId: 'personal' });
+    else device.accounts.splice(0);
+    release(); assert.deepEqual(plain(await read), []); remote.onGet = null;
+    assert.deepEqual(plain(await device.db.getDayEntries(day)), before);
+  }
+});
+
+test('a failing independent color read rejects without holding the core writer or poisoning later reads', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t); const get = remote.adapter.getEvent;
+  let first = true, fail, started; const pending = new Promise((_, reject) => { fail = reject; }); const reached = new Promise((resolve) => { started = resolve; });
+  remote.adapter.getEvent = async (...args) => { if (first) { first = false; started(); await pending; } return get(...args); };
+  const read = device.engine.reconcileLinkedAccountColors([day]); const failed = assert.rejects(read, /Synthetic color read failed/); await reached;
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 1136, text: 'Core writer remains available', categoryId: 'study' });
+  let timeout; try {
+    await Promise.race([device.engine.synchronizeAccounts(), new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('The color failure held the core reconciliation queue')), 4000);
+    })]);
+    assert.match(remote.events.get(`personal:${original.id}`).description, /Core writer remains available/);
+  } finally { clearTimeout(timeout); fail(new Error('Synthetic color read failed')); await failed; }
+  assert.deepEqual(plain(await device.engine.reconcileLinkedAccountColors([day])), []);
+});
+
+test('pending and locally changed calendar projections run before unchanged synced projections with stable identity order', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  for (const start of [600, 700, 800]) await saveRange(device, start, 2, `Synthetic note ${start}`, 'study', `Activity ${start}`);
+  await device.engine.linkActualsToAccounts([day]); await device.engine.synchronizeAccounts();
+  const projections = (await device.engine.listProjections()).sort((left, right) => left.id.localeCompare(right.id));
+  const changed = projections.at(-1), pending = projections[1];
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: changed.startMinute, text: 'Newest priority note', categoryId: 'study' });
+  await device.db.putSyncDocument(`projection:${pending.id}`, { ...pending, state: 'pending' }); remote.calls.length = 0;
+  await device.engine.synchronizeAccounts();
+  const firstPass = remote.calls.filter((call) => call.type === 'get').slice(0, 3).map((call) => call.id);
+  const expected = [changed, pending].sort((left, right) => left.id.localeCompare(right.id)).map((item) => item.eventId);
+  assert.deepEqual(firstPass.slice(0, 2), expected); assert.equal(firstPass[2], projections[0].eventId);
+  assert.equal(remote.events.size, 3); assert.match(remote.events.get(`personal:${changed.eventId}`).description, /Newest priority note/);
+});
+
+test('a chosen exact Google event palette color is written to the original event and acknowledged independently of minute notes', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t);
+  await device.db.putSyncDocument('category:verified_event_color', { id: 'verified_event_color', name: 'Verified Google shade', color: '#2952A3',
+    providerOriginalColor: '#2952A3', provider: 'google', accountId: 'google:person', providerColorId: '7', googleColorVerified: true });
+  await device.categories.listCategories();
+  const before = plain(await device.db.getDayEntries(day)); remote.calls.length = 0;
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1137 }, 'google_palette_2952a3');
+  const result = await device.engine.synchronizeAccounts(); assert.equal(result.outcome, 'success');
+  const write = remote.calls.find((call) => call.type === 'update'); assert.equal(write.id, original.id); assert.equal(write.write.googleColorId, '7');
+  assert.equal(remote.events.size, 1); assert.equal(remote.calls.filter((call) => call.type === 'create').length, 0);
+  assert.deepEqual((await device.db.getDayEntries(day)).map((entry) => entry.text), before.map((entry) => entry.text));
+  const acknowledged = (await device.engine.listProjections()).find((projection) => projection.eventId === original.id && projection.state !== 'deleted');
+  assert.ok(acknowledged);
+  assert.deepEqual(plain(acknowledged.baseColorSelection), { categoryId: 'google_palette_2952a3', color: '#2952A3' });
+});
+
+test('unsupported explicit color changes retain local fill and report a mapping error instead of pretending the source color changed', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t); remote.calls.length = 0;
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1137 }, 'google_palette_0d7813');
+  const changed = await device.engine.synchronizeAccounts(); assert.equal(changed.outcome, 'error'); assert.match(changed.message, /no verified Google event or label mapping/);
+  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
+  assert.equal((await device.db.getMinuteEntry(day, 1135)).categoryId, 'google_palette_0d7813');
+  assert.equal(remote.events.get(`personal:${original.id}`).displayColor, '#112233');
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1137 }, 'study');
+  await device.categories.updateCategory('study', { color: '#0D7813' });
+  const sameId = await device.engine.synchronizeAccounts(); assert.equal(sameId.outcome, 'error');
+  assert.match(sameId.message, /no verified Google event or label mapping/);
+  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0,
+    'the acknowledgement compares hex as well as category ID');
+});
+
+test('a legitimate source recolor establishes a new color acknowledgement without being mistaken for an unsupported local choice', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t); const projection = (await device.engine.listProjections())[0];
+  delete projection.baseColorSelection; await device.db.putSyncDocument(`projection:${projection.id}`, projection);
+  remote.edit('personal', original.id, { displayColor: '#123456' }); remote.calls.length = 0;
+  assert.deepEqual(plain(await device.engine.reconcileLinkedAccountColors([day])), [day]);
+  const imported = (await device.engine.listProjections())[0]; assert.equal(imported.baseColorSelection.color, '#123456');
+  assert.equal(imported.baseColorSelection.categoryId, (await device.db.getMinuteEntry(day, 1135)).categoryId);
+  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
+});
+
+test('revoking calendar edit import during a gated palette lookup stops the later full source import', async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t); const before = plain(await device.db.getDayEntries(day));
+  remote.edit('personal', original.id, { displayColor: undefined, title: 'External changed title', start: iso(1160), end: iso(1163) });
+  const list = remote.adapter.listCalendars; let release, started;
+  const gate = new Promise((resolve) => { release = resolve; }); const reached = new Promise((resolve) => { started = resolve; });
+  remote.adapter.listCalendars = async () => { started(); await gate; return list(); }; remote.calls.length = 0;
+  const sync = device.engine.synchronizeAccounts(); await reached; device.accounts[0].consent.importCalendarEdits = false; release();
+  const result = await sync; assert.equal(result.outcome, 'error'); assert.match(result.message, /Allow calendar edit import/);
+  assert.deepEqual(plain(await device.db.getDayEntries(day)), before);
+  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
 });
 
 test('confirming a recurring plan updates only its concrete occurrence and preserves source notes', async (t) => {
@@ -1152,11 +1287,19 @@ test('a categorized interruption never gives two projections ownership of the sa
 
 test('an interrupted block projects every border and explicit regrouping retires the child events', async (t) => {
   const { device, remote, original } = await linkedPrayer(t);
+  for (const id of ['prayer', 'family']) {
+    const local = (await device.categories.listCategories()).find((category) => category.id === id);
+    await device.db.putSyncDocument(`category:verified_${id}`, { id: `verified_${id}`, name: `Verified ${id}`, color: local.color,
+      provider: 'google', accountId: 'google:person', calendarId: 'personal', providerLabelId: `label-${id}`,
+      providerOriginalColor: local.color, googleColorVerified: true });
+  }
+  await device.categories.listCategories();
   const projectedEvent = plain(remote.events.get(`personal:${original.id}`));
   await saveRange(device, 1138, 2, 'Print for mum', 'family');
   await device.engine.linkActualsToAccounts([day], planned(projectedEvent),
     { dateKey: day, minuteIndex: 1138 });
   await device.engine.synchronizeAccounts();
+  assert.notEqual(device.engine.getAccountSyncStatus().outcome, 'error', device.engine.getAccountSyncStatus().message);
   const segments = [...remote.events.values()].map((event) => ({
     start: (Date.parse(event.start) - Date.parse(iso(0))) / 60000,
     end: (Date.parse(event.end) - Date.parse(iso(0))) / 60000,
@@ -1174,6 +1317,10 @@ test('an interrupted block projects every border and explicit regrouping retires
   await device.engine.synchronizeAccounts();
   assert.equal(remote.events.size, 3, 'matching activity colors alone must not erase independently titled borders');
 
+  await device.db.putSyncDocument('category:merge_color', { id: 'merge_color', name: 'Verified merge color', color: '#2952A3',
+    provider: 'google', accountId: 'google:person', calendarId: 'personal', providerLabelId: 'merge-label',
+    providerOriginalColor: '#2952A3', googleColorVerified: true });
+  await device.categories.listCategories();
   await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1144 },
     { title: original.title, categoryId: 'google_palette_2952a3' });
   await device.inline.flushInlineMinutes();
@@ -1718,4 +1865,17 @@ test('ambiguous moved named-group geometry preserves existing calendar events fo
   assert.deepEqual(plain([...remote.events.values()]), initial);
   assert.equal(remote.calls.slice(beforeCalls).filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length, 0);
   assert.equal((await device.db.getDayEntries('2026-11-06')).length, 4);
+});
+
+
+test('an unmapped new explicit Google palette border remains queued instead of acknowledging a default-colored create', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 601 },
+    { title: 'Read', categoryId: 'google_palette_2952a3' });
+  await device.inline.retryInlineMinuteLinks({ synchronize: false });
+  const result = await device.engine.synchronizeAccounts();
+  assert.equal(result.outcome, 'error'); assert.match(result.message, /no verified Google event or label mapping/);
+  assert.equal(remote.events.size, 0); assert.equal(remote.calls.some((call) => call.type === 'create'), false);
+  assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'google_palette_2952a3');
+  assert.ok((await device.engine.listProjections()).every((projection) => !projection.baseColorSelection && projection.state === 'pending'));
 });

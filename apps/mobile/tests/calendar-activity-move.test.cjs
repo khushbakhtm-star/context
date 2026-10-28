@@ -11,7 +11,7 @@ const day = '2026-10-25';
 
 function runtime(t, overrides = {}) {
   const sqlite = new DatabaseSync(':memory:'); t.after(() => sqlite.close());
-  const events = new Map(); const calls = []; let serial = 0; let failUpdate = null; let failCreateAfterSave = false;
+  const events = new Map(); const calls = [], colorCalls = []; let serial = 0; let failUpdate = null; let failCreateAfterSave = false;
   const nativeDb = {
     async execAsync(sql) { sqlite.exec(sql); },
     async runAsync(sql, ...params) { const result = sqlite.prepare(sql).run(...params); return { changes: result.changes }; },
@@ -58,7 +58,23 @@ function runtime(t, overrides = {}) {
         if (name === 'expo-calendar/legacy') return nativeCalendar;
         if (name === 'expo-calendar') return overrides.modernBoundReads ? { ExpoCalendarEvent: {
           get: async (id) => Object.create(events.get(id) ?? {}) } } : {};
-        if (name === '../../modules/context-calendar-colors') return { getEventColorsAsync: async () => ({}) };
+        if (name === '../../modules/context-calendar-colors') return {
+          getEventColorsAsync: async () => {
+            await overrides.beforeColorRead?.();
+            return overrides.noColorRead ? {} : Object.fromEntries([...events.values()].map((event) => [event.id, event.displayColor ?? '#2952A3']));
+          },
+          setEventColorAsync: async (input) => {
+            await overrides.beforeColorWrite?.(input);
+            if (overrides.failColorWrite) throw Error('The selected event color is unavailable in this calendar palette.');
+            const event = events.get(input.eventId); assert.ok(event); assert.equal(event.calendarId, input.calendarId);
+            assert.equal(event.displayColor ?? '#2952A3', input.expectedColor);
+            assert.equal(new Date(event.startDate).getTime(), input.startMs); assert.equal(new Date(event.endDate).getTime(), input.endMs);
+            assert.equal(event.title, input.title); assert.equal(event.notes ?? '', input.notes);
+            if (overrides.palette && !overrides.palette.includes(input.color)) throw Error('Unsupported palette color');
+            const changed = (event.displayColor ?? '#2952A3') !== input.color;
+            event.displayColor = input.color; colorCalls.push({ ...input }); return { color: input.color, changed };
+          },
+        };
         if (name.startsWith('@noble/')) return require(name);
         if (!name.startsWith('.')) throw new Error(`Unexpected native activity import ${name}`);
         const target = path.resolve(path.dirname(filename), `${name}.ts`);
@@ -66,6 +82,7 @@ function runtime(t, overrides = {}) {
           getAccountPreferences: async (accountId) => overrides.accountPreferences?.[accountId] ?? { selectedCalendarIds: [], writeCalendarId: null },
           listProjections: async () => (await load(source('data/database.ts')).getSyncDocuments('projection:'))
             .flatMap((document) => document.value ? [document.value] : []),
+          reconcileLinkedAccountColors: async (dates) => overrides.reconcileAccounts?.(dates) ?? [],
           requireCalendarColorImportCurrent(entries) { overrides.colorGuard?.(entries); }, notifyCalendarColorImported() {},
           localActivityColorHash(entries) { return load(source('sync/codec.ts')).hashValue([...new Set(entries.map((entry) =>
             `${entry.categoryId}:${load(source('theme.ts')).categoryById(entry.categoryId).color.toUpperCase()}`))].sort()); } };
@@ -78,8 +95,26 @@ function runtime(t, overrides = {}) {
     cache.set(filename, module.exports); return module.exports;
   }
   const db = load(source('data/database.ts')); const sheet = load(source('services/spreadsheet.ts'));
+  const initialize = db.initializeDatabase; let paletteSeeded = false;
+  db.initializeDatabase = async () => {
+    await initialize();
+    if (paletteSeeded) return;
+    paletteSeeded = true;
+    await load(source('services/categories.ts')).listCategories();
+    // These historical native fixtures use a synthetic, already verified Google
+    // palette; UI palette discovery/provenance has separate category tests.
+    for (const account of overrides.accounts ?? []) if (account.provider === 'google') {
+      for (const [index, category] of load(source('theme.ts')).DEFAULT_CATEGORIES.entries()) {
+        await db.putSyncDocument(`category:fixture_verified_${account.id}_${index}`, {
+          ...category, id: `fixture_verified_${account.id}_${index}`, provider: 'google', accountId: account.id,
+          providerColorId: String(index + 1), googleColorVerified: true,
+        });
+      }
+    }
+  };
   const calendar = load(source('services/calendar.ts'));
-  return { db, sheet, calendar, events, calls, sqlite, set failUpdate(id) { failUpdate = id; },
+  calendar.configureCalendarProjection('personal');
+  return { db, sheet, calendar, events, calls, colorCalls, sqlite, set failUpdate(id) { failUpdate = id; },
     categories: load(source('services/categories.ts')),
     codec: load(source('sync/codec.ts')),
     set failCreateAfterSave(value) { failCreateAfterSave = value; } };
@@ -169,17 +204,21 @@ test('bound-only coexistence writes exact existing notes with a configured accou
   assert.equal(r.events.size, 1); assert.equal((await r.db.getSyncBindings(day)).length, 1);
 });
 
-test('bound-only coexistence keeps missing originals and changed local shapes deferred without replacement or remapping', async (t) => {
+test('bound-only coexistence keeps missing originals and ambiguous multi-binding shapes deferred without replacement or remapping', async (t) => {
   for (const reason of ['missing', 'shape']) {
     const options = directWriterOptions(); const r = runtime(t, options); const segment = await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
     const id = [...r.events.keys()][0]; const bindings = plain(await r.db.getSyncBindings(day));
     options.accountPreferences.google.writeCalendarId = 'google-calendar'; r.calendar.configureCalendarProjection('personal');
     if (reason === 'missing') { r.events.delete(id); await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Later text', categoryId: 'unaccounted' }); }
-    else await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 101 }, { title: 'Make coffee', categoryId: 'unaccounted' });
+    else {
+      await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 101 }, { title: 'Make coffee', categoryId: 'unaccounted' });
+      await r.db.saveSyncBinding({ ...bindings[0], segmentKey: `${day}:${segment.blockId}:200-200`, eventId: 'second-exact-binding' });
+    }
+    const expectedBindings = plain(await r.db.getSyncBindings(day));
     r.calls.length = 0;
     const result = await r.calendar.syncActualDay(day, 'personal', () => true, boundOnly);
     assert.equal(result.deferred, true); assert.equal(result.created, 0); assert.deepEqual(r.calls, []);
-    assert.deepEqual(plain(await r.db.getSyncBindings(day)), bindings);
+    assert.deepEqual(plain(await r.db.getSyncBindings(day)), expectedBindings);
   }
 });
 
@@ -403,7 +442,7 @@ test('bound-event protection uses modern Android shared getters rather than the 
 });
 
 test('known native event recolor fills linked minutes only and preserves notes, identity, grouping and formatting without source writes', async (t) => {
-  const r = runtime(t); await r.db.initializeDatabase();
+  const options = {}; const r = runtime(t, options); await r.db.initializeDatabase();
   await r.db.saveMinuteRange({ dateKey: day, startMinute: 100, durationMinutes: 3, text: 'Make coffee', categoryId: 'study' });
   await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 102 }, { title: 'Coffee', categoryId: 'study' });
   await r.sheet.applyCellFormat({ dateKey: day, startMinute: 101, endMinute: 101 }, { bold: true, underline: true });
@@ -427,6 +466,7 @@ test('known native event recolor fills linked minutes only and preserves notes, 
   await r.calendar.reconcileLinkedNativeColors(day, [unrelated], [read.calendar]);
   assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, after[0].entry.categoryId);
   for (const event of r.events.values()) delete event.displayColor;
+  options.noColorRead = true;
   const fallbackOnly = await r.calendar.loadPlannedEventsResult(['personal'], day, [read.calendar]);
   await r.calendar.reconcileLinkedNativeColors(day, fallbackOnly.plans, [read.calendar]);
   assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, after[0].entry.categoryId,
@@ -682,7 +722,7 @@ test('a second provider edit while preparing native import leaves the current le
   assert.equal((await r.db.getMinuteEntry(day, 100)).text, 'Original note'); assert.equal(event.title, 'Later provider edit'); assert.equal(r.calls.length, 0);
 });
 
-test('resizing one native event over another bordered activity pauses instead of overwriting its minute notes', async (t) => {
+test('resizing one native event over another protects its notes while an independent source color can still import', async (t) => {
   const r = runtime(t); await r.db.initializeDatabase();
   await r.db.saveMinuteRange({ dateKey: day, startMinute: 100, durationMinutes: 5, text: 'First notes', categoryId: 'study' });
   await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 104 }, { title: 'First event', categoryId: 'study' });
@@ -693,7 +733,13 @@ test('resizing one native event over another bordered activity pauses instead of
   first.endDate = new Date(2026, 9, 25, 1, 48).toISOString(); first.notes = '';
   const read = await nativeColorPlans(r, '#123456'); r.calls.length = 0;
   await assert.rejects(r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar]), /overlaps another/);
-  assert.deepEqual(plain(await r.db.getDayEntries(day)), before); assert.equal(r.events.size, 2); assert.equal(r.calls.length, 0);
+  const after = plain(await r.db.getDayEntries(day));
+  assert.deepEqual(after.slice(0, 5), before.slice(0, 5));
+  for (let index = 5; index < after.length; index++) {
+    for (const field of ['id', 'dateKey', 'minuteIndex', 'text', 'blockId', 'source', 'createdAt']) assert.equal(after[index][field], before[index][field]);
+    assert.equal((await r.categories.listCategories()).find((category) => category.id === after[index].categoryId).color, '#123456');
+  }
+  assert.equal(r.events.size, 2); assert.equal(r.calls.length, 0);
 });
 
 test('one bordered event keeps one native ID when its individual minute fill colors differ or change', async (t) => {
@@ -732,4 +778,282 @@ test('receipt-less exact current compact content may bootstrap its baseline befo
   await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Later exact minute note', categoryId: 'unaccounted' });
   assert.equal((await r.calendar.syncActualDay(day, 'personal')).updated, 1);
   assert.equal(r.events.get(event.id).title, 'Original note'); assert.match(r.events.get(event.id).notes, /Later exact minute note/);
+});
+
+
+async function twoIndependentBorders(r) {
+  await r.db.initializeDatabase();
+  for (const [minuteIndex, title] of [[100, 'First activity'], [200, 'Second activity']]) {
+    await r.db.saveMinuteEntry({ dateKey: day, minuteIndex, text: 'Original minute note', categoryId: 'study' });
+    await r.sheet.groupMinuteRange({ dateKey: day, startMinute: minuteIndex, endMinute: minuteIndex }, { title, categoryId: 'study' });
+  }
+  await r.calendar.syncActualDay(day, 'personal'); r.calendar.configureCalendarProjection('personal');
+  const [bad, good] = ordered(r); return { bad: r.events.get(bad.id), good: r.events.get(good.id) };
+}
+
+test('one conflicted native binding stays protected while an unrelated edited border and new border synchronize', async (t) => {
+  const r = runtime(t); const { bad, good } = await twoIndependentBorders(r);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Local changed first note', categoryId: 'study' });
+  bad.notes = 'External changed first note'; const protectedEvent = plain(bad);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'Local changed second note', categoryId: 'study' });
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 300, text: 'Third note', categoryId: 'study' });
+  await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 300, endMinute: 300 }, { title: 'Third activity', categoryId: 'study' });
+  r.calls.length = 0; const result = await r.calendar.flushPendingActuals('personal', [day]);
+  assert.equal(result.failed, 1); assert.equal(result.remaining, 1);
+  assert.deepEqual(plain(r.events.get(bad.id)), protectedEvent);
+  assert.match(r.events.get(good.id).notes, /Local changed second note/); assert.equal(r.events.size, 3);
+  assert.equal(r.calls.some((call) => call.id === bad.id), false);
+  assert.equal(r.calls.filter((call) => call.type === 'create').length, 1);
+  assert.match((await r.db.getPendingSyncDates())[0].lastError, /edited in your calendar and in Context/);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).text, 'Local changed first note');
+});
+
+test('bound-only native preflight isolates a bad binding without creating, deleting or adopting it or unbound borders', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); const { bad, good } = await twoIndependentBorders(r);
+  options.accountPreferences.google.writeCalendarId = 'google-calendar';
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Local changed first note', categoryId: 'study' });
+  bad.title = 'External first title'; const protectedEvent = plain(bad);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'Local changed second note', categoryId: 'study' });
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 300, text: 'Third note', categoryId: 'study' });
+  await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 300, endMinute: 300 }, { title: 'Third activity', categoryId: 'study' });
+  r.calls.length = 0; const result = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(result.failed, 1); assert.equal(result.remaining, 1); assert.equal(r.events.size, 2);
+  assert.deepEqual(plain(r.events.get(bad.id)), protectedEvent); assert.match(r.events.get(good.id).notes, /Local changed second note/);
+  assert.deepEqual(plain(r.calls), [{ type: 'update', id: good.id }]);
+});
+
+test('a legacy receipt-less source conflict is isolated even without an explicit source color', async (t) => {
+  const r = runtime(t); const { bad, good } = await twoIndependentBorders(r);
+  await r.db.setSetting(`calendar.native-write.v1.personal.${bad.id}`, null);
+  bad.title = 'External first title'; const before = plain(bad);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'Changed second note', categoryId: 'study' });
+  r.calls.length = 0; const result = await r.calendar.flushPendingActuals('personal', [day]);
+  assert.equal(result.failed, 1); assert.deepEqual(plain(r.events.get(bad.id)), before);
+  assert.match(r.events.get(good.id).notes, /Changed second note/);
+  assert.equal(r.calls.some((call) => call.id === bad.id), false);
+  assert.equal(await r.db.getSetting(`calendar.native-write.v1.personal.${bad.id}`, null), null);
+});
+
+test('a failed binding block cannot be removed by cleanup while a separate exact binding updates', async (t) => {
+  const r = runtime(t); const { bad, good } = await twoIndependentBorders(r);
+  const badBlock = (await r.db.getSyncBindings(day)).find((binding) => binding.eventId === bad.id).blockId;
+  await r.sheet.resetMinuteCells({ dateKey: day, startMinute: 100, endMinute: 100 });
+  bad.notes = 'External retained note'; const before = plain(bad);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'Changed second note', categoryId: 'study' });
+  r.calls.length = 0; const result = await r.calendar.flushPendingActuals('personal', [day]);
+  assert.equal(result.failed, 1); assert.deepEqual(plain(r.events.get(bad.id)), before);
+  assert.equal(r.calls.some((call) => call.id === bad.id), false);
+  assert.ok((await r.db.getSyncBindings(day)).some((binding) => binding.blockId === badBlock));
+  assert.match(r.events.get(good.id).notes, /Changed second note/);
+});
+
+test('revoked calendar permission and unknown whole-calendar read failures stop every native write', async (t) => {
+  for (const failure of ['permission', 'read']) {
+    const options = {}; const r = runtime(t, options); const { bad } = await twoIndependentBorders(r);
+    bad.notes = 'External change';
+    await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'Changed second note', categoryId: 'study' });
+    if (failure === 'permission') options.beforeBoundRead = async () => { options.permission = 'denied'; throw new Error('Calendar access was revoked'); };
+    else options.beforeNativeRead = async () => { throw new Error('Whole provider query failed'); };
+    r.calls.length = 0; const result = await r.calendar.flushPendingActuals('personal', [day]);
+    assert.equal(result.failed, 1); assert.deepEqual(r.calls, []);
+  }
+});
+
+test('a rejected raw import destination excludes only its original block and keeps safe unrelated writes available', async (t) => {
+  const options = {}; const r = runtime(t, options); const { bad, good } = await twoIndependentBorders(r);
+  Object.assign(bad, { startDate: new Date(2026, 9, 25, 9, 0).toISOString(), endDate: new Date(2026, 9, 25, 9, 1).toISOString(), notes: '' });
+  options.colorGuard = (entries) => { if (entries.some((entry) => entry.minuteIndex === 540)) throw Error('Finish the current minute edit before importing.'); };
+  const oldBinding = plain((await r.db.getSyncBindings(day)).find((binding) => binding.eventId === bad.id));
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'Changed second note', categoryId: 'study' });
+  r.calls.length = 0; const result = await r.calendar.flushPendingActuals('personal', [day]);
+  assert.equal(result.failed, 1); assert.equal((await r.db.getMinuteEntry(day, 100)).text, 'Original minute note');
+  assert.equal(await r.db.getMinuteEntry(day, 540), null);
+  assert.deepEqual(plain((await r.db.getSyncBindings(day)).find((binding) => binding.eventId === bad.id)), oldBinding);
+  assert.equal(r.calls.some((call) => call.id === bad.id), false); assert.match(r.events.get(good.id).notes, /Changed second note/);
+});
+
+
+test('structured native reconciliation finishes safe imports before its compatible wrapper reports blocked exact bindings', async (t) => {
+  const r = runtime(t); const { bad, good } = await twoIndependentBorders(r);
+  const badBinding = (await r.db.getSyncBindings(day)).find((binding) => binding.eventId === bad.id);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Local changed first note', categoryId: 'study' });
+  bad.title = 'External first title'; good.title = 'External second title'; good.notes = ''; r.calls.length = 0;
+  const calendars = await r.calendar.listDeviceCalendars(); const read = await r.calendar.loadPlannedEventsResult(['personal'], day, calendars);
+  const result = await r.calendar.reconcileLinkedNativeColorsResult(day, read.plans, calendars);
+  assert.deepEqual(plain(result.changedDates), [day]); assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].blockId, badBinding.blockId); assert.equal(result.failures[0].eventId, bad.id);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).text, 'Local changed first note');
+  assert.equal((await r.db.getMinuteEntry(day, 200)).text, '');
+  assert.equal((await r.db.getDayCalendarSegments(day)).find((segment) => segment.startMinute === 200).activityTitle, 'External second title');
+  await assert.rejects(r.calendar.reconcileLinkedNativeColors(day, read.plans, calendars), (error) =>
+    error instanceof r.calendar.NativeCalendarReconciliationError && error.failures[0].eventId === bad.id && /edited in your calendar and in Context/.test(error.message));
+  assert.deepEqual(r.calls, [], 'importing either safe or blocked provider data performs no source writes');
+});
+
+test('native-only aggregate preflight does not enqueue another account color pass', async (t) => {
+  let reads = 0; const r = runtime(t, { reconcileAccounts: async () => { reads++; return []; } });
+  await r.db.initializeDatabase();
+  const preferences = { selectedCalendarIds: [], writeCalendarId: null, syncActuals: false };
+  assert.deepEqual(plain(await r.calendar.reconcileLinkedCalendarColors([day], [], preferences, { nativeOnly: true })), []);
+  assert.equal(reads, 0);
+  await r.calendar.reconcileLinkedCalendarColors([day], [], preferences); assert.equal(reads, 1);
+});
+
+
+test('bound-only one-to-one border resize preserves its exact native ID, notes and location without a duplicate', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+  const id = ordered(r)[0].id; r.events.get(id).location = 'Original place';
+  options.accountPreferences.google.writeCalendarId = 'google-calendar'; r.calendar.configureCalendarProjection('personal');
+  await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 102 }, { title: 'Make coffee', categoryId: 'unaccounted' });
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 102, text: 'Last minute note', categoryId: 'unaccounted' });
+  r.calls.length = 0; const result = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(result.failed, 0); assert.equal(result.succeeded, 1); assert.equal(r.events.size, 1);
+  assert.equal(ordered(r)[0].id, id); assert.equal(r.events.get(id).location, 'Original place');
+  assert.equal(new Date(r.events.get(id).endDate).getTime(), new Date(2026, 9, 25, 1, 43).getTime());
+  assert.match(r.events.get(id).notes, /Make coffee[\s\S]*Last minute note/);
+  assert.deepEqual(plain(r.calls), [{ type: 'update', id }]);
+  const binding = (await r.db.getSyncBindings(day))[0]; assert.match(binding.segmentKey, /:100-102$/); assert.equal(binding.eventId, id);
+});
+
+test('bound-only cross-day move and Undo retime the same original after source cleanup defers', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); const segment = await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+  const id = ordered(r)[0].id; const originalStart = r.events.get(id).startDate;
+  options.accountPreferences.google.writeCalendarId = 'google-calendar'; r.calendar.configureCalendarProjection('personal');
+  const group = await r.sheet.getMovableActivityGroup(day, 100); const targetDay = '2026-10-26';
+  await r.sheet.moveActivityGroup(group, { dateKey: targetDay, startMinute: 600 }); r.calls.length = 0;
+  const source = await r.calendar.syncActualDay(day, 'personal', () => true, boundOnly); assert.equal(source.deferred, true); assert.deepEqual(r.calls, []);
+  const moved = await r.calendar.flushPendingActuals('personal', [targetDay], 90, boundOnly);
+  assert.equal(moved.failed, 0); assert.equal(r.events.size, 1); assert.equal(ordered(r)[0].id, id);
+  assert.equal(new Date(r.events.get(id).startDate).getTime(), new Date(2026, 9, 26, 10, 0).getTime());
+  assert.equal((await r.db.getSyncBindingsForBlock(segment.blockId))[0].dateKey, targetDay);
+  assert.equal(r.calls.some((call) => call.type === 'create' || call.type === 'delete'), false);
+  await r.sheet.undoSpreadsheetEdit(); await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(new Date(r.events.get(id).startDate).getTime(), new Date(originalStart).getTime());
+  assert.equal((await r.db.getSyncBindingsForBlock(segment.blockId))[0].eventId, id);
+});
+
+test('a cross-day retime source conflict is isolated from a separate target-day binding', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); const { bad, good } = await twoIndependentBorders(r);
+  const targetDay = '2026-10-26';
+  // The separate target binding already exists and stays under the same exact native authority.
+  const second = await r.sheet.getMovableActivityGroup(day, 200);
+  await r.sheet.moveActivityGroup(second, { dateKey: targetDay, startMinute: 700 });
+  await r.calendar.syncActualDay(targetDay, 'personal');
+  const group = await r.sheet.getMovableActivityGroup(day, 100);
+  await r.sheet.moveActivityGroup(group, { dateKey: targetDay, startMinute: 600 }); bad.title = 'External first title';
+  options.accountPreferences.google.writeCalendarId = 'google-calendar';
+  await r.db.saveMinuteEntry({ dateKey: targetDay, minuteIndex: 700, text: 'Changed independent target note', categoryId: 'study' });
+  const before = plain(bad); r.calls.length = 0;
+  const result = await r.calendar.flushPendingActuals('personal', [targetDay], 90, boundOnly);
+  assert.ok(result.failed > 0); assert.deepEqual(plain(r.events.get(bad.id)), before);
+  assert.match(r.events.get(good.id).notes, /Changed independent target note/);
+  assert.equal(r.calls.some((call) => call.id === bad.id), false);
+});
+
+
+async function coloredBorder(r) {
+  await r.db.initializeDatabase();
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Original note', categoryId: 'study' });
+  await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, { title: 'Activity', categoryId: 'study' });
+  await r.calendar.syncActualDay(day, 'personal'); return ordered(r)[0].id;
+}
+
+test('explicit native fill changes use the exact event color CAS while note-only edits preserve its color', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); const id = await coloredBorder(r);
+  assert.equal(r.events.get(id).displayColor, '#1B887A');
+  options.accountPreferences.google.writeCalendarId = 'google-calendar';
+  await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'work');
+  r.colorCalls.length = 0; const fill = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(fill.failed, 0); assert.equal(r.colorCalls.length, 1); assert.equal(r.colorCalls[0].expectedColor, '#1B887A');
+  assert.equal(r.colorCalls[0].eventId, id); assert.equal(r.events.get(id).displayColor, '#AB8B00');
+  const receipt = await r.db.getSetting(`calendar.color-receipt.device.personal.${id}`, null);
+  assert.equal(receipt.remoteColor, '#AB8B00');
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'New note with the same fill', categoryId: 'work' });
+  r.colorCalls.length = 0; await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(r.colorCalls.length, 0); assert.equal(r.events.get(id).displayColor, '#AB8B00');
+  assert.match(r.events.get(id).notes, /New note with the same fill/); assert.equal(r.events.size, 1);
+});
+
+test('a failed native fill remains pending independently of its acknowledged content and retries on the local-hash skip path', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); const id = await coloredBorder(r);
+  options.accountPreferences.google.writeCalendarId = 'google-calendar';
+  await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'work');
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Content acknowledged before fill', categoryId: 'work' });
+  options.failColorWrite = true; r.calls.length = 0; r.colorCalls.length = 0;
+  const first = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(first.failed, 1); assert.equal(first.remaining, 1); assert.match(r.events.get(id).notes, /Content acknowledged before fill/);
+  assert.equal(r.events.get(id).displayColor, '#1B887A'); assert.equal(r.calls.filter((call) => call.type === 'update').length, 1);
+  options.failColorWrite = false; r.calls.length = 0;
+  const retry = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(retry.failed, 0); assert.equal(retry.remaining, 0); assert.equal(r.events.get(id).displayColor, '#AB8B00');
+  assert.equal(r.calls.length, 0, 'acknowledged content does not need another write just to finish the fill');
+  assert.equal(r.colorCalls.length, 1); assert.equal(r.events.size, 1);
+});
+
+test('a newly created event retains its exact pending color intent across an unsupported-palette failure without a duplicate', async (t) => {
+  const options = { failColorWrite: true }; const r = runtime(t, options); await r.db.initializeDatabase();
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'New activity note', categoryId: 'study' });
+  await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, { title: 'New activity', categoryId: 'study' });
+  const first = await r.calendar.flushPendingActuals('personal', [day]); const id = ordered(r)[0].id;
+  assert.equal(first.failed, 1); assert.equal(r.events.size, 1); assert.equal((await r.db.getSyncBindings(day))[0].eventId, id);
+  const intentKey = `calendar.color-intent.device.personal.${id}`;
+  assert.equal((await r.db.getSetting(intentKey, null)).expectedColor, '#2952A3');
+  assert.equal(await r.db.getSetting(`calendar.color-receipt.device.personal.${id}`, null), null);
+  options.failColorWrite = false; const before = r.calls.filter((call) => call.type === 'create').length;
+  const retry = await r.calendar.flushPendingActuals('personal', [day]);
+  assert.equal(retry.failed, 0); assert.equal(r.events.size, 1); assert.equal(r.events.get(id).displayColor, '#1B887A');
+  assert.equal(r.calls.filter((call) => call.type === 'create').length, before); assert.equal(await r.db.getSetting(intentKey, null), null);
+});
+
+test('a simultaneous source fill change or missing exact color read never overwrites the source color', async (t) => {
+  for (const reason of ['changed', 'unavailable']) {
+    const options = directWriterOptions(); const r = runtime(t, options); const id = await coloredBorder(r);
+    options.accountPreferences.google.writeCalendarId = 'google-calendar';
+    await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'work');
+    if (reason === 'changed') options.beforeUpdate = async () => { r.events.get(id).displayColor = '#0B8043'; };
+    else options.noColorRead = true;
+    r.colorCalls.length = 0; const result = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+    assert.equal(result.failed, 1); assert.equal(r.colorCalls.length, 0);
+    assert.equal(r.events.get(id).displayColor, reason === 'changed' ? '#0B8043' : '#1B887A');
+    assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, 'work');
+    assert.equal((await r.db.getSetting(`calendar.color-receipt.device.personal.${id}`, null)).remoteColor, '#1B887A');
+  }
+});
+
+
+test('one unsupported native color does not poison another verified event update on the same date', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); const { bad, good } = await twoIndependentBorders(r);
+  options.accountPreferences.google.writeCalendarId = 'google-calendar';
+  await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'work');
+  await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 200, endMinute: 200 }, 'family');
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'Independent update', categoryId: 'family' });
+  options.beforeColorWrite = async (input) => { if (input.eventId === bad.id) throw Error('Choose a supported color for this original calendar.'); };
+  r.calls.length = 0; r.colorCalls.length = 0;
+  const result = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(result.failed, 1); assert.equal(result.remaining, 1);
+  assert.ok(result.reviewMessages.some((message) => /supported color/.test(message)));
+  assert.equal(r.events.get(bad.id).displayColor, '#1B887A'); assert.equal(r.events.get(good.id).displayColor, '#BE6D00');
+  assert.match(r.events.get(good.id).notes, /Independent update/);
+  assert.equal(r.calls.some((call) => call.type === 'create' || call.type === 'delete'), false);
+  options.beforeColorWrite = undefined; r.calls.length = 0;
+  const retry = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(retry.failed, 0); assert.equal(r.events.get(bad.id).displayColor, '#AB8B00'); assert.equal(r.calls.length, 0);
+});
+
+
+test('an interrupted native retime receipt rekeys the original binding on retry without a second provider update', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+  const id = ordered(r)[0].id; const oldKey = (await r.db.getSyncBindings(day))[0].segmentKey;
+  options.accountPreferences.google.writeCalendarId = 'google-calendar';
+  await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 101 }, { title: 'Make coffee', categoryId: 'unaccounted' });
+  const remap = r.db.remapActivitySyncBindings; r.db.remapActivitySyncBindings = async () => { throw Error('Interrupted local rekey'); };
+  r.calls.length = 0; const first = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(first.failed, 1); assert.equal((await r.db.getSyncBindings(day))[0].segmentKey, oldKey);
+  assert.equal(new Date(r.events.get(id).endDate).getTime(), new Date(2026, 9, 25, 1, 42).getTime());
+  assert.equal(r.calls.filter((call) => call.type === 'update').length, 1);
+  r.db.remapActivitySyncBindings = remap; r.calls.length = 0;
+  const retry = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(retry.failed, 0); assert.equal(retry.remaining, 0); assert.deepEqual(r.calls, []);
+  const binding = (await r.db.getSyncBindings(day))[0]; assert.equal(binding.eventId, id); assert.match(binding.segmentKey, /:100-101$/);
+  assert.equal(r.events.size, 1);
 });

@@ -1,7 +1,7 @@
 import * as Crypto from 'expo-crypto';
 
-import { getSetting, getSyncDocuments, putSyncDocument, setSetting } from '../data/database';
-import { accountFetch } from '../sync/accounts';
+import { getMinuteEntry, getSetting, getSyncBindingsForBlock, getSyncDocuments, putSyncDocument, setSetting } from '../data/database';
+import { accountFetch, getAccounts } from '../sync/accounts';
 import { createCalendarAdapter } from '../sync/providers';
 import { hashValue } from '../sync/codec';
 import type { AccountProvider, ConnectedAccount } from '../sync/types';
@@ -10,10 +10,82 @@ import type { ActivityCategory } from '../theme';
 import type { DeviceCalendar } from '../types';
 import { CELL_FORMAT_PREFIX } from '../utils/cell-format';
 import { GOOGLE_ACTIVITY_COLORS, googleActivityColorValues, isAllowedGoogleActivityColor } from '../utils/google-activity-colors';
+import type { CalendarPreferences } from '../types';
 
 const SETTING = 'activity.categories.v2';
 const COLOR = /^#[0-9a-f]{6}$/i;
 let mutations: Promise<unknown> = Promise.resolve();
+const paletteRefreshJobs = new Map<string, Promise<void>>();
+const paletteRefreshTimes = new Map<string, number>();
+const paletteListeners = new Set<() => void>();
+export function subscribeWritablePaletteChanges(listener: () => void) {
+  paletteListeners.add(listener); return () => { paletteListeners.delete(listener); };
+}
+
+function refreshPaletteInBackground(key: string, read: () => Promise<ActivityCategory[]>, isCurrent: () => Promise<boolean>) {
+  if (paletteRefreshJobs.has(key) || Date.now() - (paletteRefreshTimes.get(key) ?? 0) < 60_000) return;
+  const job = (async () => {
+    const values = await read();
+    await serialized(async () => {
+      if (!await isCurrent()) return;
+      const before = hashValue(await getSyncDocuments('category:', CELL_FORMAT_PREFIX));
+      await importCategories(values);
+      const after = hashValue(await getSyncDocuments('category:', CELL_FORMAT_PREFIX));
+      if (before !== after) for (const listener of paletteListeners) { try { listener(); } catch { /* Screen unmounted. */ } }
+    });
+  })().catch(() => { /* Cached verified choices stay available offline; explicit import reports provider errors. */ })
+    .finally(() => { paletteRefreshTimes.set(key, Date.now()); if (paletteRefreshJobs.get(key) === job) paletteRefreshJobs.delete(key); });
+  paletteRefreshJobs.set(key, job);
+}
+
+async function connectedGoogleWriters() {
+  const accounts = typeof getAccounts === 'function' ? await getAccounts() : [];
+  const projections = await getSyncDocuments('projection:');
+  return Promise.all(accounts.filter((account) => account.provider === 'google' && account.consent.calendarRead && account.consent.calendarWrite)
+    .map(async (account) => {
+      const preferences = await getSetting<{ writeCalendarId?: string | null; selectedCalendarIds?: string[] }>(`account.calendars.${account.id}`, {});
+      const labels = new Set<string>();
+      if (preferences.writeCalendarId) labels.add(preferences.writeCalendarId);
+      for (const document of projections) if (document.value?.accountId === account.id && document.value.state !== 'deleted' &&
+          typeof document.value.calendarId === 'string') labels.add(document.value.calendarId);
+      const labelCalendars = [...labels].sort().slice(0, 256);
+      return { account, labelCalendars, identity: hashValue([account.id, account.subject, account.provider, account.consent,
+        preferences.writeCalendarId ?? null, [...(preferences.selectedCalendarIds ?? [])].sort(), labelCalendars]) };
+    }));
+}
+
+async function readGoogleWritablePalette(account: ConnectedAccount, labelCalendars: readonly string[]): Promise<ActivityCategory[]> {
+  const palette = await providerJson(account, 'https://www.googleapis.com/calendar/v3/colors');
+  const values: ActivityCategory[] = [];
+  for (const [id, item] of Object.entries(palette.event ?? {}).slice(0, 256)) {
+    const color = (item as { background?: unknown }).background;
+    if (/^[A-Za-z0-9_-]{1,80}$/.test(id) && typeof color === 'string' && COLOR.test(color)) values.push({
+      id: stableId(account.id, 'color', id), name: `Google event color ${id}`, color,
+      provider: 'google', accountId: account.id, providerColorId: id, googleColorVerified: true,
+    });
+  }
+  if (account.consent.categoryRead) for (const calendarId of labelCalendars) {
+    const metadata = await providerJson(account, `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}?eventLabelVersion=1`);
+    for (const label of (metadata.labelProperties?.eventLabels ?? []).slice(0, 200)) {
+      if (typeof label.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(label.id) || !COLOR.test(label.backgroundColor ?? '')) continue;
+      values.push({ id: stableId(account.id, calendarId, label.id), name: label.name || `Google label ${label.id}`,
+        color: label.backgroundColor, provider: 'google', accountId: account.id, calendarId,
+        providerLabelId: label.id, googleColorVerified: true });
+    }
+  }
+  return values;
+}
+
+async function readNativeWritablePalette(calendarIds: readonly string[]): Promise<ActivityCategory[]> {
+  try {
+    const bridge = await import('../../modules/context-calendar-colors');
+    if (typeof bridge.getEventPaletteAsync !== 'function') return [];
+    return (await bridge.getEventPaletteAsync(calendarIds)).map((item) => ({
+      id: stableId('device-event-color', item.calendarId, item.key), name: item.color, color: item.color,
+      provider: 'device' as const, calendarId: item.calendarId, providerColorId: item.key, googleColorVerified: true,
+    }));
+  } catch { return []; }
+}
 
 function validCategory(value: unknown): value is ActivityCategory {
   if (!value || typeof value !== 'object') return false;
@@ -97,9 +169,49 @@ export function ensureSourceColorCategory(input: { color: string; name: string; 
 
 /** New activity choices use only Google-provided hex values. Old records are still
  * available through listCategories for history, reports, rename and archive. */
-export async function listSelectableActivityCategories(): Promise<ActivityCategory[]> {
+export type ActivityColorOptions = { writableOnly?: boolean; scope?: { dateKey: string; minuteIndex: number } };
+export async function listSelectableActivityCategories(options: ActivityColorOptions = {}): Promise<ActivityCategory[]> {
   const categories = await listCategories();
-  return categories.filter((category) => !category.archived &&
+  const historical = () => categories.filter((category) => !category.archived &&
+    !(category.provider === 'google' && category.providerOriginalColor && category.color.toUpperCase() !== category.providerOriginalColor.toUpperCase()) &&
+    isAllowedGoogleActivityColor(category.color, categories));
+  if (options.writableOnly === false) return historical();
+  const allWriters = await connectedGoogleWriters();
+  for (const writer of allWriters) refreshPaletteInBackground(hashValue(['google-event-palette', writer.identity]),
+    () => readGoogleWritablePalette(writer.account, writer.labelCalendars),
+    async () => (await connectedGoogleWriters()).some((current) => current.identity === writer.identity));
+  const preferences = await getSetting<Partial<CalendarPreferences>>('calendar.preferences', {});
+  const selectedNativeIds = preferences.writeCalendarId ? [preferences.writeCalendarId] : preferences.selectedCalendarIds ?? [];
+  if (selectedNativeIds.length) refreshPaletteInBackground(hashValue(['native-event-palette', [...selectedNativeIds].sort()]),
+    () => readNativeWritablePalette(selectedNativeIds), async () => {
+      const current = await getSetting<Partial<CalendarPreferences>>('calendar.preferences', {});
+      const ids = current.writeCalendarId ? [current.writeCalendarId] : current.selectedCalendarIds ?? [];
+      return hashValue([...ids].sort()) === hashValue([...selectedNativeIds].sort());
+    });
+  let writers = allWriters; let nativeIds = selectedNativeIds;
+  if (options.scope && typeof getMinuteEntry === 'function' && typeof getSyncBindingsForBlock === 'function') {
+    const entry = await getMinuteEntry(options.scope.dateKey, options.scope.minuteIndex);
+    if (entry) {
+      const owners = (await getSyncDocuments('projection:')).filter((document) => document.value?.state !== 'deleted' && document.value?.blockId === entry.blockId);
+      const owner = owners.find((document) => allWriters.some((writer) => writer.account.id === document.value?.accountId));
+      if (owner) {
+        writers = allWriters.filter((writer) => writer.account.id === owner.value!.accountId)
+          .map((writer) => ({ ...writer, labelCalendars: [String(owner.value!.calendarId)] })); nativeIds = [];
+      } else if (!owners.length) {
+        const bound = (await getSyncBindingsForBlock(entry.blockId)).filter((binding) => binding.calendarId === preferences.writeCalendarId);
+        if (bound.length) { writers = []; nativeIds = [...new Set(bound.map((binding) => binding.calendarId))]; }
+      }
+    }
+  }
+  const writable = categories.filter((category) => category.googleColorVerified && (
+    writers.some((writer) => category.provider === 'google' && category.accountId === writer.account.id &&
+      (category.providerColorId || category.providerLabelId && writer.labelCalendars.includes(category.calendarId ?? ''))) ||
+    category.provider === 'device' && category.providerColorId && nativeIds.includes(category.calendarId ?? '')) &&
+      (!category.providerOriginalColor || category.providerOriginalColor.toUpperCase() === category.color.toUpperCase()));
+  const writableColors = new Set(writable.map((category) => category.color.toUpperCase()));
+  const restricted = writers.length > 0 || categories.some((category) => category.provider === 'device' &&
+    category.googleColorVerified && category.providerColorId && nativeIds.includes(category.calendarId ?? ''));
+  return historical().filter((category) => (!restricted || writableColors.has(category.color.toUpperCase())) &&
     // A local display override must not offer a color that its provider ID would
     // render differently. Keep the category readable for existing entries.
     !(category.provider === 'google' && category.providerOriginalColor &&
@@ -176,10 +288,10 @@ async function importCategories(values: ActivityCategory[]) {
 }
 
 export function importDeviceCategories(calendars: DeviceCalendar[]) {
-  return serialized(() => importCategories(calendars.map((calendar) => ({
+  return readNativeWritablePalette(calendars.map((calendar) => calendar.id)).then((palette) => serialized(() => importCategories([...calendars.map((calendar) => ({
     id: stableId('device', calendar.id), name: calendar.title, color: COLOR.test(calendar.color) ? calendar.color : '#96938C',
     provider: 'device' as const, calendarId: calendar.id,
-  }))));
+  })), ...palette])));
 }
 
 // Graph defines 25 named presets; their exact rendered shades vary between Outlook clients.
@@ -285,20 +397,24 @@ export function categoryProviderColor(categoryId: string, provider: AccountProvi
   accountId: string, calendarId?: string): ProviderCategoryColor {
   const category = CATEGORIES.find((item) => item.id === categoryId);
   if (!category) return {};
-  if (!category.provider && provider === 'google') {
+  if (provider === 'google') {
+    const direct = category.provider === 'google' && category.accountId === accountId &&
+      (!category.providerOriginalColor || category.providerOriginalColor.toUpperCase() === category.color.toUpperCase());
+    if (direct && category.providerLabelId && calendarId === category.calendarId) return { eventLabelId: category.providerLabelId };
+    if (direct && category.providerColorId) return { colorId: category.providerColorId };
+    // Labels belong to one calendar. A same-account label from another calendar
+    // may still use an independently verified exact event/target-label shade.
     const matching = CATEGORIES.find((item) => {
       const original = item.providerOriginalColor ?? item.color;
       return item.provider === 'google' && item.accountId === accountId && typeof original === 'string' &&
         original.toUpperCase() === category.color.toUpperCase() &&
         (item.providerColorId || (item.providerLabelId && item.calendarId === calendarId));
     });
-    if (matching) return matching.providerLabelId ? { eventLabelId: matching.providerLabelId } : { colorId: matching.providerColorId };
+    if (matching) return matching.providerLabelId && matching.calendarId === calendarId
+      ? { eventLabelId: matching.providerLabelId } : { colorId: matching.providerColorId };
+    return {};
   }
   if (category.provider !== provider || category.accountId !== accountId) return {};
-  if (provider === 'google') {
-    if (category.providerLabelId && calendarId === category.calendarId) return { eventLabelId: category.providerLabelId };
-    if (category.providerColorId) return { colorId: category.providerColorId };
-  }
   if (provider === 'microsoft' && category.providerCategoryName) return { categoryName: category.providerCategoryName };
   return {};
 }

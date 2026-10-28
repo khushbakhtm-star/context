@@ -121,7 +121,7 @@ async function applyOperation(operation: WearEdit, fingerprint: string, epoch: n
     const draftRevision = inlineMinuteDrafts.get(operation.dateKey, operation.minuteIndex)?.revision;
     const categoryId = operation.categoryId ?? before.entry?.categoryId ?? 'unaccounted';
     if (resolution?.choice !== 'phone' && operation.categoryId && operation.categoryId !== canonical.categoryId &&
-        !(await listSelectableActivityCategories()).some((category) => category.id === operation.categoryId)) {
+        !(await listSelectableActivityCategories({ writableOnly: false })).some((category) => category.id === operation.categoryId)) {
       throw new Error('The watch activity color is no longer available. Choose another color on the watch.');
     }
     const equivalent = canonical.text === operation.text.trim() && canonical.categoryId === categoryId;
