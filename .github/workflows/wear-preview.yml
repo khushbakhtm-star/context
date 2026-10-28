@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: Exact reviewed Context watch 0.1.10 source commit
+        description: Exact reviewed Context watch 0.1.11 source commit
         required: true
-        default: 2019b79e0f1f23583b6322d5ce3259dd1ffe6dfe
+        default: 25e230bf09beaed4f22c112b9e25e7a3bd1caea5
         type: string
 
 permissions:
@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CONTEXT_SOURCE_COMMIT: 2019b79e0f1f23583b6322d5ce3259dd1ffe6dfe
+  CONTEXT_SOURCE_COMMIT: 25e230bf09beaed4f22c112b9e25e7a3bd1caea5
   EXPO_PUBLIC_CONTEXT_DISTRIBUTION: store
   EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL: standalone
   EAS_BUILD_PROFILE: wear-preview
@@ -102,7 +102,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: context-0.1.10-watch-unsigned
+          name: context-0.1.11-watch-unsigned
           path: ${{ runner.temp }}/context-watch-preview/
           if-no-files-found: warn
           compression-level: 0

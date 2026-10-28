@@ -17,9 +17,9 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 
-SOURCE = "2019b79e0f1f23583b6322d5ce3259dd1ffe6dfe"
-VERSION = "0.1.10"
-CODE = 100011
+SOURCE = "25e230bf09beaed4f22c112b9e25e7a3bd1caea5"
+VERSION = "0.1.11"
+CODE = 100012
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned watch preview: local publisher signing is separate"
 CERTIFICATE = "44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772"
@@ -29,6 +29,9 @@ MODULES = {
     "tileLayout": "Lcom/context/minuteledger/wear/ContextTileLayout;",
     "transport": "Lcom/context/minuteledger/wear/WatchDataService;",
     "dictationPolicy": "Lcom/context/minuteledger/wear/DictationSavePolicy;",
+    "speechDialog": "Lcom/context/minuteledger/wear/WatchDictationDialog;",
+    "speechPolicy": "Lcom/context/minuteledger/wear/WatchDictationPolicy;",
+    "pendingWork": "Lcom/context/minuteledger/wear/CoalescedPendingWork;",
 }
 
 
@@ -117,6 +120,20 @@ def element_blocks(xml, element):
                 break
             end += 1
         yield "\n".join(lines[start:end])
+
+
+def speech_manifest_verified(xml):
+    def named(block, value):
+        lines=block.splitlines()
+        depth=len(lines[0])-len(lines[0].lstrip())
+        expression=r'^\s*A:\s+android:name(?:\([^)]*\))?\s*=\s*"'+re.escape(value)+r'"(?:\s|$)'
+        return any(len(line)-len(line.lstrip())==depth+2 and re.search(expression,line) for line in lines[1:])
+    permissions=[item for item in element_blocks(xml,"uses-permission") if named(item,"android.permission.RECORD_AUDIO")]
+    actions=[action for query in element_blocks(xml,"queries") for intent in element_blocks(query,"intent")
+        for action in element_blocks(intent,"action") if named(action,"android.speech.RecognitionService")]
+    if len(permissions)!=1 or len(actions)!=1:
+        raise ValueError("Compiled watch microphone permission or exact speech-service query action is missing or duplicated")
+    return {"microphonePermissionDeclared":True,"recognitionServiceQueryDeclared":True}
 
 
 def resource_file(resources, kind, name):
@@ -220,6 +237,7 @@ def verify(source, reports, receipt):
     (reports / "compiled-watch-resources.txt").write_text(resources)
     links = tile_resource_files(resources)
     tile_manifest_verified(xml, resources)
+    speech = speech_manifest_verified(xml)
     preview_proof = []
     versions = tile_preview_versions(links)
     with zipfile.ZipFile(apk) as resource_zip:
@@ -247,6 +265,8 @@ def verify(source, reports, receipt):
             raise ValueError("The unsigned native watch APK contains a signature or phone bundle")
         dex_files = {name: archive.read(name) for name in names if re.fullmatch(r"classes(?:[2-9]|[1-9][0-9]+)?\.dex", name)}
         classes = verify_required_class_definitions(dex_files, MODULES)
+        if not any(b"HH:mm:ss" in value for value in dex_files.values()):
+            raise ValueError("Live dictation clock format is absent from actual DEX")
     if (f"package: name='{APP_ID}' versionCode='{CODE}' versionName='{VERSION}'" not in identity or
             "uses-feature: name='android.hardware.type.watch'" not in identity or not re.search(r"^(?:minSdkVersion|sdkVersion):'30'\s*$", identity, re.M)):
         raise ValueError("Actual watch package/version/required feature/minimum SDK differs")
@@ -259,7 +279,9 @@ def verify(source, reports, receipt):
     required_suites = {"com.context.minuteledger.wear.ContextTileLayoutTest",
                        "com.context.minuteledger.wear.JVMLaunchPolicyTest",
                        "com.context.minuteledger.wear.JVMSpeechSessionGuardTest",
-                       "com.context.minuteledger.wear.JVMDictationSavePolicyTest"}
+                       "com.context.minuteledger.wear.JVMDictationSavePolicyTest",
+                       "com.context.minuteledger.wear.JVMWatchDictationPolicyTest",
+                       "com.context.minuteledger.wear.JVMCoalescedPendingWorkTest"}
     completed_suites = set()
     for index, file in enumerate(test_files):
         suite = ET.fromstring(file.read_bytes())
@@ -284,6 +306,7 @@ def verify(source, reports, receipt):
                     "nativeIdentityVerified": True, "watchFeatureRequired": True,
                     "noPhoneBundle": True, "actualClassDefinitionsVerified": True,
                     "nativeClassDefinitions": classes, "tileManifestVerified": True, "unitTests": tests,
+                    "speechManifest": speech, "watchDictationClockPackaged": True,
                     "approvedTilePreviewPresent": True, "tileResources": links,
                     "compiledPreviewAlternatives": preview_proof,
                     "tileResourceSelectionPolicy": {"minimumSdk": 30, "configurationSource": "compiled resource table, never ZIP filenames",
