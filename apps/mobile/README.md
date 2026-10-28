@@ -2,6 +2,10 @@
 
 ## Current published phone builds
 
+Phone **0.1.26/code27** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.26/context-0.1.26-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.26/context-0.1.26-foss-preview.apk) updates. Context 0.1.26 batches legacy activity-title queries and reads legacy projection minutes through the exact block/date index. A synthetic regression checks a full 1,440-minute unlabeled day using three bounded queries instead of 1,440 scalar reads. Hold Sync to inspect local stage durations, key-derivation backend timings and phone-provider acknowledgements; Copy timings copies only fixed labels and aggregate numbers. A phone-provider acknowledgement confirms a local SDK operation, not upload to Google Calendar. Existing phone-linked events retain their original identity. Hold Sync for its actual current step. Local editing stays available and source/ledger checks remain in force. Automated source/native checks passed; physical-phone and live-calendar behavior still need confirmation. Use the Wear-enabled edition with the independent Watch 0.1.10 release.
+
+## Previous phone release: 0.1.25
+
 Phone **0.1.25/code26** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.25/context-0.1.25-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.25/context-0.1.25-foss-preview.apk) updates. Synchronization observers join existing work without forcing a second full pass. Each pass shares scoped provider color metadata, and confirmed immutable uploads can skip redundant downloads after the passphrase is verified. Existing phone-linked events retain their original identity. Hold Sync for its actual current step. Local editing stays available and source/ledger checks remain in force. Automated source/native checks passed; physical-phone and live-calendar behavior still need confirmation. Use the Wear-enabled edition with the independent Watch 0.1.10 release.
 
 ## Previous phone release: 0.1.24

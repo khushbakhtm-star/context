@@ -1,5 +1,17 @@
 # Context F-Droid submission preparation
 
+## Verified 0.1.26 candidate
+
+The current independent candidate is [0.1.26/code27](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.26), source [`03632cc4a61f2ff60eb25b9218d4c6aa2c6f65ac`](https://github.com/khushbakhtm-star/context/commit/03632cc4a61f2ff60eb25b9218d4c6aa2c6f65ac). Both phone editions and all twelve public evidence files match verified local sizes/digests. [Run 40641361830](https://github.com/khushbakhtm-star/context/actions/runs/40641361830), controller `09d27362b179378d639779dedbf8e75b3728b276`, passed independent native and integrated recipe/APK scans. Structured source results: **0 errors, 0 warnings**, 7 information findings. Audits recorded 108 removals, 5 patches and 33 exact optional Wear-source removals.
+
+The FOSS APK is **78,385,055 bytes**, SHA-256 `dc152f16024b296dc220d3e557cd427ec1762f5a4d6d9f1f7e90d994b90d807e`. [Permanent evidence](https://github.com/khushbakhtm-star/context/releases/download/v0.1.26/context-0.1.26-foss-build-evidence.zip) retains 23 checked entries, SHA-256 `768868fefe3e5f8ae48526043f91be56b6e23f8034c731d8d8266f8ccf9ff465`. Original publisher signatures, protected content, five actual native module class definitions and 16 KiB alignment passed. TypeScript and 884 mobile tests passed, including 135 focused named checks in that same run.
+
+Update [the existing request4667](https://gitlab.com/fdroid/rfp/-/work_items/4667). This independent publisher preview is **not** official catalog approval, F-Droid signing or a server reproducibility claim. Earlier candidate preparation below is preserved as historical context and does not supersede this current receipt.
+
+The [source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40642708977) passed at the exact application source.
+
+## Historical candidate preparation
+
 ## Verified 0.1.25 candidate
 
 The current independent candidate is [0.1.25/code26](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.25), source [`108080cd49b70119af407b5aea93a839fc325785`](https://github.com/khushbakhtm-star/context/commit/108080cd49b70119af407b5aea93a839fc325785). Both phone editions and all twelve public evidence files match verified local sizes/digests. [Run 40635901393](https://github.com/khushbakhtm-star/context/actions/runs/40635901393), controller `291825f4ad0a129f722850320e02f93992887602`, passed independent native and integrated recipe/APK scans. Structured source results: **0 errors, 0 warnings**, 7 information findings. Audits recorded 108 removals, 5 patches and 33 exact optional Wear-source removals.

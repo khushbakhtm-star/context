@@ -723,6 +723,8 @@ test('identical normalized account-color bursts share one remote pass and retry 
 
 test('an older color read cannot delay or undo a newer source write and its acknowledged projection', async (t) => {
   const { device, remote, original } = await linkedColoredActivity(t);
+  const isOriginal = (projection) => projection.state !== 'deleted' && projection.eventId === original.id &&
+    projection.sourceEventId === original.id && projection.calendarId === original.calendarId;
   remote.edit('personal', original.id, { displayColor: '#123456' });
   const get = remote.adapter.getEvent; let first = true, release, started;
   const gate = new Promise((resolve) => { release = resolve; }); const reached = new Promise((resolve) => { started = resolve; });
@@ -733,12 +735,15 @@ test('an older color read cannot delay or undo a newer source write and its ackn
   let timeout; try {
     await Promise.race([(async () => { await device.engine.synchronizeAccounts(); await device.engine.synchronizeAccounts(); })(),
       new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('A held color read blocked the core writer')), 4000); })]);
-    const before = plain(await device.db.getDayEntries(day)); const projection = plain((await device.engine.listProjections())[0]);
+    const before = plain(await device.db.getDayEntries(day));
+    const owners = (await device.engine.listProjections()).filter(isOriginal);
+    assert.equal(owners.length, 1); const projection = plain(owners[0]);
     assert.match(remote.events.get(`personal:${original.id}`).description, /Newest exact source note/);
     const category = (await device.categories.listCategories()).find((item) => item.id === before[0].categoryId);
     assert.equal(category.color, '#654321'); release();
     assert.deepEqual(plain(await old), []); assert.deepEqual(plain(await device.db.getDayEntries(day)), before);
-    assert.deepEqual(plain((await device.engine.listProjections())[0]), projection);
+    const after = (await device.engine.listProjections()).filter(isOriginal);
+    assert.equal(after.length, 1); assert.deepEqual(plain(after[0]), projection);
   } finally { clearTimeout(timeout); release(); await old.catch(() => {}); }
 });
 
@@ -819,14 +824,33 @@ test('unsupported explicit color changes retain local fill and report a mapping 
 });
 
 test('a legitimate source recolor establishes a new color acknowledgement without being mistaken for an unsupported local choice', async (t) => {
-  const { device, remote, original } = await linkedColoredActivity(t); const projection = (await device.engine.listProjections())[0];
-  delete projection.baseColorSelection; await device.db.putSyncDocument(`projection:${projection.id}`, projection);
-  remote.edit('personal', original.id, { displayColor: '#123456' }); remote.calls.length = 0;
-  assert.deepEqual(plain(await device.engine.reconcileLinkedAccountColors([day])), [day]);
-  const imported = (await device.engine.listProjections())[0]; assert.equal(imported.baseColorSelection.color, '#123456');
-  assert.equal(imported.baseColorSelection.categoryId, (await device.db.getMinuteEntry(day, 1135)).categoryId);
-  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
-  assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
+  for (const retiredPosition of ['first', 'last']) {
+    const { device, remote, original } = await linkedColoredActivity(t);
+    const isOriginal = (projection) => projection.state !== 'deleted' && projection.eventId === original.id &&
+      projection.sourceEventId === original.id && projection.calendarId === original.calendarId;
+    const owners = (await device.engine.listProjections()).filter(isOriginal);
+    assert.equal(owners.length, 1, 'the original event has exactly one active projection');
+    const projection = owners[0];
+    delete projection.baseColorSelection; await device.db.putSyncDocument(`projection:${projection.id}`, projection);
+    // Explicit source adoption retains retired generated projections. Their key
+    // order is unrelated to ownership; force both sides of the active source.
+    const retiredId = (retiredPosition === 'first' ? '0' : 'f').repeat(40);
+    await device.db.putSyncDocument(`projection:${retiredId}`, { ...projection, id: retiredId,
+      blockId: `retired:${retiredId}`, state: 'deleted', eventId: null, sourceEventId: null,
+      baseEvent: null, baseLocalHash: null });
+    const before = await device.engine.listProjections();
+    assert.equal((retiredPosition === 'first' ? before[0] : before.at(-1)).id, retiredId);
+    remote.edit('personal', original.id, { displayColor: '#123456' }); remote.calls.length = 0;
+    assert.deepEqual(plain(await device.engine.reconcileLinkedAccountColors([day])), [day]);
+    const after = await device.engine.listProjections(); const imported = after.filter(isOriginal);
+    assert.equal(imported.length, 1);
+    assert.equal(imported[0].baseColorSelection.color, '#123456');
+    assert.equal(imported[0].baseColorSelection.categoryId, (await device.db.getMinuteEntry(day, 1135)).categoryId);
+    assert.equal(after.find((item) => item.id === retiredId).state, 'deleted');
+    assert.equal(after.find((item) => item.id === retiredId).baseColorSelection, undefined);
+    assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+    assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
+  }
 });
 
 test('revoking calendar edit import during a gated palette lookup stops the later full source import', async (t) => {
