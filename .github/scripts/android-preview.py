@@ -10,9 +10,9 @@ import struct
 import subprocess
 import zipfile
 
-SOURCE = "108080cd49b70119af407b5aea93a839fc325785"
-VERSION = "0.1.25"
-CODE = 26
+SOURCE = "03632cc4a61f2ff60eb25b9218d4c6aa2c6f65ac"
+VERSION = "0.1.26"
+CODE = 27
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned Wear-phone preview: local publisher signing is separate"
 NATIVE_RULE_MARKER = "# Context audited native module identities for packaging verification"
@@ -120,7 +120,7 @@ def verify(source, reports, receipt):
         raise ValueError("The audited native module rules changed during the build")
     tools = Path(os.environ["ANDROID_HOME"]) / "build-tools/37.0.0"
     original = mobile / "android/app/build/outputs/apk/release/app-release-unsigned.apk"
-    apk = reports / "context-0.1.25-wear-phone-unsigned.apk"
+    apk = reports / "context-0.1.26-wear-phone-unsigned.apk"
     run([tools / "zipalign", "-P", "16", "-f", "4", original, apk])
     run([tools / "zipalign", "-c", "-P", "16", "-v", "4", apk])
     data = apk.read_bytes()
@@ -194,7 +194,7 @@ def main():
         # A failed verifier may have produced an aligned intermediate. Retain diagnostics,
         # but never let upload-artifact expose that APK as a usable unsigned build.
         if args.mode == "verify":
-            (reports / "context-0.1.25-wear-phone-unsigned.apk").unlink(missing_ok=True)
+            (reports / "context-0.1.26-wear-phone-unsigned.apk").unlink(missing_ok=True)
         receipt.update({"status": "failed", "scope": "Not a verified build; never install or publish this output.",
                         "error": str(error)})
         path.write_text(json.dumps(receipt, indent=2) + "\n")
