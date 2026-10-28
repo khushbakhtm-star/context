@@ -1,4 +1,4 @@
-# Context 0.1.20/code21 source candidate; new independent verification is pending.
+# Context 0.1.21/code22 source candidate; new independent verification is pending.
 # Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
@@ -31,10 +31,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.20
-    versionCode: 21
+  - versionName: 0.1.21
+    versionCode: 22
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: c7f38c21755a4ff5f2b3bcac6ef463a66fb13608
+    commit: f929b89c526e8dea1c4c2eaaee315329848384bb
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -82,5 +82,5 @@ MaintainerNotes: |-
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.20
-CurrentVersionCode: 21
+CurrentVersion: 0.1.21
+CurrentVersionCode: 22
