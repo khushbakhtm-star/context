@@ -3,7 +3,7 @@
     "name": "Context",
     "slug": "context-minute-ledger",
     "scheme": "context",
-    "version": "0.1.21",
+    "version": "0.1.22",
     "orientation": "portrait",
     "icon": "./assets/context-app-logo.png",
     "userInterfaceStyle": "automatic",
@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "22",
+      "buildNumber": "23",
       "bundleIdentifier": "com.context.minuteledger",
       "infoPlist": {
         "NSCalendarsUsageDescription": "Context reads your selected calendars to place planned events on your minute ledger and writes only the actual activity blocks you choose to synchronize.",
@@ -24,7 +24,7 @@
     },
     "android": {
       "package": "com.context.minuteledger",
-      "versionCode": 22,
+      "versionCode": 23,
       "adaptiveIcon": {
         "foregroundImage": "./assets/context-app-logo.png",
         "backgroundColor": "#111315"

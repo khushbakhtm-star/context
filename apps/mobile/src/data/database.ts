@@ -557,12 +557,25 @@ export async function acknowledgeInlineMinuteLink(item: Pick<PendingInlineMinute
 /** Rotate an unrouteable imported ticket behind other peer work without
  * acknowledging it or changing its token. A newer coalesced edit wins the guard. */
 export async function deferInlineMinuteLink(item: Pick<PendingInlineMinuteLink, 'dateKey' | 'minuteIndex' | 'token'>) {
+  return rotateInlineMinuteLink(item, false);
+}
+
+/** Only a proven native/account ownership review may promote a local ticket.
+ * Preserve its exact token/payload while moving it behind actionable local and
+ * peer work; this neither grants calendar authority nor acknowledges the edit.
+ */
+export async function promoteInlineMinuteLinkForAccountReview(item: Pick<PendingInlineMinuteLink, 'dateKey' | 'minuteIndex' | 'token'>) {
+  return rotateInlineMinuteLink(item, true);
+}
+
+async function rotateInlineMinuteLink(item: Pick<PendingInlineMinuteLink, 'dateKey' | 'minuteIndex' | 'token'>,
+  promoteOrdinary: boolean) {
   const db = await database(); let deferred = false;
   await db.withExclusiveTransactionAsync(async (txn) => {
     const current = await txn.getFirstAsync<{ affected_dates_json: string; requires_account_writer: number }>(
       `SELECT affected_dates_json, requires_account_writer FROM inline_minute_link_outbox
         WHERE date_key = ? AND minute_index = ? AND token = ?`, item.dateKey, item.minuteIndex, item.token);
-    if (!current || current.requires_account_writer !== 1) return;
+    if (!current || (current.requires_account_writer !== 1 && (!promoteOrdinary || current.requires_account_writer !== 0))) return;
     await txn.runAsync(`DELETE FROM inline_minute_link_outbox WHERE date_key = ? AND minute_index = ? AND token = ?`,
       item.dateKey, item.minuteIndex, item.token);
     await txn.runAsync(`INSERT INTO inline_minute_link_outbox

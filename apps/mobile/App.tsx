@@ -59,11 +59,12 @@ import { isDateKey, normalizeSelectedDates } from './src/utils/date-selection';
 import type { CalendarNavigationTarget } from './src/utils/calendar-navigation';
 import { calendarViewDates, calendarViewKind, calendarViewModePageTarget, type CalendarViewMode } from './src/utils/calendar-view-mode';
 import { hasConfiguredAccountCalendarWriter } from './src/services/calendar-write-routing';
-import { configureCalendarColorImports, requestAccountSynchronization, subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
+import { configureCalendarColorImports, getAccountSyncStatus, requestAccountSynchronization, subscribeAccountSync, synchronizeAccounts } from './src/sync/engine';
+import type { AccountSyncStatus } from './src/sync/types';
 import { listCategories } from './src/services/categories';
 import { printContextSchedule } from './src/services/print';
 import { defaultPrintOptions, normalizePrintOptions, printOptionDates, type ContextPrintOptions, type PrintAction } from './src/utils/print-options';
-import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
+import { flushInlineMinutes, inlineMinuteDrafts, subscribeInlineMinuteCommits } from './src/services/inline-minutes';
 import { redoSpreadsheetEdit, spreadsheetEditor, subscribeSpreadsheetCommits, undoSpreadsheetEdit } from './src/services/spreadsheet';
 import { ReleaseUpdateNotice, useReleaseUpdates } from './src/components/ReleaseUpdates';
 import { useWearBridge } from './src/wear/useWearBridge';
@@ -83,6 +84,42 @@ const DEFAULT_PREFERENCES: CalendarPreferences = {
 
 class CalendarTransitionCancelled extends Error {}
 const MANUAL_SYNC_WAIT_MS = 35_000;
+type ManualSyncStage = 'saving' | 'accounts' | 'phone-calendars' | 'linked-changes' | 'phone-updates' | 'complete';
+type ManualSyncAttempt = { epoch: number; stage: ManualSyncStage; timedOut: boolean;
+  accountJob?: Promise<AccountSyncStatus>; accountCycleId?: number };
+
+function manualSyncStageText(stage: ManualSyncStage) {
+  return { saving: 'Saving local minutes.', accounts: 'Synchronizing accounts.',
+    'phone-calendars': 'Refreshing phone calendars.', 'linked-changes': 'Checking linked calendar changes.',
+    'phone-updates': 'Updating linked phone-calendar events.', complete: 'Synchronization finished.' }[stage];
+}
+
+function accountSyncContinues(status: AccountSyncStatus) {
+  return status.running || status.cycleComplete === false || status.outcome === 'running' || status.outcome === 'continuing' ||
+    status.message === 'Private ledger synchronization is continuing.';
+}
+
+function accountSyncFailure(status: AccountSyncStatus) {
+  const messages: string[] = [];
+  const ordinary = ['Accounts synchronized', 'Ready to connect', 'Connect an account to sync your phones'];
+  if (status.outcome === 'error' || (!status.outcome && !accountSyncContinues(status) && status.message && !ordinary.includes(status.message))) {
+    if (status.message) messages.push(status.message);
+  }
+  if (status.conflicts) messages.push('Review calendar conflicts in Settings → Calendar accounts.');
+  return [...new Set(messages)].join('\n') || null;
+}
+
+function accountSyncProgressText(status: AccountSyncStatus) {
+  const phases = { idle: 'Account synchronization is ready.', 'checking-storage': 'Checking encrypted ledger storage.',
+    downloading: 'Checking downloaded ledger updates.', uploading: 'Uploading encrypted ledger updates.',
+    calendar: 'Synchronizing calendar activities.' };
+  const message = accountSyncContinues(status) && status.phase && status.phase !== 'idle' ? phases[status.phase] : status.message;
+  const progress = status.progress;
+  const count = progress && Number.isSafeInteger(progress.completed) && progress.completed >= 0
+    ? Number.isSafeInteger(progress.total) && progress.total! >= progress.completed
+      ? ` (${progress.completed} of ${progress.total})` : ` (${progress.completed})` : '';
+  return (message || phases.idle) + count;
+}
 
 /** Cancellation releases the UI while the existing read/save promise finishes safely. */
 function awaitCalendarTransition<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -128,8 +165,11 @@ function AppController() {
   const printAbortRef = useRef<AbortController | null>(null);
   const [manualSyncing, setManualSyncing] = useState(false);
   const [manualSyncError, setManualSyncError] = useState<string | null>(null);
+  const [manualSyncNotice, setManualSyncNotice] = useState<string | null>(null);
+  const [accountSyncStatus, setAccountSyncStatus] = useState(getAccountSyncStatus);
   const [calendarLoadWarning, setCalendarLoadWarning] = useState<{ scope: string; message: string | null } | null>(null);
   const manualSyncAbortRef = useRef<AbortController | null>(null);
+  const manualSyncAttemptRef = useRef<ManualSyncAttempt | null>(null);
   const calendarColorContextRef = useRef<{ dates: string[]; calendars: DeviceCalendar[]; preferences: CalendarPreferences }>({
     dates: [], calendars: [], preferences: DEFAULT_PREFERENCES,
   });
@@ -165,14 +205,21 @@ function AppController() {
   calendarProjectionConfigRef.current = { ready, syncActuals: preferences.syncActuals,
     writeCalendarId: preferences.writeCalendarId, accountCalendarWrites };
   const nativeProjectionWork = useMemo(() => createCoalescedDateWork(async (dates) => {
-    // Finish durable local source-link ownership before choosing a writer. The
-    // native projector also excludes exact account-owned blocks before writes.
-    await retryInlineMinuteLinks({ synchronize: false });
+    const requested = calendarProjectionConfigRef.current;
+    if (!controllerMountedRef.current || AppState.currentState !== 'active' || !requested.ready ||
+        !requested.syncActuals || !requested.writeCalendarId) return;
+    // The account worker drains a bounded durable-link pass and validates its
+    // storage first. A phone-provider read cannot prevent that independent work.
+    const accountResult = await synchronizeAccounts();
+    if (accountResult.running || accountResult.cycleComplete === false || accountResult.nativeWriteReady !== true) {
+      throw new Error('Phone-calendar updates remain queued until account synchronization is ready.');
+    }
     const directWrites = await hasConfiguredAccountCalendarWriter();
     const current = calendarProjectionConfigRef.current;
-    if (!controllerMountedRef.current || AppState.currentState !== 'active' || !current.ready || directWrites ||
-        current.accountCalendarWrites || !current.syncActuals || !current.writeCalendarId) return;
-    const result = await flushPendingActuals(current.writeCalendarId, dates);
+    if (!controllerMountedRef.current || AppState.currentState !== 'active' || !current.ready ||
+        !current.syncActuals || !current.writeCalendarId || current.writeCalendarId !== requested.writeCalendarId) return;
+    const result = await flushPendingActuals(current.writeCalendarId, dates, 90,
+      { existingBindingsOnly: directWrites || current.accountCalendarWrites });
     if (result.failed) throw new Error('Calendar projection remains queued.');
   }, () => controllerMountedRef.current && readyRef.current && AppState.currentState === 'active'), []);
   const [focusRequest, setFocusRequest] = useState<{
@@ -230,6 +277,7 @@ function AppController() {
       printAbortRef.current = null;
       manualSyncAbortRef.current?.abort();
       manualSyncAbortRef.current = null;
+      manualSyncAttemptRef.current = null;
       invalidatePrintOptionsAction();
       printOptionsOpenRef.current = false;
       printOptionsClosingRef.current = false;
@@ -262,9 +310,7 @@ function AppController() {
         const directWrites = await hasConfiguredAccountCalendarWriter();
         setAccountCalendarWrites(directWrites);
         if (!mounted) return;
-        configureCalendarProjection(
-          savedPreferences.syncActuals && !directWrites ? savedPreferences.writeCalendarId : null,
-        );
+        configureCalendarProjection(savedPreferences.syncActuals ? savedPreferences.writeCalendarId : null);
         setPreferences(savedPreferences);
         const normalizedDates = normalizeSelectedDates(savedSelectedDates);
         const restoredMode: CalendarViewMode = normalizedDates.length ? normalizedDates.length > 7 ? 'month' : 'day' :
@@ -304,6 +350,7 @@ function AppController() {
         activeTransitionRef.current?.controller.abort();
         printAbortRef.current?.abort();
         manualSyncAbortRef.current?.abort();
+        manualSyncAttemptRef.current = null;
         invalidatePrintOptionsAction();
         calendarReturnRefresh.cancel();
         nativeProjectionWork.suspend();
@@ -313,6 +360,7 @@ function AppController() {
         return;
       }
       if (Platform.OS !== 'ios' && !printOptionsOpenRef.current) printOptionsClosingRef.current = false;
+      setAccountSyncStatus(getAccountSyncStatus());
       // Some calendar providers publish a saved event shortly after their editor closes.
       calendarReturnRefresh.start();
       nativeProjectionWork.resume();
@@ -327,17 +375,18 @@ function AppController() {
   }, [ready, calendarReturnRefresh, nativeProjectionWork]);
 
   useEffect(() => {
-    if (!ready || accountCalendarWrites || !preferences.syncActuals || !preferences.writeCalendarId) return;
-    void flushPendingActuals(preferences.writeCalendarId);
-  }, [accountCalendarWrites, preferences.syncActuals, preferences.writeCalendarId, ready]);
+    if (!ready || !preferences.syncActuals || !preferences.writeCalendarId) return;
+    nativeProjectionWork.request(calendarColorContextRef.current.dates);
+  }, [accountCalendarWrites, preferences.syncActuals, preferences.writeCalendarId, ready, nativeProjectionWork]);
 
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
     const unsubscribe = subscribeAccountSync((next) => {
+      if (!cancelled && controllerMountedRef.current && AppState.currentState === 'active') setAccountSyncStatus(next);
       if (!next.running) {
         void listCategories().then(() => {
-          if (!cancelled && controllerMountedRef.current) setDataVersion((version) => version + 1);
+          if (!cancelled && controllerMountedRef.current && AppState.currentState === 'active') setDataVersion((version) => version + 1);
         }).catch(() => { /* Categories can refresh on the next pass. */ });
       }
     });
@@ -350,15 +399,17 @@ function AppController() {
         epoch === lifecycleEpochRef.current && AppState.currentState === 'active';
       try {
         const current = calendarColorContextRef.current;
-        // Read source color changes before projecting local entries back out.
-        try { await reconcileLinkedCalendarColors(current.dates, current.calendars, current.preferences); }
-        catch { /* A source read failure must not block unrelated account work. */ }
-        if (!currentPass()) return;
-        try { await retryInlineMinuteLinks({ synchronize: false }); }
-        catch { /* Durable link tickets remain queued independently. */ }
-        if (!currentPass()) return;
-        try { await synchronizeAccounts(); }
+        let accountReady = false;
+        try {
+          const result = await synchronizeAccounts();
+          accountReady = !result.running && result.cycleComplete !== false && result.nativeWriteReady === true;
+        }
         catch { /* Accounts can retry independently of device-calendar reads. */ }
+        if (!currentPass() || !accountReady) return;
+        // Native preflight still precedes native writes. It no longer holds up
+        // authenticated account synchronization or its storage validation.
+        try { await reconcileLinkedCalendarColors(current.dates, current.calendars, current.preferences); }
+        catch { /* Retain the source guard; the native worker rechecks each binding. */ }
         if (currentPass()) nativeProjectionWork.resume();
       }
       finally { polling = false; }
@@ -389,9 +440,7 @@ function AppController() {
       if (!controllerMountedRef.current || sequence !== accountRefreshSequence.current) return;
       setAccountCalendarWrites(directWrites);
       const current = calendarProjectionConfigRef.current;
-      configureCalendarProjection(
-        current.syncActuals && !directWrites ? current.writeCalendarId : null,
-      );
+      configureCalendarProjection(current.syncActuals ? current.writeCalendarId : null);
     }).catch(() => { /* Keep the current projection settings; account refresh can retry. */ });
     requestAccountSynchronization();
   }, []);
@@ -399,7 +448,7 @@ function AppController() {
   const watchDataChanged = useCallback((days: string[]) => {
     dataChanged();
     const current = calendarProjectionConfigRef.current;
-    if (current.ready && current.syncActuals && current.writeCalendarId && !current.accountCalendarWrites) {
+    if (current.ready && current.syncActuals && current.writeCalendarId) {
       nativeProjectionWork.request(days);
     }
   }, [dataChanged, nativeProjectionWork]);
@@ -444,14 +493,12 @@ function AppController() {
       (!preferences.syncActuals || sanitized.writeCalendarId !== preferences.writeCalendarId);
     calendarProjectionConfigRef.current = { ...calendarProjectionConfigRef.current,
       syncActuals: sanitized.syncActuals, writeCalendarId: sanitized.writeCalendarId };
-    configureCalendarProjection(
-      sanitized.syncActuals && !accountCalendarWrites ? sanitized.writeCalendarId : null,
-    );
+    configureCalendarProjection(sanitized.syncActuals ? sanitized.writeCalendarId : null);
     setPreferences(sanitized);
     void setSetting('calendar.preferences', sanitized);
-    if (needsFullReprojection && !accountCalendarWrites) {
+    if (needsFullReprojection) {
       void enqueueBoundDatesForSync().then(() => {
-        if (sanitized.writeCalendarId) void flushPendingActuals(sanitized.writeCalendarId);
+        if (sanitized.writeCalendarId) nativeProjectionWork.request(calendarColorContextRef.current.dates);
       });
     }
   }
@@ -695,30 +742,50 @@ function AppController() {
     setCalendarLoadWarning((previous) => previous?.scope === syncWarningScope && previous.message === message
       ? previous : { scope: syncWarningScope, message });
   }, [syncWarningScope]);
-  const calendarSyncError = [...new Set([manualSyncError,
+  const calendarSyncError = [...new Set([manualSyncError, accountSyncFailure(accountSyncStatus),
     calendarLoadWarning?.scope === syncWarningScope ? calendarLoadWarning.message : null].filter(Boolean))].join('\n\n') || null;
   const overviewDates = useMemo(() => calendarViewDates(viewMode, activeDate, selectedDateKeys),
     [viewMode, activeDate, selectedDateKeys]);
   calendarColorContextRef.current = { dates: overviewDates, calendars, preferences };
 
+  function calendarSyncDetails() {
+    const attempt = manualSyncAttemptRef.current;
+    const status = getAccountSyncStatus();
+    const active = attempt && attempt.epoch === lifecycleEpochRef.current;
+    const parts = [active ? attempt.stage === 'accounts' ? manualSyncStageText('accounts') : manualSyncNotice : null,
+      accountSyncProgressText(status)];
+    if (active && attempt.timedOut && status.running && attempt.stage === 'accounts') {
+      parts.push('This account work is continuing in the background. Saved minutes remain available for editing.');
+    }
+    return [...new Set(parts.filter(Boolean))].join('\n\n');
+  }
+
   async function synchronizeCalendar() {
     if (!ready || viewChangingRef.current || manualSyncAbortRef.current || !controllerMountedRef.current || AppState.currentState !== 'active') return;
     const controller = new AbortController();
     const epoch = lifecycleEpochRef.current;
+    const attempt: ManualSyncAttempt = { epoch, stage: 'saving', timedOut: false };
+    manualSyncAttemptRef.current = attempt;
     manualSyncAbortRef.current = controller;
     setManualSyncing(true);
     setManualSyncError(null);
+    setManualSyncNotice(manualSyncStageText('saving'));
+    const isVisibleAttempt = () => manualSyncAttemptRef.current === attempt && controllerMountedRef.current &&
+      lifecycleEpochRef.current === epoch && AppState.currentState === 'active';
     const requireCurrent = () => {
-      if (controller.signal.aborted || !controllerMountedRef.current || lifecycleEpochRef.current !== epoch || AppState.currentState !== 'active') {
-        throw new CalendarTransitionCancelled();
-      }
+      if (controller.signal.aborted || !isVisibleAttempt()) throw new CalendarTransitionCancelled();
     };
-    // A sync is background work, not a view transition. In particular, its
-    // network waits must never disable the minute grid or navigation.
+    const stage = (next: ManualSyncStage) => {
+      requireCurrent(); attempt.stage = next; setManualSyncNotice(manualSyncStageText(next));
+    };
+    // Release only this caller's wait. The shared account worker retains its
+    // storage/version guards and can finish without holding the minute editor.
     const deadline = setTimeout(() => {
       if (manualSyncAbortRef.current !== controller) return;
-      if (controllerMountedRef.current && lifecycleEpochRef.current === epoch && AppState.currentState === 'active') {
-        setManualSyncError('Synchronization is taking longer than expected. Saved minutes remain on this phone. You can keep editing.');
+      attempt.timedOut = true;
+      if (isVisibleAttempt()) {
+        const detail = attempt.stage === 'accounts' ? accountSyncProgressText(getAccountSyncStatus()) : manualSyncStageText(attempt.stage);
+        setManualSyncNotice(detail + '\nThis step is still pending. You can keep editing saved minutes and hold Sync for details.');
       }
       controller.abort();
     }, MANUAL_SYNC_WAIT_MS);
@@ -729,37 +796,70 @@ function AppController() {
         if (inlineMinuteDrafts.snapshot().some((draft) => draft.error)) {
           throw new Error('Your current minute could not be saved. Try again.');
         }
+        stage('accounts');
+        // synchronizeAccounts drains a bounded durable-link pass itself. Neither
+        // an unbounded local-link drain nor phone-provider reads precede it.
+        const accountJob = synchronizeAccounts();
+        attempt.accountJob = accountJob;
+        const snapshot = getAccountSyncStatus();
+        if (snapshot.running && snapshot.cycleComplete === false) attempt.accountCycleId = snapshot.cycleId;
+        const observe = (result: AccountSyncStatus | null, error?: unknown) => {
+          if (!isVisibleAttempt() || !attempt.timedOut || attempt.stage !== 'accounts' || attempt.accountJob !== accountJob) return;
+          if (result && attempt.accountCycleId !== undefined && result.cycleId !== undefined && result.cycleId !== attempt.accountCycleId) return;
+          const failure = result ? accountSyncFailure(result) : error instanceof Error ? error.message : 'Account synchronization needs a retry.';
+          setManualSyncError(failure);
+          setManualSyncNotice(result && accountSyncContinues(result) ? accountSyncProgressText(result) : failure ? null :
+            'Account synchronization finished. Linked phone-calendar updates can be checked with Sync.');
+          // This observer intentionally does not resume the expired native steps.
+        };
+        void accountJob.then((result) => observe(result), (error) => observe(null, error));
+        const accountResult = await accountJob;
         requireCurrent();
+        const messages: string[] = [];
+        const accountFailure = accountSyncFailure(accountResult);
+        if (accountFailure) messages.push(accountFailure);
+        if (accountResult.running || accountResult.cycleComplete === false || accountResult.nativeWriteReady !== true) {
+          setManualSyncNotice(accountSyncProgressText(accountResult));
+          if (messages.length) setManualSyncError(messages.join('\n'));
+          return;
+        }
+        const continuing = accountSyncContinues(accountResult);
+        // Account work has settled before any native preflight or mutation.
+        // A failure here cannot undo account success or authorize blind writes.
+        stage('phone-calendars');
         const available = await refreshCalendars();
         requireCurrent();
         const current = calendarColorContextRef.current;
-        await reconcileLinkedCalendarColors(current.dates, available, current.preferences);
+        stage('linked-changes');
+        try { await reconcileLinkedCalendarColors(current.dates, available, current.preferences); }
+        catch (error) {
+          requireCurrent();
+          messages.push(error instanceof Error ? error.message : 'Linked phone-calendar changes need review.');
+          setManualSyncError([...new Set(messages)].join('\n'));
+          setManualSyncNotice('Account work finished; linked phone-calendar updates remain queued for review.');
+          return; // Never write native events after failed or unfinished preflight.
+        }
         requireCurrent();
-        await retryInlineMinuteLinks({ synchronize: false });
-        requireCurrent();
-        const accountResult = await synchronizeAccounts();
-        requireCurrent();
-        const messages: string[] = [];
-        if (accountResult.message && accountResult.message !== 'Accounts synchronized' && accountResult.message !== 'Ready to connect' &&
-            accountResult.message !== 'Connect an account to sync your phones') messages.push(accountResult.message);
-        if (accountResult.conflicts) messages.push('Review calendar conflicts in Settings → Calendar accounts.');
-        const config = calendarProjectionConfigRef.current;
+        const beforeWriterCheck = calendarProjectionConfigRef.current;
         const directWrites = await hasConfiguredAccountCalendarWriter();
         requireCurrent();
-        if (config.syncActuals && config.writeCalendarId && !config.accountCalendarWrites && !directWrites) {
-          const result = await flushPendingActuals(config.writeCalendarId);
+        const config = calendarProjectionConfigRef.current;
+        if (config.syncActuals && config.writeCalendarId && config.writeCalendarId === beforeWriterCheck.writeCalendarId) {
+          stage('phone-updates');
+          const result = await flushPendingActuals(config.writeCalendarId, [], 90,
+            { existingBindingsOnly: config.accountCalendarWrites || directWrites });
           requireCurrent();
-          if (result.failed) messages.push('Some calendar updates need review. Check calendar synchronization in Settings.');
+          if (result.failed) messages.push('Some linked phone-calendar updates need review. Check calendar synchronization in Settings.');
         }
-        await refreshCalendars();
         requireCurrent();
         setDataVersion((version) => version + 1);
         colorDraftObserver.consumeSkipped();
-        if (messages.length) throw new Error([...new Set(messages)].join('\n'));
+        attempt.stage = 'complete';
+        setManualSyncNotice(continuing ? accountSyncProgressText(accountResult) : manualSyncStageText('complete'));
+        if (messages.length) setManualSyncError([...new Set(messages)].join('\n'));
       })(), controller.signal);
     } catch (error) {
-      if (!(error instanceof CalendarTransitionCancelled) && !controller.signal.aborted &&
-          controllerMountedRef.current && lifecycleEpochRef.current === epoch && AppState.currentState === 'active') {
+      if (!(error instanceof CalendarTransitionCancelled) && !controller.signal.aborted && isVisibleAttempt()) {
         setManualSyncError(error instanceof Error ? error.message : 'Synchronization will retry.');
       }
     } finally {
@@ -877,7 +977,8 @@ function AppController() {
               {tab === 'today' ? <>
                 <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void navigate('search')}
                   onPrint={() => void openPrintOptions()}
-                  onSync={() => void synchronizeCalendar()} syncing={manualSyncing} syncError={calendarSyncError}
+                  onSync={() => void synchronizeCalendar()} syncing={manualSyncing || accountSyncStatus.running} syncError={calendarSyncError}
+                  syncDetails={calendarSyncDetails}
                   onOpenReports={() => void navigate('reports')} onJumpToNow={jumpToCurrentMinute}
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
@@ -977,7 +1078,7 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onSync, syncing, syncError, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onSync, syncing, syncError, syncDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
   viewMode, viewChanging, onViewModeChange }: {
   onOpenSettings: () => void;
   onPrint: () => void;
@@ -986,6 +1087,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   onSync: () => void;
   syncing: boolean;
   syncError: string | null;
+  syncDetails?: string | (() => string) | null;
   onJumpToNow: () => void;
   onOpenDatePicker: () => void;
   canGoPrevious: boolean;
@@ -1026,6 +1128,12 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const controlWidth = Math.max(40, Math.min(44, availableWidth / 7));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
   const navigationBusy = viewChanging || historyPending || history.busy;
+  const hasSyncDetails = Boolean(syncDetails || syncError || syncing);
+  const showSyncDetails = () => {
+    const detail = typeof syncDetails === 'function' ? syncDetails() : syncDetails;
+    const message = [...new Set([detail, syncError].filter(Boolean))].join('\n\n');
+    if (message) Alert.alert('Calendar synchronization', message);
+  };
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
   const binderActions = useRef({ single: () => {}, double: () => {}, long: () => {} });
@@ -1263,13 +1371,13 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel={syncing ? 'Synchronizing calendars' : syncError ? 'Calendar sync needs attention. Tap to retry' : 'Sync attached calendars'}
-      accessibilityHint={syncError ? 'Touch and hold for sync details' : undefined}
-      disabled={navigationBusy || syncing} accessibilityState={{ disabled: navigationBusy || syncing, busy: syncing }}
+      accessibilityHint={hasSyncDetails ? 'Touch and hold for sync details' : undefined}
+      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, busy: syncing }}
       onPressIn={() => { syncLongPress.current = false; binderPress.cancel(); }}
-      onLongPress={() => { syncLongPress.current = true; if (syncError) Alert.alert('Calendar synchronization', syncError); }}
-      accessibilityActions={syncError ? [{ name: 'longpress', label: 'Show sync details' }] : []}
-      onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress' && syncError) Alert.alert('Calendar synchronization', syncError); }}
-      onPress={() => { binderPress.cancel(); if (syncLongPress.current) { syncLongPress.current = false; return; } onSync(); }} style={controlStyle}>
+      onLongPress={() => { syncLongPress.current = true; showSyncDetails(); }}
+      accessibilityActions={hasSyncDetails ? [{ name: 'longpress', label: 'Show sync details' }] : []}
+      onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') showSyncDetails(); }}
+      onPress={() => { binderPress.cancel(); if (syncLongPress.current) { syncLongPress.current = false; return; } if (!syncing) onSync(); }} style={controlStyle}>
       <View style={styles.syncIconWrap}>
         {syncing ? <ActivityIndicator size="small" color={colors.graphite} /> : <CalendarHeaderIcon name="sync" />}
         {syncError ? <Text accessible={false} importantForAccessibility="no" allowFontScaling={false}

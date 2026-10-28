@@ -60,9 +60,15 @@ async function accountOwnedCalendarBlocks() {
     .map((projection) => projection.blockId));
 }
 
-async function requireNativeWriteAuthority(blockId: string, canContinue: () => boolean) {
-  if (!canContinue() || await hasConfiguredAccountCalendarWriter() ||
-      (await accountOwnedCalendarBlocks()).has(blockId) || !canContinue()) throw new ProjectionCancelledError();
+async function requireNativeWriteAuthority(blockId: string, canContinue: () => boolean, binding?: SyncBinding) {
+  if (!canContinue() || (await accountOwnedCalendarBlocks()).has(blockId)) throw new ProjectionCancelledError();
+  if (binding) {
+    const current = (await getSyncBindingsForBlock(blockId)).find((item) => item.segmentKey === binding.segmentKey);
+    if (projectionTargetCalendarId !== binding.calendarId || !current || hashValue(current) !== hashValue(binding)) {
+      throw new ProjectionCancelledError();
+    }
+  } else if (await hasConfiguredAccountCalendarWriter()) throw new ProjectionCancelledError();
+  if (!canContinue() || (await accountOwnedCalendarBlocks()).has(blockId) || !canContinue()) throw new ProjectionCancelledError();
 }
 
 export async function getCalendarPermissionStatus() {
@@ -861,12 +867,70 @@ export type CalendarSyncResult = {
   deferred?: true;
 };
 
+export type CalendarProjectionOptions = { existingBindingsOnly?: boolean };
+
+/** Coexistence with an account writer authorizes only the selected calendar's
+ * exact private bindings. It never adopts, remaps, creates or replaces events. */
+async function syncExistingBoundActualDay(value: string, calendarId: string, canContinue: () => boolean): Promise<CalendarSyncResult> {
+  if (projectionTargetCalendarId !== calendarId) return { created: 0, updated: 0, removed: 0, deferred: true };
+  const generation = projectionGeneration;
+  const currentPass = () => canContinue() && projectionGeneration === generation && projectionTargetCalendarId === calendarId;
+  const owned = await accountOwnedCalendarBlocks();
+  const segments = await getDayCalendarSegments(value);
+  const bindings = await getSyncBindings(value);
+  const selectedBindings = bindings.filter((binding) => binding.calendarId === calendarId && !owned.has(binding.blockId));
+  let deferred = bindings.length !== selectedBindings.length || segments.some((segment) =>
+    (segment.activityTitle || bindings.some((binding) => binding.blockId === segment.blockId)) &&
+    !selectedBindings.some((binding) => binding.segmentKey === segment.segmentKey && binding.blockId === segment.blockId));
+  let updated = 0; let removed = 0;
+  for (const binding of selectedBindings) {
+    if (!currentPass()) throw new ProjectionCancelledError();
+    const interval = bindingInterval(binding.segmentKey, binding.blockId);
+    if (!interval || interval.dateKey !== value || binding.dateKey !== value) { deferred = true; continue; }
+    const segment = segments.find((item) => item.segmentKey === binding.segmentKey && item.blockId === binding.blockId && item.dateKey === value);
+    if (!segment && (await getEntriesForBlock(binding.blockId)).length) {
+      // A changed shape or a move needs the ordinary identity-preserving path;
+      // this restricted pass must never delete its original event first.
+      deferred = true; continue;
+    }
+    const source = await requireUnchangedNativeEvent(binding);
+    if (!source) { deferred = true; continue; }
+    await requireNativeWriteAuthority(binding.blockId, currentPass, binding);
+    if (segment) {
+      const receipt = await getSetting<NativeWriteReceipt | null>(nativeWriteReceiptKey(calendarId, binding.eventId), null);
+      if (receipt?.version === 2 && receipt.localHash === nativeLocalHash(segment)) continue;
+      const latest = await requireUnchangedNativeEvent(binding);
+      if (!latest) { deferred = true; continue; }
+      await requireNativeWriteAuthority(binding.blockId, currentPass, binding);
+      const details = eventDetails(segment, typeof latest.title === 'string' ? latest.title : undefined);
+      const returnedId = await Calendar.updateEventAsync(binding.eventId, details);
+      if (returnedId && returnedId !== binding.eventId) {
+        throw new Error('The calendar changed this linked event identifier. Review its original link before synchronizing again.');
+      }
+      if (!currentPass()) throw new ProjectionCancelledError();
+      await recordNativeWrite(calendarId, binding.eventId, segment, details);
+      updated++;
+    } else {
+      const latest = await requireUnchangedNativeEvent(binding);
+      if (!latest) { deferred = true; continue; }
+      await requireNativeWriteAuthority(binding.blockId, currentPass, binding);
+      await Calendar.deleteEventAsync(binding.eventId);
+      await requireNativeWriteAuthority(binding.blockId, currentPass, binding);
+      await deleteSyncBinding(binding.segmentKey);
+      removed++;
+    }
+  }
+  return { created: 0, updated, removed, ...(deferred ? { deferred: true as const } : {}) };
+}
+
 export async function syncActualDay(
   value: string,
   calendarId: string,
   canContinue: () => boolean = () => true,
+  options: CalendarProjectionOptions = {},
 ): Promise<CalendarSyncResult> {
   if (isWeb()) return { created: 0, updated: 0, removed: 0 };
+  if (options.existingBindingsOnly) return syncExistingBoundActualDay(value, calendarId, canContinue);
   if (await hasConfiguredAccountCalendarWriter()) return { created: 0, updated: 0, removed: 0, deferred: true };
   const owned = await accountOwnedCalendarBlocks();
   const allSegments = await getDayCalendarSegments(value);
@@ -1042,8 +1106,9 @@ async function flushPendingActualsOnce(
   limit: number,
   priorityDates: string[],
   expectedGeneration: number,
+  options: CalendarProjectionOptions,
 ): Promise<CalendarOutboxResult> {
-  if (await hasConfiguredAccountCalendarWriter()) {
+  if (!options.existingBindingsOnly && await hasConfiguredAccountCalendarWriter()) {
     const remaining = (await getPendingSyncDates(1)).length;
     return { attempted: 0, succeeded: 0, failed: 0, remaining, ...(remaining ? { deferred: true as const } : {}) };
   }
@@ -1074,7 +1139,7 @@ async function flushPendingActualsOnce(
         await reconcileLinkedNativeColors(item.dateKey, read.plans, calendars);
       }
       if (!canContinue()) throw new ProjectionCancelledError();
-      const result = await syncActualDay(item.dateKey, calendarId, canContinue);
+      const result = await syncActualDay(item.dateKey, calendarId, canContinue, options);
       if (!canContinue()) throw new ProjectionCancelledError();
       if (result.deferred) { deferred = true; continue; }
       await markSyncDateComplete(item.dateKey, item.updatedAt);
@@ -1100,10 +1165,12 @@ export function flushPendingActuals(
   calendarId: string,
   priorityDates: string[] = [],
   limit = 90,
+  options: CalendarProjectionOptions = {},
 ): Promise<CalendarOutboxResult> {
   const expectedGeneration = projectionGeneration;
+  const selectedOptions = { existingBindingsOnly: options.existingBindingsOnly === true };
   const job = outboxChain.then(() =>
-    flushPendingActualsOnce(calendarId, limit, priorityDates, expectedGeneration),
+    flushPendingActualsOnce(calendarId, limit, priorityDates, expectedGeneration, selectedOptions),
   );
   outboxChain = job.then(
     () => undefined,

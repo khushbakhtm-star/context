@@ -232,7 +232,9 @@ export function AccountsScreen({ onDataChanged }: Props) {
       </View>
 
       <View style={styles.syncCard}>
-        <Text style={styles.cardTitle}>{busy || status.message || 'Ready'}</Text>
+        <Text style={styles.cardTitle}>{busy === 'Synchronizing accounts…'
+          ? status.message || busy
+          : busy || status.message || 'Ready'}</Text>
         {status.lastSyncedAt ? (
           <Text style={styles.help}>Last synchronized {new Date(status.lastSyncedAt).toLocaleString()}</Text>
         ) : null}

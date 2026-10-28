@@ -64,20 +64,34 @@ test('routing ignores read-only/storage-only accounts and rechecks permission, c
   assert.equal(await h.api.hasConfiguredAccountCalendarWriter(), false);
 });
 
-test('the production native worker drains local ownership links before dispatch and only suppresses a configured account writer', async () => {
+test('the production native worker awaits a safe account cycle then restricts an existing native destination when an account writer is configured', async () => {
   const h = harness(); const calls = []; let release;
   const held = new Promise((resolve) => { release = resolve; });
   const worker = nativeWorker({
-    retryInlineMinuteLinks: async () => { calls.push('links'); await held; },
+    synchronizeAccounts: async () => { calls.push('accounts'); await held; return { running: false, cycleComplete: true, nativeWriteReady: true }; },
     hasConfiguredAccountCalendarWriter: h.api.hasConfiguredAccountCalendarWriter,
     calendarProjectionConfigRef: { current: { ready: true, syncActuals: true, writeCalendarId: 'native-personal', accountCalendarWrites: false } },
     controllerMountedRef: { current: true }, AppState: { currentState: 'active' },
-    flushPendingActuals: async (calendarId, dates) => { calls.push([calendarId, dates]); return { failed: 0 }; },
+    flushPendingActuals: async (...args) => { calls.push(args); return { failed: 0 }; },
   });
   const job = worker(['2026-10-27']); await Promise.resolve();
-  assert.deepEqual(calls, ['links'], 'native export must not race the pending durable account source-link pass');
+  assert.deepEqual(calls, ['accounts'], 'native export must not race an unfinished account source/storage cycle');
   release(); await job;
-  assert.deepEqual(copy(calls), ['links', ['native-personal', ['2026-10-27']]]);
+  assert.deepEqual(copy(calls), ['accounts', ['native-personal', ['2026-10-27'], 90, { existingBindingsOnly: false }]]);
   h.preferences.set('google:person', { selectedCalendarIds: ['personal'], writeCalendarId: 'personal' });
-  calls.length = 0; await worker(['2026-10-27']); assert.deepEqual(calls, ['links']);
+  calls.length = 0; await worker(['2026-10-27']);
+  assert.deepEqual(copy(calls), ['accounts', ['native-personal', ['2026-10-27'], 90, { existingBindingsOnly: true }]]);
+});
+
+test('the native worker never falls back after failed or incomplete account downloads', async () => {
+  for (const status of [{ nativeWriteReady: false }, { nativeWriteReady: true, running: true },
+    { nativeWriteReady: true, cycleComplete: false }, {}]) {
+    let writes = 0;
+    const worker = nativeWorker({ synchronizeAccounts: async () => status,
+      hasConfiguredAccountCalendarWriter: async () => true,
+      calendarProjectionConfigRef: { current: { ready: true, syncActuals: true, writeCalendarId: 'native', accountCalendarWrites: true } },
+      controllerMountedRef: { current: true }, AppState: { currentState: 'active' },
+      flushPendingActuals: async () => { writes++; return { failed: 0 }; } });
+    await assert.rejects(worker(['2026-10-27']), /remain queued/); assert.equal(writes, 0);
+  }
 });

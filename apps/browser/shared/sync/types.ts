@@ -139,4 +139,13 @@ export type AccountSyncStatus = {
   lastSyncedAt: string | null;
   message: string;
   conflicts: number;
+  outcome?: 'idle' | 'running' | 'continuing' | 'success' | 'error';
+  phase?: 'idle' | 'checking-storage' | 'downloading' | 'uploading' | 'calendar';
+  progress?: { completed: number; total?: number };
+  /** One identity for a shared synchronization promise, including its follow-up pass. */
+  cycleId?: number;
+  cycleComplete?: boolean;
+  /** Complete account downloads and no provider/conflict error; never inferred from a caller timeout. */
+  nativeWriteReady?: boolean;
+  nativePendingCount?: number;
 };

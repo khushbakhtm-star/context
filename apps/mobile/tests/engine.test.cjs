@@ -360,6 +360,73 @@ test('many synchronization requests during a gated read drain in at most two pas
   remote.onGet = null;
 });
 
+test('shared account sync callers observe one exact completion cycle and safe phases across the follow-up pass', async (t) => {
+  const { device, remote } = await linkedPrayer(t); const before = device.engine.getAccountSyncStatus();
+  const events = []; const unsubscribe = device.engine.subscribeAccountSync((next) => events.push(plain(next))); t.after(unsubscribe);
+  let started, release; const reached = new Promise((resolve) => { started = resolve; }); const gate = new Promise((resolve) => { release = resolve; });
+  let reads = 0; remote.onGet = async () => { if (++reads === 1) { started(); await gate; } };
+  const first = device.engine.synchronizeAccounts(); await reached;
+  const active = device.engine.getAccountSyncStatus();
+  assert.equal(active.running, true); assert.equal(active.outcome, 'running'); assert.equal(active.phase, 'calendar');
+  assert.equal(active.cycleComplete, false); assert.ok(active.cycleId > before.cycleId);
+  assert.equal(active.nativeWriteReady, false);
+  assert.equal(device.engine.synchronizeAccounts(), first, 'joining callers share the same exact account promise');
+  release(); const final = await first;
+  assert.equal(final.outcome, 'success'); assert.equal(final.cycleComplete, true); assert.equal(final.running, false);
+  assert.equal(final.cycleId, active.cycleId);
+  assert.equal(final.nativeWriteReady, true);
+  const completed = events.filter((event) => event.cycleComplete);
+  assert.equal(completed.length, 1, 'the intermediate pass cannot masquerade as completion');
+  assert.ok(events.every((event) => event.cycleId === final.cycleId));
+  assert.ok(events.filter((event) => !event.cycleComplete).every((event) => event.running));
+  assert.ok(events.filter((event) => event.outcome === 'running').every((event) => !/person|Pray|prayer/i.test(event.message)));
+  remote.onGet = null;
+  const next = await device.engine.synchronizeAccounts(); assert.ok(next.cycleId > final.cycleId); assert.equal(next.cycleComplete, true);
+});
+
+test('a native-bound legacy block cannot become a stale account copy while an unrelated new border still publishes', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const source = { ...originalPrayer(), id: 'legacy-provider-id', title: 'Externally changed activity', description: '', start: iso(700), end: iso(710) };
+  remote.seed(source); await saveRange(device, 600, 3, 'Private earlier note', 'study', 'Earlier activity');
+  const legacy = await device.db.getMinuteEntry(day, 600);
+  await device.db.saveSyncBinding({ dateKey: day, segmentKey: `${day}:${legacy.blockId}:600-602`, blockId: legacy.blockId,
+    calendarId: 'opaque-native-calendar', eventId: 'opaque-native-event' });
+  const binding = plain((await device.db.getSyncBindingsForBlock(legacy.blockId))[0]);
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1,
+    text: 'A newer private thought', categoryId: 'study', queueInlineLink: true });
+  await saveRange(device, 800, 2, 'New note', 'work', 'New explicit border');
+  await assert.rejects(device.engine.linkActualsToAccounts([day]), /phone-calendar activity needs review/);
+  const result = await device.engine.synchronizeAccounts();
+  assert.equal(result.outcome, 'continuing'); assert.equal(result.nativePendingCount, 1); assert.equal(result.nativeWriteReady, true);
+  assert.match(result.message, /waiting for their original calendar connection/);
+  assert.equal(remote.events.size, 2); assert.deepEqual(plain(remote.events.get(`personal:${source.id}`)), source);
+  assert.equal(remote.calls.filter((call) => call.type === 'create').length, 1);
+  assert.equal(remote.calls.find((call) => call.type === 'create').write.title, 'New explicit border');
+  assert.equal((await device.engine.listProjections()).some((projection) => projection.blockId === legacy.blockId), false);
+  assert.deepEqual(plain((await device.db.getSyncBindingsForBlock(legacy.blockId))[0]), binding);
+  assert.equal((await device.db.getMinuteEntry(day, 600)).text, 'A newer private thought');
+  assert.ok((await device.db.getPendingInlineMinuteLinks()).some((ticket) => ticket.minuteIndex === 600 && ticket.requiresAccountWriter),
+    'the unapproved ticket stays retryable without starving later eligible local or imported work');
+});
+
+test('explicit permitted account source selection can take authority over an exact native-bound block without guessing its provider ID', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const source = { ...originalPrayer(), id: 'explicit-provider-id', title: 'Chosen activity', description: '', start: iso(600), end: iso(605) };
+  remote.seed(source); await saveRange(device, 600, 3, 'Minute thought', 'study', source.title);
+  const legacy = await device.db.getMinuteEntry(day, 600);
+  await device.db.saveSyncBinding({ dateKey: day, segmentKey: `${day}:${legacy.blockId}:600-602`, blockId: legacy.blockId,
+    calendarId: 'opaque-native-calendar', eventId: 'different-opaque-native-id' });
+  await device.engine.linkActualsToAccounts([day], planned(source), { dateKey: day, minuteIndex: 600 });
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1); assert.equal(remote.calls.filter((call) => call.type === 'create').length, 0);
+  const projection = (await device.engine.listProjections())[0]; assert.equal(projection.sourceEventId, source.id); assert.equal(projection.eventId, source.id);
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 601, text: 'Later exact note', categoryId: 'study' });
+  await device.engine.linkActualsToAccounts([day]); const result = await device.engine.synchronizeAccounts();
+  assert.equal(result.outcome, 'success'); assert.equal(remote.events.size, 1);
+  assert.match(remote.events.get(`personal:${source.id}`).description, /Later exact note/);
+  assert.equal((await device.db.getSyncBindingsForBlock(legacy.blockId)).length, 1, 'the account guard never deletes a native binding');
+});
+
 test('simultaneous source-link requests for the same coordinate establish only one projection owner', async (t) => {
   const remote = cloud(); const device = phone(t, remote); await prepare(device);
   const original = originalPrayer(); remote.seed(original); await saveRange(device, 1135, 3);

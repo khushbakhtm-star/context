@@ -523,6 +523,55 @@ test('legacy inline-ticket migration preserves local intent and imported-account
   await api.initializeDatabase(); assert.equal((await api.getPendingInlineMinuteLinks()).find((ticket) => ticket.minuteIndex === 720).requiresAccountWriter, true);
 });
 
+test('a page of native-review local tickets cannot starve newer local borders or peer work, and stays exactly retryable', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  const insert = sqlite.prepare(`INSERT INTO inline_minute_link_outbox
+    (date_key, minute_index, affected_dates_json, token, requires_account_writer) VALUES (?, ?, ?, ?, ?)`);
+  for (let minute = 0; minute < 100; minute++) {
+    insert.run(day, minute, JSON.stringify([day, '2026-10-26']), `native-review-${minute}`, 0);
+    await api.saveSyncBinding({ dateKey: day, segmentKey: `native-${minute}:0-0`, blockId: `native-${minute}`,
+      calendarId: 'exact-native-calendar', eventId: `exact-native-event-${minute}` });
+  }
+  insert.run(day, 300, JSON.stringify([day]), 'peer-work', 1);
+  insert.run(day, 400, JSON.stringify([day]), 'new-local-border', 0);
+  const bindings = plain(await api.getSyncBindings(day));
+  const blocked = await api.getPendingInlineMinuteLinks();
+  assert.equal(blocked.length, 100); assert.ok(blocked.every((ticket) => ticket.minuteIndex < 100));
+  assert.equal(await api.deferInlineMinuteLink(blocked[0]), false, 'ordinary failure deferral cannot promote a local edit');
+  for (const ticket of blocked) assert.equal(await api.promoteInlineMinuteLinkForAccountReview(ticket), true);
+  const next = await api.getPendingInlineMinuteLinks();
+  assert.deepEqual(next.slice(0, 2).map((ticket) => ticket.minuteIndex), [400, 300]);
+  const all = await api.getPendingInlineMinuteLinks(500);
+  assert.equal(all.length, 102, 'review deferral acknowledges or drops no work');
+  for (const previous of blocked) {
+    const current = all.find((ticket) => ticket.minuteIndex === previous.minuteIndex);
+    assert.equal(current.token, previous.token); assert.equal(current.requiresAccountWriter, true);
+    assert.deepEqual(plain(current.affectedDates), [day, '2026-10-26']);
+  }
+  assert.deepEqual(plain(await api.getSyncBindings(day)), bindings);
+  assert.equal((await api.getPendingSyncDates()).length, 0, 'review rotation never invents a native-calendar write');
+  assert.equal((await api.getSyncDocuments('minute:')).length, 0);
+});
+
+test('native-review promotion is token guarded and a later coalesced edit retains its review requirement', async (t) => {
+  const { api, sqlite } = createRepository(t); await api.initializeDatabase();
+  await api.saveMinuteRange({ dateKey: day, startMinute: 210, durationMinutes: 1, text: 'Earlier thought', categoryId: 'study', queueInlineLink: true });
+  const previous = (await api.getPendingInlineMinuteLinks())[0];
+  await api.saveMinuteRange({ dateKey: day, startMinute: 210, durationMinutes: 1, text: 'Newer thought', categoryId: 'study', queueInlineLink: true });
+  const before = plain(sqlite.prepare('SELECT rowid, * FROM inline_minute_link_outbox').all());
+  assert.equal(await api.promoteInlineMinuteLinkForAccountReview(previous), false);
+  assert.deepEqual(plain(sqlite.prepare('SELECT rowid, * FROM inline_minute_link_outbox').all()), before);
+  const latest = (await api.getPendingInlineMinuteLinks())[0];
+  assert.equal(await api.promoteInlineMinuteLinkForAccountReview(latest), true);
+  await api.saveMinuteRange({ dateKey: day, startMinute: 210, durationMinutes: 1, text: 'Typed after review', categoryId: 'study', queueInlineLink: true });
+  const current = (await api.getPendingInlineMinuteLinks())[0];
+  assert.equal(current.requiresAccountWriter, true); assert.notEqual(current.token, latest.token);
+  const row = plain(sqlite.prepare('SELECT rowid, * FROM inline_minute_link_outbox').all());
+  assert.equal(await api.promoteInlineMinuteLinkForAccountReview(latest), false);
+  assert.deepEqual(plain(sqlite.prepare('SELECT rowid, * FROM inline_minute_link_outbox').all()), row);
+  assert.equal((await api.getMinuteEntry(day, 210)).text, 'Typed after review');
+});
+
 test('inline link tickets are scoped to explicit edits and stale acknowledgements retain newer work', async (t) => {
   const { api } = createRepository(t);
   await api.initializeDatabase();

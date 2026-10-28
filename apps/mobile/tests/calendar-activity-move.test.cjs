@@ -32,10 +32,12 @@ function runtime(t, overrides = {}) {
       if (failCreateAfterSave) throw new Error('Create response was lost');
       return id; },
     async updateEventAsync(id, details) { calls.push({ type: 'update', id });
+      await overrides.beforeUpdate?.(id);
       if (failUpdate === id) throw new Error('Provider temporarily unavailable');
       const event = events.get(id); if (!event) throw Object.assign(new Error('Missing'), { code: 'E_EVENT_NOT_FOUND' });
       events.set(id, { ...event, ...plain(details) }); return id; },
     async getEventAsync(id) {
+      await overrides.beforeBoundRead?.(id);
       if (overrides.failLegacyReads) throw Object.assign(new Error('Legacy empty RRULE conversion failed'), { code: 'E_BAD_RECURRENCE' });
       if (!events.has(id)) throw Object.assign(new Error('Missing'), { code: 'E_EVENT_NOT_FOUND' }); return plain(events.get(id)); },
     async deleteEventAsync(id) { calls.push({ type: 'delete', id }); events.delete(id); },
@@ -109,6 +111,10 @@ async function nativeColorPlans(r, color) {
 
 const googleWriter = { id: 'google', provider: 'google', subject: 'personal', label: 'Personal',
   consent: { ledgerStorage: false, calendarRead: true, calendarWrite: true, replaceOccurrences: true, importCalendarEdits: true } };
+const boundOnly = { existingBindingsOnly: true };
+function directWriterOptions() {
+  return { accounts: [googleWriter], accountPreferences: { google: { selectedCalendarIds: [], writeCalendarId: null } } };
+}
 function accountProjection(segment, state = 'pending') {
   return { id: 'account-owner', accountId: 'google', calendarId: 'google-calendar', eventId: 'google-event',
     sourceEventId: 'google-event', blockId: segment.blockId, dateKey: segment.dateKey,
@@ -142,6 +148,109 @@ test('a configured account destination pauses native creation and leaves its dur
   assert.equal(result.deferred, true);
   assert.equal(r.calls.length, 0); assert.equal((await r.db.getSyncBindings(day)).length, 0);
   assert.equal((await r.db.getPendingSyncDates()).length, 1); assert.equal((await r.db.getMinuteEntry(day, 100)).text, 'Prayed');
+});
+
+test('bound-only coexistence writes exact existing notes with a configured account writer and never creates an unbound border', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); await oneMinute(r, 'Initial note');
+  await r.calendar.syncActualDay(day, 'personal'); const id = [...r.events.keys()][0]; const binding = plain((await r.db.getSyncBindings(day))[0]);
+  r.calendar.configureCalendarProjection('personal'); options.accountPreferences.google.writeCalendarId = 'google-calendar';
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Exact note sent through existing binding', categoryId: 'unaccounted' });
+  r.calls.length = 0;
+  const result = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(result.succeeded, 1); assert.equal(result.failed, 0); assert.equal(result.remaining, 0);
+  assert.deepEqual(r.calls, [{ type: 'update', id }]); assert.match(r.events.get(id).notes, /Exact note sent/);
+  assert.deepEqual(plain((await r.db.getSyncBindings(day))[0]), binding);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 200, text: 'New private border', categoryId: 'work' });
+  await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 200, endMinute: 200 }, { title: 'Unbound activity', categoryId: 'work' });
+  r.calls.length = 0;
+  const deferred = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(deferred.deferred, true); assert.equal(deferred.remaining, 1); assert.equal(deferred.failed, 0);
+  assert.deepEqual(r.calls, [], 'an unchanged binding must not churn while unbound work remains deferred');
+  assert.equal(r.events.size, 1); assert.equal((await r.db.getSyncBindings(day)).length, 1);
+});
+
+test('bound-only coexistence keeps missing originals and changed local shapes deferred without replacement or remapping', async (t) => {
+  for (const reason of ['missing', 'shape']) {
+    const options = directWriterOptions(); const r = runtime(t, options); const segment = await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+    const id = [...r.events.keys()][0]; const bindings = plain(await r.db.getSyncBindings(day));
+    options.accountPreferences.google.writeCalendarId = 'google-calendar'; r.calendar.configureCalendarProjection('personal');
+    if (reason === 'missing') { r.events.delete(id); await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Later text', categoryId: 'unaccounted' }); }
+    else await r.sheet.groupMinuteRange({ dateKey: day, startMinute: 100, endMinute: 101 }, { title: 'Make coffee', categoryId: 'unaccounted' });
+    r.calls.length = 0;
+    const result = await r.calendar.syncActualDay(day, 'personal', () => true, boundOnly);
+    assert.equal(result.deferred, true); assert.equal(result.created, 0); assert.deepEqual(r.calls, []);
+    assert.deepEqual(plain(await r.db.getSyncBindings(day)), bindings);
+  }
+});
+
+test('bound-only coexistence never touches an account-owned block or another calendar and leaves their outbox pending', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); const segment = await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+  const bindings = plain(await r.db.getSyncBindings(day)); const event = plain([...r.events.values()][0]);
+  await r.db.putSyncDocument('projection:account-owner', accountProjection(segment));
+  options.accountPreferences.google.writeCalendarId = 'google-calendar'; r.calendar.configureCalendarProjection('personal');
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Account-owned pending note', categoryId: 'unaccounted' });
+  r.calls.length = 0;
+  const owned = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(owned.deferred, true); assert.equal(owned.remaining, 1); assert.equal(r.calls.length, 0);
+  assert.deepEqual(plain([...r.events.values()][0]), event); assert.deepEqual(plain(await r.db.getSyncBindings(day)), bindings);
+  await r.db.putSyncDocument('projection:account-owner', { ...accountProjection(segment), state: 'deleted' });
+  r.calendar.configureCalendarProjection('other-calendar');
+  const other = await r.calendar.syncActualDay(day, 'other-calendar', () => true, boundOnly);
+  assert.equal(other.deferred, true); assert.equal(r.calls.length, 0); assert.deepEqual(plain([...r.events.values()][0]), event);
+});
+
+test('bound-only preflight imports external title/time/cleared notes and preserves location before later note writeback', async (t) => {
+  const options = directWriterOptions(); const r = runtime(t, options); await oneMinute(r, 'Original note'); await r.calendar.syncActualDay(day, 'personal');
+  const id = [...r.events.keys()][0]; const event = r.events.get(id); event.title = 'External event title'; event.notes = '';
+  event.startDate = new Date(2026, 9, 25, 3, 20).toISOString(); event.endDate = new Date(2026, 9, 25, 3, 23).toISOString(); event.location = 'External location';
+  options.accountPreferences.google.writeCalendarId = 'google-calendar'; r.calendar.configureCalendarProjection('personal'); r.calls.length = 0;
+  await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal((await r.db.getMinuteEntry(day, 100)), null); assert.equal((await r.db.getMinuteEntry(day, 201)).text, '');
+  assert.equal(r.events.get(id).title, 'External event title'); assert.equal(r.events.get(id).location, 'External location');
+  assert.equal(r.calls.filter((call) => call.type === 'create' || call.type === 'delete').length, 0);
+  const entry = await r.db.getMinuteEntry(day, 201);
+  await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 201, text: 'A separate minute thought', categoryId: entry.categoryId });
+  await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+  assert.equal(r.events.size, 1); assert.match(r.events.get(id).notes, /A separate minute thought/);
+  assert.equal(r.events.get(id).title, 'External event title'); assert.equal(r.events.get(id).location, 'External location');
+});
+
+test('bound-only mutation rechecks exact binding, account owner and selected-target generation after provider awaits', async (t) => {
+  for (const change of ['binding', 'account-owner', 'opt-out']) {
+    const options = directWriterOptions(); const r = runtime(t, options); const segment = await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+    const binding = (await r.db.getSyncBindings(day))[0]; const before = plain([...r.events.values()][0]);
+    options.accountPreferences.google.writeCalendarId = 'google-calendar'; r.calendar.configureCalendarProjection('personal');
+    await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Pending local note', categoryId: 'unaccounted' });
+    options.beforeBoundRead = async () => {
+      options.beforeBoundRead = undefined;
+      if (change === 'binding') await r.db.saveSyncBinding({ ...binding, eventId: 'changed-exact-binding' });
+      else if (change === 'account-owner') await r.db.putSyncDocument('projection:account-owner', accountProjection(segment));
+      else r.calendar.configureCalendarProjection(null);
+    };
+    r.calls.length = 0;
+    await assert.rejects(r.calendar.syncActualDay(day, 'personal', () => true, boundOnly));
+    assert.deepEqual(r.calls, []); assert.deepEqual(plain([...r.events.values()][0]), before);
+    assert.equal((await r.db.getMinuteEntry(day, 100)).text, 'Pending local note');
+  }
+});
+
+test('bound-only full Reset removes only its verified original event and a disappearing update never creates a replacement', async (t) => {
+  for (const action of ['reset', 'missing-during-update']) {
+    const options = directWriterOptions(); const r = runtime(t, options); await oneMinute(r); await r.calendar.syncActualDay(day, 'personal');
+    const id = [...r.events.keys()][0]; options.accountPreferences.google.writeCalendarId = 'google-calendar'; r.calendar.configureCalendarProjection('personal');
+    if (action === 'reset') {
+      await r.sheet.resetMinuteCells({ dateKey: day, startMinute: 100, endMinute: 100 }); r.calls.length = 0;
+      const result = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+      assert.equal(result.succeeded, 1); assert.deepEqual(r.calls, [{ type: 'delete', id }]);
+      assert.equal(r.events.size, 0); assert.equal((await r.db.getSyncBindings(day)).length, 0);
+    } else {
+      await r.db.saveMinuteEntry({ dateKey: day, minuteIndex: 100, text: 'Pending text', categoryId: 'unaccounted' });
+      options.beforeUpdate = async () => { r.events.delete(id); }; r.calls.length = 0;
+      const result = await r.calendar.flushPendingActuals('personal', [day], 90, boundOnly);
+      assert.equal(result.failed, 1); assert.deepEqual(r.calls, [{ type: 'update', id }]);
+      assert.equal((await r.db.getSyncBindings(day))[0].eventId, id); assert.equal(result.remaining, 1);
+    }
+  }
 });
 
 test('durable account source ownership pauses native color, update and cleanup even after consent is revoked or disconnected', async (t) => {

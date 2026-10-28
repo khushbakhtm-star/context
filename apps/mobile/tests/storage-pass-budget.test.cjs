@@ -10,13 +10,13 @@ const ts = require('typescript');
 function fixture({ documents = 0, downloads = 0 } = {}) {
   const filename = path.join(__dirname, '../src/sync/engine.ts');
   const source = fs.readFileSync(filename, 'utf8'); const parsed = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
-  const names = new Set(['storageSync', 'runSync', 'StorageDownloadPending']);
+  const names = new Set(['storageSync', 'runSync', 'StorageDownloadPending', 'NativeAccountLinkReviewError']);
   const nodes = parsed.statements.filter((node) => names.has(node.name?.text) || ts.isVariableStatement(node) &&
     node.declarationList.declarations.some((item) => ['STORAGE_DOWNLOADS_PER_PASS', 'STORAGE_UPLOADS_PER_PASS'].includes(item.name.getText(parsed))));
   const settings = new Map(); const uploaded = new Set(); const seen = new Set(); const remote = new Map();
   const docs = Array.from({ length: documents }, (_, index) => ({ key: `category:fixture_${index}`, revision: String(index), value: { id: `fixture_${index}` } }));
   for (let index = 0; index < downloads; index++) remote.set(`remote_${index}`, JSON.stringify({ version: 1, id: `remote_${index}`, documents: [{ key: `category:remote_${index}`, value: { id: `remote_${index}` } }] }));
-  const counts = { serial: 0, encrypted: [], writes: [], imports: [], continuation: 0, calendar: 0, list: 0 };
+  const counts = { serial: 0, encrypted: [], writes: [], imports: [], continuation: 0, calendar: 0, list: 0, statuses: [] };
   const storage = { async listFiles() { counts.list++; return [...remote.keys()].map((id) => ({ id, name: id })); },
     async readFile(file) { return remote.get(file.id); },
     async writeFile(name, text) { counts.writes.push(name); remote.set(name, text); } };
@@ -36,7 +36,7 @@ function fixture({ documents = 0, downloads = 0 } = {}) {
     getPendingInlineMinuteLinks: async () => [], listCategories: async () => [], listProjections: async () => [],
     linkActualsToAccounts: async () => {}, serializeColorReconciliation: async (work) => { counts.calendar++; return work(); },
     requestAccountSynchronization: () => { counts.continuation++; }, status: { running: false, lastSyncedAt: null, message: 'Ready' },
-    publish(next) { Object.assign(context.status, next); } };
+    publish(next) { Object.assign(context.status, next); counts.statuses.push(structuredClone(context.status)); } };
   const module = { exports: {} };
   const code = ts.transpileModule(nodes.map((node) => node.getText(parsed)).join('\n') + '\nexport { storageSync, runSync };', {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -50,10 +50,17 @@ test('one foreground pass uploads at most four 500-document batches across both 
   assert.deepEqual(h.counts.encrypted, [500, 500, 500, 500]); assert.equal(h.counts.writes.length, 4);
   assert.equal(h.uploaded.size, 2000); assert.equal(first.running, false); assert.equal(first.lastSyncedAt, null);
   assert.match(first.message, /continuing/); assert.equal(h.counts.continuation, 1);
+  assert.equal(first.outcome, 'continuing'); assert.equal(first.cycleComplete, true);
+  assert.equal(first.nativeWriteReady, true, 'an upload-only backlog cannot hide an unfinished download');
   const second = await h.api.runSync();
   assert.deepEqual(h.counts.encrypted, [500, 500, 500, 500, 500, 1]); assert.equal(h.uploaded.size, 2501);
   assert.equal(new Set(h.counts.writes).size, 6); assert.equal(second.message, 'Accounts synchronized');
   assert.ok(second.lastSyncedAt); assert.equal(h.counts.continuation, 1);
+  assert.equal(second.outcome, 'success');
+  const progress = h.counts.statuses.filter((item) => item.running);
+  assert.ok(progress.some((item) => item.phase === 'uploading' && item.progress?.completed === 3 && item.progress.total === undefined),
+    'four batches are a work budget, never a claim that only four updates exist');
+  assert.ok(progress.every((item) => !item.cycleComplete && !item.message.includes('google:fixture')));
 });
 
 test('bounded downloads preserve checkpoints and block uploads and calendar writes until every remote batch has been checked', async () => {
@@ -63,10 +70,13 @@ test('bounded downloads preserve checkpoints and block uploads and calendar writ
   assert.equal(h.counts.calendar, 0); assert.equal(first.running, false); assert.equal(first.lastSyncedAt, null);
   assert.match(first.message, /download is continuing.*Calendar changes will resume/);
   assert.equal(h.counts.continuation, 1);
+  assert.equal(first.outcome, 'continuing', 'a pending download is not reported as a failed provider request');
+  assert.equal(first.nativeWriteReady, false, 'native fallback must not bypass incomplete encrypted downloads');
   const second = await h.api.runSync();
   assert.ok(h.seen.has('remote_9')); assert.equal(h.counts.writes.length, 1);
   for (let index = 0; index < 10; index++) assert.equal(h.counts.imports.filter((key) => key === `category:remote_${index}`).length, 1);
   assert.equal(second.message, 'Accounts synchronized'); assert.ok(second.lastSyncedAt);
+  assert.equal(second.outcome, 'success');
 });
 
 test('a failed immutable upload retains its exact pending encrypted batch and never marks its documents uploaded', async () => {
@@ -91,4 +101,14 @@ test('a remote batch arriving in the second storage phase also queues continuati
   assert.equal(first.lastSyncedAt, null); assert.equal(h.counts.continuation, 1);
   const second = await h.api.runSync(); assert.equal(second.message, 'Accounts synchronized');
   assert.equal(h.counts.writes.length, 1, 'continuing the read cannot duplicate the earlier acknowledged upload');
+});
+
+test('a real storage failure remains an error and never advances the last successful timestamp', async () => {
+  const h = fixture({ downloads: 1 }); h.context.status.lastSyncedAt = '2026-10-20T10:00:00.000Z';
+  h.context.createLedgerStorage().readFile = async () => { throw new Error('Fixture provider denied access'); };
+  const result = await h.api.runSync();
+  assert.equal(result.outcome, 'error'); assert.equal(result.cycleComplete, true); assert.equal(result.running, false);
+  assert.equal(result.nativeWriteReady, false);
+  assert.equal(result.lastSyncedAt, '2026-10-20T10:00:00.000Z'); assert.match(result.message, /denied access/);
+  assert.equal(h.counts.continuation, 0); assert.equal(h.counts.writes.length, 0);
 });

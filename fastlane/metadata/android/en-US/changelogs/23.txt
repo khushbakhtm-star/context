@@ -1,0 +1,1 @@
+Sync starts with account updates before optional calendar refreshes. Live sync steps distinguish queued progress from errors. Existing phone-linked events retain their original connection when account editing is enabled. Local editing remains available throughout synchronization.
