@@ -21,7 +21,7 @@ import { makeCalendarDescription, makeCompactCalendarDescription, readCalendarDe
 import { ACCOUNT_PLAN_READ_LEASE_MS, accountPlanReadDeadline, accountPlanScope, accountPlanScopeIdentity,
   decodeAccountPlanCache, encodeAccountPlanCache, type AccountPlanScope } from '../utils/account-plan-cache';
 import { clearLedgerKeyCache, decryptBatch, encryptBatch, hashValue, parseProjectedMinutes } from './codec';
-import { createCalendarAdapter } from './providers';
+import { createCalendarAdapter, createCalendarMetadataReadCache, type CalendarMetadataReadCache } from './providers';
 import { createLedgerStorage } from './storage';
 import { zonedMinuteToInstant } from './time';
 import { canCreateAccountProjection } from '../utils/calendar-projection-authority';
@@ -180,8 +180,16 @@ async function storageSync(account: ConnectedAccount, passphrase: string, budget
     publish({ phase: 'uploading', progress: { completed: budget.uploads },
       message: 'Uploading encrypted ledger updates…', cycleComplete: false });
     await decryptBatch(pending.ciphertext, passphrase);
-    await storage.writeFile(pending.name, pending.ciphertext);
+    const uploaded = await storage.writeFile(pending.name, pending.ciphertext);
+    if (uploaded !== undefined && (!uploaded || typeof uploaded.id !== 'string' || !uploaded.id.length ||
+        uploaded.id.length > 2_048 || /[\u0000-\u001F\u007F]/.test(uploaded.id) || uploaded.name !== pending.name)) {
+      throw new Error('The storage service returned an unexpected uploaded file identity.');
+    }
     await acknowledgeUploaded(storageKey, pending.batch.documents);
+    // Only an exact transport receipt plus the durable local revision
+    // acknowledgement makes this an already-checked immutable file. Peers'
+    // files and transports without receipts still follow normal download.
+    if (uploaded) await markSyncFileSeen(storageKey, uploaded.id);
     await setSetting(pendingKey, null);
     budget.uploads++;
   }
@@ -310,13 +318,41 @@ function categoryForEvent(accountId: string, event: RemoteCalendarEvent) {
       (category.providerCategoryName && event.microsoftCategories?.includes(category.providerCategoryName))));
 }
 
-async function remoteActivityColor(account: ConnectedAccount, event: RemoteCalendarEvent) {
+type CalendarSyncReads = {
+  metadata: CalendarMetadataReadCache;
+  defaultColors: Map<string, Promise<Map<string, string>>>;
+};
+
+async function remoteActivityColor(account: ConnectedAccount, event: RemoteCalendarEvent, reads?: CalendarSyncReads) {
   const direct = calendarColor(event.displayColor) ?? calendarColor(categoryForEvent(account.id, event)?.providerOriginalColor);
   if (direct) return direct.toUpperCase();
   // An unresolved explicit label must never be mistaken for the calendar default.
   if (event.googleColorId || event.googleEventLabelId || event.microsoftCategories?.length) return undefined;
-  const calendar = (await createCalendarAdapter(account).listCalendars()).find((item) => item.id === event.calendarId);
-  return calendarColor(calendar?.providedColor)?.toUpperCase();
+  if (!reads) {
+    const calendar = (await createCalendarAdapter(account).listCalendars()).find((item) => item.id === event.calendarId);
+    return calendarColor(calendar?.providedColor)?.toUpperCase();
+  }
+  // A pass may inspect many events inheriting the same calendar color. Share
+  // only display metadata; this snapshot never supplies write authority or an
+  // event version. Fresh account checks around each event remain below.
+  const scope = hashValue({ id: account.id, provider: account.provider, subject: account.subject,
+    calendarRead: account.consent.calendarRead, categoryRead: account.consent.categoryRead });
+  let pending = reads.defaultColors.get(scope);
+  if (!pending) {
+    pending = createCalendarAdapter(account, reads.metadata).listCalendars().then((calendars) => {
+      const colors = new Map<string, string>();
+      for (const calendar of calendars) {
+        const color = calendarColor(calendar.providedColor)?.toUpperCase();
+        if (color) colors.set(calendar.id, color);
+      }
+      return colors;
+    });
+    if (reads.defaultColors.size >= 128) reads.defaultColors.delete(reads.defaultColors.keys().next().value!);
+    reads.defaultColors.set(scope, pending);
+    const started = pending;
+    void pending.catch(() => { if (reads.defaultColors.get(scope) === started) reads.defaultColors.delete(scope); });
+  }
+  return (await pending).get(event.calendarId);
 }
 
 function eventContentHash(event: RemoteCalendarEvent) {
@@ -904,13 +940,13 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
   await saveProjection(next);
 }
 
-async function reconcileProjection(account: ConnectedAccount, projection: Projection) {
+async function reconcileProjection(account: ConnectedAccount, projection: Projection, reads: CalendarSyncReads) {
   if (projection.state === 'deleted' || projection.state === 'conflict') return;
   await serializeColorReconciliation(async () => {
     coreProjectionEpochs.set(projection.id, (coreProjectionEpochs.get(projection.id) ?? 0) + 1);
     activeCoreProjections.add(projection.id);
   });
-  try { await reconcileCurrentProjection(account, projection); }
+  try { await reconcileCurrentProjection(account, projection, reads); }
   finally {
     await serializeColorReconciliation(async () => {
       activeCoreProjections.delete(projection.id);
@@ -919,15 +955,15 @@ async function reconcileProjection(account: ConnectedAccount, projection: Projec
   }
 }
 
-async function reconcileCurrentProjection(account: ConnectedAccount, projection: Projection) {
-  const adapter = createCalendarAdapter(account);
+async function reconcileCurrentProjection(account: ConnectedAccount, projection: Projection, reads: CalendarSyncReads) {
+  const adapter = createCalendarAdapter(account, reads.metadata);
   let segment = await getProjectionSegment(projection);
   let write = segment ? buildWrite(projection, segment) : null;
   let localHash = write ? localWriteHash(write) : null;
   const remote = projection.eventId ? await adapter.getEvent(projection.calendarId, projection.eventId) : null;
   let currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
   if (!currentAccount?.consent.calendarRead) return;
-  const resolvedColor = remote ? await remoteActivityColor(currentAccount, remote) : undefined;
+  const resolvedColor = remote ? await remoteActivityColor(currentAccount, remote, reads) : undefined;
   currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
   if (!currentAccount?.consent.calendarRead) return;
   segment = await getProjectionSegment(projection);
@@ -978,7 +1014,7 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
   if (projection.pendingSourceScope === 'series' && !currentAccount.consent.editSeries) {
     throw new Error('Allow recurring-series changes for this account before applying this edit.');
   }
-  const writableAdapter = createCalendarAdapter(currentAccount);
+  const writableAdapter = createCalendarAdapter(currentAccount, reads.metadata);
   if (!write) {
     if (remote) await writableAdapter.deleteEvent(remote);
     await saveProjection({ ...projection, state: 'deleted', baseLocalHash: null });
@@ -1004,7 +1040,7 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
       dateKey: segment!.entries[0]!.dateKey, endDateKey: segment!.entries.at(-1)!.dateKey,
       state: 'synced', conflict: undefined, pendingSourceScope: undefined,
       pendingSourceOperationId: undefined });
-    const savedColor = await remoteActivityColor(currentAccount, saved);
+    const savedColor = await remoteActivityColor(currentAccount, saved, reads);
     if (savedColor && segment) await setSetting(accountColorReceiptKey(projection), { version: 1,
       calendarId: saved.calendarId, eventId: saved.id, remoteColor: savedColor,
       localColorHash: localActivityColorHash(segment.entries) } satisfies ColorReceipt);
@@ -1049,6 +1085,7 @@ export async function canAcknowledgeInlineMinuteLink(ticket: PendingInlineMinute
 
 async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
   const managedCycle = cycleId !== undefined;
+  const reads: CalendarSyncReads = { metadata: createCalendarMetadataReadCache(), defaultColors: new Map() };
   publish({ running: true, outcome: 'running', phase: 'checking-storage', progress: undefined,
     cycleId: cycleId ?? status.cycleId ?? 0, cycleComplete: false, nativeWriteReady: false, nativePendingCount: 0,
     message: 'Checking account synchronization…' });
@@ -1136,7 +1173,7 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
         message: 'Synchronizing calendar activities…', cycleComplete: false });
       try {
         const current = (await listProjections()).find((item) => item.id === projection.id);
-        if (current) await reconcileProjection(account, current);
+        if (current) await reconcileProjection(account, current, reads);
       }
       catch (error) { errors.push(`${account.label}: ${error instanceof Error ? error.message : 'Calendar sync failed.'}`); }
       completedCalendars++;
@@ -1183,7 +1220,9 @@ export function requestAccountSynchronization() {
 
 export function synchronizeAccounts(): Promise<AccountSyncStatus> {
   if (requestedSyncTimer) { clearTimeout(requestedSyncTimer); requestedSyncTimer = null; }
-  if (activeJob) { rerunRequested = true; return activeJob; }
+  // Polling, manual Sync and the native outbox can all await the same cycle.
+  // Joining does not imply another edit; durable work explicitly requests it.
+  if (activeJob) return activeJob;
   const cycleId = ++syncCycleId;
   const previousLastSyncedAt = status.lastSyncedAt;
   activeJob = (async () => {

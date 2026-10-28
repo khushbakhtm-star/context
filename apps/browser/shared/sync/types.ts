@@ -38,7 +38,9 @@ export type StorageFile = { id: string; name: string };
 export interface LedgerStorage {
   listFiles(): Promise<StorageFile[]>;
   readFile(file: StorageFile): Promise<string>;
-  writeFile(name: string, contents: string): Promise<void>;
+  /** An exact confirmed identity skips downloading the writer's own immutable
+   * batch. Older/custom transports may omit it and retain the prior behavior. */
+  writeFile(name: string, contents: string): Promise<StorageFile | void>;
 }
 
 export type AccountCalendar = {

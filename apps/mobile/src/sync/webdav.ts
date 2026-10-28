@@ -268,9 +268,10 @@ export function createWebDavStorage(
       if (response.status === 412 || response.status === 409) {
         const prior = await this.readFile({ id: url, name });
         if (prior !== contents) throw new Error('An existing immutable WebDAV ledger batch has different contents.');
-        return;
+        return scopedFileUrl(folder, url);
       }
       if (!response.ok) throw new Error(`WebDAV ledger upload failed (${response.status}).`);
+      return scopedFileUrl(folder, url);
     },
   };
 }

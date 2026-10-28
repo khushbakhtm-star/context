@@ -25,6 +25,7 @@ function fixture({ documents = 0, downloads = 0 } = {}) {
     Crypto: { randomUUID: () => `fixture_${++counts.serial}` },
     SecureStore: { getItemAsync: async () => 'fixture-not-a-real-key' }, PASSPHRASE_KEY: 'fixture',
     createLedgerStorage: () => storage, getAccounts: async () => [account],
+    createCalendarMetadataReadCache: () => Object.freeze({}),
     getSetting: async (key, fallback) => settings.has(key) ? settings.get(key) : fallback,
     setSetting: async (key, value) => { settings.set(key, value); },
     getDocumentsForUpload: async (_account, limit) => docs.filter((doc) => !uploaded.has(doc.key)).slice(0, limit),

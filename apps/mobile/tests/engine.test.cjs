@@ -159,6 +159,7 @@ function phone(t, remote, initialAccount = account()) {
             },
           };
           if (resolved === syncFile('providers.ts')) return {
+            createCalendarMetadataReadCache: () => Object.freeze({}),
             createCalendarAdapter: (selectedAccount) => {
               remote.adapterAccounts.push(plain(selectedAccount));
               return remote.adapter;
@@ -373,6 +374,7 @@ test('shared account sync callers observe one exact completion cycle and safe ph
   assert.equal(active.cycleComplete, false); assert.ok(active.cycleId > before.cycleId);
   assert.equal(active.nativeWriteReady, false);
   assert.equal(device.engine.synchronizeAccounts(), first, 'joining callers share the same exact account promise');
+  device.engine.requestAccountSynchronization(); // Actual work, rather than an observer, requests the follow-up pass.
   release(); const final = await first;
   assert.equal(final.outcome, 'success'); assert.equal(final.cycleComplete, true); assert.equal(final.running, false);
   assert.equal(final.cycleId, active.cycleId);

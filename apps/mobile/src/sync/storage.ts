@@ -21,6 +21,15 @@ async function requireStorageConsent(account: ConnectedAccount) {
   if (!current?.consent.ledgerStorage) throw new Error('Ledger storage permission is disabled for this account.');
 }
 
+function confirmedFile(value: unknown, name: string): StorageFile {
+  const file = value as Partial<StorageFile> | null;
+  if (!file || typeof file.id !== 'string' || !file.id.length || file.id.length > 2_048 ||
+      /[\u0000-\u001F\u007F]/.test(file.id) || file.name !== name) {
+    throw new Error('The storage service returned an unexpected uploaded file identity.');
+  }
+  return { id: file.id, name };
+}
+
 async function expectSuccess(response: Response, action: string) {
   if (response.ok) return;
   if (response.status === 401 || response.status === 403) {
@@ -69,12 +78,13 @@ async function googleRead(account: ConnectedAccount, file: StorageFile) {
 async function googleWrite(account: ConnectedAccount, name: string, contents: string) {
   await requireStorageConsent(account);
   validFileName(name);
-  const existing = (await googleList(account, `trashed = false and name = '${name}'`))[0];
+  const existing = (await googleList(account, `trashed = false and name = '${name}'`))
+    .find((file) => file.name === name);
   if (existing) {
     if ((await googleRead(account, existing)) !== contents) {
       throw new Error('A different immutable Context batch already uses this filename.');
     }
-    return;
+    return confirmedFile(existing, name);
   }
 
   // A preallocated ID survives a lost HTTP response. Retrying the same pending batch cannot create
@@ -110,11 +120,20 @@ async function googleWrite(account: ConnectedAccount, name: string, contents: st
     body,
   });
   if (response.status === 409) {
-    const saved = await googleRead(account, { id, name });
+    // A generated ID alone is not a receipt. Confirm the actual remote name/ID
+    // and immutable bytes after a lost create response.
+    const metadata = await accountFetch(account, `${DRIVE}/files/${encodeURIComponent(id)}?fields=id,name`);
+    await expectSuccess(metadata, 'Checking the saved Google upload');
+    const file = confirmedFile(await metadata.json(), name);
+    if (file.id !== id) throw new Error('Google returned a different upload identifier.');
+    const saved = await googleRead(account, file);
     if (saved !== contents) throw new Error('The saved Google batch differs from the pending upload.');
-    return;
+    return file;
   }
   await expectSuccess(response, 'Uploading Google ledger data');
+  const saved = confirmedFile(await response.json(), name);
+  if (saved.id !== id) throw new Error('Google returned a different upload identifier.');
+  return saved;
 }
 
 function validatedGraphNextLink(value: string) {
@@ -180,7 +199,7 @@ async function graphWrite(account: ConnectedAccount, name: string, contents: str
     if ((await graphRead(account, existing)) !== contents) {
       throw new Error('A different immutable Context batch already uses this filename.');
     }
-    return;
+    return confirmedFile(existing, name);
   }
   const root = await graphRoot(account);
   const response = await accountFetch(
@@ -197,9 +216,10 @@ async function graphWrite(account: ConnectedAccount, name: string, contents: str
     if (!matching || (await graphRead(account, matching)) !== contents) {
       throw new Error('The saved Microsoft batch differs from the pending upload.');
     }
-    return;
+    return confirmedFile(matching, name);
   }
   await expectSuccess(response, 'Uploading Microsoft ledger data');
+  return confirmedFile(await response.json(), name);
 }
 
 export function createLedgerStorage(account: ConnectedAccount): LedgerStorage {

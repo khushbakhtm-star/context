@@ -1,4 +1,4 @@
-import { accountFetch } from './accounts';
+import { accountFetch, getAccounts } from './accounts';
 import { isDescriptionLog, readCalendarDescription, type DescriptionLog } from '../utils/calendar-description';
 import type {
   AccountCalendar,
@@ -20,6 +20,58 @@ const HTML_LOG_START = '<!-- context-minute-ledger:start -->';
 const HTML_LOG_END = '<!-- context-minute-ledger:end -->';
 
 type JsonObject = Record<string, any>;
+
+const metadataCacheBrand: unique symbol = Symbol('ContextCalendarMetadataReadCache');
+export type CalendarMetadataReadCache = { readonly [metadataCacheBrand]: true };
+const metadataCaches = new WeakMap<CalendarMetadataReadCache, Map<string, Promise<JsonObject>>>();
+const MAX_METADATA_READS = 128;
+
+/** One sync pass owns this handle. No event, version, write or permission result is cached. */
+export function createCalendarMetadataReadCache(): CalendarMetadataReadCache {
+  const cache: CalendarMetadataReadCache = Object.freeze({ [metadataCacheBrand]: true });
+  metadataCaches.set(cache, new Map());
+  return cache;
+}
+
+function detachedMetadata(value: JsonObject): JsonObject {
+  return JSON.parse(JSON.stringify(value)) as JsonObject;
+}
+
+async function readGoogleMetadata(account: ConnectedAccount, url: string,
+  cache?: CalendarMetadataReadCache): Promise<JsonObject> {
+  const read = () => accountFetch(account, url).then(expectJson);
+  if (!cache) return read();
+  const entries = metadataCaches.get(cache);
+  if (!entries) return Promise.reject(new Error('The calendar metadata read scope is invalid.'));
+  const key = JSON.stringify(['google-display-metadata', account.id, account.provider, account.subject,
+    Boolean(account.consent.calendarRead), Boolean(account.consent.categoryRead), url]);
+  const requireCurrentScope = async () => {
+    const current = (await getAccounts()).find((item) => item.id === account.id &&
+      item.provider === account.provider && item.subject === account.subject);
+    if (!current?.consent.calendarRead ||
+        Boolean(current.consent.categoryRead) !== Boolean(account.consent.categoryRead)) {
+      entries.delete(key);
+      throw new Error('Calendar metadata access changed. Refresh the connected account before continuing.');
+    }
+  };
+  // A cache hit must not skip accountFetch's live consent boundary. The caller
+  // may be an adapter created before a disconnect or category-consent change.
+  await requireCurrentScope();
+  let pending = entries.get(key);
+  if (!pending) {
+    // A bounded pass-local snapshot also coalesces overlapping readers. Errors
+    // are evicted so a later request can recover instead of inheriting a failure.
+    pending = Promise.resolve().then(read).then(detachedMetadata);
+    while (entries.size >= MAX_METADATA_READS) entries.delete(entries.keys().next().value!);
+    entries.set(key, pending);
+    const current = pending;
+    void pending.catch(() => { if (entries.get(key) === current) entries.delete(key); });
+  }
+  // Keep provider objects and callers from mutating another adapter's snapshot.
+  const result = await pending;
+  await requireCurrentScope();
+  return detachedMetadata(result);
+}
 
 function descriptionLogMetadata(value: unknown): DescriptionLog | undefined {
   if (value === undefined) return undefined;
@@ -256,15 +308,15 @@ function googleWrite(write: CalendarEventWrite) {
   };
 }
 
-function googleAdapter(account: ConnectedAccount): AccountCalendarAdapter {
+function googleAdapter(account: ConnectedAccount, metadataReads?: CalendarMetadataReadCache): AccountCalendarAdapter {
   const eventsUrl = (calendarId: string) => `${GOOGLE}/calendars/${encoded(calendarId)}/events`;
   const eventUrl = (calendarId: string, id: string) => `${eventsUrl(calendarId)}/${encoded(id)}`;
   const withDisplayColors = async (events: RemoteCalendarEvent[], calendarId: string) => {
     const needPalette = events.some((event) => event.googleColorId && !event.googleEventLabelId && !event.displayColor);
     const needLabels = account.consent.categoryRead && events.some((event) => event.googleEventLabelId && !event.displayColor);
     const [palette, labels] = await Promise.allSettled([
-      needPalette ? accountFetch(account, `${GOOGLE}/colors`).then(expectJson) : Promise.resolve(null),
-      needLabels ? accountFetch(account, query(`${GOOGLE}/calendars/${encoded(calendarId)}`, { eventLabelVersion: '1' })).then(expectJson) : Promise.resolve(null),
+      needPalette ? readGoogleMetadata(account, `${GOOGLE}/colors`, metadataReads) : Promise.resolve(null),
+      needLabels ? readGoogleMetadata(account, query(`${GOOGLE}/calendars/${encoded(calendarId)}`, { eventLabelVersion: '1' }), metadataReads) : Promise.resolve(null),
     ]);
     const eventColors = palette.status === 'fulfilled' ? palette.value?.event : undefined;
     const eventLabels = labels.status === 'fulfilled' ? labels.value?.labelProperties?.eventLabels : undefined;
@@ -724,8 +776,8 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
   return adapter;
 }
 
-export function createCalendarAdapter(account: ConnectedAccount): AccountCalendarAdapter {
-  if (account.provider === 'google') return googleAdapter(account);
+export function createCalendarAdapter(account: ConnectedAccount, metadataReads?: CalendarMetadataReadCache): AccountCalendarAdapter {
+  if (account.provider === 'google') return googleAdapter(account, metadataReads);
   if (account.provider === 'microsoft') return microsoftAdapter(account);
   throw new Error('This account supports encrypted ledger storage only. Connect Google or Microsoft for calendar access.');
 }

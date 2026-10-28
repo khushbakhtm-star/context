@@ -1,0 +1,1 @@
+Reduce duplicate synchronization passes and repeated calendar color requests. Avoid downloading immutable ledger batches just uploaded by this phone. New edits, permissions, encryption and calendar conflict checks remain in force.
