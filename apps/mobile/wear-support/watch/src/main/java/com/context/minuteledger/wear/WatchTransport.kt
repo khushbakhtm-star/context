@@ -22,11 +22,24 @@ import java.util.concurrent.TimeUnit
 object WatchTransport {
     const val ACTION_CHANGED = "com.context.minuteledger.wear.CHANGED"
     private val worker = Executors.newSingleThreadExecutor()
+    private val outgoing = Executors.newSingleThreadExecutor()
+    private val acknowledgements = Executors.newSingleThreadExecutor()
+    private val incoming = HashSet<String>()
+    @Volatile private var pendingApplication: Context? = null
     private const val ROOT = "/context/v1/"
     @Volatile var lastError: String? = null
         private set
+    private val pendingSender = CoalescedPendingWork({ work -> outgoing.execute(work) }) {
+        pendingApplication?.let { app ->
+            runCatching { uploadPending(app); lastError = null }
+                .onFailure { lastError = "Connection paused. Your edits are saved on this watch." }
+            changed(app)
+        }
+    }
 
-    fun synchronize(context: Context, dateKey: String) = worker.execute {
+    fun synchronize(context: Context, dateKey: String) {
+      sendPending(context)
+      worker.execute {
         val app = context.applicationContext
         runCatching {
             requireAvailable(app)
@@ -43,10 +56,10 @@ object WatchTransport {
                     }
                 }
             } finally { items.release() }
-            uploadPending(app)
             lastError = null
         }.onFailure { lastError = "Connection paused. Your edits are saved on this watch." }
         changed(app)
+      }
     }
 
     fun requestDay(context: Context, dateKey: String) = worker.execute {
@@ -63,18 +76,25 @@ object WatchTransport {
         changed(app)
     }
 
-    fun sendPending(context: Context) = worker.execute {
-        val app = context.applicationContext
-        runCatching { uploadPending(app); lastError = null }
-            .onFailure { lastError = "Connection paused. Your edits are saved on this watch." }
-        changed(app)
+    fun sendPending(context: Context) {
+        pendingApplication = context.applicationContext
+        pendingSender.request()
     }
 
-    fun enqueueReceive(context: Context, path: String, asset: Asset) = worker.execute {
+    fun enqueueReceive(context: Context, path: String, asset: Asset) {
+      val key = path + "\n" + (asset.digest ?: return)
+      synchronized(incoming) {
+          if (key in incoming || incoming.size >= 128) return
+          incoming.add(key)
+      }
+      val receiver = if (path.startsWith(ROOT + "phone/ack/")) acknowledgements else worker
+      receiver.execute {
         val app = context.applicationContext
-        runCatching { receive(app, path, asset); lastError = null }
+        try { runCatching { receive(app, path, asset); lastError = null }
             .onFailure { lastError = "Could not read the phone response. Your watch edits are safe." }
-        changed(app)
+          changed(app)
+        } finally { synchronized(incoming) { incoming.remove(key) } }
+      }
     }
 
     private fun requireAvailable(context: Context) {

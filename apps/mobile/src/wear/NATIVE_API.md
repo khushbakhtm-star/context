@@ -13,7 +13,9 @@ All methods below return promises. The Expo `onInboxChanged` event contains
 - `scanPendingAsync(): Promise<void>` enumerates current `/context/v1/watch/` DataItems and
   receives their Assets through the same bounded durable inbox as listener events.
 - `drainInboxAsync(): Promise<Array<{id:string,path:string,payload:string,receivedAt:number}>>`
-  returns at most 32 records, without removing them. `id` is an opaque local record key;
+  returns at most 128 records (the existing 8 MiB inbox bound), without removing them.
+  Returning the whole bounded inbox keeps older replies awaiting radio delivery from hiding a new edit.
+  `id` is an opaque local record key;
   `path` is the source DataItem path and `payload` is UTF-8 Asset JSON.
 - `acknowledgeInboxAsync(id:string): Promise<void>` removes that local record and its source
   DataItem only after JavaScript has durably processed it and successfully published the reply.

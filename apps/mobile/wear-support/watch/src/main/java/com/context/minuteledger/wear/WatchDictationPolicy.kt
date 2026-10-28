@@ -1,0 +1,52 @@
+package com.context.minuteledger.wear
+
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+enum class WatchSpeechBackend { ON_DEVICE, SYSTEM, UNAVAILABLE }
+enum class WatchSpeechFailure { NETWORK, MODEL, MICROPHONE, EMPTY, BUSY, UNAVAILABLE }
+
+/** Clock display never retargets the immutable minute being recorded. */
+object WatchDictationPolicy {
+    fun backend(api: Int, onDeviceAvailable: Boolean, systemAvailable: Boolean,
+        systemExplicitlyChosen: Boolean = false): WatchSpeechBackend = when {
+        systemExplicitlyChosen && systemAvailable -> WatchSpeechBackend.SYSTEM
+        !systemExplicitlyChosen && api >= 31 && onDeviceAvailable -> WatchSpeechBackend.ON_DEVICE
+        else -> WatchSpeechBackend.UNAVAILABLE
+    }
+    fun clock(current: LocalDateTime, twelveHour: Boolean = false): String = current.format(
+        DateTimeFormatter.ofPattern(if (twelveHour) "h:mm:ss a" else "HH:mm:ss", Locale.ROOT))
+    fun minuteLabel(target: Coordinate, twelveHour: Boolean = false): String {
+        val current = LocalDateTime.parse("${target.dateKey}T00:00:00").plusMinutes(target.minuteIndex.toLong())
+        val time = current.format(DateTimeFormatter.ofPattern(if (twelveHour) "h:mm a" else "HH:mm", Locale.ROOT))
+        return "Note ${target.dateKey} $time"
+    }
+    /** Unconfirmed words may become an editable draft, never a saved operation. */
+    fun preservedDraft(pending: SpeechSession?, requestCode: Int, editor: EditorSession?,
+        originalText: String, currentText: String?, partial: String?): String? {
+        if (!SpeechSessionGuard.accepts(pending, requestCode, editor) || currentText != originalText ||
+            partial == null || partial.length > DictationSavePolicy.MAX_TEXT_LENGTH) return null
+        return partial.trim().takeIf { it.isNotEmpty() }
+    }
+    fun failure(kind: WatchSpeechFailure, onDevice: Boolean): String = when (kind) {
+        WatchSpeechFailure.MODEL -> if (onDevice) "Offline speech is unavailable for this language on this watch. Tap Type, or explicitly choose system speech."
+            else "This system speech provider cannot use the selected language. Tap Type, or change the watch speech language."
+        WatchSpeechFailure.NETWORK -> if (onDevice) "On-watch speech could not finish. Tap Type or retry."
+            else "System speech could not connect. It may need internet on the watch or paired phone. Tap Type or retry."
+        WatchSpeechFailure.MICROPHONE -> "Microphone access is unavailable. Tap Type, or allow microphone access in watch Settings."
+        WatchSpeechFailure.EMPTY -> "No words were confirmed. Tap Type or try speaking again."
+        WatchSpeechFailure.BUSY -> "Speech recognition is busy. Tap Type or retry."
+        WatchSpeechFailure.UNAVAILABLE -> "On-watch speech is unavailable. Tap Type, or explicitly choose system speech if offered."
+    }
+}
+
+/** A cancelled/retried recognizer cannot deliver its late callback to a new run. */
+class WatchDictationRunGuard {
+    private var generation = 0
+    private var open = true
+    fun begin(): Int { check(open); generation += 1; return generation }
+    fun accepts(token: Int): Boolean = open && token == generation
+    fun invalidate() { generation += 1 }
+    fun close() { open = false; generation += 1 }
+}

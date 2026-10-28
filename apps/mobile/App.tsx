@@ -1437,7 +1437,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') showSyncDetails(); }}
       onPress={() => { binderPress.cancel(); if (syncLongPress.current) { syncLongPress.current = false; return; } if (!syncing) onSync(); }} style={controlStyle}>
       <View style={styles.syncIconWrap}>
-        {syncing ? <ActivityIndicator size="small" color={colors.graphite} /> : <CalendarHeaderIcon name="sync" />}
+        <CalendarHeaderIcon name="sync" active={syncing} />
         {syncError ? <Text accessible={false} importantForAccessibility="no" allowFontScaling={false}
           style={styles.syncAttention}>!</Text> : null}
       </View>

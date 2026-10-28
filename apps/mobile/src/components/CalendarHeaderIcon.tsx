@@ -5,7 +5,9 @@ import { useAppTheme } from '../appearance';
 import type { AppColors } from '../theme';
 
 /** Decorative monochrome symbols; the containing button provides its accessible name. */
-export function CalendarHeaderIcon({ name }: { name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings' }) {
+export function CalendarHeaderIcon({ name, active = false }: {
+  name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings'; active?: boolean;
+}) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   return <View pointerEvents="none" accessible={false} style={styles.icon}>
@@ -15,7 +17,7 @@ export function CalendarHeaderIcon({ name }: { name: 'back' | 'menu' | 'search' 
     </> : name === 'menu' ? <>{[4, 11, 18].map((top) => <View key={top} style={[styles.menuLine, { top }]} />)}</> : name === 'search' ? <>
       <View style={styles.searchRing} /><View style={styles.searchHandle} />
     </> : name === 'sync' ? <>
-      <View style={styles.syncUpper} /><View style={styles.syncLower} />
+      <View testID={active ? 'sync-loop-closed' : 'sync-loop-open'} style={[styles.syncRing, !active && styles.syncOpen]} />
       <View style={[styles.syncArrow, { left: 17, top: 2, transform: [{ rotate: '45deg' }] }]} />
       <View style={[styles.syncArrow, { left: 17, top: 6, transform: [{ rotate: '-45deg' }] }]} />
       <View style={[styles.syncArrow, { left: 1, top: 16, transform: [{ rotate: '-45deg' }] }]} />
@@ -50,10 +52,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   graphAxes: { position: 'absolute', left: 1, bottom: 1, width: 22, height: 22,
     borderLeftWidth: 1.5, borderBottomWidth: 1.5, borderColor: colors.graphite },
   graphBar: { position: 'absolute', bottom: 4, width: 3, borderRadius: 0.5, backgroundColor: colors.graphite },
-  syncUpper: { position: 'absolute', left: 3, top: 4, width: 18, height: 6,
-    borderTopWidth: 2, borderLeftWidth: 2, borderTopLeftRadius: 5, borderColor: colors.graphite },
-  syncLower: { position: 'absolute', left: 3, top: 14, width: 18, height: 6,
-    borderBottomWidth: 2, borderRightWidth: 2, borderBottomRightRadius: 5, borderColor: colors.graphite },
+  syncRing: { position: 'absolute', left: 3, top: 3, width: 18, height: 18,
+    borderWidth: 2, borderRadius: 9, borderColor: colors.graphite },
+  syncOpen: { borderLeftColor: 'transparent', borderRightColor: 'transparent' },
   syncArrow: { position: 'absolute', width: 6, height: 2, borderRadius: 1, backgroundColor: colors.graphite },
   printPaperTop: { position: 'absolute', left: 6, top: 1, width: 12, height: 8,
     borderWidth: 2, borderBottomWidth: 0, borderColor: colors.graphite, borderTopLeftRadius: 1, borderTopRightRadius: 1 },

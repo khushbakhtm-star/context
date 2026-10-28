@@ -2,10 +2,12 @@ package com.context.minuteledger.wear
 
 import android.app.Activity
 import android.app.Dialog
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -55,6 +57,8 @@ class MinuteActivity : Activity() {
         val autoNow: Boolean, val inputFocused: Boolean)
     private var pendingRestore: RestoredEditor? = null
     private var pendingSpeech: SpeechSession? = null
+    private var watchDictation: WatchDictationDialog? = null
+    private var microphoneRequestSession: EditorSession? = null
     private var retryDictation: DictationSavePlan? = null
     private var nextSpeechRequest = SPEECH
     private var preserveSpeechResume = false
@@ -152,7 +156,8 @@ class MinuteActivity : Activity() {
                 val speech = SpeechSession(savedInstanceState.getInt("speechRequest"),
                     savedInstanceState.getString("speechSessionId") ?: session.sessionId, target,
                     savedInstanceState.getString("speechOperationId") ?: java.util.UUID.randomUUID().toString())
-                if (SpeechSessionGuard.accepts(speech, speech.requestCode, session)) pendingSpeech = speech
+                if (!savedInstanceState.getBoolean("speechInApp", false) &&
+                    SpeechSessionGuard.accepts(speech, speech.requestCode, session)) pendingSpeech = speech
             }
             savedInstanceState.getString("dictationRetryText")?.let { retryText ->
                 val retrySpeech = SpeechSession(savedInstanceState.getInt("dictationRetryRequest", SPEECH),
@@ -182,6 +187,7 @@ class MinuteActivity : Activity() {
     }
     override fun onStop() {
         visible = false; wasStopped = true; launchGeneration++
+        microphoneRequestSession = null
         handler.removeCallbacks(ticker); unregisterReceiver(receiver); super.onStop()
     }
     override fun onResume() {
@@ -196,10 +202,13 @@ class MinuteActivity : Activity() {
         else { render(); centerMinute() }
     }
     override fun onPause() {
-        resumed = false; launchGeneration++; super.onPause()
+        resumed = false; launchGeneration++
+        if (watchDictation != null) { preserveSpeechResume = true; watchDictation?.cancel(preserveDraft = true) }
+        super.onPause()
     }
     override fun onDestroy() {
         visible = false; resumed = false; launchGeneration++
+        microphoneRequestSession = null; watchDictation?.cancel(); watchDictation = null
         editorDialog?.dismiss(); pickers.toList().forEach { it.dismiss() }
         super.onDestroy()
     }
@@ -213,6 +222,9 @@ class MinuteActivity : Activity() {
         }
     }
     override fun onSaveInstanceState(out: Bundle) {
+        // Some platform versions can snapshot before the usual pause callback.
+        // Stop the microphone and hand off only an editable draft before saving.
+        if (watchDictation != null) { preserveSpeechResume = true; watchDictation?.cancel(preserveDraft = true) }
         out.putString("date", selected.dateKey); out.putInt("minute", selected.minuteIndex); out.putBoolean("follow", followingNow)
         out.putBoolean("deferredNow", deferredNow); out.putInt("nextSpeechRequest", nextSpeechRequest)
         out.putBoolean("preserveSpeechResume", preserveSpeechResume)
@@ -229,6 +241,7 @@ class MinuteActivity : Activity() {
         out.putBoolean("editorAutoNow", pendingRestore?.autoNow ?: editorAutoNow)
         out.putBoolean("editorInputFocused", pendingRestore?.inputFocused ?: (editor?.hasFocus() == true))
         pendingSpeech?.let {
+            out.putBoolean("speechInApp", watchDictation != null)
             out.putInt("speechRequest", it.requestCode); out.putString("speechSessionId", it.editorSessionId)
             out.putString("speechOperationId", it.operationId)
         }
@@ -436,17 +449,7 @@ class MinuteActivity : Activity() {
         val tools = row()
         tools.addView(colorButton, LinearLayout.LayoutParams(0, dp(WatchLayout.INPUT_TOOLS), 1f))
         tools.addView(button("Dictate", "Dictate a note for this selected minute") {
-            try {
-                val request = nextSpeechRequest
-                nextSpeechRequest = if (request >= 65535) SPEECH else request + 1
-                pendingSpeech = SpeechSession(request, session.sessionId, target)
-                @Suppress("DEPRECATION")
-                startActivityForResult(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    .putExtra(RecognizerIntent.EXTRA_PROMPT, "${target.dateKey} ${timeLabel(target.minuteIndex)}"), request)
-            } catch (_: android.content.ActivityNotFoundException) {
-                pendingSpeech = null; toast("Dictation is unavailable. Tap the note to type.")
-            }
+            beginWatchDictation(session)
         }, LinearLayout.LayoutParams(0, dp(WatchLayout.INPUT_TOOLS), 1f))
         body.addView(tools)
         val actions = row()
@@ -460,6 +463,7 @@ class MinuteActivity : Activity() {
         editorDialog = dialog
         dialog.setOnDismissListener {
             if (editorDialog === dialog && editorSession?.sessionId == session.sessionId) {
+                watchDictation?.cancel(); microphoneRequestSession = null
                 editing = null; editor = null; editorDialog = null; editorSession = null; pendingSpeech = null; retryDictation = null
                 if (visible && !isChangingConfigurations) applyLaunch(LaunchTrigger.EDITOR_CLOSED)
             }
@@ -480,16 +484,71 @@ class MinuteActivity : Activity() {
             LinearLayout.LayoutParams(-1, dp(32)))
         showPicker(dialog)
     }
-    @Deprecated("Uses the system speech activity for compatibility with Wear OS 3 and later")
+    private fun beginWatchDictation(session: EditorSession) {
+        if (!visible || !resumed || isFinishing || isDestroyed ||
+            editorSession?.sessionId != session.sessionId || editing != session.coordinate || pendingSpeech != null) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            microphoneRequestSession = session; preserveSpeechResume = true
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), MICROPHONE)
+            return
+        }
+        val request = nextSpeechRequest
+        nextSpeechRequest = if (request >= 65535) SPEECH else request + 1
+        val speech = SpeechSession(request, session.sessionId, session.coordinate)
+        pendingSpeech = speech
+        val originalText = editor?.text?.toString() ?: ""
+        (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+            .hideSoftInputFromWindow(editor?.windowToken, 0)
+        lateinit var screen: WatchDictationDialog
+        screen = WatchDictationDialog(this, session.coordinate, twelveHourClock,
+            isCurrent = { visible && resumed && !isFinishing && !isDestroyed && pendingSpeech == speech &&
+                SpeechSessionGuard.accepts(speech, request, editorSession) },
+            onConfirmed = { text ->
+                if (watchDictation === screen) watchDictation = null
+                acceptDictationResult(request, true, text)
+            },
+            onClosed = { type, partial ->
+                if (watchDictation === screen) watchDictation = null
+                if (pendingSpeech == speech) {
+                    WatchDictationPolicy.preservedDraft(speech, request, editorSession,
+                        originalText, editor?.text?.toString(), partial)?.let { text ->
+                        editor?.setText(text); editor?.setSelection(editor?.text?.length ?: 0)
+                        pendingRestore = pendingRestore?.copy(text = text)
+                    }
+                    pendingSpeech = null
+                }
+                if (type && visible && resumed && editorSession?.sessionId == session.sessionId) {
+                    editor?.requestFocus()
+                    (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                        .showSoftInput(editor, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                }
+            })
+        watchDictation = screen
+        screen.show()
+    }
+    @Deprecated("Activity runtime permission callback retained for supported Wear OS versions")
+    override fun onRequestPermissionsResult(request: Int, permissions: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(request, permissions, results)
+        if (request != MICROPHONE) return
+        val session = microphoneRequestSession; microphoneRequestSession = null
+        if (session == null || editorSession?.sessionId != session.sessionId || editing != session.coordinate) return
+        if (permissions.indexOf(Manifest.permission.RECORD_AUDIO).let { it >= 0 && results.getOrNull(it) == PackageManager.PERMISSION_GRANTED }) {
+            if (visible && resumed) beginWatchDictation(session)
+            else toast("Microphone allowed. Tap Dictate when ready.")
+        } else toast("Microphone access was not allowed. Tap the note to type.")
+    }
+    @Deprecated("Retained only for results already launched by an older restored session")
     override fun onActivityResult(request: Int, result: Int, data: Intent?) {
         super.onActivityResult(request, result, data)
+        acceptDictationResult(request, result == RESULT_OK, data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull())
+    }
+    private fun acceptDictationResult(request: Int, successful: Boolean, rawText: String?) {
         val speech = pendingSpeech
         val session = editorSession
         if (!SpeechSessionGuard.accepts(speech, request, session)) return
         preserveSpeechResume = !resumed
         pendingSpeech = null
-        val rawText = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-        val plan = DictationSavePolicy.prepare(speech, request, session, result == RESULT_OK, rawText) ?: return
+        val plan = DictationSavePolicy.prepare(speech, request, session, successful, rawText) ?: return
         // Keep the confirmed words editable if durable local storage needs a retry.
         pendingRestore = pendingRestore?.copy(text = plan.text)
         editor?.setText(plan.text); editor?.setSelection(editor?.text?.length ?: 0)
@@ -599,6 +658,7 @@ class MinuteActivity : Activity() {
         private const val LAUNCH_ACTION = "com.context.minuteledger.action"
         private const val RECORD_NOW = "com.context.minuteledger.action.RECORD_NOW"
         private const val SPEECH = 100
+        private const val MICROPHONE = 99
         private val BACKGROUND = Color.parseColor("#08090B")
         private val PANEL = Color.parseColor("#202024")
         private val FOREGROUND = Color.parseColor("#F3EFF7")

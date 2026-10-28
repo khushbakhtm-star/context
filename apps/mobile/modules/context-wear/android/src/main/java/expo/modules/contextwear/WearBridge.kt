@@ -22,7 +22,6 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
@@ -42,12 +41,19 @@ internal object WearBridge {
   private val uuidValue = Regex("^$uuid$")
   private val dateValue = Regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
   private val transport = ReentrantLock()
+  private val scan = ReentrantLock()
+  private val sentAtLock = Any()
+  private val consentLock = Any()
+  private var consentEpoch = 0L
   private val admission = Any()
   private val admitted = HashSet<String>()
   private val scanScheduled = AtomicBoolean(false)
   private val withdrawalScheduled = AtomicBoolean(false)
   private val disabledWithdrawn = AtomicBoolean(false)
-  private val worker = Executors.newSingleThreadExecutor { work -> Thread(work, "ContextWearInbox").apply { isDaemon = true } }
+  private val workers = WearWorkLanes()
+  private val publications = WearPublicationLanes()
+  // Enumeration may wait on old Assets. A fresh DataEvent has bounded admission
+  // and its own receiver so a nearby Bluetooth edit does not wait behind it.
   private val observers = ConcurrentHashMap<String, (Int) -> Unit>()
   @Volatile private var lastError: String? = null
   private var lastSentAt = 0L
@@ -87,7 +93,10 @@ internal object WearBridge {
   fun setEnabled(context: Context, enabled: Boolean) {
     requireIdentity(context)
     // Revocation is durable immediately, even while an earlier SDK call completes.
-    WearInbox.setEnabled(context, enabled)
+    synchronized(consentLock) {
+      consentEpoch++
+      WearInbox.setEnabled(context, enabled)
+    }
     disabledWithdrawn.set(false)
     lastError = null
     if (enabled) scheduleScan(context.applicationContext)
@@ -97,9 +106,9 @@ internal object WearBridge {
 
   private fun scheduleWithdrawal(context: Context) {
     if (disabledWithdrawn.get() || !withdrawalScheduled.compareAndSet(false, true)) return
-    worker.execute {
+    workers.maintain {
       try {
-        transport.withLock {
+        publications.withdrawAll {
           if (!WearInbox.enabled(context)) {
             requireAvailable(context)
             val local = waitFor(Wearable.getNodeClient(context).localNode)
@@ -142,14 +151,14 @@ internal object WearBridge {
       if (admitted.size >= WearInbox.MAX_RECORDS) { lastError = "ERR_WEAR_BACKPRESSURE"; return }
       admitted.add(key)
     }
-    worker.execute {
-      try { transport.withLock { receive(application, envelope) } }
+    workers.receive {
+      try { receive(application, envelope) }
       catch (failure: Throwable) { error(failure) }
       finally { synchronized(admission) { admitted.remove(key) } }
     }
   }
 
-  fun scanPending(context: Context) = transport.withLock {
+  fun scanPending(context: Context) = scan.withLock {
     requireEnabled(context)
     requireAvailable(context)
     val uri = Uri.parse("wear://*$WATCH_PREFIX")
@@ -236,7 +245,7 @@ internal object WearBridge {
 
   private fun scheduleScan(context: Context) {
     if (!scanScheduled.compareAndSet(false, true)) return
-    worker.execute {
+    workers.maintain {
       try { if (WearInbox.enabled(context)) scanPending(context) }
       catch (failure: Throwable) { error(failure) }
       finally { scanScheduled.set(false) }
@@ -266,8 +275,8 @@ internal object WearBridge {
     publish(context, "$PHONE_PREFIX" + "ack/$operation", payload, ACK_LIMIT)
   }
 
-  private fun publish(context: Context, path: String, payload: String, limit: Int) = transport.withLock {
-    requireEnabled(context)
+  private fun publish(context: Context, path: String, payload: String, limit: Int) {
+    val epoch = synchronized(consentLock) { requireEnabled(context); consentEpoch }
     requireAvailable(context)
     val encoded = StandardCharsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
       .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(payload))
@@ -277,16 +286,20 @@ internal object WearBridge {
     val request = PutDataMapRequest.create(path)
     request.dataMap.putInt("protocolVersion", 1)
     request.dataMap.putAsset("payload", Asset.createFromBytes(bytes))
-    lastSentAt = maxOf(lastSentAt + 1, System.currentTimeMillis())
-    request.dataMap.putLong("sentAt", lastSentAt)
+    val sentAt = synchronized(sentAtLock) {
+      lastSentAt = maxOf(lastSentAt + 1, System.currentTimeMillis())
+      lastSentAt
+    }
+    request.dataMap.putLong("sentAt", sentAt)
     requireEnabled(context)
     val client = Wearable.getDataClient(context)
-    val published = waitFor(client.putDataItem(request.asPutDataRequest().setUrgent()))
-    // Consent may have been revoked while the SDK task was in flight. The caller
-    // receives no successful publication and the just-created item is withdrawn.
-    if (!WearInbox.enabled(context)) {
-      waitFor(client.deleteDataItems(published.uri, DataClient.FILTER_LITERAL))
-      throw WearBridgeFailure("ERR_WEAR_DISABLED")
+    publications.withPath(path) {
+      publishWithWearConsent(
+        enabled = { synchronized(consentLock) { consentEpoch == epoch && WearInbox.enabled(context) } },
+        disabled = { throw WearBridgeFailure("ERR_WEAR_DISABLED") },
+        publish = { waitFor(client.putDataItem(request.asPutDataRequest().setUrgent())) },
+        withdraw = { published -> waitFor(client.deleteDataItems(published.uri, DataClient.FILTER_LITERAL)); Unit }
+      )
     }
   }
 

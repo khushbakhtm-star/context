@@ -1,0 +1,1 @@
+Use static sync arrows instead of an animated header indicator. Prioritize saved watch notes over full-day refreshes. The separate watch update adds an in-app dictation clock and available on-device speech, with explicit system-voice fallback. Device speech support and connectivity still apply.

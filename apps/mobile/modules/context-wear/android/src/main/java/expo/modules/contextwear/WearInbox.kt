@@ -66,6 +66,7 @@ internal object WearInbox {
 
   @Synchronized
   fun put(context: Context, path: String, payload: String, sourceUri: String, digest: String): Boolean {
+    if (!enabled(context)) throw WearBridgeFailure("ERR_WEAR_DISABLED")
     val id = sha256((sourceUri + "\n" + sha256(payload.toByteArray(StandardCharsets.UTF_8))).toByteArray(StandardCharsets.UTF_8))
     val target = File(directory(context), "$id.json")
     if (target.isFile) return false
@@ -81,7 +82,7 @@ internal object WearInbox {
 
   @Synchronized
   fun drain(context: Context): List<InboxRecord> = files(context).map(::read)
-    .sortedWith(compareBy<InboxRecord> { it.receivedAt }.thenBy { it.id }).take(32)
+    .sortedWith(compareBy<InboxRecord> { it.receivedAt }.thenBy { it.id }).take(MAX_RECORDS)
 
   @Synchronized
   fun get(context: Context, id: String): InboxRecord? {

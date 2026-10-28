@@ -41,9 +41,9 @@ test('watch project generation carries its independent release identity, approve
   project.generateWear(root, output, { version: '0.9.0', android: { versionCode: 91 } });
   const gradle = fs.readFileSync(path.join(output, 'wear/build.gradle'), 'utf8');
   assert.match(gradle, /applicationId 'com\.context\.minuteledger'/);
-  assert.match(gradle, /versionCode 100011 as int/);
-  assert.match(gradle, /versionName "0\.1\.10"/);
-  assert.deepEqual(JSON.parse(JSON.stringify(project.readWatchVersion(root))), { version: '0.1.10', versionCode: 100011 });
+  assert.match(gradle, /versionCode 100012 as int/);
+  assert.match(gradle, /versionName "0\.1\.11"/);
+  assert.deepEqual(JSON.parse(JSON.stringify(project.readWatchVersion(root))), { version: '0.1.11', versionCode: 100012 });
   project.generateWear(root, output, { version: '22.1.0', android: { versionCode: 500 } });
   assert.equal(fs.readFileSync(path.join(output, 'wear/build.gradle'), 'utf8'), gradle,
     'phone version changes cannot silently change the watch package identity');
@@ -54,7 +54,10 @@ test('watch project generation carries its independent release identity, approve
     hash(fs.readFileSync(path.join(root, 'assets/context-app-logo.png'))));
   const manifest = fs.readFileSync(path.join(output, 'wear/src/main/AndroidManifest.xml'), 'utf8');
   assert.match(manifest, /android\.hardware\.type\.watch/);
-  assert.doesNotMatch(manifest, /RECORD_AUDIO/);
+  assert.match(manifest, /<uses-permission android:name="android\.permission\.RECORD_AUDIO"\s*\/>/);
+  assert.match(manifest, /<queries>[\s\S]*android\.speech\.RecognitionService[\s\S]*<\/queries>/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, 'modules/context-wear/android/src/main/AndroidManifest.xml'), 'utf8'),
+    /RECORD_AUDIO|RecognitionService/, 'watch microphone permission must not be added to the phone bridge');
   assert.doesNotThrow(() => project.generateWear(root, output, {}), 'phone metadata is not a watch version source');
 });
 

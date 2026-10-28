@@ -25,6 +25,16 @@ let work: Promise<unknown> = Promise.resolve();
 let consentWrites: Promise<unknown> = Promise.resolve();
 let draining: Promise<void> | null = null;
 let drainAgain = false;
+// Radio publication and full-day snapshots must never hold the SQLite inbox lane.
+// Every queued reply still has its durable receipt/source item until acknowledged.
+let replies: Promise<unknown> = Promise.resolve();
+let snapshots: Promise<unknown> = Promise.resolve();
+let scanning: Promise<void> | null = null;
+let checkingStatus: Promise<void> | null = null;
+const backgroundItems = new Map<string, Promise<void>>();
+const replyJobs = new Map<string, Promise<void>>();
+const dayJobs = new Map<string, { promise: Promise<void>; again: boolean; epoch: number }>();
+const MAX_BACKGROUND_JOBS = 128;
 const listeners = new Set<() => void>();
 const changes = new Set<(affectedDates: string[]) => void>();
 const receiptKey = (id: string) => `wear.receipt.${id}`;
@@ -37,6 +47,43 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
   const next = work.then(task, task); work = next.then(() => undefined, () => undefined); return next;
 }
 function current(epoch: number) { return state.enabled && generation === epoch && AppState.currentState === 'active'; }
+function backgroundError(epoch: number, error: unknown) {
+  if (current(epoch)) update({ error: error instanceof Error ? error.message : 'A watch reply is waiting to reconnect.' });
+}
+function queueReply(receipt: Receipt, epoch: number) {
+  const key = `${epoch}:${receipt.operationId}:${receipt.fingerprint}:${receipt.status}`;
+  const existing = replyJobs.get(key); if (existing) return existing;
+  if (replyJobs.size >= MAX_BACKGROUND_JOBS) return Promise.reject(new Error('Watch replies remain queued for retry.'));
+  const run = () => acknowledge(receipt, epoch);
+  const job = replies.then(run, run).finally(() => { if (replyJobs.get(key) === job) replyJobs.delete(key); });
+  replies = job.catch(() => {}); replyJobs.set(key, job); return job;
+}
+function queueInboxReply(item: WearInboxItem, epoch: number, run: () => Promise<void>) {
+  if (backgroundItems.has(item.id)) return;
+  if (backgroundItems.size >= MAX_BACKGROUND_JOBS) return;
+  const job = Promise.resolve().then(run).catch((error) => backgroundError(epoch, error))
+    .finally(() => {
+      if (backgroundItems.get(item.id) === job) backgroundItems.delete(item.id);
+      if (state.enabled && generation !== epoch && AppState.currentState === 'active') void drainWearInbox({ scan: false });
+    });
+  backgroundItems.set(item.id, job);
+}
+function scanWearInbox(epoch: number) {
+  if (scanning || !wearNative || !current(epoch)) return;
+  const job = wearNative.scanPendingAsync().catch((error) => backgroundError(epoch, error)).finally(() => {
+    if (scanning === job) scanning = null;
+    if (state.enabled && AppState.currentState === 'active') void drainWearInbox({ scan: generation !== epoch });
+  });
+  scanning = job;
+}
+function checkNativeStatus(epoch: number) {
+  if (checkingStatus || !wearNative || !current(epoch)) return;
+  const job = wearNative.getStatusAsync().then((status) => {
+    if (current(epoch)) update({ connectedNodeCount: status.connectedNodeCount, pendingCount: status.pendingCount,
+      ...(status.error ? { error: 'The watch connection is waiting. Keep both devices nearby.' } : {}) });
+  }).catch((error) => backgroundError(epoch, error)).finally(() => { if (checkingStatus === job) checkingStatus = null; });
+  checkingStatus = job;
+}
 function cellValue(cell: SpreadsheetCellState): WearCell {
   return { minuteIndex: cell.minuteIndex, text: cell.entry?.text ?? '', categoryId: cell.entry?.categoryId ?? 'unaccounted',
     version: wearCellVersion(cell.version?.minuteRevision ?? null, cell.version?.formatRevision ?? null) };
@@ -107,7 +154,7 @@ async function conflict(operation: WearEdit, fingerprint: string, epoch: number)
     minuteIndex: operation.minuteIndex, status: 'conflict', pendingAck: true, request: operation,
     message: 'The phone minute changed. Review both notes in Context on the phone.' };
   await setSetting(receiptKey(operation.operationId), receipt);
-  await refreshConflicts(); await acknowledge(receipt, epoch);
+  await refreshConflicts(); return receipt;
 }
 async function applyOperation(operation: WearEdit, fingerprint: string, epoch: number,
   resolution?: { choice: 'watch' | 'append' | 'phone'; expectedPhoneVersion: string }) {
@@ -152,13 +199,12 @@ async function applyOperation(operation: WearEdit, fingerprint: string, epoch: n
     }
     return { receipt, changed: changed.textChanged };
   });
-  if (!result) { await conflict(operation, fingerprint, epoch); return; }
+  if (!result) return conflict(operation, fingerprint, epoch);
   if (result.changed) {
     for (const listener of changes) { try { listener([operation.dateKey]); } catch { /* local observers */ } }
     void retryInlineMinuteLinks();
   }
-  await acknowledge(result.receipt, epoch);
-  await sendDay(operation.dateKey, epoch);
+  return result.receipt;
 }
 async function processItem(item: WearInboxItem, epoch: number) {
   if (!wearNative || !current(epoch)) return;
@@ -167,12 +213,17 @@ async function processItem(item: WearInboxItem, epoch: number) {
   catch { update({ error: 'An invalid watch item was ignored. Notes saved on the watch remain there.' });
     await wearNative.acknowledgeInboxAsync(item.id); return; }
   if (parsed.kind === 'request') {
-    await sendDay(parsed.value.dateKey, epoch, parsed.value.requestId);
-    for (const id of parsed.value.pendingOperationIds ?? []) {
-      const receipt = await receiptFor(id);
-      if (receipt && receipt.dateKey === parsed.value.dateKey) await acknowledge(receipt, epoch);
-    }
-    if (current(epoch)) await wearNative.acknowledgeInboxAsync(item.id);
+    queueInboxReply(item, epoch, async () => {
+      const run = async () => {
+        await sendDay(parsed.value.dateKey, epoch, parsed.value.requestId);
+        for (const id of parsed.value.pendingOperationIds ?? []) {
+          const receipt = await receiptFor(id);
+          if (receipt && receipt.dateKey === parsed.value.dateKey) await queueReply(receipt, epoch);
+        }
+        if (current(epoch)) await wearNative!.acknowledgeInboxAsync(item.id);
+      };
+      const job = snapshots.then(run, run); snapshots = job.catch(() => {}); await job;
+    });
     return;
   }
   const operation = parsed.value;
@@ -183,14 +234,22 @@ async function processItem(item: WearInboxItem, epoch: number) {
     const ack: WearAck = { version: 1, operationId: operation.operationId, dateKey: operation.dateKey,
       minuteIndex: operation.minuteIndex, status: 'error', entry: cellValue(await readCell(operation.dateKey, operation.minuteIndex)),
       message: 'This watch operation ID was reused. Save the note again as a new operation.' };
-    if (current(epoch)) { await wearNative.publishAckAsync(JSON.stringify(ack)); await wearNative.acknowledgeInboxAsync(item.id); }
+    queueInboxReply(item, epoch, async () => {
+      if (current(epoch)) await wearNative!.publishAckAsync(JSON.stringify(ack));
+      if (current(epoch)) await wearNative!.acknowledgeInboxAsync(item.id);
+    });
     return;
   }
-  if (previous?.status === 'applied' || previous?.status === 'conflict') await acknowledge(previous, epoch);
-  else await applyOperation(operation, fingerprint, epoch);
-  if (current(epoch)) await wearNative.acknowledgeInboxAsync(item.id);
+  const receipt = previous?.status === 'applied' || previous?.status === 'conflict'
+    ? previous : await applyOperation(operation, fingerprint, epoch);
+  queueInboxReply(item, epoch, async () => {
+    await queueReply(receipt, epoch);
+    if (current(epoch)) await wearNative!.acknowledgeInboxAsync(item.id);
+    if (current(epoch)) void publishWearDay(operation.dateKey).catch((error) => backgroundError(epoch, error));
+  });
 }
-export function drainWearInbox() {
+export function drainWearInbox(options: { scan?: boolean } = {}) {
+  const scan = options.scan !== false;
   if (draining) { drainAgain = true; return draining; }
   const task = enqueue(async () => {
     const epoch = generation;
@@ -198,25 +257,23 @@ export function drainWearInbox() {
     update({ running: true, error: null });
     try {
       let lastError: string | null = null;
-      for (const { value } of await listWearReceiptSettings('pending')) {
-        if (validReceipt(value)) {
-          try { await acknowledge(value, epoch); } catch { lastError = 'A watch reply is waiting to reconnect.'; }
-        }
-      }
-      await wearNative.scanPendingAsync();
       const failed = new Set<string>();
       for (let batch = 0; batch < 8 && current(epoch); batch += 1) {
-        const items = (await wearNative.drainInboxAsync()).filter((item) => !failed.has(item.id)); if (!items.length) break;
+        const items = (await wearNative.drainInboxAsync()).filter((item) => !failed.has(item.id) && !backgroundItems.has(item.id))
+          .sort((left, right) => Number(left.path.includes('/request/')) - Number(right.path.includes('/request/')));
+        if (!items.length) break;
         for (const item of items) if (current(epoch)) {
           try { await processItem(item, epoch); }
           catch (error) { failed.add(item.id); lastError = error instanceof Error ? error.message : 'A watch note is waiting.'; }
         }
-        await wearNative.scanPendingAsync();
+      }
+      for (const { value } of (await listWearReceiptSettings('pending')).slice(0, MAX_BACKGROUND_JOBS)) {
+        if (validReceipt(value)) void queueReply(value, epoch).catch((error) => backgroundError(epoch, error));
       }
       await refreshConflicts();
-      const status = await wearNative.getStatusAsync();
-      update({ connectedNodeCount: status.connectedNodeCount, pendingCount: status.pendingCount,
-        error: status.error ? 'The watch connection is waiting. Keep both devices nearby.' : lastError });
+      if (lastError) update({ error: lastError });
+      if (scan) scanWearInbox(epoch);
+      checkNativeStatus(epoch);
     } catch (error) {
       update({ error: error instanceof Error ? error.message : 'Watch synchronization is waiting. Your notes remain saved.' });
     } finally { update({ running: false }); }
@@ -224,7 +281,7 @@ export function drainWearInbox() {
   draining = task.finally(() => {
     draining = null;
     const again = drainAgain; drainAgain = false;
-    if (again && state.enabled && AppState.currentState === 'active') void drainWearInbox();
+    if (again && state.enabled && AppState.currentState === 'active') void drainWearInbox({ scan: false });
   });
   return draining;
 }
@@ -234,7 +291,7 @@ export async function initializeWearBridge() {
     const epoch = generation;
     nativeSubscription?.remove();
     const subscription = wearNative.addListener('onInboxChanged', (event) => {
-      if (state.enabled && (event?.pendingCount ?? 1) > 0) void drainWearInbox();
+      if (state.enabled && (event?.pendingCount ?? 1) > 0) void drainWearInbox({ scan: false });
     });
     nativeSubscription = subscription;
     let completed = false;
@@ -285,25 +342,45 @@ export async function setWearEnabled(enabled: boolean) {
   consentWrites = task.then(() => undefined, () => undefined);
   return task;
 }
-export const publishWearDay = (day: string) => enqueue(async () => {
-  if (!wearDate(day)) return; await sendDay(day, generation);
-});
-export const refreshWearStatus = () => enqueue(async () => {
+export function publishWearDay(day: string): Promise<void> {
+  if (!wearDate(day)) return Promise.resolve();
+  const existing = dayJobs.get(day); if (existing?.epoch === generation) { existing.again = true; return existing.promise; }
+  if (dayJobs.size >= 32) return Promise.reject(new Error('Watch day snapshots remain queued for retry.'));
+  const epoch = generation;
+  const state = { promise: Promise.resolve(), again: false, epoch };
+  const run = async () => {
+    for (let pass = 0; pass < 2 && current(epoch); pass++) {
+      state.again = false; await sendDay(day, epoch);
+      if (!state.again) break;
+    }
+  };
+  const job = snapshots.then(run, run).finally(() => {
+    if (dayJobs.get(day) === state) dayJobs.delete(day);
+    if (state.again && current(epoch)) void publishWearDay(day).catch((error) => backgroundError(epoch, error));
+  });
+  state.promise = job; dayJobs.set(day, state); snapshots = job.catch(() => {}); return job;
+}
+export async function refreshWearStatus() {
   if (!wearNative) return;
+  const epoch = generation;
   const status = await wearNative.getStatusAsync();
+  if (epoch !== generation || AppState.currentState !== 'active') return;
   update({ connectedNodeCount: status.connectedNodeCount, pendingCount: status.pendingCount,
     error: status.error ? 'The watch connection is waiting. Keep both devices nearby.' : null });
-  await refreshConflicts();
-});
-export function resolveWearConflict(id: string, choice: 'watch' | 'append' | 'phone', expectedPhoneVersion: string) {
-  return enqueue(async () => {
+  await enqueue(async () => { if (epoch === generation) await refreshConflicts(); });
+}
+export async function resolveWearConflict(id: string, choice: 'watch' | 'append' | 'phone', expectedPhoneVersion: string) {
+  const { applied, epoch } = await enqueue(async () => {
     const epoch = generation;
     if (!current(epoch)) throw new Error('Enable watch synchronization and keep Context open to review this note.');
     const receipt = await receiptFor(id);
     if (!receipt || receipt.status !== 'conflict' || !receipt.request) throw new Error('This note is already resolved.');
-    await applyOperation(receipt.request, receipt.fingerprint, epoch, { choice, expectedPhoneVersion });
+    const applied = await applyOperation(receipt.request, receipt.fingerprint, epoch, { choice, expectedPhoneVersion });
     await refreshConflicts();
+    return { applied, epoch };
   });
+  await queueReply(applied, epoch);
+  if (current(epoch)) void publishWearDay(applied.dateKey).catch((error) => backgroundError(epoch, error));
 }
 export function stopWearBridge() {
   generation += 1; initialized = false; drainAgain = false; nativeSubscription?.remove(); nativeSubscription = null;

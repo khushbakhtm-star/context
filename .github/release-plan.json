@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.27",
-  "sourceAndroidVersionCode": 28,
-  "sourceIosBuildNumber": "28",
+  "version": "0.1.28",
+  "sourceAndroidVersionCode": 29,
+  "sourceIosBuildNumber": "29",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context 0.1.27/code28 with completion-delayed foreground account polling. A full calendar check finishes before the next 15-second wait begins, preventing fixed timer ticks from repeatedly restarting long history scans. Saved edits and manual synchronization retain their existing prompt requests. Cleanup prevents an in-flight poll from restarting its timer after unmount. All event reads, storage authentication, permissions, encryption, source ownership and conflict checks remain intact. Independent assembly, five native class definitions, signatures and package checks are required before availability feeds change. Physical S23 behavior, iOS/store availability and official F-Droid inclusion require separate confirmation. The independent Wear companion remains 0.1.10/code100011."
+  "notes": "Prepare Context phone 0.1.28/code29 and independent Watch 0.1.11/code100012. The phone header uses static closed/open arrow loops for active/idle synchronization while preserving error details. Watch notes and durable local acknowledgements take priority over full-day snapshots, without waiting for cloud synchronization. Watch dictation stays inside Context with a live clock and prefers an available on-device speech service; system voice is an explicit fallback and offline recognition depends on installed service support. Watch microphone access requires a user-initiated runtime permission. Consent, immutable operation IDs, local commit-before-acknowledgement, source revisions and encrypted calendar/storage checks remain protected. Exact reviewed Wear-source removal inventories, independent builds, actual native class definitions and publisher-certificate checks must pass before availability records change. Physical devices, live speech/transport, Apple/Google stores and official F-Droid inclusion require separate confirmation."
 }
