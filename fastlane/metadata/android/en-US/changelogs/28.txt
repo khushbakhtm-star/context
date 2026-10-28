@@ -1,0 +1,1 @@
+Wait between completed background calendar checks so long scans do not keep restarting on fixed timer ticks. Saved edits still request synchronization promptly, and manual Sync remains available. The indicator continues to reflect actual running work. Calendar ownership, source-version checks and encrypted storage remain protected.

@@ -390,8 +390,11 @@ function AppController() {
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastAccountCompletionAt: number | null = null;
     const unsubscribe = subscribeAccountSync((next) => {
       if (!cancelled && controllerMountedRef.current && AppState.currentState === 'active') setAccountSyncStatus(next);
+      if (!next.running && next.cycleComplete === true) lastAccountCompletionAt = Date.now();
       if (!next.running) {
         void listCategories().then(() => {
           if (!cancelled && controllerMountedRef.current && AppState.currentState === 'active') setDataVersion((version) => version + 1);
@@ -399,8 +402,19 @@ function AppController() {
       }
     });
     let polling = false;
+    const schedule = (delay = 15000) => {
+      if (cancelled || polling || timer !== null || !controllerMountedRef.current ||
+          !readyRef.current || AppState.currentState !== 'active') return;
+      timer = setTimeout(() => { timer = null; void poll(); }, delay);
+    };
     const poll = async () => {
-      if (polling || cancelled || AppState.currentState !== 'active') return;
+      if (polling || cancelled || !controllerMountedRef.current || !readyRef.current || AppState.currentState !== 'active') return;
+      // Saved edits and manual Sync have their own prompt workers. A recently
+      // completed independent cycle makes another full background sweep redundant.
+      const sinceCompletion = lastAccountCompletionAt === null ? null : Date.now() - lastAccountCompletionAt;
+      if (sinceCompletion !== null && sinceCompletion >= 0 && sinceCompletion < 15000) {
+        schedule(15000 - sinceCompletion); return;
+      }
       polling = true;
       const epoch = lifecycleEpochRef.current;
       const currentPass = () => !cancelled && controllerMountedRef.current && readyRef.current &&
@@ -420,11 +434,17 @@ function AppController() {
         catch { /* Retain the source guard; the native worker rechecks each binding. */ }
         if (currentPass()) nativeProjectionWork.resume();
       }
-      finally { polling = false; }
+      finally { polling = false; schedule(); }
     };
+    const appStateSubscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') schedule();
+      else { if (timer !== null) clearTimeout(timer); timer = null; }
+    });
     void poll();
-    const timer = setInterval(() => { void poll(); }, 15000);
-    return () => { cancelled = true; unsubscribe(); clearInterval(timer); };
+    return () => {
+      cancelled = true; unsubscribe(); appStateSubscription.remove();
+      if (timer !== null) clearTimeout(timer); timer = null;
+    };
   }, [ready, nativeProjectionWork]);
 
   useEffect(() => {
