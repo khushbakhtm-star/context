@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: Exact reviewed Context 0.1.28 source commit
+        description: Exact reviewed Context 0.1.29 source commit
         required: true
-        default: 25e230bf09beaed4f22c112b9e25e7a3bd1caea5
+        default: 5586f4a305a71956aeabaa035fa350861b6b6cf9
         type: string
 
 permissions:
@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CONTEXT_SOURCE_COMMIT: 25e230bf09beaed4f22c112b9e25e7a3bd1caea5
+  CONTEXT_SOURCE_COMMIT: 5586f4a305a71956aeabaa035fa350861b6b6cf9
   EXPO_PUBLIC_CONTEXT_DISTRIBUTION: store
   EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL: standalone-wear
   EAS_BUILD_PROFILE: wear-phone-preview
@@ -103,7 +103,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: context-0.1.28-wear-phone-unsigned
+          name: context-0.1.29-wear-phone-unsigned
           path: ${{ runner.temp }}/context-android-preview/
           if-no-files-found: warn
           compression-level: 0

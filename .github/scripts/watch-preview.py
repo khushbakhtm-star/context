@@ -17,9 +17,9 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 
-SOURCE = "25e230bf09beaed4f22c112b9e25e7a3bd1caea5"
-VERSION = "0.1.11"
-CODE = 100012
+SOURCE = "5586f4a305a71956aeabaa035fa350861b6b6cf9"
+VERSION = "0.1.12"
+CODE = 100013
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned watch preview: local publisher signing is separate"
 CERTIFICATE = "44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772"
@@ -32,6 +32,7 @@ MODULES = {
     "speechDialog": "Lcom/context/minuteledger/wear/WatchDictationDialog;",
     "speechPolicy": "Lcom/context/minuteledger/wear/WatchDictationPolicy;",
     "pendingWork": "Lcom/context/minuteledger/wear/CoalescedPendingWork;",
+    "noteDraft": "Lcom/context/minuteledger/wear/WatchDictationNote;",
 }
 
 
