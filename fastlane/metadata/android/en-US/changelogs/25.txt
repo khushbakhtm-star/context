@@ -1,0 +1,1 @@
+Android prepares encrypted ledger keys with the phone's native cryptography on a dedicated background thread. Existing encrypted data, passphrases and the 600,000-round derivation remain compatible. Provider self-tests and lock checks protect key handling. No new permissions are required.

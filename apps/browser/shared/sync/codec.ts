@@ -19,6 +19,16 @@ const pendingKeys = new Map<string, Promise<Uint8Array>>();
 let keyCacheGeneration = 0;
 let keyDerivationQueue: Promise<void> = Promise.resolve();
 
+/** Installed only by the mobile bootstrap. Portable/browser callers need no
+ * native runtime and retain WebCrypto or the cooperative JS implementation. */
+export type NativeLedgerKeyDeriver = (passphrase: string, saltHex: string) => Promise<string | null>;
+let nativeLedgerKeyDeriver: NativeLedgerKeyDeriver | null = null;
+export function configureNativeLedgerKeyDeriver(deriver: NativeLedgerKeyDeriver | null) {
+  if (nativeLedgerKeyDeriver === deriver) return;
+  nativeLedgerKeyDeriver = deriver;
+  clearLedgerKeyCache();
+}
+
 export function clearLedgerKeyCache() {
   keyCacheGeneration += 1;
   for (const key of derivedKeys.values()) key.fill(0);
@@ -245,11 +255,26 @@ async function deriveKeyCooperatively(password: Uint8Array, salt: Uint8Array, re
   }
 }
 
+// Java PBKDF2 password encoders must not reinterpret an unpaired UTF-16
+// surrogate. The existing UTF-8 replacement semantics remain the JS fallback.
+function hasUnpairedSurrogate(text: string) {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = text.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
+      index += 1;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) return true;
+  }
+  return false;
+}
+
 async function deriveKeyBytes(passphrase: string, salt: Uint8Array, requireCurrent: () => void) {
   const subtle = globalThis.crypto?.subtle;
   if (subtle?.importKey && subtle.deriveBits) {
     // Standards-native WebCrypto runs the same PBKDF2 operation off the browser
-    // JS thread. Hermes without SubtleCrypto takes the cooperative path below.
+    // JS thread. Hermes without SubtleCrypto uses the optional native bridge or
+    // the cooperative path below.
     const password = new Uint8Array(utf8ToBytes(passphrase));
     let key: Uint8Array | undefined;
     try {
@@ -265,6 +290,18 @@ async function deriveKeyBytes(passphrase: string, salt: Uint8Array, requireCurre
       key?.fill(0);
       throw error;
     } finally { password.fill(0); }
+  }
+  const native = nativeLedgerKeyDeriver;
+  if (native && !hasUnpairedSurrogate(passphrase)) {
+    requireCurrent();
+    const hex = await native(passphrase, bytesToHex(salt));
+    requireCurrent();
+    if (hex !== null) {
+      if (typeof hex !== 'string' || !/^[a-f0-9]{64}$/.test(hex)) {
+        throw new Error('Secure ledger key derivation failed.');
+      }
+      return hexToBytes(hex);
+    }
   }
   return deriveKeyCooperatively(utf8ToBytes(passphrase), salt, requireCurrent);
 }

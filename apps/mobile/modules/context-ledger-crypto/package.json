@@ -1,0 +1,8 @@
+{
+  "name": "context-ledger-crypto",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SDK-only background ledger key derivation for Context",
+  "license": "MIT",
+  "main": "index.ts"
+}

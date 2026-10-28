@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.23",
-  "sourceAndroidVersionCode": 24,
-  "sourceIosBuildNumber": "24",
+  "version": "0.1.24",
+  "sourceAndroidVersionCode": 25,
+  "sourceIosBuildNumber": "25",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context 0.1.23/code24 with guarded exact-palette Google phone-event color writeback, per-activity native review isolation, shorter account color commit sections, coalesced refreshes and truthful encryption/upload progress. Existing exact phone-linked event identities remain guarded when borders move or resize. Storage-first checks, raw-draft guards, source baselines, account projection ownership and encryption format remain intact. Independent native assembly, signatures and verification receipts are required before availability feeds change. Physical-device behavior, iOS/store distribution and official F-Droid inclusion require separate confirmation. The independent Wear companion remains 0.1.10/code100011."
+  "notes": "Prepare Context 0.1.24/code25 with SDK-only Android PBKDF2 acceleration on a dedicated background queue. The existing 600,000-round SHA-256 derivation, 16-byte salt, 32-byte key and encrypted ledger format remain unchanged. Native provider self-tests cover exact password encoding before any user key is derived; unsupported environments retain the existing implementation. Cache, lock-generation, source ownership and storage-first synchronization guards remain intact. Independent assembly, five actual native module class definitions, signature and package verification are required before availability feeds change. Physical S23 timing, iOS/store distribution and official F-Droid inclusion require separate confirmation. The independent Wear companion remains 0.1.10/code100011."
 }
