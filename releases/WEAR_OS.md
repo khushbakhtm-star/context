@@ -2,6 +2,10 @@
 
 ## Current matching releases
 
+Use the [Wear-enabled phone 0.1.24/code25](https://github.com/khushbakhtm-star/context/releases/download/v0.1.24/context-0.1.24-wear-phone-preview.apk) with the separately published [Watch 0.1.10/code100011](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
+
+## Previous matching releases: 0.1.23
+
 Use the [Wear-enabled phone 0.1.23/code24](https://github.com/khushbakhtm-star/context/releases/download/v0.1.23/context-0.1.23-wear-phone-preview.apk) with the separately published [Watch 0.1.10/code100011](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
 
 ## Previous matching releases: 0.1.22
@@ -70,6 +74,6 @@ Official references: [Wear OS debugging](https://developer.android.com/training/
 
 The separate [Watch 0.1.10 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.10/context-0.1.10-wear-preview.apk) saves an accepted dictation
 result automatically to the minute opened by that editor. Keyboard entry still uses Save.
-Install as an Update on the watch; use the Wear-enabled phone 0.1.23. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
+Install as an Update on the watch; use the Wear-enabled phone 0.1.24. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
 contains the exact source and automated build/package/signature receipts. Physical dictation
 and reconnect behavior still need checking after this watch update.
