@@ -2,6 +2,22 @@
 
 ## Current matching releases
 
+Use the [Wear-enabled phone 0.1.28/code29](https://github.com/khushbakhtm-star/context/releases/download/v0.1.28/context-0.1.28-wear-phone-preview.apk) with the separately published [Watch 0.1.11/code100012](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.11). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
+
+## Published 0.1.11 Watch update
+
+The separate [Watch 0.1.11/code100012 release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.11) contains five checked public assets. [Watch APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.11/context-0.1.11-wear-preview.apk): **11,409,110 bytes**, SHA-256 c2a2fed1b32bdb4b960bb112809bd41321582aca1f8e69ba461026d754cd7b29.
+
+[Build 40756438963](https://github.com/khushbakhtm-star/context/actions/runs/40756438963) used controller 526e4fa2ec6bda15eb5b56ad3653783d50cc64d1 and exact application source 25e230bf09beaed4f22c112b9e25e7a3bd1caea5.
+
+Dictation stays inside Context with a live seconds clock honoring the existing 12/24-hour preference and a fixed selected-note minute. Dictate requests watch microphone access. Available on-device speech is preferred; system speech is an explicit choice and may need internet. Typed entry remains available. Confirmed words use durable save authority; partial words are drafts only. A coalesced sender prioritizes pending notes over full-day reads. Keep Context active on the phone to apply its durable inbox to the ledger.
+
+The actual build ran 51 JVM cases (0 skipped), including all six required suites. Eight actual native class definitions, compiled Tile/logo resources, microphone/query/clock checks, protected ZIP contents, original publisher certificate, official supported-SDK v3 verification, separate contained-v2 proof and 16 KiB alignment passed. No runtime support below minimum SDK30 is claimed. Install as an Update on the watch. Speech/model availability, Bluetooth delivery speed and physical Watch7 behavior still require device confirmation. This optional companion remains separate from phone APKs and store/catalog availability.
+
+
+
+## Previous matching releases: 0.1.27
+
 Use the [Wear-enabled phone 0.1.27/code28](https://github.com/khushbakhtm-star/context/releases/download/v0.1.27/context-0.1.27-wear-phone-preview.apk) with the separately published [Watch 0.1.10/code100011](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
 
 ## Previous matching releases: 0.1.26
@@ -86,6 +102,6 @@ Official references: [Wear OS debugging](https://developer.android.com/training/
 
 The separate [Watch 0.1.10 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.10/context-0.1.10-wear-preview.apk) saves an accepted dictation
 result automatically to the minute opened by that editor. Keyboard entry still uses Save.
-Install as an Update on the watch; use the Wear-enabled phone 0.1.27. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
+Install as an Update on the watch; use the Wear-enabled phone 0.1.28. The [release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
 contains the exact source and automated build/package/signature receipts. Physical dictation
 and reconnect behavior still need checking after this watch update.

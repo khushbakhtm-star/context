@@ -2,7 +2,7 @@
 
 ## Fix “installed 0.1.9, latest 0.1.8”
 
-The original setup followed the FOSS phone edition when its latest APK was 0.1.8 (version code 9). The installed 0.1.9 was the Wear-enabled phone edition (code 10). The **10 → 9** error meant the selected APK would downgrade the app. Both phone editions now offer **0.1.27 (code 28)**.
+The original setup followed the FOSS phone edition when its latest APK was 0.1.8 (version code 9). The installed 0.1.9 was the Wear-enabled phone edition (code 10). The **10 → 9** error meant the selected APK would downgrade the app. Both phone editions now offer **0.1.28 (code 29)**.
 
 For an S23 paired with a Galaxy Watch7, or for native Google account sign-in, keep the Wear-enabled phone route and update its existing Obtainium entry using these steps:
 
@@ -15,7 +15,7 @@ For an S23 paired with a Galaxy Watch7, or for native Google account sign-in, ke
    ^context-[0-9]+\.[0-9]+\.[0-9]+-wear-phone-preview\.apk$
    ```
 
-5. Return to Context’s details to apply the options, then refresh and tap **Update**. Dismiss the keyboard first if needed. It should offer **0.1.27**.
+5. Return to Context’s details to apply the options, then refresh and tap **Update**. Dismiss the keyboard first if needed. It should offer **0.1.28**.
 
 Keep Context installed so its ledger stays on the phone. Change the existing entry; do not add a duplicate entry for the same app or uninstall Context.
 
@@ -36,7 +36,7 @@ For manual setup, use the same repository URL, enable prereleases and choose the
 ^context-[0-9]+\.[0-9]+\.[0-9]+-foss-preview\.apk$
 ```
 
-The FOSS route now selects **0.1.27 (code 28)**. It omits native Google account sign-in and the optional Wear transport. Use the Wear-enabled phone route for a paired watch or native Google sign-in. Neither phone filter installs the separate watch APK. Context's previews come from [the publisher's GitHub releases](https://github.com/khushbakhtm-star/context/releases). Official F-Droid inclusion remains pending; no custom Context F-Droid repository has been published.
+The FOSS route now selects **0.1.28 (code 29)**. It omits native Google account sign-in and the optional Wear transport. Use the Wear-enabled phone route for a paired watch or native Google sign-in. Neither phone filter installs the separate watch APK. Context's previews come from [the publisher's GitHub releases](https://github.com/khushbakhtm-star/context/releases). Official F-Droid inclusion remains pending; no custom Context F-Droid repository has been published.
 
 ## Receive future updates
 
@@ -56,9 +56,9 @@ Sources: [Obtainium links](https://wiki.obtainium.imranr.dev/deep_links/),
 
 ## Galaxy Watch7 tile and watch update
 
-The separate [Watch 0.1.10 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.10/context-0.1.10-wear-preview.apk)
+The separate [Watch 0.1.11 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.11/context-0.1.11-wear-preview.apk)
 adds a **Record now** tile and current-minute entry. Install it on the watch as an Update
 using the previously paired PC; phone Obtainium filters update their phone edition.
 After updating, swipe left from the watch face to **Add tiles**, then select **Context**.
-The [watch release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.10)
+The [watch release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.11)
 includes the exact source, signatures, compiled Tile and package verification receipts.
