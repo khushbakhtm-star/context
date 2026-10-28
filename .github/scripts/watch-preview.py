@@ -126,7 +126,7 @@ def speech_manifest_verified(xml):
     def named(block, value):
         lines=block.splitlines()
         depth=len(lines[0])-len(lines[0].lstrip())
-        expression=r'^\s*A:\s+android:name(?:\([^)]*\))?\s*=\s*"'+re.escape(value)+r'"(?:\s|$)'
+        expression=r'^\s*A:\s+(?:android:|http://schemas\.android\.com/apk/res/android:)name(?:\([^)]*\))?\s*=\s*"'+re.escape(value)+r'"(?:\s|$)'
         return any(len(line)-len(line.lstrip())==depth+2 and re.search(expression,line) for line in lines[1:])
     permissions=[item for item in element_blocks(xml,"uses-permission") if named(item,"android.permission.RECORD_AUDIO")]
     actions=[action for query in element_blocks(xml,"queries") for intent in element_blocks(query,"intent")
