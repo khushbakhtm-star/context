@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.28",
-  "sourceAndroidVersionCode": 29,
-  "sourceIosBuildNumber": "29",
+  "version": "0.1.29",
+  "sourceAndroidVersionCode": 30,
+  "sourceIosBuildNumber": "30",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context phone 0.1.28/code29 and independent Watch 0.1.11/code100012. The phone header uses static closed/open arrow loops for active/idle synchronization while preserving error details. Watch notes and durable local acknowledgements take priority over full-day snapshots, without waiting for cloud synchronization. Watch dictation stays inside Context with a live clock and prefers an available on-device speech service; system voice is an explicit fallback and offline recognition depends on installed service support. Watch microphone access requires a user-initiated runtime permission. Consent, immutable operation IDs, local commit-before-acknowledgement, source revisions and encrypted calendar/storage checks remain protected. Exact reviewed Wear-source removal inventories, independent builds, actual native class definitions and publisher-certificate checks must pass before availability records change. Physical devices, live speech/transport, Apple/Google stores and official F-Droid inclusion require separate confirmation."
+  "notes": "Prepare Context phone 0.1.29/code30 and independent Watch 0.1.12/code100013. An icon cell menu and pencil editor fill explicit minute spans across midnight, optionally giving the span one event border. Existing mixed notes can be preserved while changing event bounds. Fixed-width day/week columns use faster height-only pinch zoom with a compact full-day overview. Native and account writers retain exact source identities for unambiguous bordered overnight events. The watch uses a compact live clock and retains dictated phrases until one explicit Done action; pauses do not save or close the note. Available on-device speech is preferred; explicit system speech may require internet. Consent, fresh source revisions, conflict checks, guarded atomic Undo, immutable operation IDs and encrypted calendar/storage checks remain protected. Exact Wear-source inventories, independent builds, native class definitions and original publisher-certificate checks must pass before availability records change. Physical devices, live speech/transport, Apple/Google stores and official F-Droid inclusion require separate confirmation."
 }

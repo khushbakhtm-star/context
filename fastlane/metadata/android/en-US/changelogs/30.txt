@@ -1,0 +1,1 @@
+Fill minute spans across midnight with the pencil range editor and optionally group them into one calendar event. Use icon cell actions and faster height-only pinch zoom to see the full day or week. The separate watch update uses a smaller live clock and keeps dictated words across pauses until you tap Done. Offline speech still depends on watch support.

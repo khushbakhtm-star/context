@@ -2,10 +2,24 @@ import type { CalendarDayCount } from './calendar-grid';
 
 export const CALENDAR_TIME_RAIL = 88;
 export const CALENDAR_BASE_ROW_HEIGHT = 34;
+export const CALENDAR_COMPACT_ROW_HEIGHT = 9;
 
 export function normalizeCalendarZoom(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value)
-    ? Math.round(Math.max(0.5, Math.min(2.5, value)) * 100) / 100 : 1;
+    ? Math.round(Math.max(0.0001, Math.min(2.5, value)) * 1_000_000) / 1_000_000 : 1;
+}
+
+export function calendarFitDayZoom(viewportHeight: number): number {
+  const height = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 500;
+  return height / (1440 * CALENDAR_BASE_ROW_HEIGHT);
+}
+
+/** One comfortable inward pinch can reach the full day; columns never scale. */
+export function calendarPinchZoom(startZoom: number, startDistance: number, distance: number, viewportHeight: number): number {
+  const floor = calendarFitDayZoom(viewportHeight);
+  const initial = Math.max(floor, normalizeCalendarZoom(startZoom));
+  if (!Number.isFinite(startDistance) || startDistance < 8 || !Number.isFinite(distance) || distance <= 0) return initial;
+  return Math.max(floor, normalizeCalendarZoom(initial * (distance / startDistance) ** 6));
 }
 
 export function parseCalendarMinute(input: string): number | null {
@@ -21,16 +35,17 @@ export function parseCalendarMinute(input: string): number | null {
 /** The native label measurement includes the user's font scale and stays fixed
  * during vertical zoom. A passive time rail adds one pixel on each side. */
 export function calendarGridLayout(viewport: number, preset: CalendarDayCount, value = 1, bufferedDays: number = preset,
-  measuredBaseTimeWidth?: number, exactSelection = false) {
+  measuredBaseTimeWidth?: number, exactSelection = false, viewportHeight = 500) {
   const viewportWidth = Number.isFinite(viewport) && viewport > CALENDAR_TIME_RAIL ? viewport : 360;
-  const zoom = normalizeCalendarZoom(value);
+  const zoom = Math.max(calendarFitDayZoom(viewportHeight), normalizeCalendarZoom(value));
   const compact = typeof measuredBaseTimeWidth === 'number' && Number.isFinite(measuredBaseTimeWidth) && measuredBaseTimeWidth > 0;
   const railWidth = Math.min(compact ? Math.ceil(measuredBaseTimeWidth) + 2 : CALENDAR_TIME_RAIL, viewportWidth - 64);
   // A view is one complete page. Pinch changes minute density; dates and text keep their horizontal geometry.
   const dayCount = Math.max(1, Math.min(7, Math.trunc(preset))) as CalendarDayCount;
   const dayWidth = (viewportWidth - railWidth) / dayCount;
   const contentWidth = viewportWidth;
-  return { viewportWidth, dayWidth, contentWidth, railWidth, zoom, rowHeight: Math.max(17, Math.round(CALENDAR_BASE_ROW_HEIGHT * zoom)),
+  const height = CALENDAR_BASE_ROW_HEIGHT * zoom;
+  return { viewportWidth, dayWidth, contentWidth, railWidth, zoom, rowHeight: height < CALENDAR_COMPACT_ROW_HEIGHT ? height : Math.round(height),
     maxOffset: Math.max(0, contentWidth - viewportWidth), dayCount };
 }
 

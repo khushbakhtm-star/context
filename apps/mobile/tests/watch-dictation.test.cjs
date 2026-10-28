@@ -10,6 +10,8 @@ const dialog = read('WatchDictationDialog.kt');
 const policy = read('WatchDictationPolicy.kt');
 
 test('watch dictation owns its visible clock while retaining a separate immutable note minute and clock preference', () => {
+  assert.match(dialog, /private val clock = label\("", 10f\)\.apply \{ setTypeface\(Typeface\.MONOSPACE, Typeface\.NORMAL\)/);
+  assert.match(dialog, /root\.addView\(clock, LinearLayout\.LayoutParams\(-1, dp\(18\)\)\)/);
   assert.match(dialog, /clock\.text = "Now \$\{WatchDictationPolicy\.clock\(LocalDateTime\.now\(\), twelveHourClock\)\}"/);
   assert.match(dialog, /handler\.postDelayed\(this, 1000\)/);
   assert.match(dialog, /minuteLabel\(target, twelveHourClock\)/);
@@ -44,9 +46,10 @@ test('watch lifecycle stops speech before state snapshots and clears pending per
   assert.match(stop, /previous\?\.destroy\(\)/);
 });
 
-test('only confirmed results reach durable autosave; partial return is an exact-session editable draft', () => {
+test('only user-confirmed dictation reaches durable save; an interrupted return is an exact-session editable draft', () => {
   const partial = dialog.slice(dialog.indexOf('override fun onPartialResults'), dialog.indexOf('override fun onEvent'));
-  assert.match(partial, /words\.text = partial/);
+  assert.match(partial, /note\.preview\(partial\)/);
+  assert.match(partial, /words\.text = note\.text/);
   assert.doesNotMatch(partial, /onConfirmed|close\(|save/);
   assert.match(activity, /if \(pendingSpeech == speech\) \{\s*WatchDictationPolicy\.preservedDraft/);
   assert.match(policy, /currentText != originalText/);
@@ -58,4 +61,18 @@ test('only confirmed results reach durable autosave; partial return is an exact-
   assert.match(accept, /store\.saveDictation\(plan\)/);
   assert.match(activity, /checkSelfPermission\(Manifest\.permission\.RECORD_AUDIO\)/);
   assert.match(activity, /requestPermissions\(arrayOf\(Manifest\.permission\.RECORD_AUDIO\), MICROPHONE\)/);
+});
+
+test('speech phrase completion retains the watch note and only Done confirms it before microphone teardown', () => {
+  const results = dialog.slice(dialog.indexOf('override fun onResults'), dialog.indexOf('override fun onPartialResults'));
+  assert.match(results, /note\.acceptPhrase\(text\)/);
+  assert.match(results, /handler\.postDelayed\(nextPhrase, 200\)/);
+  assert.doesNotMatch(results, /close\(confirmed|onConfirmed/);
+  const done = dialog.slice(dialog.indexOf('private val done:'), dialog.indexOf('private val continueButton'));
+  assert.match(done, /button\("Done"/);
+  assert.match(done, /note\.confirmDisplayed\(\)\?\.let \{ close\(confirmed = it\) \}/);
+  const retry = dialog.slice(dialog.indexOf('private fun start('), dialog.indexOf('private fun failed('));
+  assert.match(retry, /note\.beginPhrase\(\)/);
+  assert.doesNotMatch(retry, /words\.text = ""/);
+  assert.match(dialog.slice(dialog.indexOf('private fun close(')), /handler\.removeCallbacks\(nextPhrase\)/);
 });

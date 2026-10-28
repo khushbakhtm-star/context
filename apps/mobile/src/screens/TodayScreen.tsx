@@ -10,8 +10,11 @@ import { useAppTheme } from '../appearance';
 import { MinuteEditor } from '../components/MinuteEditor';
 import { CellColorPalette } from '../components/CellColorPalette';
 import { CellActionMenu } from '../components/CellActionMenu';
+import { CellActionIcon } from '../components/CellActionIcon';
+import { CompactMinuteOverview } from '../components/CompactMinuteOverview';
+import { MinuteSpanEditor, type MinuteSpanEditorSession } from '../components/MinuteSpanEditor';
 
-import { deleteMinuteEntry, getDayEntries, getMinuteEntry, saveMinuteRange } from '../data/database';
+import { deleteMinuteEntry, getDayEntries, getMinuteEntry, getEntriesForBlock, saveMinuteRange } from '../data/database';
 import { flushPendingActuals, loadPlannedEventsResult, openPlannedEvent, reconcileLinkedNativeColors } from '../services/calendar';
 import { ensureSourceColorCategory, listSelectableActivityCategories, subscribeWritablePaletteChanges } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits,
@@ -19,6 +22,7 @@ import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscri
 import { applyCellFormat, clearTextMinuteRange, colorMinuteRange, resetMinuteFill, resetMinuteCells, copyMinuteRange, cutMinuteRange, editInlineMinute,
   fillMinuteRange, getDayActivityGroups, getDayCellFormats, getSpreadsheetClipboard, groupMinuteRange, pasteMinuteRange,
   prepareMinutePaste, prepareExternalMinutePaste, pasteExternalMinuteRange,
+  prepareMinuteSpanFill, fillMinuteSpan, type MinuteSpan, type MinuteSpanFillInput,
   getMovableActivityGroup, prepareActivityGroupMove, moveActivityGroup, ungroupMinuteRange,
   prepareMinuteRangeMove, moveMinuteRange, cancelMinuteRangeMove,
   spreadsheetEditor, type ActivityGroup, type CellFormat, type MinuteCellRange } from '../services/spreadsheet';
@@ -33,8 +37,10 @@ import { analyzeCellSelection } from '../utils/cell-action-policy';
 import { calendarCellColor, calendarColor } from '../utils/calendar-cell-color';
 import { activityGroupDragGrip, activityGroupDropTarget, activityGroupDragScrollOffsets,
   type ActivityGroupDragGrip, type ActivityGroupDropTarget } from '../utils/activity-group-drag';
-import { calendarGridLayout, calendarZoomOffsets, normalizeCalendarZoom, revealCalendarDay,
+import { calendarGridLayout, calendarZoomOffsets, normalizeCalendarZoom, calendarFitDayZoom, calendarPinchZoom, CALENDAR_COMPACT_ROW_HEIGHT, revealCalendarDay,
   type CalendarZoomAnchor } from '../utils/calendar-layout';
+import { compactCalendarBands, compactCalendarOutlines, type CompactMinute } from '../utils/calendar-compact';
+import { minuteDetailsCount } from '../utils/minute-details';
 import { createCalendarPeriodSwipe, type CalendarPeriodDirection } from '../utils/calendar-period-swipe';
 import { getAccounts } from '../sync/accounts';
 import { linkActualsToAccounts, loadCachedAccountPlans, loadAccountPlansResult, synchronizeAccounts } from '../sync/engine';
@@ -104,6 +110,7 @@ export function TodayScreen({
   const [measuredTimeWidths, setMeasuredTimeWidths] = useState<Record<string, number>>({});
   const timeWidthKey = clockFormat + '|' + fontScale;
   const [viewportWidth, setViewportWidth] = useState(windowWidth);
+  const [minuteViewportHeight, setMinuteViewportHeight] = useState(500);
   const [liveZoom, setLiveZoom] = useState(() => normalizeCalendarZoom(zoom));
   const [pinching, setPinching] = useState(false);
   const zoomRef = useRef(liveZoom);
@@ -123,10 +130,10 @@ export function TodayScreen({
   const gridLayout = useMemo(() => {
     if (dateBufferRef.current.key !== navigationKey) dateBufferRef.current = { key: navigationKey, count: gridDayCount };
     const layout = calendarGridLayout(viewportWidth, gridDayCount, liveZoom, dateBufferRef.current.count,
-      measuredTimeWidths[timeWidthKey], explicitDays != null);
+      measuredTimeWidths[timeWidthKey], explicitDays != null, minuteViewportHeight);
     dateBufferRef.current.count = layout.dayCount;
     return layout;
-  }, [viewportWidth, gridDayCount, liveZoom, navigationKey, measuredTimeWidths, timeWidthKey, explicitDays]);
+  }, [viewportWidth, gridDayCount, liveZoom, navigationKey, measuredTimeWidths, timeWidthKey, explicitDays, minuteViewportHeight]);
   const styles = useMemo(() => createStyles(colors, resolvedMode, gridLayout), [colors, resolvedMode, gridLayout]);
   const days = useMemo(() => explicitDays ?? Array.from({ length: gridLayout.dayCount }, (_, index) => dateKey(addDays(baseDays[0]!, index))),
     [baseDays, gridLayout.dayCount, explicitDays]);
@@ -134,6 +141,9 @@ export function TodayScreen({
   const rangeKey = days.join('|');
   const rangeRef = useRef(rangeKey);
   const visibleDaysRef = useRef(days);
+  const compactView = gridLayout.rowHeight < CALENDAR_COMPACT_ROW_HEIGHT;
+  const compactViewRef = useRef(compactView); compactViewRef.current = compactView;
+  const compactListRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const listRef = useRef<FlatList<number>>(null);
   const horizontalRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const horizontalOffset = useRef(new Animated.Value(0)).current;
@@ -200,6 +210,10 @@ export function TodayScreen({
   const suppressCellPressRef = useRef<{ key: string; until: number } | null>(null);
   const [inlineVersion, setInlineVersion] = useState(0);
   const [spreadsheetState, setSpreadsheetState] = useState(() => spreadsheetEditor.snapshot());
+  const [spanEditor, setSpanEditor] = useState<MinuteSpanEditorSession | null>(null);
+  const spanEditorScopeRef = useRef<{ selection: CalendarMinuteSelection; token: number; generation: number; id: number } | null>(null);
+  const spanEditorIdRef = useRef(0);
+  const spanEditorEpochRef = useRef(0);
   const [groupComposerOpen, setGroupComposerOpen] = useState(false);
   const groupComposerOpenRef = useRef(groupComposerOpen);
   groupComposerOpenRef.current = groupComposerOpen;
@@ -306,12 +320,24 @@ export function TodayScreen({
       if (!measured.root || !measured.grid || !measured.body || !mountedRef.current ||
           sequence !== viewportMeasurementRef.current || generation !== navigationGenerationRef.current) return;
       bodyWindowRef.current = { x: measured.grid.x, y: measured.body.y, height: measured.body.height };
+      if (Number.isFinite(measured.body.height) && measured.body.height > 0) setMinuteViewportHeight((old) => Math.abs(old - measured.body!.height) > 0.5 ? measured.body!.height : old);
       menuOriginRef.current = { x: measured.grid.x - measured.root.x, y: measured.body.y - measured.root.y };
       positionFillHandle();
     };
     root.measureInWindow((x, y) => { measured.root = { x, y }; apply(); });
     grid.measureInWindow((x) => { measured.grid = { x }; apply(); });
     body.measureInWindow((_x, y, _width, height) => { measured.body = { y, height }; apply(); });
+  }
+
+  function scrollMinuteOffset(offset: number, animated = false) {
+    const layout = gridLayoutRef.current;
+    const value = Math.max(0, Math.min(1440 * layout.rowHeight - bodyWindowRef.current.height, offset));
+    if (compactViewRef.current) compactListRef.current?.scrollTo({ y: value, animated });
+    else listRef.current?.scrollToOffset({ offset: value, animated });
+  }
+  function scrollMinuteIndex(index: number, viewPosition = 0, animated = false) {
+    if (!compactViewRef.current) { listRef.current?.scrollToIndex({ index, viewPosition, animated }); return; }
+    scrollMinuteOffset(index * gridLayoutRef.current.rowHeight - Math.max(0, bodyWindowRef.current.height - gridLayoutRef.current.rowHeight) * viewPosition, animated);
   }
 
   function positionFillHandle() {
@@ -490,7 +516,7 @@ export function TodayScreen({
       }
       if (offsets.y !== verticalOffsetRef.current) {
         verticalOffsetRef.current = offsets.y;
-        listRef.current?.scrollToOffset({ offset: offsets.y, animated: false });
+        scrollMinuteOffset(offsets.y);
       }
       updateGroupDrag(drag.x, drag.y);
     }, 50);
@@ -648,7 +674,7 @@ export function TodayScreen({
     pinchFrameRef.current = null; pinchRef.current = null; pendingPinchZoomRef.current = null;
     pendingZoomAnchorRef.current = null; setPinching(false);
     horizontalRef.current?.scrollTo({ x: horizontalOffsetRef.current, animated: false });
-    listRef.current?.scrollToOffset({ offset: verticalOffsetRef.current, animated: false });
+    scrollMinuteOffset(verticalOffsetRef.current);
     cellTouchRef.current = null; cellActivationRef.current = null;
     if (!hasRange) configureSelectionRange(selection);
     setGroupComposerOpen(false); setCellMenuOpen(false);
@@ -665,7 +691,7 @@ export function TodayScreen({
         verticalOffsetRef.current, gridLayoutRef.current.rowHeight);
       if (next !== verticalOffsetRef.current) {
         verticalOffsetRef.current = next;
-        listRef.current?.scrollToOffset({ offset: next, animated: false });
+        scrollMinuteOffset(next);
         updateRangeDrag(drag.pageY);
       }
     }, 50);
@@ -733,12 +759,12 @@ export function TodayScreen({
     horizontalOffsetRef.current = offsets.x; verticalOffsetRef.current = offsets.y;
     horizontalOffset.setValue(offsets.x);
     horizontalRef.current?.scrollTo({ x: offsets.x, animated: false });
-    listRef.current?.scrollToOffset({ offset: offsets.y, animated: false });
+    scrollMinuteOffset(offsets.y);
   }
 
   function applyLiveZoom(value: number, anchor: CalendarZoomAnchor) {
     if (rangeDragRef.current || groupDragRef.current) return;
-    const next = normalizeCalendarZoom(value);
+    const next = Math.max(calendarFitDayZoom(bodyWindowRef.current.height), normalizeCalendarZoom(value));
     if (next === zoomRef.current) return;
     pendingZoomAnchorRef.current = { ...anchor, generation: navigationGenerationRef.current };
     zoomRef.current = next;
@@ -804,7 +830,7 @@ export function TodayScreen({
       const distance = Math.hypot(second.pageX - first.pageX, second.pageY - first.pageY);
       if (distance < 8) return;
       horizontalRef.current?.scrollTo({ x: horizontalOffsetRef.current, animated: false });
-      listRef.current?.scrollToOffset({ offset: verticalOffsetRef.current, animated: false });
+      scrollMinuteOffset(verticalOffsetRef.current);
       pinchRef.current = { distance, zoom: zoomRef.current, generation: navigationGenerationRef.current,
         anchor: captureZoomAnchor({ x: (first.pageX + second.pageX) / 2, y: (first.pageY + second.pageY) / 2 }) };
       setPinching(true);
@@ -821,7 +847,8 @@ export function TodayScreen({
       const pinch = pinchRef.current;
       const [first, second] = event.nativeEvent.touches;
       if (!pinch || !first || !second || pinch.generation !== navigationGenerationRef.current) return;
-      pendingPinchZoomRef.current = pinch.zoom * Math.hypot(second.pageX - first.pageX, second.pageY - first.pageY) / pinch.distance;
+      pendingPinchZoomRef.current = calendarPinchZoom(pinch.zoom, pinch.distance,
+        Math.hypot(second.pageX - first.pageX, second.pageY - first.pageY), bodyWindowRef.current.height);
       if (pinchFrameRef.current == null) pinchFrameRef.current = requestAnimationFrame(() => {
         pinchFrameRef.current = null;
         if (mountedRef.current && pinchRef.current && pinchRef.current.generation === navigationGenerationRef.current &&
@@ -1086,9 +1113,12 @@ export function TodayScreen({
         cancelRangeDrag();
         cancelGroupDrag();
         setCellMenuOpen(false);
+        spanEditorEpochRef.current++;
         const selected = inlineSelectionRef.current;
-        if (selected) inlineMinuteDrafts.close(inlineMinuteKey(selected.dateKey, selected.minuteIndex));
-        setInlineSelection(null);
+        if (!spanEditorScopeRef.current) {
+          if (selected) inlineMinuteDrafts.close(inlineMinuteKey(selected.dateKey, selected.minuteIndex));
+          setInlineSelection(null);
+        }
         setInlineEditing(false);
 
         setGroupComposerOpen(false);
@@ -1163,7 +1193,7 @@ export function TodayScreen({
     const generation = navigationGenerationRef.current;
     requestAnimationFrame(() => {
       if (!mountedRef.current || generation !== navigationGenerationRef.current || rangeDragRef.current || groupDragRef.current || cellHoldRef.current) return;
-      listRef.current?.scrollToIndex({ index: Math.max(0, Math.min(1439, minute - 3)), animated: false });
+      scrollMinuteIndex(Math.max(0, Math.min(1439, minute - 3)));
       positionedViewRef.current = true;
     });
   }, []);
@@ -1212,7 +1242,7 @@ export function TodayScreen({
         horizontalOffsetRef.current = offset;
         horizontalRef.current?.scrollTo({ x: offset, animated: false });
       }
-      listRef.current?.scrollToIndex({ index: minute, viewPosition: 0.3, animated: false });
+      scrollMinuteIndex(minute, 0.3);
       positionedViewRef.current = true;
     });
   }, []);
@@ -1569,6 +1599,31 @@ export function TodayScreen({
     endMinute: Math.max(rangeStart ?? inlineSelection.minuteIndex, rangeEnd ?? inlineSelection.minuteIndex) } : null;
   const selectedFormat = inlineSelection
     ? dayData[inlineSelection.dateKey]?.formats?.get(inlineSelection.minuteIndex) ?? {} : {};
+  const compactData = useMemo(() => { const values = days.map((day) => {
+    const index = indexedDays.get(day), groups = indexedGroups.get(day);
+    const sourceBounds = new Map<PlannedEvent, ReturnType<typeof calendarMinuteRange>>();
+    for (const plan of dayData[day]?.plans ?? []) if (!plan.allDay) sourceBounds.set(plan, calendarMinuteRange(plan.startDate, plan.endDate, day));
+    const cells: CompactMinute[] = Array.from({ length: 1440 }, (_, minute) => {
+      const entry = index?.entriesByMinute.get(minute), draft = draftsByKey.get(inlineMinuteKey(day, minute));
+      const plan = index?.plansByMinute.get(minute)?.[0], group = groups?.get(minute), format = dayData[day]?.formats?.get(minute) ?? {};
+      const hasActual = Boolean(entry || draft && draft.revision > 0);
+      const cellKey = inlineMinuteKey(day, minute);
+      const sourcePending = sourceColorJobs.current.has(cellKey) &&
+        sourceColorJobEpochs.current.get(cellKey) === (explicitColorEpochs.current.get(cellKey) ?? 0);
+      const actualColor = sourcePending && plan ? plan.color : hasActual ? categoryById(draft?.categoryId ?? entry?.categoryId ?? 'unaccounted').color : undefined;
+      const previewColor = rangeSelecting && rangeColorChosen && groupHasGoogleColor && selectedRange?.dateKey === day &&
+        minute >= selectedRange.startMinute && minute <= selectedRange.endMinute ? categoryById(rangeColorId).color : undefined;
+      const color = calendarCellColor({ actualColor, hasActual, groupColor: group ? categoryById(group.categoryId).color : undefined,
+        planColor: plan?.color, noFill: format.noFill, previewColor });
+      const boundedPlan = !format.noFill && plan && sourceBounds.get(plan);
+      return { color: color ?? undefined, textColor: format.textColor ?? activityTextColor(color, colors.ink),
+        text: draft?.text ?? entry?.text ?? '',
+        ...(group ? { groupId: group.blockId, title: group.title } : boundedPlan && plan ? { groupId: `plan:${plan.calendarId}:${plan.id}`, title: plan.title } : {}) };
+    });
+    return [day, { bands: compactCalendarBands(cells), outlines: compactCalendarOutlines(cells) }] as const;
+  }); return { bands: new Map(values.map(([day, value]) => [day, value.bands])),
+    outlines: new Map(values.map(([day, value]) => [day, value.outlines])) }; }, [days, indexedDays, indexedGroups, draftsByKey, dayData, availableColors, colors.ink,
+    rangeSelecting, rangeColorChosen, groupHasGoogleColor, rangeColorId, selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute]);
   const cellPolicy = useMemo(() => {
     if (!selectedRange) return analyzeCellSelection([]);
     const index = indexedDays.get(selectedRange.dateKey);
@@ -1641,6 +1696,62 @@ export function TodayScreen({
         if (groupComposerOpenRef.current && selectionStillCurrent(selection, token, generation)) groupTitleInputRef.current?.focus();
       });
     }
+  }
+
+  useEffect(() => { spanEditorScopeRef.current = null; setSpanEditor(null); }, [navigationKey, dateSelectionOpen]);
+
+  async function openSpanDetails(command?: CellCommandSelection) {
+    const selection = command?.selection ?? inlineSelectionRef.current;
+    const range = command?.range ?? parsedRange();
+    if (!selection || !range || !await prepareOptions(selection)) return;
+    const token = selectionTokenRef.current, generation = navigationGenerationRef.current;
+    const group = indexedGroups.get(selection.dateKey)?.get(selection.minuteIndex);
+    const entries = group ? await getEntriesForBlock(group.blockId) : (await getDayEntries(range.dateKey))
+      .filter((entry) => entry.minuteIndex >= range.startMinute && entry.minuteIndex <= range.endMinute);
+    if (!selectionStillCurrent(selection, token, generation)) return;
+    const sorted = [...entries].sort((a, b) => a.dateKey.localeCompare(b.dateKey) || a.minuteIndex - b.minuteIndex);
+    const first = group ? sorted[0] : { dateKey: range.dateKey, minuteIndex: range.startMinute };
+    const last = group ? sorted.at(-1) : { dateKey: range.dateKey, minuteIndex: range.endMinute };
+    if (!first || !last) throw new Error('Refresh this event before editing its range.');
+    const span = { startDateKey: first.dateKey, startMinute: first.minuteIndex,
+      endDateKey: last.minuteIndex === 1439 ? dateKey(addDays(last.dateKey, 1)) : last.dateKey,
+      endMinute: (last.minuteIndex + 1) % 1440 };
+    const count = minuteDetailsCount(span);
+    if (group && count !== sorted.length) throw new Error('Choose one continuous event before editing its bounds.');
+    const values = group ? sorted.map((entry) => entry.text) : Array.from({ length: count }, (_, offset) =>
+      entries.find((entry) => entry.minuteIndex === range.startMinute + offset)?.text ?? '');
+    const text = values.every((value) => value === values[0]) ? values[0] ?? '' : undefined;
+    const id = ++spanEditorIdRef.current;
+    spanEditorScopeRef.current = { selection: { ...selection }, token, generation, id };
+    setSpanEditor({ id, span, text, categoryId: group?.categoryId ?? entries[0]?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted',
+      ...(group ? { event: { title: group.title, categoryId: group.categoryId, blockId: group.blockId } } : {}) });
+    setCellMenuOpen(false); setGroupComposerOpen(false); setInlineEditing(false); Keyboard.dismiss();
+  }
+
+  async function saveSpanDetails(span: MinuteSpan, input: MinuteSpanFillInput): Promise<boolean> {
+    const scope = spanEditorScopeRef.current;
+    const epoch = spanEditorEpochRef.current;
+    const current = () => Boolean(scope && epoch === spanEditorEpochRef.current && spanEditorScopeRef.current === scope &&
+      selectionStillCurrent(scope.selection, scope.token, scope.generation));
+    if (!scope || !current() || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return false;
+    toolBusyRef.current = true; setToolBusy(true);
+    try {
+      if (!await flushDraftsForOptions() || !current()) return false;
+      const preview = await prepareMinuteSpanFill(span, input);
+      if (!current()) return false;
+      if (preview.occupiedCount) {
+        const replace = await new Promise<boolean>((resolve) => Alert.alert('Apply to these minutes?',
+          `${preview.occupiedCount} existing cells are in this range.`,
+          [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) }, { text: 'Replace', onPress: () => resolve(true) }],
+          { cancelable: true, onDismiss: () => resolve(false) }));
+        if (!replace || !current()) return false;
+      }
+      if (input.event) for (const range of preview.ranges) recordExplicitColor(range.dateKey, range.startMinute, range.endMinute);
+      markLocalChange(preview.ranges.map((range) => range.dateKey));
+      await fillMinuteSpan(span, input, { previewToken: preview.token });
+      for (const range of preview.ranges) await refreshLocalEntries(range.dateKey);
+      return current();
+    } finally { toolBusyRef.current = false; if (mountedRef.current) setToolBusy(false); }
   }
 
   function cancelGroupComposer() {
@@ -2017,7 +2128,24 @@ export function TodayScreen({
       ) : null}
 
       <View ref={minuteViewportRef} collapsable={false} style={styles.minuteViewport} onLayout={measureMinuteViewport}>
-      <FlatList ref={listRef} data={MINUTE_ITEMS} keyExtractor={(minute) => minute.toString()}
+      {compactView ? <CompactMinuteOverview scrollRef={compactListRef} days={days} labels={dayLabels} bands={compactData.bands} outlines={compactData.outlines}
+        rowHeight={gridLayout.rowHeight} railWidth={gridLayout.railWidth} dayWidth={gridLayout.dayWidth} colors={colors}
+        current={{ day: today, minute: currentMinute }} selection={selectedRange ? { day: selectedRange.dateKey, first: selectedRange.startMinute, last: selectedRange.endMinute } : undefined}
+        disabled={pinching || toolBusy || menuCommandPending || spreadsheetState.busy} scrolling={!pinching && !rangeDragging && !groupDragging}
+        timeLabel={timeLabel} onSelect={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current)
+          void openInlineMinute(day, minute, false, undefined, false, true); }}
+        onHold={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current) void openLongPressMenu(day, minute); }}
+        onBegin={() => { manualFocusScroll.current = true; }} onEnd={() => { manualFocusScroll.current = false; }}
+        onScroll={(event) => {
+          verticalOffsetRef.current = event.nativeEvent.contentOffset.y; positionFillHandle();
+          if (manualFocusScroll.current && !inlineEditingRef.current && !rangeSelecting) {
+            const day = visibleDaysRef.current.includes(focusedDayRef.current) ? focusedDayRef.current : visibleDaysRef.current[0]!;
+            focusCallbackRef.current?.({ dateKey: day, minuteIndex: Math.max(0, Math.min(1439, Math.floor(event.nativeEvent.contentOffset.y / gridLayoutRef.current.rowHeight))) });
+          }
+        }} onLayout={() => { measureMinuteViewport(); if (pendingZoomAnchorRef.current) restoreZoomAnchor(); }}
+        onContentSizeChange={() => { if (pendingZoomAnchorRef.current) restoreZoomAnchor(); }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.ink} colors={[colors.currentTime]} progressBackgroundColor={colors.surface} />}
+      /> : <FlatList ref={listRef} data={MINUTE_ITEMS} keyExtractor={(minute) => minute.toString()}
         style={styles.minuteList} contentContainerStyle={styles.minuteListContent}
         getItemLayout={(_, index) => ({ length: gridLayout.rowHeight, offset: gridLayout.rowHeight * index, index })}
         initialNumToRender={24} maxToRenderPerBatch={24} windowSize={9} keyboardShouldPersistTaps="always"
@@ -2159,7 +2287,7 @@ export function TodayScreen({
             })}
           </View>
         )}
-      />
+      />}
       {groupDragging && groupDragPreview ? (() => {
         const target = groupDragPreview.target;
         const top = Math.max(0, target.startMinute * gridLayout.rowHeight - verticalOffsetRef.current);
@@ -2209,6 +2337,7 @@ export function TodayScreen({
           transform: [{ translateX: cellMenuOriginX }, { translateY: Animated.add(cellMenuOriginY, cellMenuTop) }],
         }]}>
           <CellActionMenu busy={menuCommandPending || toolBusy || spreadsheetState.busy}
+            onEdit={() => void dispatchCellCommand(openSpanDetails)}
             onCut={() => void dispatchCellCommand((scope) => captureSelectedCells('cut', scope))}
             onCopy={() => void dispatchCellCommand((scope) => captureSelectedCells('copy', scope))}
             onAutoFill={cellPolicy.canAutoFill ? () => void dispatchCellCommand(autoFillSelection) : undefined}
@@ -2262,6 +2391,10 @@ export function TodayScreen({
               }}
               onSubmitEditing={() => void finishInlineEditing()}
               style={styles.bottomTextInput} />
+            <Pressable accessibilityRole="button" accessibilityLabel="Edit selected minutes and time range"
+              disabled={entrySaving || toolBusy || spreadsheetState.busy} onPress={() => void dispatchCellCommand(openSpanDetails)} style={styles.bottomTool}>
+              <CellActionIcon name="edit" color={colors.ink} />
+            </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Save minute text and show formatting"
               disabled={entrySaving || toolBusy || spreadsheetState.busy}
               onPress={() => void finishInlineEditing()} style={styles.bottomTool}>
@@ -2310,6 +2443,10 @@ export function TodayScreen({
                 onPress={() => { Keyboard.dismiss(); setFormatPalette((value) => value === 'cell' ? null : 'cell'); }} style={styles.bottomTool}>
                 <View style={[styles.groupColorDot, { backgroundColor: menuFillColor }]} />
               </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="Edit selected minutes and time range"
+                disabled={menuCommandPending || toolBusy || spreadsheetState.busy} onPress={() => void dispatchCellCommand(openSpanDetails)} style={styles.bottomTool}>
+                <CellActionIcon name="edit" color={colors.ink} />
+              </Pressable>
               <Pressable accessibilityRole="button" accessibilityLabel="Apply event border" accessibilityHint="Name the selected minutes as one calendar event without changing their notes."
                 disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
                 onPress={() => void dispatchCellCommand(openCurrentRangeOptions)} style={styles.bottomTool}>
@@ -2334,6 +2471,8 @@ export function TodayScreen({
       ) : null}
 
 
+      <MinuteSpanEditor session={spanEditor} clockFormat={clockFormat} colorChoices={pickerColors}
+        onClose={() => { spanEditorScopeRef.current = null; setSpanEditor(null); }} onSave={saveSpanDetails} />
       <MinuteEditor visible={editor != null} dateKey={editor?.dateKey ?? activeDate}
         clockFormat={clockFormat}
         minuteIndex={editor?.minuteIndex ?? 0} entry={editor?.entry ?? null} plan={editor?.plan ?? null}

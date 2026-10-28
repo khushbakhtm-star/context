@@ -78,4 +78,47 @@ class JVMWatchDictationPolicyTest {
         assertTrue(WatchDictationPolicy.failure(WatchSpeechFailure.NETWORK, false).contains("may need internet"))
         assertFalse(WatchDictationPolicy.failure(WatchSpeechFailure.NETWORK, true).contains("will work"))
     }
+    @Test fun breathsSeparatePhrasesWithoutDiscardingEarlierWords() {
+        val note = WatchDictationNote()
+        note.beginPhrase(); assertTrue(note.preview("Mum said"))
+        assertTrue(note.acceptPhrase("Mum said"))
+        // A provider's final result keeps the draft; it has no save callback.
+        note.beginPhrase(); assertEquals("Mum said", note.text)
+        assertTrue(note.preview("make an appointment"))
+        assertTrue(note.acceptPhrase("make an appointment"))
+        note.beginPhrase(); assertTrue(note.acceptPhrase("for next Tuesday"))
+        assertEquals("Mum said make an appointment for next Tuesday", note.text)
+        assertEquals(note.text, note.confirmDisplayed())
+    }
+    @Test fun partialHypothesesReplaceOnlyTheirOwnPhraseAndDoneConfirmsTheDisplayedWords() {
+        val note = WatchDictationNote()
+        assertNull(note.confirmDisplayed())
+        note.beginPhrase(); assertTrue(note.acceptPhrase("First thought.")); note.beginPhrase()
+        assertTrue(note.preview("Second")); assertTrue(note.preview("Second thought"))
+        assertEquals("First thought. Second thought", note.text)
+        assertTrue(note.acceptPhrase("Second thought."))
+        assertEquals("First thought. Second thought.", note.text)
+        note.beginPhrase(); assertTrue(note.preview("Third thought"))
+        assertEquals("First thought. Second thought. Third thought", note.confirmDisplayed())
+    }
+    @Test fun retryRetainsTheWordsSeenBeforeAnInterruptionWithoutDuplicatingTheNextPartial() {
+        val note = WatchDictationNote()
+        assertTrue(note.acceptPhrase("Earlier words")); note.beginPhrase()
+        assertTrue(note.preview("before a network interruption")); note.beginPhrase()
+        assertEquals("Earlier words before a network interruption", note.text)
+        assertTrue(note.preview("continuing")); assertTrue(note.preview("continuing now"))
+        assertEquals("Earlier words before a network interruption continuing now", note.text)
+        assertTrue(note.acceptPhrase("continuing now"))
+        assertEquals("Earlier words before a network interruption continuing now", note.confirmDisplayed())
+    }
+    @Test fun emptyOrOversizedProviderResultsCannotEraseAnExistingNoteDraft() {
+        val note = WatchDictationNote()
+        assertTrue(note.acceptPhrase("Keep me")); note.beginPhrase()
+        assertFalse(note.acceptPhrase("  ")); assertFalse(note.preview("x".repeat(50_001)))
+        assertFalse(note.acceptPhrase("x".repeat(50_001)))
+        assertEquals("Keep me", note.text)
+        assertTrue(note.preview("still here"))
+        assertFalse(note.acceptPhrase("x".repeat(50_001)))
+        assertEquals("Keep me still here", note.confirmDisplayed())
+    }
 }

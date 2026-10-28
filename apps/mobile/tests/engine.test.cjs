@@ -1386,6 +1386,87 @@ test('a cross-midnight activity remains one event and calendar movement imports 
   assert.equal((await device.engine.listProjections())[0].state, 'synced');
 });
 
+test('pencil overnight fill and explicit bounds edits keep one account event and location across both date queues and Undo', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const next = '2026-10-26';
+  const span = { startDateKey: day, startMinute: 1438, endDateKey: next, endMinute: 3 };
+  const input = { text: 'Sleep note', event: { title: 'Sleep', categoryId: 'sleep' } };
+  const preview = await device.sheet.prepareMinuteSpanFill(span, input);
+  await device.sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  await device.inline.retryInlineMinuteLinks({ synchronize: false });
+  await device.engine.linkActualsToAccounts([day, next]); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1); assert.equal(remote.calls.filter((call) => call.type === 'create').length, 1);
+  const original = [...remote.events.values()][0];
+  const blockId = (await device.db.getMinuteEntry(day, 1438)).blockId;
+  assert.equal(original.start, iso(1438)); assert.equal(original.end, iso(1443)); assert.equal(original.title, 'Sleep');
+  remote.edit('personal', original.id, { location: 'Home' });
+  await device.engine.synchronizeAccounts();
+  const shifted = { startDateKey: next, startMinute: 8, endDateKey: next, endMinute: 13 };
+  const changed = { event: { blockId, title: 'Sleep', categoryId: 'sleep' } };
+  const resize = await device.sheet.prepareMinuteSpanFill(shifted, changed);
+  await device.sheet.fillMinuteSpan(shifted, changed, { previewToken: resize.token });
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  const event = remote.events.get(`personal:${original.id}`);
+  assert.equal(remote.events.size, 1); assert.equal(event.start, iso(1448)); assert.equal(event.end, iso(1453));
+  assert.equal(event.location, 'Home'); assert.equal(event.title, 'Sleep');
+  assert.equal((await device.db.getMinuteEntry(day, 1438)).text, 'Sleep note', 'outside notes stay private after explicit resize');
+  assert.ok((await device.db.getMinuteEntry(day, 1438)).blockId.startsWith('sheet_'));
+  assert.equal((await device.engine.listProjections()).filter((projection) => projection.state !== 'deleted').length, 1);
+  await device.sheet.undoSpreadsheetEdit();
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  const undone = remote.events.get(`personal:${original.id}`);
+  assert.equal(remote.events.size, 1); assert.equal(undone.start, iso(1438)); assert.equal(undone.end, iso(1443));
+  assert.equal(undone.location, 'Home'); assert.equal(remote.calls.filter((call) => call.type === 'create').length, 1);
+});
+
+test('an exact legacy source border can be pencil-resized beyond its old dates without replacing its event identity or location', async (t) => {
+  const { device, remote, original } = await linkedPrayer(t);
+  remote.edit('personal', original.id, { location: 'Quiet room' }); await device.engine.synchronizeAccounts();
+  const blockId = (await device.db.getMinuteEntry(day, 1135)).blockId;
+  assert.ok(!blockId.startsWith('activity_'));
+  const span = { startDateKey: '2026-11-03', startMinute: 700, endDateKey: '2026-11-03', endMinute: 705 };
+  const input = { event: { blockId, title: original.title, categoryId: 'prayer' } };
+  const preview = await device.sheet.prepareMinuteSpanFill(span, input);
+  await device.sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  const saved = remote.events.get(`personal:${original.id}`);
+  assert.equal(remote.events.size, 1); assert.equal(saved.location, 'Quiet room'); assert.equal(saved.title, original.title);
+  assert.equal(saved.start, new Date(2026, 10, 3, 11, 40).toISOString());
+  assert.equal(saved.end, new Date(2026, 10, 3, 11, 45).toISOString());
+  assert.equal(remote.calls.filter((call) => ['create', 'delete', 'updateSeries'].includes(call.type)).length, 0);
+  const active = (await device.engine.listProjections()).filter((projection) => projection.state !== 'deleted');
+  assert.equal(active.length, 1); assert.equal(active[0].sourceEventId, original.id); assert.equal(active[0].blockId, blockId);
+  await device.sheet.undoSpreadsheetEdit(); await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.get(`personal:${original.id}`).start, iso(1135));
+  assert.equal(remote.events.get(`personal:${original.id}`).location, 'Quiet room');
+  assert.equal(remote.events.size, 1);
+});
+
+test('ambiguous disjoint borders sharing a legacy source ID require review without adopting or deleting any provider event', async (t) => {
+  for (const shape of ['gap', 'different-title']) {
+    const { device, remote, original } = await linkedPrayer(t);
+    const blockId = (await device.db.getMinuteEntry(day, 1135)).blockId;
+    const movedDay = '2026-11-03';
+    const span = { startDateKey: movedDay, startMinute: 700, endDateKey: movedDay, endMinute: 705 };
+    const input = { event: { blockId, title: original.title, categoryId: 'prayer' } };
+    const preview = await device.sheet.prepareMinuteSpanFill(span, input);
+    await device.sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+    const minuteIndex = shape === 'gap' ? 710 : 705;
+    const before = await device.db.getSpreadsheetCells({ dateKey: movedDay, startMinute: minuteIndex, endMinute: minuteIndex });
+    await device.db.applySpreadsheetTransaction([{ day: movedDay, expected: before, target: [{ ...before[0],
+      entry: { text: 'Independent note', categoryId: 'prayer', blockId },
+      format: { calendarEvent: { id: blockId, title: shape === 'gap' ? original.title : 'Another border' } } }] }],
+    { textChanged: true, formatChanged: true });
+    const writes = remote.calls.filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length;
+    await assert.rejects(device.engine.linkActualsToAccounts([day, movedDay]), /ambiguous moved borders/);
+    await device.engine.synchronizeAccounts();
+    assert.equal(remote.calls.filter((call) => ['create', 'update', 'delete', 'updateSeries'].includes(call.type)).length, writes);
+    assert.equal(remote.events.size, 1); assert.ok(remote.events.has(`personal:${original.id}`));
+    assert.equal((await device.db.getMinuteEntry(movedDay, minuteIndex)).text, 'Independent note');
+    assert.equal(device.engine.getAccountSyncStatus().outcome, 'error');
+  }
+});
+
 test('a phone timezone change preserves the original projection instants when its minute text is edited', async (t) => {
   const previousTimezone = process.env.TZ;
   try {

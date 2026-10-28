@@ -50,3 +50,30 @@ class WatchDictationRunGuard {
     fun invalidate() { generation += 1 }
     fun close() { open = false; generation += 1 }
 }
+
+/** Phrase boundaries are not note boundaries. Only the user's Done action confirms this draft. */
+class WatchDictationNote {
+    private var completed = ""
+    private var partial = ""
+    val text: String get() = join(completed, partial)
+    fun beginPhrase() {
+        // A retry retains words shown before an interruption, without saving them.
+        completed = text; partial = ""
+    }
+    fun preview(value: String): Boolean {
+        val next = value.trim()
+        if (join(completed, next).length > DictationSavePolicy.MAX_TEXT_LENGTH) return false
+        partial = next; return true
+    }
+    fun acceptPhrase(value: String): Boolean {
+        val next = value.trim()
+        if (next.isEmpty() || join(completed, next).length > DictationSavePolicy.MAX_TEXT_LENGTH) return false
+        completed = join(completed, next); partial = ""; return true
+    }
+    fun confirmDisplayed(): String? = text.takeIf { it.isNotBlank() && it.length <= DictationSavePolicy.MAX_TEXT_LENGTH }
+    private fun join(first: String, second: String): String = when {
+        first.isEmpty() -> second
+        second.isEmpty() -> first
+        else -> "$first $second"
+    }
+}

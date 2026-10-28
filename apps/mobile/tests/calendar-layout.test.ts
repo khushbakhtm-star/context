@@ -41,7 +41,7 @@ test('Day zoom changes minute density while retaining one full-width date column
   assert.equal(normalizeCalendarZoom(undefined), 1);
   assert.equal(normalizeCalendarZoom('1.5'), 1);
   assert.equal(normalizeCalendarZoom(Number.NaN), 1);
-  assert.equal(normalizeCalendarZoom(0.1), 0.5);
+  assert.equal(normalizeCalendarZoom(0.1), 0.1);
   assert.equal(normalizeCalendarZoom(8), 2.5);
   const small = calendarGridLayout(360, 1, 0.5);
   assert.equal(small.rowHeight, 17);

@@ -815,11 +815,28 @@ async function getProjectionSegment(projection: Projection) {
   const groups = await partitionActivity(entries);
   const start = civil(projection.dateKey, projection.startMinute);
   const end = civil(projection.endDateKey ?? projection.dateKey, projection.endMinute);
-  const selected = groups.find((group) => civil(group[0]!.dateKey, group[0]!.minuteIndex) <= end &&
+  let selected = groups.find((group) => civil(group[0]!.dateKey, group[0]!.minuteIndex) <= end &&
     civil(group.at(-1)!.dateKey, group.at(-1)!.minuteIndex) >= start) ??
     // A whole named activity keeps its identity when moved beyond its old date/time.
     // Ambiguous split groups still require the anchored match above.
     (namedActivity && groups.length === 1 ? groups[0] : undefined);
+  if (!selected && !namedActivity) {
+    // A pencil bounds edit can retain an ordinary source-linked block ID while
+    // moving beyond its old anchor. Only one complete, explicitly labeled civil
+    // run owns that ID; unbordered remnants or competing borders require review.
+    const complete = await getEntriesForBlock(projection.blockId);
+    if (complete.length) {
+      if (complete.length > 1440 || complete.some((entry, index) => index > 0 &&
+          civil(entry.dateKey, entry.minuteIndex) !== civil(complete[index - 1]!.dateKey, complete[index - 1]!.minuteIndex) + 60000)) {
+        throw new Error('This linked event has ambiguous moved borders. Review its activity bounds before synchronizing.');
+      }
+      const exact = await partitionActivity(complete);
+      if (exact.length !== 1 || !await getActivityTitleForEntries(exact[0]!)) {
+        throw new Error('This linked event has ambiguous moved borders. Review its activity bounds before synchronizing.');
+      }
+      selected = exact[0];
+    }
+  }
   if (!selected && namedActivity && groups.length) {
     throw new Error('This activity moved with an ambiguous calendar shape. Review its linked events before synchronizing.');
   }

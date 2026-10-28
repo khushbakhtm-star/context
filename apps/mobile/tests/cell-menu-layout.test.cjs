@@ -33,6 +33,7 @@ function menu(overrides = {}, dimensions = { width: 390, height: 844 }) {
         BackHandler: { addEventListener: () => ({ remove() {} }) }, useWindowDimensions: () => dimensions };
       if (name === '../appearance') return { useAppTheme: () => ({ colors: { ink: '#111111', panel: '#EEEEEE', hairline: '#CCCCCC' } }) };
       if (name === './CellColorPalette') return { CellColorPalette: 'CellColorPalette' };
+      if (name === './CellActionIcon') return { CellActionIcon: 'CellActionIcon' };
       throw Error(`Unexpected menu layout import: ${name}`);
     },
   });
@@ -60,24 +61,24 @@ test('a blank selection uses native action width with no empty formatting row or
   assert.deepEqual(h.widths, [159.5], 'disabled styling does not reset or churn native measurements');
 });
 
-test('measured accessibility text and formatting content expand only up to the actual viewport bound', () => {
+test('measured icon actions expand only up to the actual viewport bound without a formatting row', () => {
   const h = menu({ onClear() {}, onGroup() {}, onToggleBold() {}, onToggleItalic() {}, onToggleUnderline() {}, onTextColor() {}, onCellColor() {} });
-  h.measureActions(220); assert.equal(h.style().opacity, 0, 'wait for the formatting row measurement too');
-  h.measureFormats(244); assert.equal(h.style().width, 245);
+  h.measureActions(244); assert.equal(h.style().opacity, 1);
+  assert.equal(h.rows().length, 1); assert.equal(h.style().width, 245);
   h.measureActions(690); assert.equal(h.style().width, 374, 'native large-font content scrolls rather than exceeding the phone');
   for (const row of h.rows()) { assert.equal(row.props.keyboardShouldPersistTaps, 'always'); assert.equal(row.props.keyboardDismissMode, 'none'); }
   const narrow = menu({}, { width: 180, height: 320 }); narrow.measureActions(300); assert.equal(narrow.style().width, 164);
   const wide = menu({}, { width: 1200, height: 900 }); wide.measureActions(900); assert.equal(wide.style().width, 440);
 });
 
-test('opening a deliberate palette expands to the bounded width and closing restores measured width', () => {
-  const h = menu({ onCellColor() {} }); h.measureActions(170); h.measureFormats(56);
-  assert.equal(h.style().width, 171);
-  h.nodes().find((node) => node.props.accessibilityLabel === 'Choose cell color').props.onPress(); h.render();
-  assert.equal(h.style().width, 374); assert.ok(h.nodes().some((node) => node.type === 'CellColorPalette'));
-  h.nodes().find((node) => node.type === 'CellColorPalette').props.onClose(); h.render();
-  assert.equal(h.style().width, 171); assert.equal(h.style().opacity, 1);
-  assert.deepEqual(h.widths, [171, 374, 171]);
+test('icon actions retain accessible names and relevant AutoFill, Ungroup and pencil without text captions', () => {
+  const h = menu({ onAutoFill() {}, onUngroup() {}, onEdit() {}, onCellColor() {} }); h.measureActions(280);
+  const icons = h.nodes().filter((node) => node.type === 'CellActionIcon');
+  assert.deepEqual(icons.map((node) => node.props.name), ['cut', 'copy', 'paste', 'fill', 'ungroup', 'edit']);
+  assert.ok(h.nodes().some((node) => node.props.accessibilityLabel === 'Auto fill selected minute cells'));
+  assert.ok(h.nodes().some((node) => node.props.accessibilityLabel === 'Edit selected minutes and time range'));
+  assert.equal(h.nodes().some((node) => node.type === 'CellColorPalette'), false);
+  assert.equal(h.nodes().some((node) => node.type === 'Text'), false);
 });
 
 test('a controlled parent can hold width through a native touch without hiding the menu or running a command early', () => {

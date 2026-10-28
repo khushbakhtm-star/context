@@ -808,14 +808,38 @@ export async function getSyncBindingsForBlock(blockId: string): Promise<SyncBind
 
 type ActivityMemberSnapshot = Pick<MinuteEntry, 'dateKey' | 'minuteIndex' | 'categoryId'>;
 async function requireActivityMembers(txn: Pick<SQLite.SQLiteDatabase, 'getAllAsync'>,
-  blockId: string, expected: readonly ActivityMemberSnapshot[]) {
-  if (!isActivityGroupId(blockId) || !expected.length || expected.length > 1440) throw new Error('Invalid activity identity.');
+  blockId: string, expected: readonly ActivityMemberSnapshot[], allowSourceBlock = false) {
+  if ((!isActivityGroupId(blockId) && !(allowSourceBlock && isCalendarEventId(blockId))) ||
+      !expected.length || expected.length > 1440) throw new Error('Invalid activity identity.');
   const actual = await txn.getAllAsync<{ date_key: string; minute_index: number; category_id: string }>(
     `SELECT date_key, minute_index, category_id FROM minute_entries WHERE block_id = ? ORDER BY date_key, minute_index`, blockId);
   const normalized = [...expected].map(({ dateKey, minuteIndex, categoryId }) => ({ dateKey, minuteIndex, categoryId }))
     .sort((a, b) => a.dateKey.localeCompare(b.dateKey) || a.minuteIndex - b.minuteIndex);
   if (canonicalValue(actual.map((row) => ({ dateKey: row.date_key, minuteIndex: row.minute_index, categoryId: row.category_id }))) !== canonicalValue(normalized)) {
     throw new Error('The activity changed while its calendar link was moving. Retry synchronization.');
+  }
+  if (!isActivityGroupId(blockId)) {
+    let title: string | undefined;
+    const first = actual[0]!;
+    const civil = (day: string, minute: number) => Date.parse(`${day}T00:00:00Z`) / 60_000 + minute;
+    if (actual.some((row, index) => civil(row.date_key, row.minute_index) !== civil(first.date_key, first.minute_index) + index)) {
+      throw new Error('The source activity is no longer one contiguous bordered range.');
+    }
+    for (let start = 0; start < actual.length; start += 500) {
+      const rows = actual.slice(start, start + 500);
+      const keys = rows.map((row) => cellFormatKey(row.date_key, row.minute_index));
+      const documents = await txn.getAllAsync<Pick<DocumentRow, 'key' | 'value_json'>>(
+        `SELECT key, value_json FROM ledger_documents WHERE key IN (${keys.map(() => '?').join(',')})`, ...keys);
+      const byKey = new Map(documents.map((document) => [document.key, document.value_json]));
+      for (const key of keys) {
+        const value = byKey.get(key);
+        const label = formatFromDocument(value ? JSON.parse(value) : null).calendarEvent;
+        if (!label || label.id !== blockId || !label.title.trim() || title !== undefined && label.title !== title) {
+          throw new Error('The source activity border changed. Review its complete title and minute range.');
+        }
+        title = label.title;
+      }
+    }
   }
 }
 
@@ -829,7 +853,7 @@ export async function remapActivitySyncBindings(blockId: string,
   }
   const db = await database();
   await db.withExclusiveTransactionAsync(async (txn) => {
-    await requireActivityMembers(txn, blockId, members);
+    await requireActivityMembers(txn, blockId, members, true);
     for (const { before, after } of changes) {
       validateMinuteCellRange({ dateKey: after.dateKey, startMinute: 0, endMinute: 1439 });
       const row = await txn.getFirstAsync<{ event_id: string; calendar_id: string; block_id: string; date_key: string; updated_at: string }>(

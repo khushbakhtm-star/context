@@ -1,5 +1,5 @@
 import type { ActivitySegment, SyncBinding } from '../types';
-import { bindingInterval } from './activity-translation';
+import { activityIntervalAbsoluteEnd, bindingInterval } from './activity-translation';
 import { isCalendarEventId, validateMinuteCellRange } from './cell-format';
 
 export type NativeBoundRetimeInput = {
@@ -60,24 +60,28 @@ export function planNativeBoundRetime(input: NativeBoundRetimeInput): NativeBoun
   if (!segment || typeof segment.activityTitle !== 'string' || !segment.activityTitle.trim() || segment.activityTitle.trim().length > 200) {
     return { kind: 'deferred', reason: 'unbordered' };
   }
-  try { validateMinuteCellRange(segment); }
-  catch { return { kind: 'deferred', reason: 'invalid-segment' }; }
+  const targetInterval = bindingInterval(segment.segmentKey, input.blockId);
+  if (!targetInterval || targetInterval.dateKey !== segment.dateKey || targetInterval.startMinute !== segment.startMinute ||
+      activityIntervalAbsoluteEnd(targetInterval) !== segment.endMinute) return { kind: 'deferred', reason: 'invalid-segment' };
   if (!validDay(segment.dateKey) || segment.blockId !== input.blockId ||
       segment.segmentKey !== `${segment.dateKey}:${input.blockId}:${segment.startMinute}-${segment.endMinute}` ||
       !Array.isArray(segment.entries) || segment.entries.length !== segment.endMinute - segment.startMinute + 1 ||
       new Set(segment.entries.map((entry) => entry?.id)).size !== segment.entries.length ||
-      segment.entries.some((entry, index) => !entry || entry.blockId !== input.blockId || entry.dateKey !== segment.dateKey ||
-        entry.minuteIndex !== segment.startMinute + index || typeof entry.id !== 'string' || !entry.id ||
+      segment.entries.some((entry, index) => !entry || entry.blockId !== input.blockId ||
+        Date.parse(`${entry.dateKey}T00:00:00Z`) / 60_000 + entry.minuteIndex !==
+          Date.parse(`${segment.dateKey}T00:00:00Z`) / 60_000 + segment.startMinute + index ||
+        !validDay(entry.dateKey) || !Number.isInteger(entry.minuteIndex) || entry.minuteIndex < 0 || entry.minuteIndex >= 1440 || typeof entry.id !== 'string' || !entry.id ||
         typeof entry.text !== 'string' || typeof entry.categoryId !== 'string' || !entry.categoryId)) {
     return { kind: 'deferred', reason: 'invalid-segment' };
   }
   const targetDate = segment.dateKey;
-  if (input.processingDate !== targetDate && input.processingDate !== binding.dateKey) {
+  const targetDays = new Set(segment.entries.map((entry) => entry.dateKey));
+  if (!targetDays.has(input.processingDate) && input.processingDate !== binding.dateKey && input.processingDate !== before.endDateKey) {
     return { kind: 'deferred', reason: 'unrelated-date' };
   }
   const needsRemap = binding.segmentKey !== segment.segmentKey || binding.dateKey !== targetDate;
   return {
-    kind: input.processingDate !== targetDate ? 'defer-source-cleanup' : needsRemap ? 'retime' : 'unchanged',
+    kind: !targetDays.has(input.processingDate) ? 'defer-source-cleanup' : needsRemap ? 'retime' : 'unchanged',
     binding: { ...binding },
     segment: { ...segment, entries: segment.entries.map((entry) => ({ ...entry })) },
     afterBinding: { segmentKey: segment.segmentKey, blockId: input.blockId, dateKey: targetDate,

@@ -10,7 +10,7 @@ const ts = require('typescript');
 function screen(t, options = {}) {
   const day = '2026-10-25'; let now = 10000; let hook = 0; let dirty = true; let tree;
   const slots = []; const effects = []; const timers = new Map(); const animationFrames = new Map(); let timerId = 0;
-  const calls = []; const pastePreviews = []; const externalPreviews = []; const alerts = [];
+  const calls = []; const pastePreviews = []; const externalPreviews = []; const spanPreviews = []; const alerts = [];
   const listeners = new Set(); const appStateListeners = new Set(); const keyboardListeners = new Map(); const rows = new Map(); const modules = new Map();
   let systemReads = 0; let systemCopies = 0;
   let clipboard = null; let failure = null; let writeGate = null; let dismisses = 0;
@@ -61,6 +61,13 @@ function screen(t, options = {}) {
     colorMinuteRange: async (range, categoryId) => command('color', { ...range, categoryId }),
     ungroupMinuteRange: async (range) => command('ungroup', range),
     groupMinuteRange: async (range, group) => command('group', { ...range, ...group }),
+    prepareMinuteSpanFill: async (span, input) => {
+      const ranges = load(source('utils/minute-span.ts')).minuteSpanRanges(span);
+      spanPreviews.push({ span: { ...span }, input: JSON.parse(JSON.stringify(input)) });
+      if (options.prepareSpanGate) await options.prepareSpanGate;
+      return { token: 'span-preview', span, ranges, cellCount: ranges.reduce((n, r) => n + r.endMinute - r.startMinute + 1, 0), occupiedCount: options.spanOccupied ?? 0 };
+    },
+    fillMinuteSpan: async (span, input, applyOptions) => command('span-fill', { span, input, ...applyOptions }),
     cancelMinuteRangeMove() {},
     getMovableActivityGroup: options.readMovableGroup ?? (async () => null),
     prepareActivityGroupMove: async (source, destination) => { command('prepare-group-move', { source, destination });
@@ -117,10 +124,14 @@ function screen(t, options = {}) {
         if (name === 'react-native-safe-area-context') return { useSafeAreaInsets: () => ({ top: 24, bottom: 24 }) };
         const resolved = path.resolve(path.dirname(filename), name);
         if (resolved === source('appearance')) return { useAppTheme: () => ({ colors: load(source('theme.ts')).darkColors, resolvedMode: 'dark' }) };
+        for (const name of ['CellActionIcon', 'CompactMinuteOverview', 'MinuteSpanEditor']) {
+          if (resolved.endsWith('/components/' + name) || resolved.endsWith('\\components\\' + name)) return { [name]: name };
+        }
         if (resolved.endsWith('/components/CellActionMenu') || resolved.endsWith('\\components\\CellActionMenu')) return { CellActionMenu: 'CellActionMenu' };
         if (resolved.endsWith('/components/CellColorPalette') || resolved.endsWith('\\components\\CellColorPalette')) return { CellColorPalette: 'CellColorPalette' };
         if (resolved.endsWith('/components/MinuteEditor') || resolved.endsWith('\\components\\MinuteEditor')) return { MinuteEditor: 'MinuteEditor' };
         if (resolved === source('data/database')) return { getDayEntries: options.readEntries ?? (async (date) => [...rows.values()].filter((row) => row.dateKey === date).map((row) => ({ ...row }))),
+          getEntriesForBlock: async (blockId) => [...rows.values()].filter((row) => row.blockId === blockId).map((row) => ({ ...row })),
           getMinuteEntry: async (date, minute) => rows.get(`${date}:${minute}`) ? { ...rows.get(`${date}:${minute}`) } : null };
         if (resolved === source('services/calendar')) return { loadPlannedEventsResult: options.readNative ?? (async () => ({ plans: [], failures: [] })),
           reconcileLinkedNativeColors: options.reconcileColors ?? (async () => []), flushPendingActuals: async () => ({}) };
@@ -202,13 +213,14 @@ function screen(t, options = {}) {
   function unmount() { if (disposed) return; disposed = true;
     for (const slot of slots) slot?.cleanup?.(); timers.clear(); animationFrames.clear(); }
   t.after(unmount);
-  return { day, calls, pastePreviews, externalPreviews, alerts, rows, drafts, async start() { render(); await settle(); }, tap, hold, settle,
+  return { day, calls, pastePreviews, externalPreviews, spanPreviews, alerts, rows, drafts, async start() { render(); await settle(); }, tap, hold, settle,
     async selectThrough(minute) {
       function handle(node) { if (!node || typeof node !== 'object') return null;
         if (node.props?.accessibilityLabel === 'Drag to select minutes for Auto fill') return node;
         for (const child of [node.props?.children].flat(Infinity)) { const found = handle(child); if (found) return found; } return null; }
       handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
     },
+    details: () => find(tree, 'MinuteSpanEditor')?.props, overview: () => find(tree, 'CompactMinuteOverview')?.props,
     menu: () => find(tree, 'CellActionMenu')?.props, menuPosition, menuAncestors, measureViewport,
     palette: () => find(tree, 'CellColorPalette')?.props,
     menuBox: () => { const style = menuAncestors()?.at(-1)?.props.style[1];
@@ -249,6 +261,55 @@ function plan(id, minute, account = false) {
     endDate: new Date(2026, 9, 25, Math.floor(minute / 60), minute % 60 + 1),
     ...(account ? { accountEvent: { accountId: 'account', event: {} } } : {}) };
 }
+
+test('pencil opens a dated mixed-note range and submits one guarded overnight fill', async (t) => {
+  const h = screen(t, { spanOccupied: 2 });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'First note', categoryId: 'study', blockId: 'first' });
+  h.rows.set(`${h.day}:601`, { dateKey: h.day, minuteIndex: 601, text: 'Another note', categoryId: 'study', blockId: 'second' });
+  await h.start(); await h.tap(600); await h.selectThrough(602); h.menu().onEdit(); await h.settle();
+  assert.equal(h.details().session.text, undefined);
+  assert.equal(h.details().session.span.startMinute, 600); assert.equal(h.details().session.span.endMinute, 603);
+  const span = { startDateKey: h.day, startMinute: 1350, endDateKey: '2026-10-26', endMinute: 420 };
+  const input = { text: 'Rest', event: { title: 'Rest', categoryId: 'study' } };
+  assert.equal(await h.details().onSave(span, input), true); await h.settle();
+  assert.equal(h.spanPreviews.length, 1);
+  const applied = h.calls.find((call) => call.action === 'span-fill');
+  assert.deepEqual(JSON.parse(JSON.stringify(applied)), { action: 'span-fill', span, input, previewToken: 'span-preview' });
+});
+
+test('pencil preserves full existing cross-day event identity and independent notes', async (t) => {
+  const group = { dateKey: '2026-10-25', blockId: 'activity_existing', title: 'Rest', categoryId: 'study', startMinute: 1439, endMinute: 1439 };
+  const h = screen(t, { readGroups: async (day) => day === group.dateKey ? [group] : [] });
+  h.rows.set(`${h.day}:1439`, { dateKey: h.day, minuteIndex: 1439, text: 'Before midnight', categoryId: 'study', blockId: group.blockId });
+  h.rows.set('2026-10-26:0', { dateKey: '2026-10-26', minuteIndex: 0, text: 'After midnight', categoryId: 'study', blockId: group.blockId });
+  await h.start(); await h.tap(1439); h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  assert.equal(h.details().session.event.blockId, group.blockId);
+  assert.equal(h.details().session.span.endDateKey, '2026-10-26'); assert.equal(h.details().session.span.endMinute, 1);
+  assert.equal(h.details().session.text, undefined, 'mixed notes stay separate from the event title');
+});
+
+test('navigation during a pencil preview prevents the old range from committing', async (t) => {
+  let release; const gate = new Promise((resolve) => { release = resolve; }); const h = screen(t, { prepareSpanGate: gate });
+  await h.start(); await h.tap(600); h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  const saving = h.details().onSave({ ...h.details().session.span }, { text: 'Old intent' }); await h.settle();
+  assert.equal(h.spanPreviews.length, 1); await h.navigate('2026-10-26'); release(); assert.equal(await saving, false); await h.settle();
+  assert.equal(h.calls.some((call) => call.action === 'span-fill'), false); assert.equal(h.details().session, null);
+});
+
+test('canceling occupied pencil replacement preserves the form and performs no write', async (t) => {
+  const h = screen(t, { spanOccupied: 1, confirmReplace: false }); await h.start(); await h.tap(600);
+  h.action('Edit selected minutes and time range').onPress(); await h.settle(); const id = h.details().session.id;
+  assert.equal(await h.details().onSave(h.details().session.span, { text: 'Replacement' }), false); await h.settle();
+  assert.equal(h.calls.some((call) => call.action === 'span-fill'), false); assert.equal(h.details().session.id, id);
+});
+
+test('full-day compact Week keeps seven fixed columns and pencil opens the touched minute', async (t) => {
+  const h = screen(t, { props: { dayCount: 7, zoom: 500 / (1440 * 34) } }); await h.start();
+  assert.ok(h.overview()); assert.equal(h.overview().days.length, 7); assert.ok(h.overview().rowHeight < 1);
+  assert.ok(Math.abs(7 * h.overview().dayWidth + h.overview().railWidth - 390) < 0.000001);
+  h.overview().onSelect(h.day, 1375); await h.settle(); h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  assert.equal(h.details().session.span.startDateKey, h.day); assert.equal(h.details().session.span.startMinute, 1375);
+});
 
 test('an existing link warning reports pending during account work and retry only after that work stops', async (t) => {
   let update; let warning;

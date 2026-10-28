@@ -27,7 +27,8 @@ import { categoryById } from '../theme';
 import type { ActivitySegment, CalendarPreferences, DeviceCalendar, MinuteEntry, PlannedEvent, SyncBinding } from '../types';
 import { addDays, dateKey, localDateAtMinute, minuteIndexForDate, minuteLabel, parseDateKey } from '../utils/time';
 import { isActivityGroupId } from '../utils/cell-format';
-import { bindingInterval, matchActivityTranslation } from '../utils/activity-translation';
+import { activityIntervalAbsoluteEnd, activityIntervalContains, activityIntervalRanges, bindingInterval,
+  coalesceNativeActivitySpan, matchActivityTranslation } from '../utils/activity-translation';
 import { planNativeBoundRetime, type NativeBoundRetimePlan } from '../utils/native-bound-retime';
 import { calendarColor, nativeEventColor } from '../utils/calendar-cell-color';
 import { formatCalendarMinuteLog, parseCalendarMinuteLog, parseCompactCalendarMinuteLog } from '../utils/calendar-minute-log';
@@ -66,6 +67,48 @@ export function configureCalendarProjection(calendarId: string | null) {
 
 class ProjectionCancelledError extends Error {}
 
+type NativeActivitySegment = ActivitySegment & { nativeSpanReview?: true };
+
+async function getNativeCalendarSegments(value: string): Promise<NativeActivitySegment[]> {
+  const daily = await getDayCalendarSegments(value);
+  const dayReads = new Map<string, Promise<ActivitySegment[]>>([[value, Promise.resolve(daily)]]);
+  const readDay = (day: string) => {
+    if (!dayReads.has(day)) dayReads.set(day, getDayCalendarSegments(day));
+    return dayReads.get(day)!;
+  };
+  const resolved = new Map<string, NativeActivitySegment>();
+  const named = new Set(daily.filter((segment) => segment.activityTitle).map((segment) => segment.blockId));
+  for (const segment of daily) {
+    if (!segment.activityTitle) { if (!named.has(segment.blockId)) resolved.set(segment.segmentKey, segment); continue; }
+    if ([...resolved.values()].some((item) => item.blockId === segment.blockId)) continue;
+    const members = await getEntriesForBlock(segment.blockId);
+    const days = [...new Set(members.map((entry) => entry.dateKey))];
+    const parts = days.length <= 2 ? (await Promise.all(days.map(readDay))).flat()
+      .filter((item) => item.blockId === segment.blockId) : [];
+    const complete = coalesceNativeActivitySpan(parts, members);
+    resolved.set(complete?.segmentKey ?? segment.segmentKey, complete ?? { ...segment, nativeSpanReview: true });
+  }
+  return [...resolved.values()];
+}
+
+function requireNativeSegmentShape(segment: NativeActivitySegment) {
+  if (segment.nativeSpanReview) throw new Error('This bordered activity has ambiguous or incomplete minute cells. Review its complete range before synchronizing.');
+}
+
+async function nativeBindingsForSegments(value: string, segments: readonly ActivitySegment[]) {
+  const bindings = new Map((await getSyncBindings(value)).map((binding) => [binding.segmentKey, binding]));
+  // A reset can remove every current cell on the end day. The exact canonical
+  // key on the previous day still proves which original event needs shrinking.
+  const previousDay = dateKey(addDays(value, -1));
+  for (const binding of await getSyncBindings(previousDay)) {
+    if (bindingInterval(binding.segmentKey, binding.blockId)?.endDateKey === value) bindings.set(binding.segmentKey, binding);
+  }
+  for (const segment of segments) if (segment.activityTitle) {
+    for (const binding of await getSyncBindingsForBlock(segment.blockId)) bindings.set(binding.segmentKey, binding);
+  }
+  return [...bindings.values()];
+}
+
 async function accountOwnedCalendarBlocks() {
   // A paused/revoked source link still owns its activity until explicitly
   // removed. Falling back to the phone provider must not bypass that review.
@@ -76,7 +119,11 @@ async function accountOwnedCalendarBlocks() {
 async function requireNativeWriteAuthority(blockId: string, canContinue: () => boolean, binding?: SyncBinding) {
   if (!canContinue() || (await accountOwnedCalendarBlocks()).has(blockId)) throw new ProjectionCancelledError();
   if (binding) {
-    const current = (await getSyncBindingsForBlock(blockId)).find((item) => item.segmentKey === binding.segmentKey);
+    const bindings = await getSyncBindingsForBlock(blockId);
+    if (bindingInterval(binding.segmentKey, blockId)?.endDateKey && bindings.length !== 1) {
+      throw new Error('This overnight activity has multiple calendar links. Review those exact events before synchronizing.');
+    }
+    const current = bindings.find((item) => item.segmentKey === binding.segmentKey);
     if (projectionTargetCalendarId !== binding.calendarId || !current || hashValue(current) !== hashValue(binding)) {
       throw new ProjectionCancelledError();
     }
@@ -334,6 +381,7 @@ const nativeColorIntentKey = (calendarId: string, eventId: string) =>
 
 async function applyDesiredNativeColor(calendarId: string, eventId: string, segment: ActivitySegment,
   canContinue: () => boolean, created = false) {
+  requireNativeSegmentShape(segment);
   // Reset/no-fill and unclassified notes do not request a source event color.
   if (segment.categoryId === 'unaccounted') return;
   const color = calendarColor(categoryById(segment.categoryId).color)?.toUpperCase();
@@ -358,7 +406,7 @@ async function applyDesiredNativeColor(calendarId: string, eventId: string, segm
     const binding = (await getSyncBindingsForBlock(segment.blockId)).find((item) =>
       item.segmentKey === segment.segmentKey && item.eventId === eventId && item.calendarId === calendarId);
     if (!binding) throw new Error('The activity calendar link changed before its color could be updated.');
-    const current = (await getDayCalendarSegments(segment.dateKey)).find((item) => item.segmentKey === segment.segmentKey);
+    const current = (await getNativeCalendarSegments(segment.dateKey)).find((item) => item.segmentKey === segment.segmentKey);
     if (!current || nativeLocalHash(current) !== nativeLocalHash(segment)) {
       throw new Error('The activity changed before its calendar color could be updated. Retry synchronization.');
     }
@@ -408,7 +456,7 @@ export function reconcileLinkedNativeColorsResult(value: string, plans: readonly
     const blocked = new Set(failures.map((failure) => failure.blockId));
     const owned = await accountOwnedCalendarBlocks();
     await listCategories();
-    for (const binding of await getSyncBindings(value)) {
+    for (const binding of await nativeBindingsForSegments(value, await getNativeCalendarSegments(value))) {
       if (owned.has(binding.blockId) || blocked.has(binding.blockId)) continue;
       try {
         const plan = plans.find((item) => item.id === binding.eventId && item.calendarId === binding.calendarId && !item.allDay);
@@ -419,8 +467,7 @@ export function reconcileLinkedNativeColorsResult(value: string, plans: readonly
         const interval = bindingInterval(binding.segmentKey, binding.blockId);
         if (!interval) throw new Error('A linked activity needs review before importing its calendar color.');
         await requireUnchangedNativeEvent(binding);
-        const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === interval.dateKey &&
-          entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute);
+        const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => activityIntervalContains(interval, entry));
         if (!entries.length) continue;
         const key = nativeColorReceiptKey(binding.calendarId, binding.eventId);
         const receipt = await getSetting<NativeColorReceipt | null>(key, null);
@@ -450,7 +497,7 @@ export function reconcileLinkedNativeColorsResult(value: string, plans: readonly
         guard();
         if (await getCalendarPermissionStatus() !== 'granted') throw new Error('Calendar access changed. Retry after allowing calendar reading.');
         // Recheck exact ownership after the source/category awaits, before SQLite commit.
-        const current = (await getSyncBindings(value)).find((item) => item.segmentKey === binding.segmentKey);
+        const current = (await getSyncBindingsForBlock(binding.blockId)).find((item) => item.segmentKey === binding.segmentKey);
         if (!current || hashValue(current) !== hashValue(binding)) throw new Error('The calendar link changed. Refresh before importing its color.');
         if ((await accountOwnedCalendarBlocks()).has(binding.blockId)) continue;
         const affected = await recolorExpectedMinuteEntries(entries, category.id, { key, value: {
@@ -461,7 +508,7 @@ export function reconcileLinkedNativeColorsResult(value: string, plans: readonly
         if (writeReceipt?.version === 2) {
           const title = await getActivityTitleForEntries(next);
           const segment: ActivitySegment = { ...interval, segmentKey: binding.segmentKey, blockId: binding.blockId,
-            categoryId: category.id, entries: next, ...(title ? { activityTitle: title } : {}) };
+            endMinute: activityIntervalAbsoluteEnd(interval), categoryId: category.id, entries: next, ...(title ? { activityTitle: title } : {}) };
           // Color-only imports are acknowledged local state, not a pending edit.
           await setSetting(writeKey, { ...writeReceipt, localHash: nativeLocalHash(segment) });
         }
@@ -563,13 +610,19 @@ function segmentTitle(segment: ActivitySegment) {
 }
 
 function eventDetails(segment: ActivitySegment, sourceTitle?: string) {
+  requireNativeSegmentShape(segment);
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const sourceLabel = sourceTitle === undefined ? undefined : sourceTitle.trim().slice(0, 200) || 'Untitled event';
+  const startDate = localDateAtMinute(segment.dateKey, segment.startMinute);
+  const endDate = localDateAtMinute(segment.dateKey, segment.endMinute + 1);
+  if (segment.endMinute >= 1440 && (endDate.getTime() - startDate.getTime()) / 60_000 !== segment.entries.length) {
+    throw new Error('This overnight activity crosses a changed clock offset. Review its calendar endpoints before synchronizing.');
+  }
   return {
     title: segment.activityTitle && segment.activityTitle !== sourceLabel
       ? segment.activityTitle : sourceTitle !== undefined ? sourceTitle : segmentTitle(segment),
-    startDate: localDateAtMinute(segment.dateKey, segment.startMinute),
-    endDate: localDateAtMinute(segment.dateKey, segment.endMinute + 1),
+    startDate,
+    endDate,
     timeZone,
     notes: makeCompactCalendarDescription('', segment.entries).description,
   };
@@ -635,14 +688,13 @@ async function requireUnchangedNativeEvent(binding: SyncBinding) {
     // are still our previous write. Never manufacture a baseline from them.
     const interval = bindingInterval(binding.segmentKey, binding.blockId);
     if (!interval || event.allDay || readEventDate(event.startDate).getTime() !== localDateAtMinute(interval.dateKey, interval.startMinute).getTime() ||
-        readEventDate(event.endDate).getTime() !== localDateAtMinute(interval.dateKey, interval.endMinute + 1).getTime()) {
+        readEventDate(event.endDate).getTime() !== localDateAtMinute(interval.dateKey, activityIntervalAbsoluteEnd(interval) + 1).getTime()) {
       throw new Error('This linked event moved or changed duration in your calendar. It was kept. Review and link its new time before synchronizing or resetting the old cells.');
     }
-    const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === interval.dateKey &&
-      entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute);
+    const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => activityIntervalContains(interval, entry));
     const activityTitle = await getActivityTitleForEntries(entries);
     const segment: ActivitySegment = { segmentKey: binding.segmentKey, blockId: binding.blockId, dateKey: interval.dateKey,
-      startMinute: interval.startMinute, endMinute: interval.endMinute, entries, categoryId: entries[0]?.categoryId ?? 'unaccounted',
+      startMinute: interval.startMinute, endMinute: activityIntervalAbsoluteEnd(interval), entries, categoryId: entries[0]?.categoryId ?? 'unaccounted',
       ...(activityTitle ? { activityTitle } : {}) };
     const current = eventDetails(segment);
     const compactMatches = entries.length > 0 && nativeEventContentHash(current) === contentHash;
@@ -665,7 +717,7 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
   const failures: NativeCalendarBindingFailure[] = [];
   const blocked = new Set<string>();
   const owned = await accountOwnedCalendarBlocks();
-  for (const binding of await getSyncBindings(value)) {
+  for (const binding of await nativeBindingsForSegments(value, await getNativeCalendarSegments(value))) {
     if (owned.has(binding.blockId) || blocked.has(binding.blockId) || !calendars.some((calendar) => calendar.id === binding.calendarId)) continue;
     try {
       const receiptKey = nativeWriteReceiptKey(binding.calendarId, binding.eventId);
@@ -687,11 +739,10 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
       if (remote.calendarId !== binding.calendarId) throw new Error('A linked calendar event changed calendars. Review its new calendar.');
       const interval = bindingInterval(binding.segmentKey, binding.blockId);
       if (!interval) throw new Error('This linked activity has an invalid time. Review its calendar link.');
-      const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === interval.dateKey &&
-        entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute);
+      const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => activityIntervalContains(interval, entry));
       const activityTitle = await getActivityTitleForEntries(entries);
       const current: ActivitySegment = { segmentKey: binding.segmentKey, blockId: binding.blockId, dateKey: interval.dateKey,
-        startMinute: interval.startMinute, endMinute: interval.endMinute, categoryId: entries[0]?.categoryId ?? 'unaccounted', entries,
+        startMinute: interval.startMinute, endMinute: activityIntervalAbsoluteEnd(interval), categoryId: entries[0]?.categoryId ?? 'unaccounted', entries,
         ...(activityTitle ? { activityTitle } : {}) };
       // V1 recorded only the exact provider write hash. Reconstruct that original
       // format from CURRENT local rows; equality proves no local note/time/title edit.
@@ -699,23 +750,28 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
         entries.length > 0 && nativeEventContentHash({ ...eventDetails(current), notes: formatCalendarMinuteLog(current.entries) }) === receipt.contentHash;
       if (!unchanged) throw new Error('This linked event was edited in your calendar and in Context. Review both versions before synchronizing.');
       const start = readEventDate(remote.startDate); const end = readEventDate(remote.endDate);
-      const endInclusive = new Date(end.getTime() - 1);
       const rule = remote.recurrenceRule;
       const recurring = typeof rule === 'string' ? Boolean(rule.trim()) : rule && typeof rule === 'object'
         ? Object.values(rule).some((item) => item !== null && item !== undefined && item !== '') : Boolean(rule);
-      if (remote.allDay || recurring || dateKey(start) !== dateKey(endInclusive) ||
+      const nextDay = dateKey(start); const nextStart = minuteIndexForDate(start);
+      const count = (Date.parse(`${dateKey(end)}T00:00:00Z`) - Date.parse(`${nextDay}T00:00:00Z`)) / 60_000 + minuteIndexForDate(end) - nextStart;
+      if (remote.allDay || recurring || !Number.isInteger(count) || count < 1 || count > 1440 ||
+          (end.getTime() - start.getTime()) / 60_000 !== count ||
           start.getSeconds() || start.getMilliseconds() || end.getSeconds() || end.getMilliseconds() || end <= start) {
-        throw new Error('This linked calendar edit needs review: use one timed, non-recurring activity within a day.');
+        throw new Error('This linked calendar edit needs review: use one timed, non-recurring activity of at most 24 hours without an ambiguous clock change.');
       }
-      const nextDay = dateKey(start); const nextStart = minuteIndexForDate(start); const nextEnd = minuteIndexForDate(endInclusive);
+      const nextEnd = nextStart + count - 1;
+      const nextInterval = bindingInterval(`${nextDay}:${binding.blockId}:${nextStart}-${nextEnd}`, binding.blockId);
+      if (!nextInterval) throw new Error('The edited calendar endpoints need review.');
       const otherBindings = await getSyncBindingsForBlock(binding.blockId);
       if (otherBindings.some((other) => other.segmentKey !== binding.segmentKey && (() => {
         const part = bindingInterval(other.segmentKey, other.blockId);
-        return !part || part.dateKey === nextDay && part.startMinute <= nextEnd && part.endMinute >= nextStart;
+        return !part || activityIntervalRanges(nextInterval).some((range) =>
+          activityIntervalContains(part, { dateKey: range.dateKey, minuteIndex: range.startMinute }) ||
+          activityIntervalContains(part, { dateKey: range.dateKey, minuteIndex: range.endMinute })) ||
+          activityIntervalContains(nextInterval, { dateKey: part.dateKey, minuteIndex: part.startMinute });
       })())) throw new Error('This calendar edit overlaps another linked part of the activity. Review both event times.');
-      if ((await getEntriesForBlock(binding.blockId)).some((entry) => entry.dateKey === nextDay &&
-        entry.minuteIndex >= nextStart && entry.minuteIndex <= nextEnd && !(entry.dateKey === interval.dateKey &&
-          entry.minuteIndex >= interval.startMinute && entry.minuteIndex <= interval.endMinute))) {
+      if ((await getEntriesForBlock(binding.blockId)).some((entry) => activityIntervalContains(nextInterval, entry) && !activityIntervalContains(interval, entry))) {
         throw new Error('This calendar edit overlaps another recorded part of the activity. Review the minute cells.');
       }
       const notes = typeof remote.notes === 'string' ? remote.notes.replace(/\r\n/g, '\n') : '';
@@ -728,9 +784,11 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
       }
       const noteMap = new Map<number, string>();
       const stillOldCoordinates = nextDay !== interval.dateKey || nextStart !== interval.startMinute;
-      const oldCoordinates = stillOldCoordinates && parsed.every((item) => item.minuteIndex >= interval.startMinute && item.minuteIndex <= interval.endMinute);
+      const oldCount = activityIntervalAbsoluteEnd(interval) - interval.startMinute + 1;
+      const offsetFrom = (minute: number, start: number) => (minute - start + 1440) % 1440;
+      const oldCoordinates = stillOldCoordinates && parsed.every((item) => offsetFrom(item.minuteIndex, interval.startMinute) < oldCount);
       for (const item of parsed) {
-        const index = oldCoordinates ? nextStart + item.minuteIndex - interval.startMinute : item.minuteIndex;
+        const index = nextStart + offsetFrom(item.minuteIndex, oldCoordinates ? interval.startMinute : nextStart);
         if (index < nextStart || index > nextEnd) throw new Error('The edited calendar notes are outside this activity. Review the minute timestamps.');
         noteMap.set(index, item.text);
       }
@@ -741,10 +799,10 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
         calendarColor(remote.displayColor) ?? calendarColor(remote.eventColor) ?? calendarColor(remote.color);
       const categoryId = exactColor ? (await ensureSourceColorCategory({ color: exactColor, name: title,
         provider: 'device', calendarId: binding.calendarId })).id : current.categoryId;
-      const imported = Array.from({ length: nextEnd - nextStart + 1 }, (_, offset) => ({ dateKey: nextDay,
-        minuteIndex: nextStart + offset, text: noteMap.get(nextStart + offset) ?? '', categoryId }));
-      const snapshotRanges = [{ dateKey: interval.dateKey, startMinute: interval.startMinute, endMinute: interval.endMinute },
-        { dateKey: nextDay, startMinute: nextStart, endMinute: nextEnd }];
+      const imported = activityIntervalRanges(nextInterval).flatMap((range) => Array.from({ length: range.endMinute - range.startMinute + 1 }, (_, offset) => ({
+        dateKey: range.dateKey, minuteIndex: range.startMinute + offset,
+        text: noteMap.get((Date.parse(`${range.dateKey}T00:00:00Z`) - Date.parse(`${nextDay}T00:00:00Z`)) / 60_000 + range.startMinute + offset) ?? '', categoryId })));
+      const snapshotRanges = [...activityIntervalRanges(interval), ...activityIntervalRanges(nextInterval)];
       const snapshots = [...new Map((await Promise.all(snapshotRanges.map(async (range) =>
         (await getSpreadsheetCells(range)).map((cell) => ({ dateKey: range.dateKey, cell }))))).flat()
         .map((snapshot) => [`${snapshot.dateKey}:${snapshot.cell.minuteIndex}`, snapshot] as const)).values()];
@@ -768,15 +826,14 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
         throw new Error('This calendar event changed again while importing it. Refresh before retrying.');
       }
       await replaceProjectedMinutes({ blockId: binding.blockId, previousDate: interval.dateKey, previousStart: interval.startMinute,
-        previousEnd: interval.endMinute, expectedEntries: entries, expectedActivityTitle: activityTitle, activityTitle: labelTitle,
+        previousEndDate: interval.endDateKey, previousEnd: interval.endMinute, expectedEntries: entries, expectedActivityTitle: activityTitle, activityTitle: labelTitle,
         entries: imported, expectedFormats, beforeCommitGuard, expectedBinding: binding, nextBinding, clearPreviousFormats: true,
         localReceipt: { key: receiptKey, value: { version: 2, calendarId: binding.calendarId, eventId: binding.eventId,
           contentHash: nativeEventContentHash(remote), localHash: nativeLocalHash(nextSegment), sourceTitle: labelTitle,
           ...(receipt.descriptionLog?.version === 3 && notes.trim() ? { descriptionLog: receipt.descriptionLog } :
             !notes.trim() ? { descriptionLog: makeCompactCalendarDescription('', imported).descriptionLog } : {}) } } });
-      changed.add(interval.dateKey); changed.add(nextDay);
-      const importedRows = (await getEntriesForBlock(binding.blockId)).filter((entry) => entry.dateKey === nextDay &&
-        entry.minuteIndex >= nextStart && entry.minuteIndex <= nextEnd);
+      for (const range of snapshotRanges) changed.add(range.dateKey);
+      const importedRows = (await getEntriesForBlock(binding.blockId)).filter((entry) => activityIntervalContains(nextInterval, entry));
       const nextCoordinates = new Set(importedRows.map((entry) => `${entry.dateKey}:${entry.minuteIndex}`));
       const removedRows = entries.filter((entry) => !nextCoordinates.has(`${entry.dateKey}:${entry.minuteIndex}`))
         .map((entry) => ({ ...entry, text: '', categoryId: 'unaccounted', blockId: '' }));
@@ -1003,11 +1060,12 @@ export type CalendarProjectionOptions = { existingBindingsOnly?: boolean };
 async function retimeExactNativeBinding(plan: Exclude<NativeBoundRetimePlan, { kind: 'deferred' }>,
   members: readonly MinuteEntry[], canContinue: () => boolean): Promise<boolean | null> {
   const { binding, segment, afterBinding } = plan;
+  requireNativeSegmentShape(segment);
   const requireLocalCurrent = async () => {
     if (!canContinue()) throw new ProjectionCancelledError();
     requireCalendarColorImportCurrent(members);
     const [currentMembers, currentBindings, currentSegments] = await Promise.all([
-      getEntriesForBlock(binding.blockId), getSyncBindingsForBlock(binding.blockId), getDayCalendarSegments(segment.dateKey),
+      getEntriesForBlock(binding.blockId), getSyncBindingsForBlock(binding.blockId), getNativeCalendarSegments(segment.dateKey),
     ]);
     const current = currentSegments.filter((item) => item.blockId === binding.blockId);
     if (hashValue(currentMembers) !== hashValue(members) || currentBindings.length !== 1 ||
@@ -1056,8 +1114,8 @@ async function syncExistingBoundActualDay(value: string, calendarId: string, can
   const blocked = new Set(excludedBlocks);
   const currentPass = () => canContinue() && projectionGeneration === generation && projectionTargetCalendarId === calendarId;
   const owned = await accountOwnedCalendarBlocks();
-  const segments = await getDayCalendarSegments(value);
-  const bindings = await getSyncBindings(value);
+  const segments = await getNativeCalendarSegments(value);
+  const bindings = await nativeBindingsForSegments(value, segments);
   const candidates = new Map(bindings.map((binding) => [binding.segmentKey, binding]));
   for (const segment of segments) {
     if (!segment.activityTitle || owned.has(segment.blockId) || excludedBlocks.has(segment.blockId)) continue;
@@ -1073,17 +1131,22 @@ async function syncExistingBoundActualDay(value: string, calendarId: string, can
     if (blocked.has(binding.blockId)) continue;
     try {
       if (!currentPass()) throw new ProjectionCancelledError();
-      const segment = segments.find((item) => item.segmentKey === binding.segmentKey && item.blockId === binding.blockId && item.dateKey === value);
+      const segment = segments.find((item) => item.segmentKey === binding.segmentKey && item.blockId === binding.blockId);
+      if (segment?.activityTitle && (await getSyncBindingsForBlock(binding.blockId)).length !== 1) {
+        throw new Error('This bordered activity has multiple calendar links. Review those exact events before synchronizing.');
+      }
       if (!segment) {
         const members = await getEntriesForBlock(binding.blockId);
         if (members.length) {
           const memberDates = [...new Set(members.map((member) => member.dateKey))];
-          const globalSegments = memberDates.length === 1
-            ? (await getDayCalendarSegments(memberDates[0]!)).filter((item) => item.blockId === binding.blockId) : [];
+          const globalSegments = memberDates.length <= 2
+            ? (await getNativeCalendarSegments(memberDates[0]!)).filter((item) => item.blockId === binding.blockId) : [];
           const plan = planNativeBoundRetime({ blockId: binding.blockId, selectedCalendarId: calendarId,
             hasAccountOwner: (await accountOwnedCalendarBlocks()).has(binding.blockId),
             bindings: await getSyncBindingsForBlock(binding.blockId), segments: globalSegments, processingDate: value });
-          if (plan.kind === 'retime') {
+          const tailShrink = plan.kind === 'defer-source-cleanup' &&
+            bindingInterval(binding.segmentKey, binding.blockId)?.endDateKey === value && plan.segment.dateKey === binding.dateKey;
+          if (plan.kind === 'retime' || tailShrink) {
             const result = await retimeExactNativeBinding(plan, members, currentPass);
             if (result === null) deferred = true;
             else if (result) updated++;
@@ -1093,7 +1156,7 @@ async function syncExistingBoundActualDay(value: string, calendarId: string, can
         }
       }
       const interval = bindingInterval(binding.segmentKey, binding.blockId);
-      if (!interval || interval.dateKey !== value || binding.dateKey !== value) { deferred = true; continue; }
+      if (!interval || interval.dateKey !== binding.dateKey) { deferred = true; continue; }
       const source = await requireUnchangedNativeEvent(binding);
       if (!source) { deferred = true; continue; }
       await requireNativeWriteAuthority(binding.blockId, currentPass, binding);
@@ -1146,8 +1209,8 @@ export async function syncActualDay(
   const blocked = new Set(excludedBlocks);
   if (await hasConfiguredAccountCalendarWriter()) return { created: 0, updated: 0, removed: 0, deferred: true };
   const owned = await accountOwnedCalendarBlocks();
-  const allSegments = await getDayCalendarSegments(value);
-  const initialBindings = await getSyncBindings(value);
+  const allSegments = await getNativeCalendarSegments(value);
+  const initialBindings = await nativeBindingsForSegments(value, allSegments);
   const legacyBoundBlocks = new Set(initialBindings.map((binding) => binding.blockId));
   // Ordinary minute notes belong only to the private ledger. A deliberate
   // bordered activity or an existing exact legacy binding is a calendar event.
@@ -1155,10 +1218,17 @@ export async function syncActualDay(
     (Boolean(segment.activityTitle) || legacyBoundBlocks.has(segment.blockId)));
   for (const blockId of new Set(segments.filter((segment) => isActivityGroupId(segment.blockId)).map((segment) => segment.blockId))) {
     try {
+      for (const segment of segments.filter((item) => item.blockId === blockId)) requireNativeSegmentShape(segment);
       const members = await getEntriesForBlock(blockId);
-      if (!members.every((entry) => entry.dateKey === value)) continue;
+      if (members.length > 1440) continue;
       const existing = await getSyncBindingsForBlock(blockId);
       if (!existing.length) continue;
+      if (existing.length === 1 && existing[0]!.calendarId === calendarId &&
+          (members.some((entry) => entry.dateKey !== members[0]!.dateKey) ||
+            Boolean(bindingInterval(existing[0]!.segmentKey, blockId)?.endDateKey))) continue;
+      if (members.some((entry) => entry.dateKey !== members[0]!.dateKey)) {
+        throw new Error('This overnight activity has multiple calendar links. Review those exact events before synchronizing.');
+      }
       const previous = existing.map((binding) => bindingInterval(binding.segmentKey, blockId));
       const current = segments.filter((segment) => segment.blockId === blockId).map((segment) => ({ key: segment.segmentKey,
         dateKey: segment.dateKey, startMinute: segment.startMinute, endMinute: segment.endMinute }));
@@ -1183,7 +1253,7 @@ export async function syncActualDay(
       failures.push(await bindingReviewFailure(binding, error)); blocked.add(blockId);
     }
   }
-  const allBindings = await getSyncBindings(value);
+  const allBindings = await nativeBindingsForSegments(value, segments);
   const bindings = allBindings.filter((binding) => !owned.has(binding.blockId) && !blocked.has(binding.blockId));
   const deferred = allSegments.some((segment) => owned.has(segment.blockId) || blocked.has(segment.blockId)) || allBindings.length !== bindings.length;
   const unused = new Map(bindings.map((binding) => [binding.segmentKey, binding]));
@@ -1215,6 +1285,25 @@ export async function syncActualDay(
 
       if (binding) {
         unused.delete(binding.segmentKey);
+        if (binding.calendarId === calendarId && binding.segmentKey !== segment.segmentKey && segment.activityTitle) {
+          const members = await getEntriesForBlock(segment.blockId);
+          const plan = planNativeBoundRetime({ blockId: segment.blockId, selectedCalendarId: calendarId,
+            hasAccountOwner: (await accountOwnedCalendarBlocks()).has(segment.blockId),
+            bindings: await getSyncBindingsForBlock(segment.blockId), segments: [segment], processingDate: value });
+          if (plan.kind !== 'retime') throw new Error('This activity changed with an ambiguous calendar shape. Review its original event before synchronizing.');
+          const changed = await retimeExactNativeBinding(plan, members, canContinue);
+          if (changed === null) throw new Error('The original calendar event is unavailable. Its linked activity remains pending.');
+          if (changed) updated++;
+          continue;
+        }
+        if (segment.endMinute >= 1440 && binding.calendarId === calendarId) {
+          await requireUnchangedNativeEvent(binding);
+          const receipt = await getSetting<NativeWriteReceipt | null>(nativeWriteReceiptKey(calendarId, binding.eventId), null);
+          if (receipt?.version === 2 && receipt.localHash === nativeLocalHash(segment)) {
+            await applyDesiredNativeColor(calendarId, binding.eventId, segment, canContinue);
+            continue;
+          }
+        }
         const reconciliation = await updateOrReplaceEvent(
           calendarId,
           segment,
@@ -1270,12 +1359,27 @@ export async function syncActualDay(
     if (blocked.has(binding.blockId)) continue;
     try {
       if (!canContinue()) throw new ProjectionCancelledError();
-      if (isActivityGroupId(binding.blockId) && !segments.some((segment) => segment.blockId === binding.blockId) &&
+      if (!segments.some((segment) => segment.blockId === binding.blockId) &&
           (await getEntriesForBlock(binding.blockId)).some((entry) => entry.dateKey !== value)) {
         const members = await getEntriesForBlock(binding.blockId);
         const existing = await getSyncBindingsForBlock(binding.blockId);
+        if (existing.length === 1 && members.length) {
+          const target = (await getNativeCalendarSegments(members[0]!.dateKey)).filter((segment) => segment.blockId === binding.blockId);
+          const plan = planNativeBoundRetime({ blockId: binding.blockId, selectedCalendarId: calendarId,
+            hasAccountOwner: (await accountOwnedCalendarBlocks()).has(binding.blockId), bindings: existing,
+            segments: target, processingDate: value });
+          if (plan.kind === 'defer-source-cleanup') {
+            if (bindingInterval(binding.segmentKey, binding.blockId)?.endDateKey === value && plan.segment.dateKey === binding.dateKey) {
+              const changed = await retimeExactNativeBinding(plan, members, canContinue);
+              if (changed === null) throw new Error('The original calendar event is unavailable. Its linked activity remains pending.');
+              if (changed) updated++;
+            }
+            continue;
+          }
+          if (plan.kind === 'deferred') throw new Error('This moved activity has an ambiguous source border. Review its complete calendar range.');
+        }
         const previous = existing.map((item) => bindingInterval(item.segmentKey, binding.blockId));
-        const current = (await Promise.all([...new Set(members.map((member) => member.dateKey))].map(getDayCalendarSegments)))
+        const current = (await Promise.all([...new Set(members.map((member) => member.dateKey))].map(getNativeCalendarSegments)))
           .flat().filter((segment) => segment.blockId === binding.blockId).map((segment) => ({ key: segment.segmentKey,
             dateKey: segment.dateKey, startMinute: segment.startMinute, endMinute: segment.endMinute }));
         const mapping = previous.every((interval) => interval != null) ? matchActivityTranslation(previous, current) : null;
@@ -1373,14 +1477,15 @@ async function flushPendingActualsOnce(
       const owned = await accountOwnedCalendarBlocks();
       const sourceDates = new Set<string>();
       const relevantBlocks = new Set<string>();
-      for (const binding of await getSyncBindings(item.dateKey)) {
+      const pendingSegments = await getNativeCalendarSegments(item.dateKey);
+      for (const binding of await nativeBindingsForSegments(item.dateKey, pendingSegments)) {
         if (binding.calendarId !== calendarId || owned.has(binding.blockId)) continue;
         sourceDates.add(binding.dateKey); relevantBlocks.add(binding.blockId);
       }
       // A target-day resize/move may still own its single exact source-day key.
       // Preflight that old source too, so its conflict cannot block unrelated
       // target-day events or slip past the excluded-block set.
-      for (const segment of await getDayCalendarSegments(item.dateKey)) {
+      for (const segment of pendingSegments) {
         if (!segment.activityTitle || owned.has(segment.blockId)) continue;
         const global = await getSyncBindingsForBlock(segment.blockId);
         if (global.length !== 1 || global[0]!.calendarId !== calendarId) continue;

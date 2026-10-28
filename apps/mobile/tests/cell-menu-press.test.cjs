@@ -21,6 +21,7 @@ test('an open keyboard does not reserve a menu tap, and a single completed press
         BackHandler: { addEventListener: () => ({ remove() {} }) }, useWindowDimensions: () => ({ height: 800, width: 390 }) };
       if (name === '../appearance') return { useAppTheme: () => ({ colors: { ink: '#111111', panel: '#EEEEEE', hairline: '#CCCCCC' } }) };
       if (name === './CellColorPalette') return { CellColorPalette: 'CellColorPalette' };
+      if (name === './CellActionIcon') return { CellActionIcon: 'CellActionIcon' };
       throw Error(`Unexpected menu press import ${name}`);
     } }, { filename });
   const tree = module.exports.CellActionMenu({ busy: false, onCopy: () => copies++, onCut() {}, onClose() {},
