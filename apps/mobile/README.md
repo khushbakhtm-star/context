@@ -2,6 +2,10 @@
 
 ## Current published phone builds
 
+Phone **0.1.25/code26** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.25/context-0.1.25-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.25/context-0.1.25-foss-preview.apk) updates. Synchronization observers join existing work without forcing a second full pass. Each pass shares scoped provider color metadata, and confirmed immutable uploads can skip redundant downloads after the passphrase is verified. Existing phone-linked events retain their original identity. Hold Sync for its actual current step. Local editing stays available and source/ledger checks remain in force. Automated source/native checks passed; physical-phone and live-calendar behavior still need confirmation. Use the Wear-enabled edition with the independent Watch 0.1.10 release.
+
+## Previous phone release: 0.1.24
+
 Phone **0.1.24/code25** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.24/context-0.1.24-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.24/context-0.1.24-foss-preview.apk) updates. Encrypted-ledger key preparation uses a dedicated Android native thread with the same 600,000-round PBKDF2 and existing encrypted-file format. Existing phone-linked events retain their original identity. Hold Sync for its actual current step. Local editing stays available and source/ledger checks remain in force. Automated source/native checks passed; physical-phone and live-calendar behavior still need confirmation. Use the Wear-enabled edition with the independent Watch 0.1.10 release.
 
 ## Previous phone release: 0.1.23
