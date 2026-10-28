@@ -10,9 +10,9 @@ import struct
 import subprocess
 import zipfile
 
-SOURCE = "4b622675f0d43c56637bbcf3e5171247e7ac57c0"
-VERSION = "0.1.23"
-CODE = 24
+SOURCE = "117c70c0e440555fe3e3d62276df38c9d370eee1"
+VERSION = "0.1.24"
+CODE = 25
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned Wear-phone preview: local publisher signing is separate"
 NATIVE_RULE_MARKER = "# Context audited native module identities for packaging verification"
@@ -21,6 +21,7 @@ NATIVE_MODULES = (
     "expo.modules.sharing.SharingModule",
     "expo.modules.contextcalendarcolors.ContextCalendarColorsModule",
     "expo.modules.clipboard.ClipboardModule",
+    "expo.modules.contextledgercrypto.ContextLedgerCryptoModule",
 )
 
 
@@ -119,7 +120,7 @@ def verify(source, reports, receipt):
         raise ValueError("The audited native module rules changed during the build")
     tools = Path(os.environ["ANDROID_HOME"]) / "build-tools/37.0.0"
     original = mobile / "android/app/build/outputs/apk/release/app-release-unsigned.apk"
-    apk = reports / "context-0.1.23-wear-phone-unsigned.apk"
+    apk = reports / "context-0.1.24-wear-phone-unsigned.apk"
     run([tools / "zipalign", "-P", "16", "-f", "4", original, apk])
     run([tools / "zipalign", "-c", "-P", "16", "-v", "4", apk])
     data = apk.read_bytes()
@@ -193,7 +194,7 @@ def main():
         # A failed verifier may have produced an aligned intermediate. Retain diagnostics,
         # but never let upload-artifact expose that APK as a usable unsigned build.
         if args.mode == "verify":
-            (reports / "context-0.1.23-wear-phone-unsigned.apk").unlink(missing_ok=True)
+            (reports / "context-0.1.24-wear-phone-unsigned.apk").unlink(missing_ok=True)
         receipt.update({"status": "failed", "scope": "Not a verified build; never install or publish this output.",
                         "error": str(error)})
         path.write_text(json.dumps(receipt, indent=2) + "\n")
