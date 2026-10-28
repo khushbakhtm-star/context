@@ -416,7 +416,7 @@ function harness(t) {
         if (name.startsWith('@noble/')) return require(name);
         if (!name.startsWith('.')) throw new Error(`Unexpected sheet import: ${name}`);
         const file = path.resolve(path.dirname(filename), `${name}.ts`);
-        if (file === source('sync/engine.ts')) return { linkActualsToAccounts: async (...args) => { linkCalls.push(args); if (onLink) await onLink(...args); }, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {} };
+        if (file === source('sync/engine.ts')) return { linkActualsToAccounts: async (...args) => { linkCalls.push(args); if (onLink) await onLink(...args); }, subscribeAccountSync: () => () => {}, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {} };
         if (file === source('sync/accounts.ts')) return { accountFetch: async () => { throw new Error('Unexpected account request'); } };
         if (file === source('sync/providers.ts')) return { createCalendarAdapter: () => { throw new Error('Unexpected calendar request'); } };
         return load(file);

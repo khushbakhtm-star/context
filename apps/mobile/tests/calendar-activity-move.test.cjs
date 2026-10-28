@@ -78,7 +78,7 @@ function runtime(t, overrides = {}) {
         if (name.startsWith('@noble/')) return require(name);
         if (!name.startsWith('.')) throw new Error(`Unexpected native activity import ${name}`);
         const target = path.resolve(path.dirname(filename), `${name}.ts`);
-        if (target === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {},
+        if (target === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, subscribeAccountSync: () => () => {}, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {},
           getAccountPreferences: async (accountId) => overrides.accountPreferences?.[accountId] ?? { selectedCalendarIds: [], writeCalendarId: null },
           listProjections: async () => (await load(source('data/database.ts')).getSyncDocuments('projection:'))
             .flatMap((document) => document.value ? [document.value] : []),

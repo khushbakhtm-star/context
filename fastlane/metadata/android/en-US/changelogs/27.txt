@@ -1,0 +1,1 @@
+Batch minute-format reads for long calendar activities. Hold Sync for local step timings and copy them when needed. Refresh stale linking warnings after verified queue completion. Calendar permissions, encryption and conflict checks stay in force.

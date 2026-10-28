@@ -57,7 +57,7 @@ function harness(t, available = true) {
         if (name.startsWith('@noble/')) return require(name);
         if (!name.startsWith('.')) throw Error(`Unexpected wear import: ${name}`);
         const file = path.resolve(path.dirname(filename), `${name}.ts`);
-        if (file === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {} };
+        if (file === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, subscribeAccountSync: () => () => {}, requestAccountSynchronization: () => {}, synchronizeAccounts: async () => {} };
         if (file === source('sync/accounts.ts')) return { accountFetch: async () => { throw Error('Unexpected account request'); } };
         if (file === source('sync/providers.ts')) return { createCalendarAdapter: () => { throw Error('Unexpected calendar request'); } };
         return load(file);

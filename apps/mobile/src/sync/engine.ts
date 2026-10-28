@@ -2,7 +2,7 @@ import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 
 import {
-  acknowledgeInlineMinuteLink, acknowledgeUploaded, deferInlineMinuteLink, getActivityTitleForEntries, getDayEntries, getDaySegments, getDocumentsForUpload, getEntriesBetween,
+  acknowledgeInlineMinuteLink, acknowledgeUploaded, deferInlineMinuteLink, getActivityTitleForEntries, getDayEntries, getDaySegments, getDocumentsForUpload,
   getEntriesForBlock, getPendingInlineMinuteLinks, getSetting, getSpreadsheetCells, getSyncBindingsForBlock, getSyncDocuments, hasSeenSyncFile,
   markSyncFileSeen, mergeSyncDocuments, promoteInlineMinuteLinkForAccountReview, putSyncDocument, remapActivityProjections, replaceProjectedMinutes, recolorExpectedMinuteEntries, setSetting,
   type PendingInlineMinuteLink,
@@ -23,6 +23,7 @@ import { ACCOUNT_PLAN_READ_LEASE_MS, accountPlanReadDeadline, accountPlanScope, 
 import { clearLedgerKeyCache, decryptBatch, encryptBatch, hashValue, parseProjectedMinutes } from './codec';
 import { createCalendarAdapter, createCalendarMetadataReadCache, type CalendarMetadataReadCache } from './providers';
 import { createLedgerStorage } from './storage';
+import { createAccountSyncTrace, type AccountSyncTrace } from './diagnostics';
 import { zonedMinuteToInstant } from './time';
 import { canCreateAccountProjection } from '../utils/calendar-projection-authority';
 import type {
@@ -37,6 +38,7 @@ let status: AccountSyncStatus = { running: false, lastSyncedAt: null, message: '
 let syncCycleId = 0;
 const listeners = new Set<(next: AccountSyncStatus) => void>();
 let activeJob: Promise<AccountSyncStatus> | null = null;
+let activeTrace: AccountSyncTrace | null = null;
 let rerunRequested = false;
 let requestedSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let projectionLinkChain: Promise<void> = Promise.resolve();
@@ -66,13 +68,13 @@ function serializeColorReconciliation<T>(work: () => Promise<T>) {
   return job;
 }
 
-export function getAccountSyncStatus() { return status; }
+export function getAccountSyncStatus() { return activeTrace ? { ...status, diagnostics: activeTrace.snapshot() } : status; }
 export function subscribeAccountSync(listener: (next: AccountSyncStatus) => void) {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 }
 function publish(next: Partial<AccountSyncStatus>) {
-  status = { ...status, ...next };
+  status = { ...status, ...next, ...(activeTrace ? { diagnostics: activeTrace.snapshot() } : {}) };
   for (const listener of listeners) listener(status);
 }
 export async function hasLedgerPassphrase() {
@@ -128,22 +130,26 @@ class StorageDownloadPending extends Error {
   constructor() { super('Private ledger download is continuing. Calendar changes will resume after its remaining updates are checked.'); }
 }
 
-async function storageSync(account: ConnectedAccount, passphrase: string, budget: StoragePassBudget) {
+async function storageSync(account: ConnectedAccount, passphrase: string, budget: StoragePassBudget, trace?: AccountSyncTrace) {
   const storage = createLedgerStorage(account);
+  const timed: AccountSyncTrace['measure'] = trace ? trace.measure.bind(trace) : async (_step, operation) => operation();
   const storageKey = account.id;
   // Download first: a wrong passphrase must fail before any new encrypted files are uploaded.
   publish({ phase: 'checking-storage', progress: undefined, message: 'Checking encrypted ledger storage…', cycleComplete: false });
-  const files = await storage.listFiles();
+  const files = await timed('ledger-list', () => storage.listFiles());
   let checkedFiles = 0;
   for (const file of files) {
-    const seen = await hasSeenSyncFile(storageKey, file.id);
+    const seen = await timed('ledger-local', () => hasSeenSyncFile(storageKey, file.id));
     if (seen && budget.verifiedPassphrase) { checkedFiles++; continue; }
     if (budget.downloads >= STORAGE_DOWNLOADS_PER_PASS) throw new StorageDownloadPending();
     budget.downloads++;
     publish({ phase: 'downloading', progress: { completed: checkedFiles, total: files.length },
       message: 'Checking downloaded ledger updates…', cycleComplete: false });
     let batch: SyncBatch;
-    try { batch = await decryptBatch(await storage.readFile(file), passphrase); }
+    try {
+      const ciphertext = await timed('ledger-read', () => storage.readFile(file));
+      batch = await timed('ledger-decrypt', () => decryptBatch(ciphertext, passphrase));
+    }
     catch (error) {
       if (error instanceof Error && error.message.startsWith('Cannot unlock')) {
         await clearSavedPassphrase();
@@ -153,44 +159,46 @@ async function storageSync(account: ConnectedAccount, passphrase: string, budget
     budget.verifiedPassphrase = true;
     checkedFiles++;
     if (seen) continue;
-    await mergeSyncDocuments(batch.documents);
-    await markSyncFileSeen(storageKey, file.id);
+    await timed('ledger-merge', () => mergeSyncDocuments(batch.documents));
+    await timed('ledger-local', () => markSyncFileSeen(storageKey, file.id));
   }
 
   type Pending = { name: string; ciphertext: string; batch: SyncBatch };
   const pendingKey = `account.pendingBatch.${account.id}`;
   // Bound work per foreground pass; later passes continue without dropping unacknowledged rows.
   while (budget.uploads < STORAGE_UPLOADS_PER_PASS) {
-    let pending = await getSetting<Pending | null>(pendingKey, null);
+    let pending = await timed('ledger-local', () => getSetting<Pending | null>(pendingKey, null));
     if (!pending) {
-      const documents = await getDocumentsForUpload(storageKey, 500);
+      const documents = await timed('ledger-prepare', () => getDocumentsForUpload(storageKey, 500));
       if (!documents.length) break;
       // Drive multipart uploads have a small-file limit; ciphertext uses hexadecimal encoding.
       // Keep plaintext below 2 MiB and let larger journals continue in subsequent immutable files.
-      while (documents.length > 1 && new TextEncoder().encode(JSON.stringify(documents)).byteLength > 2 * 1024 * 1024) {
-        documents.pop();
-      }
+      await timed('ledger-prepare', () => {
+        while (documents.length > 1 && new TextEncoder().encode(JSON.stringify(documents)).byteLength > 2 * 1024 * 1024) {
+          documents.pop();
+        }
+      });
       const batch: SyncBatch = { version: 1, id: Crypto.randomUUID(), documents };
       publish({ phase: 'uploading', progress: { completed: budget.uploads },
         message: 'Preparing encrypted ledger updates…', cycleComplete: false });
       pending = { name: `context-${batch.id}.json`, batch,
-        ciphertext: await encryptBatch(batch, passphrase) };
-      await setSetting(pendingKey, pending);
+        ciphertext: await timed('ledger-encrypt', () => encryptBatch(batch, passphrase)) };
+      await timed('ledger-local', () => setSetting(pendingKey, pending));
     }
     publish({ phase: 'uploading', progress: { completed: budget.uploads },
       message: 'Uploading encrypted ledger updates…', cycleComplete: false });
-    await decryptBatch(pending.ciphertext, passphrase);
-    const uploaded = await storage.writeFile(pending.name, pending.ciphertext);
+    await timed('ledger-decrypt', () => decryptBatch(pending!.ciphertext, passphrase));
+    const uploaded = await timed('ledger-upload', () => storage.writeFile(pending!.name, pending!.ciphertext));
     if (uploaded !== undefined && (!uploaded || typeof uploaded.id !== 'string' || !uploaded.id.length ||
         uploaded.id.length > 2_048 || /[\u0000-\u001F\u007F]/.test(uploaded.id) || uploaded.name !== pending.name)) {
       throw new Error('The storage service returned an unexpected uploaded file identity.');
     }
-    await acknowledgeUploaded(storageKey, pending.batch.documents);
+    await timed('ledger-ack', () => acknowledgeUploaded(storageKey, pending!.batch.documents));
     // Only an exact transport receipt plus the durable local revision
     // acknowledgement makes this an already-checked immutable file. Peers'
     // files and transports without receipts still follow normal download.
-    if (uploaded) await markSyncFileSeen(storageKey, uploaded.id);
-    await setSetting(pendingKey, null);
+    if (uploaded) await timed('ledger-local', () => markSyncFileSeen(storageKey, uploaded.id));
+    await timed('ledger-local', () => setSetting(pendingKey, null));
     budget.uploads++;
   }
   return !(await getSetting<Pending | null>(pendingKey, null)) && !(await getDocumentsForUpload(storageKey, 1)).length;
@@ -321,6 +329,7 @@ function categoryForEvent(accountId: string, event: RemoteCalendarEvent) {
 type CalendarSyncReads = {
   metadata: CalendarMetadataReadCache;
   defaultColors: Map<string, Promise<Map<string, string>>>;
+  trace: AccountSyncTrace;
 };
 
 async function remoteActivityColor(account: ConnectedAccount, event: RemoteCalendarEvent, reads?: CalendarSyncReads) {
@@ -800,9 +809,8 @@ async function reanchorMovedActivities(projections: Projection[], linkedBlocks: 
 async function getProjectionSegment(projection: Projection) {
   const namedActivity = isActivityGroupId(projection.blockId);
   const entries = namedActivity ? await getEntriesForBlock(projection.blockId) :
-    (await getEntriesBetween(dateKey(addDays(projection.dateKey, -1)),
-      dateKey(addDays(projection.endDateKey ?? projection.dateKey, 1))))
-      .filter((entry) => entry.blockId === projection.blockId);
+    await getEntriesForBlock(projection.blockId, { startDate: dateKey(addDays(projection.dateKey, -1)),
+      endDate: dateKey(addDays(projection.endDateKey ?? projection.dateKey, 1)) });
   const civil = (day: string, minute: number) => Date.parse(`${day}T00:00:00Z`) + minute * 60000;
   const groups = await partitionActivity(entries);
   const start = civil(projection.dateKey, projection.startMinute);
@@ -942,48 +950,49 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
 
 async function reconcileProjection(account: ConnectedAccount, projection: Projection, reads: CalendarSyncReads) {
   if (projection.state === 'deleted' || projection.state === 'conflict') return;
-  await serializeColorReconciliation(async () => {
+  await reads.trace.measure('calendar-local', () => serializeColorReconciliation(async () => {
     coreProjectionEpochs.set(projection.id, (coreProjectionEpochs.get(projection.id) ?? 0) + 1);
     activeCoreProjections.add(projection.id);
-  });
+  }));
   try { await reconcileCurrentProjection(account, projection, reads); }
   finally {
-    await serializeColorReconciliation(async () => {
+    await reads.trace.measure('calendar-local', () => serializeColorReconciliation(async () => {
       activeCoreProjections.delete(projection.id);
       coreProjectionEpochs.set(projection.id, (coreProjectionEpochs.get(projection.id) ?? 0) + 1);
-    });
+    }));
   }
 }
 
 async function reconcileCurrentProjection(account: ConnectedAccount, projection: Projection, reads: CalendarSyncReads) {
   const adapter = createCalendarAdapter(account, reads.metadata);
-  let segment = await getProjectionSegment(projection);
+  const timed = reads.trace.measure.bind(reads.trace);
+  let segment = await timed('calendar-local', () => getProjectionSegment(projection));
   let write = segment ? buildWrite(projection, segment) : null;
   let localHash = write ? localWriteHash(write) : null;
-  const remote = projection.eventId ? await adapter.getEvent(projection.calendarId, projection.eventId) : null;
+  const remote = projection.eventId ? await timed('calendar-event-read', () => adapter.getEvent(projection.calendarId, projection.eventId!)) : null;
   let currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
   if (!currentAccount?.consent.calendarRead) return;
-  const resolvedColor = remote ? await remoteActivityColor(currentAccount, remote, reads) : undefined;
+  const resolvedColor = remote ? await timed('calendar-color', () => remoteActivityColor(currentAccount!, remote, reads)) : undefined;
   currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
   if (!currentAccount?.consent.calendarRead) return;
-  segment = await getProjectionSegment(projection);
+  segment = await timed('calendar-local', () => getProjectionSegment(projection));
   write = segment ? buildWrite(projection, segment) : null;
   localHash = write ? localWriteHash(write) : null;
   if (remote && segment) {
     const expected = hashValue(projection); const expectedEntries = hashValue(segment.entries);
-    const imported = await serializeColorReconciliation(async () => {
+    const imported = await timed('calendar-local', () => serializeColorReconciliation(async () => {
       const current = (await listProjections()).find((item) => item.id === projection.id);
       const authorized = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.consent.calendarRead);
       if (!current || hashValue(current) !== expected || !authorized) return false;
       const local = await getProjectionSegment(current);
       if (!local || hashValue(local.entries) !== expectedEntries) return false;
       return importAccountColorOnly(authorized, current, remote, local, { color: resolvedColor, skipDisplayBootstrap: true });
-    });
+    }));
     if (imported) return;
   }
   const currentProjection = (await listProjections()).find((item) => item.id === projection.id);
   if (!currentProjection || hashValue(currentProjection) !== hashValue(projection)) return;
-  segment = await getProjectionSegment(projection);
+  segment = await timed('calendar-local', () => getProjectionSegment(projection));
   write = segment ? buildWrite(projection, segment) : null;
   localHash = write ? localWriteHash(write) : null;
   const localChanged = segment && write ? !localProjectionUnchanged(projection, segment, write) : localHash !== projection.baseLocalHash;
@@ -998,7 +1007,7 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
       await saveProjection({ ...projection, state: 'conflict',
         conflict: 'This activity changed in Context and the calendar. Choose the version to keep.' });
     } else {
-      try { await importCalendarEvent(projection, remote); }
+      try { await timed('calendar-local', () => importCalendarEvent(projection, remote)); }
       catch (error) { await saveProjection({ ...projection, state: 'conflict',
         conflict: error instanceof Error ? error.message : 'This calendar edit needs review.' }); }
     }
@@ -1016,22 +1025,22 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
   }
   const writableAdapter = createCalendarAdapter(currentAccount, reads.metadata);
   if (!write) {
-    if (remote) await writableAdapter.deleteEvent(remote);
+    if (remote) await timed('calendar-event-write', () => writableAdapter.deleteEvent(remote));
     await saveProjection({ ...projection, state: 'deleted', baseLocalHash: null });
     return;
   }
   try {
     let saved: RemoteCalendarEvent;
     if (remote && projection.pendingSourceScope === 'series') {
-      await writableAdapter.updateSeries(remote, write);
-      saved = await writableAdapter.getEvent(projection.calendarId, remote.id) ?? remote;
-      saved = await writableAdapter.updateEvent(saved, write);
-    } else if (remote) saved = await writableAdapter.updateEvent(remote, write);
+      await timed('calendar-event-write', () => writableAdapter.updateSeries(remote, write!));
+      saved = await timed('calendar-event-read', () => writableAdapter.getEvent(projection.calendarId, remote.id)) ?? remote;
+      saved = await timed('calendar-event-write', () => writableAdapter.updateEvent(saved, write!));
+    } else if (remote) saved = await timed('calendar-event-write', () => writableAdapter.updateEvent(remote, write!));
     else {
-      saved = await writableAdapter.createEvent(projection.calendarId, write);
+      saved = await timed('calendar-event-write', () => writableAdapter.createEvent(projection.calendarId, write!));
       // A retry can recover an earlier provider create. Reconcile that content on the next pass.
       if (saved.description !== write.description || saved.start !== write.start || saved.end !== write.end) {
-        saved = await writableAdapter.updateEvent(saved, write);
+        saved = await timed('calendar-event-write', () => writableAdapter.updateEvent(saved, write!));
       }
     }
     await saveProjection({ ...projection, eventId: saved.id, baseEvent: saved,
@@ -1040,7 +1049,7 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
       dateKey: segment!.entries[0]!.dateKey, endDateKey: segment!.entries.at(-1)!.dateKey,
       state: 'synced', conflict: undefined, pendingSourceScope: undefined,
       pendingSourceOperationId: undefined });
-    const savedColor = await remoteActivityColor(currentAccount, saved, reads);
+    const savedColor = await timed('calendar-color', () => remoteActivityColor(currentAccount!, saved, reads));
     if (savedColor && segment) await setSetting(accountColorReceiptKey(projection), { version: 1,
       calendarId: saved.calendarId, eventId: saved.id, remoteColor: savedColor,
       localColorHash: localActivityColorHash(segment.entries) } satisfies ColorReceipt);
@@ -1083,9 +1092,11 @@ export async function canAcknowledgeInlineMinuteLink(ticket: PendingInlineMinute
     accounts.some((account) => account.id === projection.accountId && account.consent.calendarWrite));
 }
 
-async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
+async function runSync(cycleId?: number, sharedTrace?: AccountSyncTrace): Promise<AccountSyncStatus> {
   const managedCycle = cycleId !== undefined;
-  const reads: CalendarSyncReads = { metadata: createCalendarMetadataReadCache(), defaultColors: new Map() };
+  const trace = sharedTrace ?? createAccountSyncTrace();
+  activeTrace = trace;
+  const reads: CalendarSyncReads = { metadata: createCalendarMetadataReadCache(), defaultColors: new Map(), trace };
   publish({ running: true, outcome: 'running', phase: 'checking-storage', progress: undefined,
     cycleId: cycleId ?? status.cycleId ?? 0, cycleComplete: false, nativeWriteReady: false, nativePendingCount: 0,
     message: 'Checking account synchronization…' });
@@ -1104,7 +1115,7 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
           if (!passphrase) throw new Error('Unlock the private ledger with the same passphrase on both phones.');
           const budget = { downloads: 0, uploads: 0, verifiedPassphrase: false };
           storageBudgets.set(account.id, budget);
-          if (!await storageSync(account, passphrase, budget)) storagePending = true;
+          if (!await storageSync(account, passphrase, budget, trace)) storagePending = true;
         }
       } catch (error) {
         blockedAccounts.add(account.id);
@@ -1126,8 +1137,8 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
             else await deferInlineMinuteLink(ticket);
             continue;
           }
-          await linkActualsToAccounts(ticket.affectedDates, null,
-            { dateKey: ticket.dateKey, minuteIndex: ticket.minuteIndex });
+          await trace.measure('minute-links', () => linkActualsToAccounts(ticket.affectedDates, null,
+            { dateKey: ticket.dateKey, minuteIndex: ticket.minuteIndex }));
           if (await canAcknowledgeInlineMinuteLink(ticket)) await acknowledgeInlineMinuteLink(ticket);
           else await deferInlineMinuteLink(ticket);
         } catch (error) {
@@ -1146,7 +1157,7 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
     const linkedDates = [...new Set(projections.filter((p) => p.state !== 'deleted')
       .flatMap((p) => [p.dateKey, p.endDateKey ?? p.dateKey]))];
     if (linkedDates.length) {
-      try { await linkActualsToAccounts(linkedDates); }
+      try { await trace.measure('activity-links', () => linkActualsToAccounts(linkedDates)); }
       catch (error) {
         if (error instanceof NativeAccountLinkReviewError) for (const blockId of error.blockIds) nativePendingBlocks.add(blockId);
         else throw error;
@@ -1156,13 +1167,13 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
       const account = accounts.find((item) => item.id === projection.accountId);
       return account?.consent.calendarRead && !blockedAccounts.has(account.id);
     });
-    const ranked = await Promise.all(eligibleProjections.map(async (projection) => {
+    const ranked = await trace.measure('activity-rank', () => Promise.all(eligibleProjections.map(async (projection) => {
       if (projection.state === 'pending') return { projection, priority: 0 };
       try {
         const segment = await getProjectionSegment(projection);
         return { projection, priority: segment ? Number(localProjectionUnchanged(projection, segment)) : Number(projection.baseLocalHash === null) };
       } catch { return { projection, priority: 0 }; }
-    }));
+    })));
     const calendarProjections = ranked.sort((left, right) => left.priority - right.priority ||
       left.projection.id.localeCompare(right.projection.id)).map((item) => item.projection);
     let completedCalendars = 0;
@@ -1172,8 +1183,10 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
       publish({ phase: 'calendar', progress: { completed: completedCalendars, total: calendarProjections.length },
         message: 'Synchronizing calendar activities…', cycleComplete: false });
       try {
-        const current = (await listProjections()).find((item) => item.id === projection.id);
-        if (current) await reconcileProjection(account, current, reads);
+        await trace.measure('calendar-activity', async () => {
+          const current = (await trace.measure('calendar-local', () => listProjections())).find((item) => item.id === projection.id);
+          if (current) await reconcileProjection(account, current, reads);
+        });
       }
       catch (error) { errors.push(`${account.label}: ${error instanceof Error ? error.message : 'Calendar sync failed.'}`); }
       completedCalendars++;
@@ -1183,7 +1196,7 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
       if (!account.consent.ledgerStorage || !passphrase || blockedAccounts.has(account.id)) continue;
       try {
         const budget = storageBudgets.get(account.id) ?? { downloads: 0, uploads: 0, verifiedPassphrase: false };
-        if (!await storageSync(account, passphrase, budget)) storagePending = true;
+        if (!await storageSync(account, passphrase, budget, trace)) storagePending = true;
       }
       catch (error) {
         if (error instanceof StorageDownloadPending) { storagePending = true; continuationMessage = error.message; }
@@ -1204,6 +1217,12 @@ async function runSync(cycleId?: number): Promise<AccountSyncStatus> {
   } catch (error) {
     publish({ running: managedCycle, outcome: 'error', cycleComplete: !managedCycle, progress: undefined, nativeWriteReady: false,
       message: error instanceof Error ? error.message : 'Synchronization will retry.' });
+  } finally {
+    if (!sharedTrace) {
+      trace.finish();
+      publish({ diagnostics: trace.snapshot() });
+      if (activeTrace === trace) activeTrace = null;
+    }
   }
   return status;
 }
@@ -1225,18 +1244,22 @@ export function synchronizeAccounts(): Promise<AccountSyncStatus> {
   if (activeJob) return activeJob;
   const cycleId = ++syncCycleId;
   const previousLastSyncedAt = status.lastSyncedAt;
+  const trace = createAccountSyncTrace();
+  activeTrace = trace;
   activeJob = (async () => {
     // Fold edits arriving during a pass into one follow-up. A steady stream of
     // typing must not keep every waiting caller inside an unbounded drain loop.
     let nativeWriteReady = false;
     for (let pass = 0; pass < 2; pass++) {
       rerunRequested = false;
-      const result = await runSync(cycleId);
+      const result = await runSync(cycleId, trace);
       nativeWriteReady = result.nativeWriteReady === true;
       if (!rerunRequested) break;
     }
+    trace.finish();
     publish({ running: false, cycleId, cycleComplete: true, nativeWriteReady,
       lastSyncedAt: status.outcome === 'success' ? new Date().toISOString() : previousLastSyncedAt });
+    if (activeTrace === trace) activeTrace = null;
     return status;
   })().finally(() => {
     activeJob = null;

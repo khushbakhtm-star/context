@@ -130,7 +130,7 @@ function screen(t, options = {}) {
         };
         if (resolved === source('services/inline-minutes')) return { inlineMinuteDrafts: drafts,
           flushInlineMinutes: () => drafts.flushAll(), retryInlineMinuteLinks: async () => {}, subscribeInlineMinuteCommits: (listener) => drafts.subscribeCommits((_value, result) => listener(result)),
-          subscribeInlineMinuteLinkWarnings: () => () => {} };
+          subscribeInlineMinuteLinkWarnings: options.subscribeLinkWarnings ?? (() => () => {}) };
         if (resolved === source('services/spreadsheet')) return sheet;
         if (resolved === source('services/system-cell-clipboard')) return {
           copySpreadsheetCellsToSystem: async () => { systemCopies++; },
@@ -249,6 +249,16 @@ function plan(id, minute, account = false) {
     endDate: new Date(2026, 9, 25, Math.floor(minute / 60), minute % 60 + 1),
     ...(account ? { accountEvent: { accountId: 'account', event: {} } } : {}) };
 }
+
+test('an existing link warning reports pending during account work and retry only after that work stops', async (t) => {
+  let update; let warning;
+  const h = screen(t, { subscribeLinkWarnings(listener) { update = listener; return () => {}; },
+    props: { onSyncWarningChange(value) { warning = value; } } });
+  await h.start(); update(true, true); await h.settle();
+  assert.match(warning, /saved on this phone.*linking is pending/); assert.equal(warning.includes('needs a retry'), false);
+  update(true, false); await h.settle(); assert.match(warning, /needs a retry/);
+  update(false, false); await h.settle(); assert.equal(warning, null);
+});
 
 test('a calendar event has one titled border while its minute editors start with independent blank notes', async (t) => {
   const event = { ...plan('Appointment', 530), endDate: new Date(2026, 9, 25, 10, 20), color: '#F4511E' };

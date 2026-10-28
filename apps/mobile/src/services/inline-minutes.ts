@@ -1,6 +1,7 @@
 import { acknowledgeInlineMinuteLink, deferInlineMinuteLink, deleteMinuteEntry, getMinuteEntry, getPendingInlineMinuteLinks, getSpreadsheetCells,
   promoteInlineMinuteLinkForAccountReview, saveMinuteRange } from '../data/database';
-import { canAcknowledgeInlineMinuteLink, linkActualsToAccounts, NativeAccountLinkReviewError, requestAccountSynchronization } from '../sync/engine';
+import { canAcknowledgeInlineMinuteLink, linkActualsToAccounts, NativeAccountLinkReviewError, requestAccountSynchronization,
+  subscribeAccountSync } from '../sync/engine';
 import type { MinuteEntry } from '../types';
 import { InlineMinuteDrafts, type InlineMinuteValue } from '../utils/inline-minute-drafts';
 import { cellEventLabel, isActivityGroupId } from '../utils/cell-format';
@@ -37,20 +38,42 @@ let accountWork: Promise<void> | null = null;
 let linkRequested = false;
 let networkRequested = false;
 let linkWarning = false;
-const warningListeners = new Set<(failed: boolean) => void>();
+let accountLinkRunning = false;
+let warningGeneration = 0;
+const warningListeners = new Set<(failed: boolean, running?: boolean) => void>();
 function updateLinkWarning(failed: boolean) {
   linkWarning = failed;
-  for (const listener of warningListeners) { try { listener(failed); } catch { /* A stale screen cannot affect durable synchronization. */ } }
+  for (const listener of warningListeners) { try { listener(failed, accountLinkRunning); } catch { /* A stale screen cannot affect durable synchronization. */ } }
 }
 
-export function subscribeInlineMinuteLinkWarnings(listener: (failed: boolean) => void) {
-  warningListeners.add(listener); listener(linkWarning);
+export function subscribeInlineMinuteLinkWarnings(listener: (failed: boolean, running?: boolean) => void) {
+  warningListeners.add(listener); listener(linkWarning, accountLinkRunning);
   return () => { warningListeners.delete(listener); };
 }
+
+/** A completed cloud cycle may have drained tickets independently of this
+ * local worker. Inspect every deferred ticket; never acknowledge one here. */
+export async function refreshInlineMinuteLinkWarning() {
+  const generation = warningGeneration;
+  if (accountWork) return;
+  try {
+    const pending = await getPendingInlineMinuteLinks(1);
+    if (generation !== warningGeneration || accountWork) return;
+    if (!pending.length) updateLinkWarning(false);
+  } catch { /* Preserve the previous warning when the queue cannot be checked. */ }
+}
+
+subscribeAccountSync((next) => {
+  warningGeneration++;
+  accountLinkRunning = next.running || next.cycleComplete === false;
+  updateLinkWarning(linkWarning);
+  if (!next.running && next.cycleComplete === true) void refreshInlineMinuteLinkWarning();
+});
 
 /** The exact inline coordinate is queued in the same SQLite transaction as its text.
  * A crash or account-link failure leaves that ticket for startup/foreground retry. */
 export function retryInlineMinuteLinks(options: { synchronize?: boolean } = {}): Promise<void> {
+  warningGeneration++;
   linkRequested = true;
   networkRequested ||= options.synchronize !== false;
   if (accountWork) return accountWork;

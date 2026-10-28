@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.25",
-  "sourceAndroidVersionCode": 26,
-  "sourceIosBuildNumber": "26",
+  "version": "0.1.26",
+  "sourceAndroidVersionCode": 27,
+  "sourceIosBuildNumber": "27",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context 0.1.25/code26 to reduce repeated synchronization work: observers join the existing account cycle, provider color metadata is shared within one pass, and verified immutable uploads are recorded as already seen. New edits still request bounded follow-up work. Downloads, decryption and source-event reads retain their existing permission, revision and conflict checks. Encryption format, work factor, native modules and calendar event identities remain unchanged. Independent builds, five actual native class definitions, signatures and package checks are required before availability feeds change. Physical S23 timing, iOS/store availability and official F-Droid inclusion need separate confirmation. The independent Wear companion remains 0.1.10/code100011."
+  "notes": "Prepare Context 0.1.26/code27 with batched activity-title reads and exact block/date queries for legacy calendar activities. Synthetic regressions reduce a full unlabeled day from 1,440 title queries to three without changing transaction, label order or source checks. Sync details add process-local stage, crypto backend and local phone-provider acknowledgement timings; these do not establish Google server upload timing. Stale inline-link warnings may clear only after durable queue verification with newer-work guards. All event reads, storage authentication, permissions, encryption and conflicts retain their existing behavior. Independent assembly, five native class definitions, signatures and package checks are required before availability feeds change. Physical S23 timing, iOS/store availability and official F-Droid inclusion require separate confirmation. The independent Wear companion remains 0.1.10/code100011."
 }

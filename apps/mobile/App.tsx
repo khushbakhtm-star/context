@@ -17,6 +17,7 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import { NavigationBar as AndroidNavigationBar } from 'expo-navigation-bar';
 import * as SystemUI from 'expo-system-ui';
+import * as Clipboard from 'expo-clipboard';
 import { SafeAreaProvider, SafeAreaView, initialWindowMetrics } from 'react-native-safe-area-context';
 
 import {
@@ -31,6 +32,7 @@ import {
   createPlanInSystemCalendar,
   flushPendingActuals,
   getCalendarPermissionStatus,
+  getNativeCalendarSyncDiagnostics,
   listDeviceCalendars,
   NativeCalendarReconciliationError,
   reconcileLinkedCalendarColors,
@@ -72,6 +74,10 @@ import { useWearBridge } from './src/wear/useWearBridge';
 import { calendarColorDraftObserver } from './src/utils/calendar-color-drafts';
 import { createCoalescedDateWork } from './src/utils/coalesced-date-work';
 import { createCalendarBinderPress } from './src/utils/calendar-binder-press';
+import { advanceManualSyncTiming, createManualSyncTiming, finishManualSyncTiming,
+  manualSyncDiagnosticsText, type ManualSyncStage, type ManualSyncTiming } from './src/utils/manual-sync-diagnostics';
+import { nativeSyncDiagnosticsText } from './src/utils/native-sync-diagnostics';
+import { accountSyncDiagnosticsText } from './src/utils/account-sync-diagnostics-text';
 
 type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
 type DayCount = 1 | 3 | 7;
@@ -85,9 +91,8 @@ const DEFAULT_PREFERENCES: CalendarPreferences = {
 
 class CalendarTransitionCancelled extends Error {}
 const MANUAL_SYNC_WAIT_MS = 35_000;
-type ManualSyncStage = 'saving' | 'accounts' | 'phone-calendars' | 'linked-changes' | 'phone-updates' | 'complete';
 type ManualSyncAttempt = { epoch: number; stage: ManualSyncStage; timedOut: boolean;
-  accountJob?: Promise<AccountSyncStatus>; accountCycleId?: number };
+  accountJob?: Promise<AccountSyncStatus>; accountCycleId?: number; timing: ManualSyncTiming };
 
 function manualSyncStageText(stage: ManualSyncStage) {
   return { saving: 'Saving local minutes.', accounts: 'Synchronizing accounts.',
@@ -751,6 +756,15 @@ function AppController() {
     [viewMode, activeDate, selectedDateKeys]);
   calendarColorContextRef.current = { dates: overviewDates, calendars, preferences };
 
+  function calendarSyncTimingDetails() {
+    const attempt = manualSyncAttemptRef.current;
+    const parts = attempt && attempt.epoch === lifecycleEpochRef.current
+      ? [manualSyncDiagnosticsText(attempt.timing, Date.now())] : [];
+    parts.push(accountSyncDiagnosticsText(getAccountSyncStatus().diagnostics, Date.now()));
+    parts.push(nativeSyncDiagnosticsText(getNativeCalendarSyncDiagnostics()));
+    return parts.filter(Boolean).join('\n\n');
+  }
+
   function calendarSyncDetails() {
     const attempt = manualSyncAttemptRef.current;
     const status = getAccountSyncStatus();
@@ -760,6 +774,7 @@ function AppController() {
     if (active && attempt.timedOut && status.running && attempt.stage === 'accounts') {
       parts.push('This account work is continuing in the background. Saved minutes remain available for editing.');
     }
+    parts.push(calendarSyncTimingDetails());
     return [...new Set(parts.filter(Boolean))].join('\n\n');
   }
 
@@ -767,7 +782,7 @@ function AppController() {
     if (!ready || viewChangingRef.current || manualSyncAbortRef.current || !controllerMountedRef.current || AppState.currentState !== 'active') return;
     const controller = new AbortController();
     const epoch = lifecycleEpochRef.current;
-    const attempt: ManualSyncAttempt = { epoch, stage: 'saving', timedOut: false };
+    const attempt: ManualSyncAttempt = { epoch, stage: 'saving', timedOut: false, timing: createManualSyncTiming(Date.now()) };
     manualSyncAttemptRef.current = attempt;
     manualSyncAbortRef.current = controller;
     setManualSyncing(true);
@@ -779,7 +794,8 @@ function AppController() {
       if (controller.signal.aborted || !isVisibleAttempt()) throw new CalendarTransitionCancelled();
     };
     const stage = (next: ManualSyncStage) => {
-      requireCurrent(); attempt.stage = next; setManualSyncNotice(manualSyncStageText(next));
+      requireCurrent(); advanceManualSyncTiming(attempt.timing, next, Date.now());
+      attempt.stage = next; setManualSyncNotice(manualSyncStageText(next));
     };
     // Release only this caller's wait. The shared account worker retains its
     // storage/version guards and can finish without holding the minute editor.
@@ -794,6 +810,7 @@ function AppController() {
     }, MANUAL_SYNC_WAIT_MS);
     try {
       await awaitCalendarTransition((async () => {
+        try {
         await flushInlineMinutes();
         requireCurrent();
         if (inlineMinuteDrafts.snapshot().some((draft) => draft.error)) {
@@ -862,9 +879,10 @@ function AppController() {
         requireCurrent();
         setDataVersion((version) => version + 1);
         colorDraftObserver.consumeSkipped();
-        attempt.stage = 'complete';
+        stage('complete');
         setManualSyncNotice(continuing ? accountSyncProgressText(accountResult) : manualSyncStageText('complete'));
         if (messages.length) setManualSyncError([...new Set(messages)].join('\n'));
+        } finally { finishManualSyncTiming(attempt.timing, Date.now()); }
       })(), controller.signal);
     } catch (error) {
       if (!(error instanceof CalendarTransitionCancelled) && !controller.signal.aborted && isVisibleAttempt()) {
@@ -986,7 +1004,7 @@ function AppController() {
                 <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void navigate('search')}
                   onPrint={() => void openPrintOptions()}
                   onSync={() => void synchronizeCalendar()} syncing={manualSyncing || accountSyncStatus.running} syncError={calendarSyncError}
-                  syncDetails={calendarSyncDetails}
+                  syncDetails={calendarSyncDetails} syncTimingDetails={calendarSyncTimingDetails}
                   onOpenReports={() => void navigate('reports')} onJumpToNow={jumpToCurrentMinute}
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
@@ -1086,7 +1104,7 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onSync, syncing, syncError, syncDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
   viewMode, viewChanging, onViewModeChange }: {
   onOpenSettings: () => void;
   onPrint: () => void;
@@ -1096,6 +1114,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   syncing: boolean;
   syncError: string | null;
   syncDetails?: string | (() => string) | null;
+  syncTimingDetails?: () => string;
   onJumpToNow: () => void;
   onOpenDatePicker: () => void;
   canGoPrevious: boolean;
@@ -1140,7 +1159,18 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const showSyncDetails = () => {
     const detail = typeof syncDetails === 'function' ? syncDetails() : syncDetails;
     const message = [...new Set([detail, syncError].filter(Boolean))].join('\n\n');
-    if (message) Alert.alert('Calendar synchronization', message);
+    if (message) {
+      if (syncTimingDetails) Alert.alert('Calendar synchronization', message, [
+        { text: 'Copy timings', onPress: () => {
+          const timing = syncTimingDetails();
+          if (timing) void Clipboard.setStringAsync(timing).catch(() => {
+            Alert.alert('Could not copy timings', 'Try Copy timings again.');
+          });
+        } },
+        { text: 'OK', style: 'cancel' },
+      ]);
+      else Alert.alert('Calendar synchronization', message);
+    }
   };
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;

@@ -262,6 +262,7 @@ export function TodayScreen({
   const [projectionWarning, setProjectionWarning] = useState<string | null>(null);
   const [accountWarning, setAccountWarning] = useState<string | null>(null);
   const [inlineLinkWarning, setInlineLinkWarning] = useState(false);
+  const [inlineLinkRunning, setInlineLinkRunning] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const dayDataRef = useRef(dayData);
   const editorRef = useRef(editor);
@@ -1029,7 +1030,9 @@ export function TodayScreen({
   }, [navigationKey]);
 
   useEffect(() => inlineMinuteDrafts.subscribe(() => setInlineVersion((value) => value + 1)), []);
-  useEffect(() => subscribeInlineMinuteLinkWarnings(setInlineLinkWarning), []);
+  useEffect(() => subscribeInlineMinuteLinkWarnings((warning, running) => {
+    setInlineLinkWarning(warning); setInlineLinkRunning(Boolean(running));
+  }), []);
   useEffect(() => spreadsheetEditor.subscribe(() => setSpreadsheetState(spreadsheetEditor.snapshot())), []);
 
   useEffect(() => {
@@ -1545,7 +1548,8 @@ export function TodayScreen({
     ...days.map((day) => dayData[day]?.colorReadError ? dayData[day]?.colorReadCause : null),
   ].filter(Boolean))].join('\n\n') || 'Calendar events could not refresh. Saved minute notes remain available.' : null;
   const calendarSyncWarning = [...new Set([
-    inlineLinkWarning ? 'Your minute is saved on this phone, but account synchronization needs a retry.' : null,
+    inlineLinkWarning ? inlineLinkRunning ? 'Your minute is saved on this phone. Calendar linking is pending.' :
+      'Your minute is saved on this phone, but account synchronization needs a retry.' : null,
     accountWarning, projectionWarning, calendarReadWarning,
   ].filter(Boolean))].join('\n\n') || null;
   useEffect(() => { onSyncWarningChange?.(calendarSyncWarning); }, [calendarSyncWarning, onSyncWarningChange]);

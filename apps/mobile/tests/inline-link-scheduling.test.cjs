@@ -11,6 +11,7 @@ function runtime(t) {
   const reviewPromotions = []; const deferred = [];
   class NativeAccountLinkReviewError extends Error {}
   let gate = null; let failed = false; let review = false; let requests = 0; let revision = 0;
+  let accountListener; let queueGate = null; let queueFailed = false; const warningStates = [], queueQueries = [];
   const cache = new Map();
   const source = (name) => path.join(__dirname, '../src', name);
   function load(filename) {
@@ -31,7 +32,11 @@ function runtime(t) {
           },
           async deleteMinuteEntry(day, minute) { rows.delete(`${day}:${minute}`); },
           async getMinuteEntry(day, minute) { return rows.get(`${day}:${minute}`) ?? null; },
-          async getPendingInlineMinuteLinks() { return [...pending.values()].map((value) => ({ ...value })); },
+          async getPendingInlineMinuteLinks(limit) { queueQueries.push(limit);
+            const snapshot = [...pending.values()].map((value) => ({ ...value }));
+            if (queueGate) await queueGate;
+            if (queueFailed) throw Error('Synthetic queue read failure');
+            return snapshot.slice(0, limit ?? 100); },
           async acknowledgeInlineMinuteLink(ticket) {
             const key = `${ticket.dateKey}:${ticket.minuteIndex}`;
             if (pending.get(key)?.revision === ticket.revision) pending.delete(key);
@@ -46,6 +51,7 @@ function runtime(t) {
           async deferInlineMinuteLink(ticket) { deferred.push(ticket); },
         };
         if (name === '../sync/engine') return {
+          subscribeAccountSync(listener) { accountListener = listener; return () => {}; },
           NativeAccountLinkReviewError,
           canAcknowledgeInlineMinuteLink: async () => true,
           async linkActualsToAccounts(dates, source, anchor) { links.push({ dates: [...dates], source, ...anchor });
@@ -61,13 +67,15 @@ function runtime(t) {
     cache.set(filename, module.exports); return module.exports;
   }
   const api = load(source('services/inline-minutes.ts'));
-  api.subscribeInlineMinuteLinkWarnings((value) => warnings.push(value));
+  api.subscribeInlineMinuteLinkWarnings((value, running) => { warnings.push(value); warningStates.push({ value, running }); });
   t.after(() => api.inlineMinuteDrafts.flushAll());
   function edit(minute, text) {
     api.inlineMinuteDrafts.activate({ dateKey: '2026-10-25', minuteIndex: minute, text: '', categoryId: 'work', keepColor: false });
     api.inlineMinuteDrafts.edit('2026-10-25', minute, { text });
   }
-  return { api, rows, pending, links, warnings, reviewPromotions, deferred, edit, get requests() { return requests; },
+  return { api, rows, pending, links, warnings, warningStates, queueQueries, reviewPromotions, deferred, edit,
+    emitAccount(value) { accountListener(value); },
+    set queueGate(value) { queueGate = value; }, set queueFailed(value) { queueFailed = value; }, get requests() { return requests; },
     set gate(value) { gate = value; }, set failed(value) { failed = value; }, set review(value) { review = value; } };
 }
 
@@ -118,4 +126,50 @@ test('a poll-only empty link drain never schedules a cloud pass', async (t) => {
   const r = runtime(t);
   await r.api.retryInlineMinuteLinks({ synchronize: false });
   assert.equal(r.requests, 0); assert.equal(r.links.length, 0);
+});
+
+test('actual account completion clears a stale warning only after checking the whole durable queue', async (t) => {
+  const r = runtime(t); r.failed = true;
+  r.edit(600, 'Saved local note'); await r.api.flushInlineMinutes(); await r.api.retryInlineMinuteLinks();
+  assert.equal(r.warnings.at(-1), true);
+  const linkedBeforeRefresh = r.links.length;
+  r.emitAccount({ running: true, cycleComplete: false });
+  assert.deepEqual(r.warningStates.at(-1), { value: true, running: true });
+  const count = r.queueQueries.length;
+  r.emitAccount({ running: false, cycleComplete: false }); await nextTurn();
+  assert.equal(r.queueQueries.length, count, 'caller release or incomplete cycle cannot clear a warning');
+  // A deferred account-review ticket remains in the same queue and must count.
+  [...r.pending.values()][0].requiresAccountWriter = true;
+  r.emitAccount({ running: false, cycleComplete: true }); await nextTurn();
+  assert.equal(r.queueQueries.at(-1), 1); assert.equal(r.warnings.at(-1), true);
+  r.pending.clear(); r.emitAccount({ running: false, cycleComplete: true }); await nextTurn();
+  assert.equal(r.warnings.at(-1), false);
+  assert.equal(r.links.length, linkedBeforeRefresh, 'warning refresh neither links nor acknowledges any ticket');
+});
+
+test('ordinary pending work at account completion does not invent a link failure', async (t) => {
+  const r = runtime(t);
+  r.pending.set('2026-10-25:600', { dateKey: '2026-10-25', minuteIndex: 600,
+    affectedDates: ['2026-10-25'], requiresAccountWriter: true, revision: 1 });
+  r.emitAccount({ running: true, cycleComplete: false });
+  r.emitAccount({ running: false, cycleComplete: true }); await nextTurn();
+  assert.equal(r.queueQueries.at(-1), 1); assert.equal(r.pending.size, 1);
+  assert.ok(r.warnings.every((value) => value === false));
+  assert.equal(r.links.length, 0, 'warning inspection never dispatches pending work');
+});
+
+test('queue read failure preserves a warning and an older empty read cannot erase a newer link attempt', async (t) => {
+  const r = runtime(t); r.failed = true;
+  r.edit(600, 'First saved note'); await r.api.flushInlineMinutes(); await r.api.retryInlineMinuteLinks();
+  r.pending.clear(); r.queueFailed = true;
+  r.emitAccount({ running: false, cycleComplete: true }); await nextTurn();
+  assert.equal(r.warnings.at(-1), true); r.queueFailed = false;
+  let release; r.queueGate = new Promise((done) => { release = done; });
+  r.emitAccount({ running: false, cycleComplete: true }); await nextTurn();
+  const previous = r.warnings.length;
+  r.edit(601, 'Newer saved note'); await r.api.flushInlineMinutes();
+  const newer = r.api.retryInlineMinuteLinks();
+  release(); r.queueGate = null; await newer; await nextTurn();
+  assert.ok(r.warnings.slice(previous).every(Boolean), 'no stale empty result clears the newer failure');
+  assert.equal(r.pending.size, 1); assert.equal(r.warnings.at(-1), true);
 });

@@ -639,13 +639,23 @@ export async function getActivityTitleForEntries(entries: MinuteEntry[]) {
   return activityTitleInside(db, entries);
 }
 
-async function activityTitleInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync'>,
+async function activityTitleInside(db: Pick<SQLite.SQLiteDatabase, 'getAllAsync'>,
   entries: Pick<MinuteEntry, 'dateKey' | 'minuteIndex' | 'blockId'>[]) {
-  for (const entry of entries) {
-    const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
-      cellFormatKey(entry.dateKey, entry.minuteIndex));
-    const label = cellEventLabel(formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null), entry.blockId);
-    if (label) return label.title;
+  // Stay below older SQLite bind limits and keep the original caller order.
+  // A legacy unlabeled full day must not make 1,440 native statement round trips.
+  for (let start = 0; start < entries.length; start += 500) {
+    const chunk = entries.slice(start, start + 500);
+    const keys = [...new Set(chunk.map((entry) => cellFormatKey(entry.dateKey, entry.minuteIndex)))];
+    const documents = await db.getAllAsync<Pick<DocumentRow, 'key' | 'value_json'>>(
+      `SELECT key, value_json FROM ledger_documents WHERE key IN (${keys.map(() => '?').join(',')})`, ...keys);
+    const values = new Map(documents.map((document) => [document.key, document.value_json]));
+    for (const entry of chunk) {
+      const value = values.get(cellFormatKey(entry.dateKey, entry.minuteIndex));
+      // Parse only records reached in caller order, just like the scalar lookup;
+      // later malformed or unrelated labels cannot supersede the first match.
+      const label = cellEventLabel(formatFromDocument(value ? JSON.parse(value) : null), entry.blockId);
+      if (label) return label.title;
+    }
   }
   return undefined;
 }
@@ -680,10 +690,12 @@ export async function getEntriesBetween(startDate: string, endDate: string) {
 }
 
 /** Stable activity identities can move outside their previous calendar date window. */
-export async function getEntriesForBlock(blockId: string): Promise<MinuteEntry[]> {
+export async function getEntriesForBlock(blockId: string,
+  range?: { startDate: string; endDate: string }): Promise<MinuteEntry[]> {
   const db = await database();
   const rows = await db.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries
-    WHERE block_id = ? ORDER BY date_key, minute_index`, blockId);
+    WHERE block_id = ?${range ? ' AND date_key >= ? AND date_key <= ?' : ''}
+    ORDER BY date_key, minute_index`, ...[blockId, ...(range ? [range.startDate, range.endDate] : [])]);
   return rows.map(mapMinuteRow);
 }
 

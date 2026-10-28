@@ -30,8 +30,8 @@
     },
     {
       "path": "sync/codec.ts",
-      "bytes": 17960,
-      "sha256": "a5f4be1f581a1af0de093e73ab84d77cfe8aaafbfa0eb1fdf13df66d22fbccd6"
+      "bytes": 20701,
+      "sha256": "da46f948c1a7f2101d3087f9debea3ab75cd3d044819c0540de443ccd47d807e"
     },
     {
       "path": "utils/date-selection.ts",
@@ -45,8 +45,8 @@
     },
     {
       "path": "sync/types.ts",
-      "bytes": 4618,
-      "sha256": "83cacca1264aee243815bfae1b71b0cfd9cf196a248ab70c9130558380d3a163"
+      "bytes": 5400,
+      "sha256": "5e7ee8e365dfb3540d47c10eddb6b11d9485ae2239f35c3802279260a32c4235"
     },
     {
       "path": "types.ts",

@@ -58,7 +58,7 @@ function repository(t) {
         if (name.startsWith('@noble/')) return require(name);
         if (!name.startsWith('.')) throw Error(`Unexpected contention test import: ${name}`);
         const file = path.resolve(path.dirname(filename), `${name}.ts`);
-        if (file === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, requestAccountSynchronization: () => {} };
+        if (file === source('sync/engine.ts')) return { linkActualsToAccounts: async () => {}, subscribeAccountSync: () => () => {}, requestAccountSynchronization: () => {} };
         if (file === source('sync/accounts.ts')) return { accountFetch: async () => { throw Error('No network in SQLite tests'); } };
         if (file === source('sync/providers.ts')) return { createCalendarAdapter: () => { throw Error('No calendar in SQLite tests'); } };
         return load(file);

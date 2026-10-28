@@ -47,6 +47,12 @@ function app(options = {}) {
   let accountStatus = options.status ?? success();
   const context = {
     module: { exports: {} }, console, Error, Promise, AbortController,
+    ...require('../src/utils/manual-sync-diagnostics.ts'),
+    ...require('../src/utils/account-sync-diagnostics-text.ts'),
+    ...require('../src/utils/native-sync-diagnostics.ts'),
+    getNativeCalendarSyncDiagnostics: () => ({ content: { acknowledged: 2, totalMs: 100, lastMs: 50 },
+      color: { acknowledged: 1, totalMs: 20, lastMs: 20 } }),
+    Date: class extends Date { static now() { return clock; } },
     ready: true, viewChangingRef: { current: false }, manualSyncAbortRef: { current: null },
     manualSyncAttemptRef: { current: null },
     controllerMountedRef: { current: true }, lifecycleEpochRef: { current: 0 }, activeTransitionRef: { current: null },
@@ -84,13 +90,15 @@ function app(options = {}) {
     reviewError.getText(calendarSource).replace(/^export\s+/, ''),
     ...['manualSyncStageText', 'accountSyncContinues', 'accountSyncFailure', 'accountSyncProgressText'].map(declaration),
     declaration('awaitCalendarTransition'), synchronize.getText(source),
+    controller.body.statements.find((node) => node.name?.text === 'calendarSyncTimingDetails').getText(source),
     `const mount = (${mountEffect}); const lifecycle = (${lifecycleEffect});`,
-    'module.exports = { synchronizeCalendar, mount, lifecycle, deadline: MANUAL_SYNC_WAIT_MS, NativeCalendarReconciliationError, accountSyncProgressText };'].join('\n')), context, { filename: file });
+    'module.exports = { synchronizeCalendar, calendarSyncTimingDetails, mount, lifecycle, deadline: MANUAL_SYNC_WAIT_MS, NativeCalendarReconciliationError, accountSyncProgressText };'].join('\n')), context, { filename: file });
   const api = context.module.exports;
   const cleanupMount = api.mount(), cleanupLifecycle = api.lifecycle();
   return { state, calls, drafts, timers, context, nativeArgs, deadline: api.deadline, sync: api.synchronizeCalendar,
     reviewError: (message) => new api.NativeCalendarReconciliationError([{ blockId: 'review-block', message }]),
     progressText: api.accountSyncProgressText,
+    timingDetails: api.calendarSyncTimingDetails,
     setStatus(value) { accountStatus = value; },
     advance(milliseconds) { clock += milliseconds;
       while (true) { const due = [...timers].find(([, timer]) => timer.at <= clock); if (!due) break;
@@ -102,6 +110,26 @@ function app(options = {}) {
 function success(overrides = {}) { return { running: false, lastSyncedAt: '2026-10-27T12:00:00Z',
   message: 'Accounts synchronized', conflicts: 0, outcome: 'success', phase: 'idle',
   cycleId: 1, cycleComplete: true, nativeWriteReady: true, ...overrides }; }
+
+test('manual timing keeps measuring the exact pending account work after the caller deadline', async () => {
+  const pending = deferred(); const h = app({ accounts: () => pending.promise });
+  const work = h.sync(); await settle();
+  h.advance(35_000); await work;
+  const timing = h.context.manualSyncAttemptRef.current.timing;
+  assert.equal(timing.finishedAt, undefined); assert.equal(timing.stage, 'accounts');
+  h.advance(76_000); pending.resolve(success()); await settle();
+  assert.equal(timing.finishedAt, 111_000); assert.equal(timing.elapsed.accounts, 111_000);
+  assert.equal(h.calls.includes('native'), false, 'diagnostics cannot resume expired native work');
+});
+
+test('the actual App timing payload does not include account messages or generic error state', () => {
+  const h = app({ status: success({ message: 'Private account person@example.test and event title' }) });
+  h.state.error = 'Private source error and note';
+  const payload = h.timingDetails();
+  assert.match(payload, /Local phone-provider acknowledgements/);
+  assert.match(payload, /Content: 2/); assert.match(payload, /Color: 1/);
+  assert.equal(/Private|example.test|source error|event title/.test(payload), false);
+});
 
 
 test('accounts start before a hung phone read; the 35-second caller deadline releases editing as pending progress', async () => {

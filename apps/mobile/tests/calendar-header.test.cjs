@@ -35,7 +35,7 @@ function headerHarness(props = {}, options = {}) {
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => value === b[index]);
   const listeners = new Set(); const state = { currentState: 'active', addEventListener: (_name, callback) => { listeners.add(callback); return { remove: () => listeners.delete(callback) }; } };
   const dimensions = { width: 360, height: 500 };
-  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, sync: 0, modes: [], errors: [] };
+  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, sync: 0, modes: [], errors: [], copies: [] };
   const history = { canUndo: true, canRedo: true, busy: false };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   const module = { exports: {} };
@@ -53,6 +53,7 @@ function headerHarness(props = {}, options = {}) {
     inlineMinuteDrafts: { snapshot: () => options.drafts ?? [] },
     undoSpreadsheetEdit: async () => {}, redoSpreadsheetEdit: async () => {},
     Keyboard: { dismiss() {} }, Alert: { alert: (...args) => calls.errors.push(args) }, AppState: state, Platform: { OS: options.os ?? 'android' },
+    Clipboard: { setStringAsync: async (value) => { calls.copies.push(value); } },
     StyleSheet: { create: (value) => value, absoluteFill: {}, hairlineWidth: 0.5 },
     ScrollView: 'ScrollView', View: 'View', Text: 'Text', Pressable: 'Pressable', Modal: 'Modal',
     ActivityIndicator: 'ActivityIndicator', CalendarViewIcon: 'CalendarViewIcon', CalendarHeaderIcon: 'CalendarHeaderIcon',

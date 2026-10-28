@@ -49,6 +49,19 @@ test('physical and accessible long presses show details without also synchronizi
   h.press(button); assert.equal(h.calls.sync, 1, 'the next ordinary tap must not inherit the completed long press');
 });
 
+test('Copy timings uses only the separate safe payload while private Sync errors stay inside the popup', async () => {
+  const timing = 'Account synchronization elapsed: 111.0 s.\nCalendar API event read: 86 calls, 90.0 s.';
+  const h = header({ syncing: true, syncError: 'Private event title, person@example.test',
+    syncDetails: () => 'Private account status', syncTimingDetails: () => timing });
+  const button = syncButton(h); button.props.onPressIn(); button.props.onLongPress();
+  const [, message, buttons] = h.alerts[0];
+  assert.match(message, /Private event title/);
+  assert.ok(buttons.some((item) => item.text === 'OK'));
+  await buttons.find((item) => item.text === 'Copy timings').onPress(); await Promise.resolve();
+  assert.equal(h.calls.copies.length, 1); assert.equal(h.calls.copies[0], timing); assert.equal(h.calls.sync, 0);
+  assert.equal(/Private|example.test/.test(h.calls.copies[0]), false);
+});
+
 test('old-view warning callbacks and unmount cleanup cannot erase the active view warning', () => {
   const file = path.join(mobile, 'App.tsx'); const text = fs.readFileSync(file, 'utf8');
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);

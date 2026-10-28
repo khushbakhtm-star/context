@@ -19,6 +19,44 @@ const pendingKeys = new Map<string, Promise<Uint8Array>>();
 let keyCacheGeneration = 0;
 let keyDerivationQueue: Promise<void> = Promise.resolve();
 
+type KdfBackend = 'webcrypto' | 'native' | 'portableJs';
+export type LedgerCryptoDiagnostics = {
+  kdfByBackend: Record<KdfBackend, { calls: number; elapsedMs: number }>;
+  keyQueueMs: number;
+  cacheHits: number;
+  coalescedKeys: number;
+  encryptCalls: number;
+  encryptMs: number;
+  decryptCalls: number;
+  decryptMs: number;
+};
+// Process-local aggregate numbers only. No inputs, identities, salts, keys,
+// hashes or payload data are retained, persisted or transmitted.
+const cryptoDiagnostics: LedgerCryptoDiagnostics = {
+  kdfByBackend: { webcrypto: { calls: 0, elapsedMs: 0 }, native: { calls: 0, elapsedMs: 0 },
+    portableJs: { calls: 0, elapsedMs: 0 } },
+  keyQueueMs: 0, cacheHits: 0, coalescedKeys: 0,
+  encryptCalls: 0, encryptMs: 0, decryptCalls: 0, decryptMs: 0,
+};
+function diagnosticsNow() {
+  const time = globalThis.performance?.now?.() ?? Date.now();
+  return Number.isFinite(time) ? time : 0;
+}
+function diagnosticsElapsed(start: number) {
+  return Math.max(0, diagnosticsNow() - start);
+}
+function recordKdf(backend: KdfBackend, started: number) {
+  cryptoDiagnostics.kdfByBackend[backend].calls += 1;
+  cryptoDiagnostics.kdfByBackend[backend].elapsedMs += diagnosticsElapsed(started);
+}
+export function getLedgerCryptoDiagnostics(): LedgerCryptoDiagnostics {
+  return { ...cryptoDiagnostics, kdfByBackend: {
+    webcrypto: { ...cryptoDiagnostics.kdfByBackend.webcrypto },
+    native: { ...cryptoDiagnostics.kdfByBackend.native },
+    portableJs: { ...cryptoDiagnostics.kdfByBackend.portableJs },
+  } };
+}
+
 /** Installed only by the mobile bootstrap. Portable/browser callers need no
  * native runtime and retain WebCrypto or the cooperative JS implementation. */
 export type NativeLedgerKeyDeriver = (passphrase: string, saltHex: string) => Promise<string | null>;
@@ -277,8 +315,10 @@ async function deriveKeyBytes(passphrase: string, salt: Uint8Array, requireCurre
     // the cooperative path below.
     const password = new Uint8Array(utf8ToBytes(passphrase));
     let key: Uint8Array | undefined;
+    let started: number | undefined;
     try {
       requireCurrent();
+      started = diagnosticsNow();
       const secret = await subtle.importKey('raw', password, 'PBKDF2', false, ['deriveBits']);
       requireCurrent();
       key = new Uint8Array(await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256',
@@ -289,12 +329,19 @@ async function deriveKeyBytes(passphrase: string, salt: Uint8Array, requireCurre
     } catch (error) {
       key?.fill(0);
       throw error;
-    } finally { password.fill(0); }
+    } finally {
+      password.fill(0);
+      if (started !== undefined) recordKdf('webcrypto', started);
+    }
   }
   const native = nativeLedgerKeyDeriver;
   if (native && !hasUnpairedSurrogate(passphrase)) {
     requireCurrent();
-    const hex = await native(passphrase, bytesToHex(salt));
+    const started = diagnosticsNow();
+    let hex: string | null;
+    try { hex = await native(passphrase, bytesToHex(salt)); }
+    catch (error) { recordKdf('native', started); throw error; }
+    if (hex !== null) recordKdf('native', started);
     requireCurrent();
     if (hex !== null) {
       if (typeof hex !== 'string' || !/^[a-f0-9]{64}$/.test(hex)) {
@@ -303,20 +350,24 @@ async function deriveKeyBytes(passphrase: string, salt: Uint8Array, requireCurre
       return hexToBytes(hex);
     }
   }
-  return deriveKeyCooperatively(utf8ToBytes(passphrase), salt, requireCurrent);
+  const started = diagnosticsNow();
+  try { return await deriveKeyCooperatively(utf8ToBytes(passphrase), salt, requireCurrent); }
+  finally { recordKdf('portableJs', started); }
 }
 
 async function deriveKey(passphrase: string, salt: Uint8Array) {
   const cacheId = bytesToHex(sha256(utf8ToBytes(`${passphrase}\u0000${bytesToHex(salt)}`)));
   const cached = derivedKeys.get(cacheId);
-  if (cached) return new Uint8Array(cached);
+  if (cached) { cryptoDiagnostics.cacheHits += 1; return new Uint8Array(cached); }
   const generation = keyCacheGeneration;
   const requireCurrent = () => {
     if (generation !== keyCacheGeneration) throw new Error('The ledger was locked. Unlock it before synchronizing again.');
   };
   let pending = pendingKeys.get(cacheId);
   if (!pending) {
+    const queuedAt = diagnosticsNow();
     pending = keyDerivationQueue.then(async () => {
+      cryptoDiagnostics.keyQueueMs += diagnosticsElapsed(queuedAt);
       requireCurrent();
       const key = await deriveKeyBytes(passphrase, salt, requireCurrent);
       try { requireCurrent(); }
@@ -331,7 +382,7 @@ async function deriveKey(passphrase: string, salt: Uint8Array) {
     });
     pendingKeys.set(cacheId, pending);
     keyDerivationQueue = pending.then(() => undefined, () => undefined);
-  }
+  } else cryptoDiagnostics.coalescedKeys += 1;
   try {
     const key = await pending;
     requireCurrent();
@@ -347,8 +398,10 @@ export async function encryptBatch(
   passphrase: string,
   randomSource: RandomSource = secureRandom,
 ): Promise<string> {
-  validatePassphrase(passphrase);
-  validateBatch(batch);
+  cryptoDiagnostics.encryptCalls += 1;
+  const validationStarted = diagnosticsNow();
+  try { validatePassphrase(passphrase); validateBatch(batch); }
+  finally { cryptoDiagnostics.encryptMs += diagnosticsElapsed(validationStarted); }
   const salt = await randomSource(16);
   const nonce = await randomSource(12);
   if (salt.length !== 16 || nonce.length !== 12) throw new Error('Secure random generation failed.');
@@ -361,6 +414,7 @@ export async function encryptBatch(
     nonce: bytesToHex(nonce),
   };
   const key = await deriveKey(passphrase, salt);
+  const encryptionStarted = diagnosticsNow();
   try {
     const ciphertext = gcm(key, nonce, associatedData(header)).encrypt(
       utf8ToBytes(JSON.stringify(batch)),
@@ -368,10 +422,13 @@ export async function encryptBatch(
     return JSON.stringify({ ...header, ciphertext: bytesToHex(ciphertext) });
   } finally {
     key.fill(0);
+    cryptoDiagnostics.encryptMs += diagnosticsElapsed(encryptionStarted);
   }
 }
 
 export async function decryptBatch(text: string, passphrase: string): Promise<SyncBatch> {
+  cryptoDiagnostics.decryptCalls += 1;
+  const validationStarted = diagnosticsNow();
   validatePassphrase(passphrase);
   if (text.length > MAX_ENVELOPE_CHARS) throw new Error('The encrypted ledger file is too large.');
   let envelope: unknown;
@@ -402,7 +459,10 @@ export async function decryptBatch(text: string, passphrase: string): Promise<Sy
   }
   const typed = envelope as EncryptedEnvelope;
   const { ciphertext, ...header } = typed;
+  cryptoDiagnostics.decryptMs += diagnosticsElapsed(validationStarted);
   const key = await deriveKey(passphrase, hexToBytes(typed.salt));
+  const decryptionStarted = diagnosticsNow();
+  try {
   let plaintext: Uint8Array;
   try {
     plaintext = gcm(key, hexToBytes(typed.nonce), associatedData(header)).decrypt(
@@ -419,6 +479,7 @@ export async function decryptBatch(text: string, passphrase: string): Promise<Sy
   } finally {
     plaintext.fill(0);
   }
+  } finally { cryptoDiagnostics.decryptMs += diagnosticsElapsed(decryptionStarted); }
 }
 
 export type ProjectedMinuteLine = { minuteIndex: number; text: string };

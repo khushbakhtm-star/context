@@ -137,7 +137,20 @@ export type Projection = {
   pendingSourceOperationId?: string;
 };
 
+export type AccountSyncDiagnosticStep = 'ledger-list' | 'ledger-local' | 'ledger-read' | 'ledger-decrypt' | 'ledger-merge' |
+  'ledger-prepare' | 'ledger-encrypt' | 'ledger-upload' | 'ledger-ack' | 'minute-links' |
+  'activity-links' | 'activity-rank' | 'calendar-activity' | 'calendar-local' | 'calendar-event-read' | 'calendar-color' | 'calendar-event-write';
+export type AccountSyncDiagnostics = {
+  startedAt: number;
+  finishedAt?: number;
+  active: { step: AccountSyncDiagnosticStep; startedAt: number } | null;
+  steps: { step: AccountSyncDiagnosticStep; calls: number; elapsedMs: number }[];
+  crypto: import('./codec').LedgerCryptoDiagnostics;
+};
+
 export type AccountSyncStatus = {
+  /** Process-local aggregate timing only; never persisted or sent to a provider. */
+  diagnostics?: AccountSyncDiagnostics;
   running: boolean;
   lastSyncedAt: string | null;
   message: string;
