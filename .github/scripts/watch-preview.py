@@ -17,9 +17,9 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 
-SOURCE = "5586f4a305a71956aeabaa035fa350861b6b6cf9"
-VERSION = "0.1.12"
-CODE = 100013
+SOURCE = "fddefda295c5103fec26ef75ea2f2c7ab4a17b23"
+VERSION = "0.1.13"
+CODE = 100014
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned watch preview: local publisher signing is separate"
 CERTIFICATE = "44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772"
