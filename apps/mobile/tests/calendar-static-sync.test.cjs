@@ -47,20 +47,20 @@ function arrowTip(arms) {
   return pairs[0];
 }
 
-test('active and idle sync use distinct static grayscale loops with the existing stroke weight', () => {
+test('active and idle sync use distinct static grayscale loops with the lighter undo/redo stroke weight', () => {
   for (const graphite of ['#333333', '#E3E1DD']) {
     const active = icon(true, graphite), idle = icon(false, graphite);
     assert.equal(active.props.accessible, false); assert.equal(active.props.pointerEvents, 'none');
     const closed = nodes(active).find((node) => node.props.testID === 'sync-loop-closed');
     const open = nodes(idle).find((node) => node.props.testID === 'sync-loop-open');
     const closedStyle = flatStyle(closed.props.style), openStyle = flatStyle(open.props.style);
-    assert.equal(closedStyle.borderWidth, 2); assert.equal(closedStyle.borderColor, graphite);
+    assert.equal(closedStyle.borderWidth, 1.5); assert.equal(closedStyle.borderColor, graphite);
     assert.ok(closedStyle.width > closedStyle.height, 'the loop is a horizontally oriented oval');
     assert.equal(closedStyle.borderLeftColor, undefined); assert.equal(closedStyle.borderRightColor, undefined);
-    assert.equal(openStyle.borderWidth, 2); assert.equal(openStyle.borderColor, graphite);
+    assert.equal(openStyle.borderWidth, 1.5); assert.equal(openStyle.borderColor, graphite);
     assert.equal(openStyle.borderLeftColor, 'transparent'); assert.equal(openStyle.borderRightColor, 'transparent');
     for (const tree of [active, idle]) {
-      assert.equal(nodes(tree).filter((node) => flatStyle(node.props.style).width === 6 && flatStyle(node.props.style).height === 2).length, 4,
+      assert.equal(nodes(tree).filter((node) => flatStyle(node.props.style).width === 6 && flatStyle(node.props.style).height === 1.5).length, 4,
         'both loop states retain the same pair of arrowheads');
       assert.ok(nodes(tree).every((node) => node.type === 'View' || node.type === 'Fragment'));
       const upper = nodes(tree).filter((node) => node.props.testID === 'sync-top-arrow').map((node) => flatStyle(node.props.style));

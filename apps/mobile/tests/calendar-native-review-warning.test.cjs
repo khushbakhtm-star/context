@@ -43,12 +43,11 @@ test('a verified palette notification refreshes the selected cell without lettin
   const latest = [{ id: 'verified', name: 'Basil', color: '#0B8043' }];
   const h = screen(t, { subscribePalette: (callback) => { listeners.add(callback); return () => listeners.delete(callback); },
     readColors: (options) => { scopes.push(options?.scope); return phase === 1 ? new Promise((resolve) => { finishOld = resolve; }) : Promise.resolve(phase === 2 ? latest : []); } });
-  await h.start(); await h.tap(600); h.action('Save minute text and show formatting').onPress(); await h.settle();
-  h.action('Choose cell color').onPress(); await h.settle(); assert.equal(h.palette().colorChoices.length, 0);
+  await h.start(); await h.hold(600); assert.equal(h.menu().colorChoices.length, 0);
   phase = 1; for (const callback of listeners) callback(); await h.settle();
   phase = 2; for (const callback of listeners) callback(); await h.settle();
-  assert.equal(h.palette().colorChoices[0].id, 'verified');
-  finishOld([]); await h.settle(); assert.equal(h.palette().colorChoices[0].id, 'verified');
+  assert.equal(h.menu().colorChoices[0].id, 'verified');
+  finishOld([]); await h.settle(); assert.equal(h.menu().colorChoices[0].id, 'verified');
   assert.ok(scopes.some((scope) => scope?.dateKey === h.day && scope.minuteIndex === 600));
   h.unmount(); assert.equal(listeners.size, 0);
 });

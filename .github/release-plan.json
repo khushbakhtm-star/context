@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.30",
-  "sourceAndroidVersionCode": 31,
-  "sourceIosBuildNumber": "31",
+  "version": "0.1.31",
+  "sourceAndroidVersionCode": 32,
+  "sourceIosBuildNumber": "32",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context phone 0.1.30/code31. Resizing an event replaces its old uniform range fill; distinct removed minute annotations remain private without the old fill or border. Editing continues from the saved range using fresh committed group membership. Through includes the entire final minute and translates to the matching exclusive calendar boundary. A tap on the view icon returns to today and now; holding it opens view choices. Pinch uses a bounded native visual preview before one final grid-layout commit, retaining fixed day/week columns. Matching monochrome pencil, hollow scissors, circular Reset and static oval Sync icons use consistent strokes. One Reset action replaces Clear and removes cell text and all formatting. Provider identity, source-version/conflict checks, consent, atomic Undo and encrypted-ledger checks remain protected. Watch 0.1.12 is a separate unchanged release. Independent native builds and publisher-certificate checks must pass before availability records change. Physical-phone and live-calendar behavior, stores and official F-Droid inclusion require separate confirmation."
+  "notes": "Prepare Context phone 0.1.31/code32. Save closes the text bar and keyboard while keeping the cell selected. The held-cell popup contains a circled bold italic underlined A for formatting, centered action rows, the former event-border Group icon, circular Reset and matching Cut/Copy/Paste artwork. The static Sync circuit has lighter strokes aligned with Undo/Redo. Whole minute notes wrap, shrink and fade with vertical zoom rather than showing clipped single lines. Pinch rendering retains fixed day columns and commits the grid geometry on release. Existing inclusive Through minutes, event identity, fresh source-version/conflict checks, consent, atomic Undo and encrypted-ledger protections remain in force. Watch 0.1.12 is a separate unchanged release. Independent native builds and publisher-certificate checks must pass before availability records change. Physical-phone and live-calendar behavior, stores and official F-Droid inclusion require separate confirmation."
 }

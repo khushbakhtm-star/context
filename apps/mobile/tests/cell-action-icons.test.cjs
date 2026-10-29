@@ -5,17 +5,17 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-function icon(name, color) {
+function icon(name, color, extra = {}) {
   const filename = path.join(__dirname, '../src/components/CellActionIcon.tsx'), module = { exports: {} };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText, { module, exports: module.exports, require(name) {
-    if (name === 'react-native') return { View: 'View' };
+    if (name === 'react-native') return { View: 'View', Text: 'Text' };
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
     throw Error('Unexpected cell icon dependency: ' + name);
   } }, { filename });
-  return module.exports.CellActionIcon({ name, color });
+  return module.exports.CellActionIcon({ name, color, ...extra });
 }
 function nodes(tree) { return !tree || typeof tree !== 'object' ? [] : [tree, ...[tree.props?.children].flat(Infinity).flatMap(nodes)]; }
 const styleOf = (node) => Object.assign({}, ...[node.props.style].flat(Infinity).filter(Boolean));
@@ -63,6 +63,45 @@ test('Reset is one circular arrow with the same two-pixel outline, without a sec
   const ring = styleOf(drawing.find((node) => node.props.testID === 'reset-ring'));
   const arrow = styleOf(drawing.find((node) => node.props.testID === 'reset-arrowhead'));
   assert.equal(ring.width, ring.height); assert.equal(ring.borderWidth, 2); assert.equal(ring.backgroundColor, 'transparent');
-  assert.equal(ring.borderTopColor, 'transparent'); assert.equal(arrow.borderLeftWidth, 2); assert.equal(arrow.borderBottomWidth, 2);
+  assert.equal(ring.borderTopColor, 'transparent'); assert.equal(arrow.borderRightWidth, 2); assert.equal(arrow.borderBottomWidth, 2);
+  assert.ok(arrow.left >= ring.left + ring.width / 2 && arrow.top < ring.top + ring.height / 2,
+    'the clockwise arrowhead sits at the upper-right opening shown in the reference');
   assert.equal(drawing.filter((node) => node.type === 'View').length, 3, 'one icon host, one ring and one arrowhead');
+});
+
+test('Copy and Paste use rounded overlapping pages with opaque theme-matched foregrounds and no extra paste lines', () => {
+  for (const backgroundColor of ['#EEEEEE', '#242426']) {
+    const copy = nodes(icon('copy', '#96938C', { backgroundColor }));
+    const back = styleOf(copy.find((node) => node.props.testID === 'copy-back-page'));
+    const front = styleOf(copy.find((node) => node.props.testID === 'copy-front-page'));
+    assert.ok(front.left > back.left && front.top < back.top, 'the front page is above and right of the rear page');
+    assert.equal(front.backgroundColor, backgroundColor, 'rear page edges cannot show through the foreground page');
+    assert.equal(front.borderRadius, 4); assert.equal(back.borderRadius, 4);
+    const paste = nodes(icon('paste', '#96938C', { backgroundColor }));
+    const clipboard = styleOf(paste.find((node) => node.props.testID === 'paste-clipboard'));
+    const page = styleOf(paste.find((node) => node.props.testID === 'paste-front-page'));
+    const clip = styleOf(paste.find((node) => node.props.testID === 'paste-clip'));
+    assert.ok(page.left > clipboard.left && page.top > clipboard.top && page.width < clipboard.width);
+    assert.equal(page.backgroundColor, backgroundColor); assert.equal(clip.backgroundColor, backgroundColor);
+    assert.equal(paste.filter((node) => node.type === 'View').length, 4, 'clipboard, clip and foreground page have no faux text lines');
+    for (const part of [back, front, clipboard, page, clip]) assert.equal(part.borderWidth, 2);
+  }
+});
+
+test('Group retains the former bottom-bar event border and central minute divider', () => {
+  const drawing = nodes(icon('group', '#222222', { secondaryColor: '#777777' }));
+  const border = styleOf(drawing.find((node) => node.props.testID === 'group-event-border'));
+  const divider = styleOf(drawing.find((node) => node.props.testID === 'group-minute-divider'));
+  assert.equal(border.width, 24); assert.equal(border.height, 24); assert.equal(border.borderWidth, 2.5);
+  assert.equal(border.justifyContent, 'center'); assert.equal(divider.height, 0.5); assert.equal(divider.backgroundColor, '#777777');
+});
+
+test('Format is a centered circled bold italic underlined A with the same two-pixel outline', () => {
+  const drawing = nodes(icon('format', '#EEEEEE'));
+  const circle = styleOf(drawing.find((node) => node.props.testID === 'format-circle'));
+  const letter = drawing.find((node) => node.props.testID === 'format-letter'), style = styleOf(letter);
+  assert.equal(circle.borderWidth, 2); assert.equal(circle.width, circle.height); assert.equal(circle.borderRadius, circle.width / 2);
+  assert.equal(circle.alignItems, 'center'); assert.equal(circle.justifyContent, 'center');
+  assert.equal(letter.props.children, 'A'); assert.equal(style.fontWeight, '800'); assert.equal(style.fontStyle, 'italic');
+  assert.equal(style.textDecorationLine, 'underline'); assert.equal(style.includeFontPadding, false);
 });

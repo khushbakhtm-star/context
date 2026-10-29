@@ -28,9 +28,11 @@ function screen(t, options = {}) {
   };
   // Transpiled named imports do not bind `this`.
   react.useCallback = (work, deps) => react.useMemo(() => work, deps);
-  const jsx = (type, props) => ({ type, props: props ?? {} });
+  const jsx = (type, props) => ({ type, props: type === 'CalendarCellText'
+    ? { ...props, children: { type: 'Text', props: { children: props.text } } } : props ?? {} });
   class ClockDate extends Date { constructor(...args) { super(...(args.length ? args : ['2026-10-25T12:00:00-04:00'])); } static now() { return now; } }
-  class Value { constructor(value, config) { this.value = value; this.nativeDriver = config?.useNativeDriver === true; } setValue(value) { this.value = value; } }
+  class Value { constructor(value, config) { this.value = value; this.nativeDriver = config?.useNativeDriver === true; this.writes = 0; }
+    setValue(value) { this.value = value; this.writes++; } }
   const native = { View: 'View', Text: 'Text', Pressable: 'Pressable', ScrollView: 'ScrollView', FlatList: 'FlatList',
     TextInput: 'TextInput', KeyboardAvoidingView: 'KeyboardAvoidingView', RefreshControl: 'RefreshControl',
     Platform: { OS: options.platform ?? 'android' }, StyleSheet: { create: (value) => value, hairlineWidth: 0.5 },
@@ -129,7 +131,7 @@ function screen(t, options = {}) {
         if (name === 'react-native-safe-area-context') return { useSafeAreaInsets: () => ({ top: 24, bottom: 24 }) };
         const resolved = path.resolve(path.dirname(filename), name);
         if (resolved === source('appearance')) return { useAppTheme: () => ({ colors: load(source('theme.ts'))[options.appearanceMode === 'light' ? 'lightColors' : 'darkColors'], resolvedMode: options.appearanceMode ?? 'dark' }) };
-        for (const name of ['CellActionIcon', 'CompactMinuteOverview', 'CalendarPinchPreview', 'MinuteSpanEditor']) {
+        for (const name of ['CellActionIcon', 'CompactMinuteOverview', 'CalendarPinchPreview', 'CalendarCellText', 'MinuteSpanEditor']) {
           if (resolved.endsWith('/components/' + name) || resolved.endsWith('\\components\\' + name)) return { [name]: name };
         }
         if (resolved.endsWith('/components/CellActionMenu') || resolved.endsWith('\\components\\CellActionMenu')) return { CellActionMenu: 'CellActionMenu' };
@@ -226,7 +228,14 @@ function screen(t, options = {}) {
       handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
     },
     details: () => find(tree, 'MinuteSpanEditor')?.props, overview: () => find(tree, 'CompactMinuteOverview')?.props,
-    pinchPreview: () => find(tree, 'CalendarPinchPreview')?.props, list: () => find(tree, 'FlatList')?.props,
+    pinchPreview: () => { const props = find(tree, 'CalendarPinchPreview')?.props; return props?.active ? props : undefined; },
+    warmedPinchPreview: () => find(tree, 'CalendarPinchPreview')?.props, list: () => find(tree, 'FlatList')?.props,
+    fittedTexts: (minute, date = day) => {
+      const found = []; function visit(node) { if (!node || typeof node !== 'object') return;
+        if (node.type === 'CalendarCellText') found.push(node.props);
+        for (const child of [node.props?.children].flat(Infinity)) visit(child); }
+      visit(cell(minute, date)); return found;
+    },
     pinchResponder: () => [tree.props.children.props.children].flat(Infinity).find((node) => node?.props?.onPanResponderGrant)?.props,
     renderCount: () => renders,
     menu: () => find(tree, 'CellActionMenu')?.props, menuPosition, menuAncestors, measureViewport,
@@ -346,7 +355,8 @@ test('saving a range outside its original anchor selects the new group for the n
   const span = { startDateKey: h.day, startMinute: 724, endDateKey: '2026-10-26', endMinute: 444 };
   assert.equal(await h.details().onSave(span, { text: 'Sleep', event: { title: 'Sleep', categoryId: 'study' } }), true);
   h.details().onClose(); await h.settle();
-  h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  assert.equal(h.bar('format'), undefined); assert.equal(h.bar('entry'), undefined);
+  await h.hold(724); h.menu().onEdit(); await h.settle();
   assert.equal(h.details().session.event.blockId, appliedBlockId, 'the second Edit must resize the saved event, not create another one');
   assert.deepEqual(JSON.parse(JSON.stringify(h.details().session.span)), span);
   assert.equal(h.details().session.text, 'Sleep');
@@ -438,10 +448,9 @@ test('a calendar event has one titled border while its minute editors start with
   assert.equal(h.text(531), 'Find parking'); assert.equal(h.text(530), '');
 });
 
-test('the bottom border button names even one blank minute without copying the title into its note', async (t) => {
+test('the popup border button names even one blank minute without copying the title into its note', async (t) => {
   const h = screen(t, { colors: [{ id: 'family', name: 'Tangerine', color: '#F4511E' }] });
-  await h.start(); await h.tap(600); h.action('Save minute text and show formatting').onPress(); await h.settle();
-  h.action('Apply event border').onPress(); await h.settle();
+  await h.start(); await h.hold(600); h.menu().onGroup(); await h.settle();
   h.action('Activity title for selected minutes').onChangeText('Appointment'); await h.settle();
   h.action('Choose group fill color').onPress(); await h.settle(); h.palette().onCellColor('family'); await h.settle();
   h.action('Create group from selected minutes').onPress(); await h.settle();
@@ -484,17 +493,16 @@ test('calendar source failures report to Sync without an inline banner and clear
   h.unmount(); assert.equal(warnings.at(-1), null);
 });
 
-test('a blank colored cell exposes fill Reset while a plain blank keeps only clipboard actions', async (t) => {
+test('blank cells can format through the popup while Reset remains conditional on existing contents', async (t) => {
   const colored = screen(t); colored.rows.set(`${colored.day}:600`, { dateKey: colored.day, minuteIndex: 600,
     text: '', categoryId: 'family', blockId: 'colored' });
   await colored.start(); await colored.hold(600);
-  assert.equal(colored.menu().onCellColor, undefined); assert.equal(colored.menu().onResetCellColor, undefined);
-  assert.equal(colored.menu().onClear, undefined); colored.menu().onClose(); await colored.settle();
-  colored.action('Save minute text and show formatting').onPress(); await colored.settle();
-  colored.action('Choose cell color').onPress(); await colored.settle(); colored.palette().onResetCellColor(); await colored.settle();
+  assert.equal(typeof colored.menu().onCellColor, 'function'); assert.equal(typeof colored.menu().onResetCellColor, 'function');
+  assert.equal(colored.menu().onClear, undefined); colored.menu().onResetCellColor(); await colored.settle();
   assert.deepEqual(colored.calls.map((call) => [call.action, call.startMinute, call.endMinute]), [['reset-fill', 600, 600]]);
   const blank = screen(t); await blank.start(); await blank.hold(600);
-  assert.equal(blank.menu().onCellColor, undefined); assert.equal(blank.menu().onResetCellColor, undefined);
+  assert.equal(typeof blank.menu().onCellColor, 'function'); assert.equal(typeof blank.menu().onResetCellColor, 'function');
+  assert.equal(blank.menu().onReset, undefined);
   assert.equal(typeof blank.menu().onCut, 'function'); assert.equal(typeof blank.menu().onCopy, 'function');
   assert.equal(typeof blank.menu().onPaste, 'function');
 });
@@ -836,7 +844,7 @@ test('late native geometry callbacks cannot replace a newer root/body menu ancho
   old.forEach((complete) => complete()); assert.equal(r.menuPosition(), before + 100);
 });
 
-test('single taps show the unfocused bottom entry bar, double tap edits, and Save waits for current typing before formatting', async (t) => {
+test('single taps show the unfocused bottom entry bar, double tap edits, and Save waits then closes without formatting', async (t) => {
   const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Original', categoryId: 'work', blockId: 'note' });
   await r.start(); await r.tap(600); assert.equal(r.input().value, 'Original');
   assert.equal(r.input().autoFocus, undefined); assert.ok(r.bar('entry'));
@@ -850,40 +858,43 @@ test('single taps show the unfocused bottom entry bar, double tap edits, and Sav
   r.input().onSubmitEditing(); await r.settle(); assert.ok(r.input()); assert.equal(r.dismisses, previousDismisses);
   r.input().onChangeText('Latest edit while saving'); await r.settle(); release(); r.writeGate = null; await r.settle();
   assert.equal(r.rows.get(`${r.day}:600`).text, 'Latest edit while saving'); assert.equal(r.input(), undefined);
-  assert.ok(r.bar('format')); r.action('Finish formatting').onPress(); await r.settle(); assert.equal(r.bar('format'), undefined);
+  assert.equal(r.bar('format'), undefined); assert.equal(r.menu(), undefined);
+  assert.equal(r.action('Finish formatting'), undefined); assert.equal(r.bar('entry'), undefined);
   assert.ok(r.dismisses > previousDismisses); assert.equal(r.cell(600).props.accessibilityState.selected, true);
 });
 
-test('an untouched blank advances through both bottom checks without recording a minute, opening a popup, or clearing selection', async (t) => {
+test('an untouched blank closes with one bottom check without recording a minute or opening a formatting bar', async (t) => {
   const h = screen(t); await h.start(); await h.tap(600);
   assert.equal(h.input().value, ''); assert.equal(h.input().maxLength, 50000); assert.equal(h.input().autoFocus, undefined);
   assert.equal(h.cell(600).props.children.some((child) => child?.type === 'TextInput'), false, 'grid cells never become editors');
-  h.action('Save minute text and show formatting').onPress(); await h.settle();
-  assert.equal(h.rows.size, 0); assert.equal(h.input(), undefined); assert.ok(h.bar('format')); assert.equal(h.menu(), undefined);
-  assert.ok(h.action('Bold')); assert.ok(h.action('Italic')); assert.ok(h.action('Underline'));
-  assert.ok(h.action('Choose text color')); assert.ok(h.action('Choose cell color'));
-  h.action('Finish formatting').onPress(); await h.settle();
+  h.action('Save minute text and close keyboard').onPress(); await h.settle();
+  assert.equal(h.rows.size, 0); assert.equal(h.input(), undefined); assert.equal(h.bar('format'), undefined); assert.equal(h.menu(), undefined);
+  assert.equal(h.action('Bold'), undefined); assert.equal(h.action('Italic'), undefined); assert.equal(h.action('Underline'), undefined);
+  assert.equal(h.action('Choose text color'), undefined); assert.equal(h.action('Choose cell color'), undefined);
   assert.equal(h.bar('format'), undefined); assert.equal(h.bar('entry'), undefined); assert.equal(h.rows.size, 0);
   assert.equal(h.cell(600).props.accessibilityState.selected, true);
   await h.tap(600); assert.ok(h.bar('entry'), 'a subsequent selection opens entry again');
 });
 
-test('format actions stay in the saved bottom bar while held Group uses the existing inline composer', async (t) => {
+test('popup format callbacks apply to the captured range while Group uses the existing title composer', async (t) => {
   const h = screen(t, { colors: [{ id: 'family', name: 'Basil', color: '#0B8043' }] }); h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600,
     text: 'Read Codex', categoryId: 'study', blockId: 'note' });
   await h.start(); await h.tap(600); await h.selectThrough(602); assert.ok(h.menu());
-  for (const key of ['onToggleBold', 'onToggleItalic', 'onToggleUnderline', 'onTextColor', 'onCellColor', 'onResetCellColor', 'onEvent'])
-    assert.equal(h.menu()[key], undefined, `${key} is absent from the held clipboard popup`);
+  for (const key of ['onToggleBold', 'onToggleItalic', 'onToggleUnderline', 'onTextColor', 'onCellColor', 'onResetCellColor'])
+    assert.equal(typeof h.menu()[key], 'function', `${key} is available to the popup formatting panel`);
+  assert.equal(h.menu().onEvent, undefined, 'unlinked notes do not advertise source event details');
   assert.equal(typeof h.menu().onAutoFill, 'function'); assert.equal(typeof h.menu().onGroup, 'function');
-  h.action('Save minute text and show formatting').onPress(); await h.settle();
-  h.action('Bold').onPress(); await h.settle();
+  assert.equal(h.bar('entry'), undefined, 'the popup does not compete with the bottom input');
+  h.menu().onToggleBold(); await h.settle();
   assert.deepEqual(JSON.parse(JSON.stringify(h.calls.at(-1))), { action: 'format', dateKey: h.day, startMinute: 600, endMinute: 602, patch: { bold: true } });
-  h.action('Choose text color').onPress(); await h.settle(); h.palette().onTextColor('#123456'); await h.settle();
-  assert.equal(h.calls.at(-1).patch.textColor, '#123456'); assert.ok(h.bar('format'));
-  await h.hold(600); h.menu().onGroup(); await h.settle();
+  h.menu().onToggleItalic(); await h.settle(); assert.equal(h.calls.at(-1).patch.italic, true);
+  h.menu().onToggleUnderline(); await h.settle(); assert.equal(h.calls.at(-1).patch.underline, true);
+  h.menu().onTextColor('#123456'); await h.settle();
+  assert.equal(h.calls.at(-1).patch.textColor, '#123456'); assert.equal(h.bar('format'), undefined);
+  h.menu().onGroup(); await h.settle();
   assert.ok(h.action('Activity title for selected minutes'), 'Group retains its explicit inline title form');
   assert.equal(h.bar('format'), undefined, 'the existing group composer replaces the bar while naming an activity');
-  h.action('Cancel grouping').onPress(); await h.settle(); assert.ok(h.bar('format'));
+  h.action('Cancel grouping').onPress(); await h.settle(); assert.equal(h.bar('format'), undefined);
   assert.equal(h.menu(), undefined, 'canceling a deliberate fill-panel action does not open a held-cell popup');
   await h.hold(600); h.menu().onGroup(); await h.settle();
   h.action('Activity title for selected minutes').onChangeText('Reading'); await h.settle();
@@ -891,17 +902,16 @@ test('format actions stay in the saved bottom bar while held Group uses the exis
   assert.equal(h.action('Create group from selected minutes').disabled, false);
   h.action('Create group from selected minutes').onPress(); await h.settle();
   assert.deepEqual(JSON.parse(JSON.stringify(h.calls.at(-1))), { action: 'group', dateKey: h.day, startMinute: 600, endMinute: 602, title: 'Reading', categoryId: 'family' });
-  assert.ok(h.bar('format'));
+  assert.equal(h.bar('format'), undefined);
 });
 
-test('source Event stays in the fill panel and held Ungroup retains its existing selected-cell route', async (t) => {
+test('the cell popup exposes linked event details and retains the existing selected-cell Ungroup route', async (t) => {
   const group = { dateKey: '2026-10-25', blockId: 'activity_group', title: 'Coffee', categoryId: 'family', startMinute: 600, endMinute: 601 };
   const h = screen(t, { readGroups: async () => [group], readNative: async () => ({ plans: [plan('Source event', 600)], failures: [] }) });
   h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Boil water', categoryId: 'family', blockId: group.blockId });
-  await h.start(); await h.tap(600); h.action('Save minute text and show formatting').onPress(); await h.settle();
-  h.action('Choose cell color').onPress(); await h.settle();
-  assert.ok(h.action('Open source calendar event details'));
-  await h.hold(600); assert.equal(typeof h.menu().onUngroup, 'function'); h.menu().onUngroup(); await h.settle();
+  await h.start(); await h.hold(600);
+  assert.equal(typeof h.menu().onEvent, 'function');
+  assert.equal(typeof h.menu().onUngroup, 'function'); h.menu().onUngroup(); await h.settle();
   assert.equal(h.calls.at(-1).action, 'ungroup'); assert.equal(h.calls.at(-1).startMinute, 600);
 });
 

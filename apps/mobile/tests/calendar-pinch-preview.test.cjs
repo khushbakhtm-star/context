@@ -29,10 +29,13 @@ test('many pinch moves update native preview values without relaying out or swit
   h.measureViewport(); await h.settle();
   const initialHeight = h.list().getItemLayout(null, 700).length;
   const responder = await begin(h), preview = h.pinchPreview();
-  for (const value of [preview.scaleY, preview.inverseScaleY, preview.translateY]) assert.equal(value.nativeDriver, true, 'preview values use the public native-driver configuration');
+  assert.equal(preview.scaleY.nativeDriver, true, 'one public native-driver value drives the entire preview graph');
+  assert.equal(preview.inverseScaleY, undefined); assert.equal(preview.translateY, undefined);
   const rendered = h.renderCount();
   for (const distance of [180, 150, 130, 170, 120, 90, 80]) {
+    const writes = preview.scaleY.writes;
     responder.onPanResponderMove(gesture(distance), {}); await h.flushAnimationFrames();
+    assert.equal(preview.scaleY.writes - writes, 1, 'each pointer frame sends one native scalar update');
     assert.equal(h.renderCount(), rendered, 'pointer movement must not schedule React layout work');
     assert.equal(h.list().getItemLayout(null, 700).length, initialHeight);
     assert.equal(h.overview(), undefined, 'crossing the compact threshold must not swap renderers during the gesture');
@@ -133,4 +136,86 @@ test('navigation invalidates a queued preview frame and cannot apply its old zoo
   await h.navigate('2026-10-26'); await h.flushAnimationFrames();
   responder.onPanResponderRelease({ nativeEvent: {} }, {}); await h.settle();
   assert.equal(h.pinchPreview(), undefined); assert.equal(changes.length, 0); assert.equal(h.overview(), undefined);
+});
+
+test('the passive canvas is prewarmed at the current viewport before a pinch starts', async (t) => {
+  const h = screen(t); await h.start();
+  assert.equal(h.pinchPreview(), undefined); assert.equal(h.warmedPinchPreview().active, false);
+  const oldScale = h.warmedPinchPreview().scaleY, rowHeight = h.list().getItemLayout(null, 0).length;
+  h.list().onScroll({ nativeEvent: { contentOffset: { y: 600 * rowHeight - 250 } } });
+  h.list().onScrollEndDrag(); await h.settle();
+  assert.ok(Math.abs(h.warmedPinchPreview().anchor.minute - 600) < 0.001);
+  const responder = await begin(h);
+  assert.equal(h.pinchPreview().scaleY, oldScale, 'acquiring the gesture retains the warmed native graph');
+  responder.onPanResponderTerminate(); await h.settle();
+});
+
+test('grouped minute annotations retain independent words, formatting and the actual first-row title in preview data', async (t) => {
+  const h = screen(t, { readGroups: async () => [{ dateKey: '2026-10-25', startMinute: 600, endMinute: 610,
+    blockId: 'activity_readable', title: 'Morning', categoryId: 'study' }],
+    readFormats: async () => new Map([[601, { bold: true, italic: true, underline: true, textColor: '#123456' }]]) });
+  for (const [minute, text] of [[600, 'First note'], [601, 'Different note']]) h.rows.set(`${h.day}:${minute}`,
+    { dateKey: h.day, minuteIndex: minute, text, categoryId: 'study', blockId: 'activity_readable' });
+  await h.start();
+  const annotations = h.warmedPinchPreview().annotations.get(h.day);
+  assert.equal(annotations.find((cell) => cell.minute === 600).text, 'First note');
+  assert.equal(annotations.find((cell) => cell.minute === 600).title, 'Morning');
+  const second = annotations.find((cell) => cell.minute === 601);
+  assert.equal(second.text, 'Different note'); assert.equal(second.title, undefined);
+  assert.equal(second.color, '#123456'); assert.equal(second.bold, true); assert.equal(second.italic, true); assert.equal(second.underline, true);
+  const responder = await begin(h);
+  assert.equal(h.pinchPreview().annotations, h.warmedPinchPreview().annotations);
+  assert.equal(h.fittedTexts(601)[0].text, 'Different note');
+  responder.onPanResponderTerminate(); await h.settle();
+});
+
+test('handoff waits for every visible native note and title measurement, ignoring an old row-height acknowledgement', async (t) => {
+  const h = screen(t, { readGroups: async () => [{ dateKey: '2026-10-25', startMinute: 600, endMinute: 610,
+    blockId: 'activity_measure', title: 'Activity', categoryId: 'study' }] });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Wrapped paragraph', categoryId: 'study', blockId: 'activity_measure' });
+  h.rows.set(`${h.day}:601`, { dateKey: h.day, minuteIndex: 601, text: 'Second paragraph', categoryId: 'study', blockId: 'activity_measure' });
+  await h.start(); h.measureViewport(); await h.settle();
+  const oldReady = h.fittedTexts(600)[0].onReady, scrolls = [];
+  const old = h.list(), base = old.getItemLayout(null, 0).length;
+  old.ref.current = { scrollToOffset: (value) => scrolls.push(value), scrollToIndex() {} };
+  old.onScroll({ nativeEvent: { contentOffset: { y: 600 * base - 250 } } });
+  const responder = await begin(h); responder.onPanResponderMove(gesture(220), {}); await h.flushAnimationFrames();
+  responder.onPanResponderRelease({ nativeEvent: {} }, {}); await h.settle();
+  const target = h.list(), rowHeight = target.getItemLayout(null, 0).length;
+  target.onContentSizeChange(390, rowHeight * 1440);
+  const offset = scrolls.at(-1).offset;
+  const first = Math.ceil(offset / rowHeight), last = Math.floor((offset + 500) / rowHeight) - 1;
+  target.onViewableItemsChanged({ viewableItems: Array.from({ length: last - first + 1 }, (_, index) => ({ index: first + index })) });
+  oldReady(); await h.flushAnimationFrames(); await h.flushAnimationFrames();
+  assert.ok(h.pinchPreview(), 'native row visibility and an obsolete text callback cannot reveal unmeasured notes');
+  h.fittedTexts(600)[0].onReady(); h.fittedTexts(601)[0].onReady();
+  await h.flushAnimationFrames(); await h.flushAnimationFrames(); assert.ok(h.pinchPreview(), 'the independent event title must be ready too');
+  h.fittedTexts(600)[1].onReady();
+  await h.flushAnimationFrames(); await h.flushAnimationFrames(); assert.equal(h.pinchPreview(), undefined);
+});
+
+test('a no-fill hole inside a source event never invents a resumed title or leaves the text handoff waiting forever', async (t) => {
+  const day = '2026-10-25';
+  const plan = { id: 'source', calendarId: 'native', title: 'Source activity', allDay: false, color: '#0B8043',
+    startDate: new Date(2026, 9, 25, 10), endDate: new Date(2026, 9, 25, 10, 30) };
+  const h = screen(t, { readNative: async () => ({ plans: [plan], failures: [] }), readFormats: async () => new Map([[610, { noFill: true }]]) });
+  h.rows.set(`${day}:611`, { dateKey: day, minuteIndex: 611, text: 'Private annotation', categoryId: 'study', blockId: 'sheet_note' });
+  await h.start(); h.measureViewport(); await h.settle();
+  const annotations = h.warmedPinchPreview().annotations.get(day);
+  assert.equal(annotations.filter((cell) => cell.title).length, 1);
+  assert.equal(annotations.find((cell) => cell.title).minute, 600);
+  assert.equal(annotations.find((cell) => cell.minute === 611).title, undefined);
+  const scrolls = [], old = h.list(), base = old.getItemLayout(null, 0).length;
+  old.ref.current = { scrollToOffset: (value) => scrolls.push(value), scrollToIndex() {} };
+  old.onScroll({ nativeEvent: { contentOffset: { y: 611 * base - 250 } } });
+  const responder = await begin(h); responder.onPanResponderMove(gesture(220), {}); await h.flushAnimationFrames();
+  responder.onPanResponderRelease({ nativeEvent: {} }, {}); await h.settle();
+  const target = h.list(), rowHeight = target.getItemLayout(null, 0).length;
+  target.onContentSizeChange(390, rowHeight * 1440);
+  const offset = scrolls.at(-1).offset, first = Math.ceil(offset / rowHeight), last = Math.floor((offset + 500) / rowHeight) - 1;
+  target.onViewableItemsChanged({ viewableItems: Array.from({ length: last - first + 1 }, (_, index) => ({ index: first + index })) });
+  for (let minute = Math.floor(offset / rowHeight); minute <= Math.ceil((offset + 500) / rowHeight); minute++) {
+    for (const text of h.fittedTexts(minute)) text.onReady?.();
+  }
+  await h.flushAnimationFrames(); await h.flushAnimationFrames(); assert.equal(h.pinchPreview(), undefined);
 });

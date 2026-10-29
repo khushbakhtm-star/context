@@ -28,7 +28,8 @@ test('an open keyboard does not reserve a menu tap, and a single completed press
     onTouchActiveChange: (active) => touches.push(active) });
   const nodes = [];
   function visit(node) { if (!node || typeof node !== 'object') return; nodes.push(node);
-    for (const child of [node.props?.children].flat(Infinity)) visit(child); }
+    const children = typeof node.props?.children === 'function' ? node.props.children({ pressed: false }) : node.props?.children;
+    for (const child of [children].flat(Infinity)) visit(child); }
   visit(tree);
   for (const scroll of nodes.filter((node) => node.type === 'ScrollView')) {
     assert.equal(scroll.props.keyboardShouldPersistTaps, 'always');

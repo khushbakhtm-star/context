@@ -7,7 +7,7 @@ import { compactMinuteAt, type CompactBand } from '../utils/calendar-compact';
 type Touch = { day: string; minute: number; x: number; y: number; long: boolean };
 export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines, rowHeight, railWidth, dayWidth, colors,
   current, selection, disabled, scrolling, timeLabel, onSelect, onHold, onScroll, onBegin, onEnd, onLayout, onContentSizeChange,
-  refreshControl, hidden = false, backgroundColor = colors.calendarCell, gridLineColor = colors.hairline,
+  refreshControl, hidden = false, backgroundColor = colors.calendarCell, gridLineColor = colors.hairline, fontScale = 1,
 }: { scrollRef: RefObject<ComponentRef<typeof ScrollView> | null>; days: readonly string[]; labels: ReadonlyMap<string, string>;
   bands: ReadonlyMap<string, readonly CompactBand[]>; outlines?: ReadonlyMap<string, readonly CompactBand[]>;
   rowHeight: number; railWidth: number; dayWidth: number; colors: AppColors;
@@ -16,7 +16,7 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
   onSelect: (day: string, minute: number) => void; onHold: (day: string, minute: number) => void;
   onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void; onBegin: () => void; onEnd: () => void;
   onLayout: () => void; onContentSizeChange: (width: number, height: number) => void; refreshControl?: ReactElement; hidden?: boolean;
-  backgroundColor?: string; gridLineColor?: string;
+  backgroundColor?: string; gridLineColor?: string; fontScale?: number;
 }) {
   const touch = useRef<Touch | null>(null);
   const previousGeometry = useRef({ days: days.join('|'), rowHeight });
@@ -59,16 +59,12 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
             return <View key={`${band.startMinute}:${index}`} style={{ position: 'absolute', left: 0, right: 0,
               top: band.startMinute * rowHeight, height: bandHeight, overflow: 'hidden', backgroundColor: band.color,
               opacity: band.mixed ? 0.8 : 1 }}>
-              {!band.mixed && !band.groupId && bandHeight >= 21 && band.text ? <Text maxFontSizeMultiplier={1.4} numberOfLines={Math.min(3, Math.floor(bandHeight / 21))}
-                style={{ paddingHorizontal: 2, fontSize: 16, lineHeight: 21, color: band.textColor ?? colors.ink }}>{band.text}</Text> : null}
             </View>;
           })}
           {(outlines?.get(day) ?? []).map((outline) => {
             const height = (outline.endMinute - outline.startMinute) * rowHeight;
             return height >= 2 ? <View key={`outline:${outline.startMinute}:${outline.groupId}`} style={{ position: 'absolute', left: 0, right: 0,
               top: outline.startMinute * rowHeight, height, borderWidth: 1, borderColor: outline.textColor ?? colors.ink, overflow: 'hidden' }}>
-              {height >= 16 ? <Text numberOfLines={Math.min(3, Math.floor(height / 14))} maxFontSizeMultiplier={1.4}
-                style={{ fontSize: 11, lineHeight: 14, fontWeight: '600', paddingHorizontal: 2, color: outline.textColor ?? colors.ink }}>{outline.title}</Text> : null}
             </View> : null;
           })}
           {Array.from({ length: 25 }, (_, hour) => <View key={hour} style={{ position: 'absolute', left: 0, right: 0,

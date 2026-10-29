@@ -77,6 +77,21 @@ export function calendarPinchPreviewGeometry(anchor: CalendarZoomAnchor, baseRow
   return { scaleY, inverseScaleY: 1 / scaleY, translateY: -offset, offset };
 }
 
+/** Exact piecewise-linear offset graph. One native scale value drives geometry,
+ * anchor clamping and glyph transforms instead of three JS-to-native updates. */
+export function calendarPinchOffsetRange(anchor: CalendarZoomAnchor, baseRowHeight: number, viewportHeight: number) {
+  if (![baseRowHeight, viewportHeight, anchor.minute, anchor.viewportY].every(Number.isFinite) || baseRowHeight <= 0 || viewportHeight <= 0) {
+    throw new Error('Invalid calendar pinch geometry.');
+  }
+  const minimum = viewportHeight / (1440 * baseRowHeight);
+  const maximum = Math.max(minimum + 1e-8, CALENDAR_BASE_ROW_HEIGHT * 2.5 / baseRowHeight);
+  const edges = [minimum, maximum];
+  if (anchor.minute > 0) edges.push(anchor.viewportY / (anchor.minute * baseRowHeight));
+  if (anchor.minute < 1440) edges.push((viewportHeight - anchor.viewportY) / ((1440 - anchor.minute) * baseRowHeight));
+  const inputRange = [...new Set(edges.filter((value) => Number.isFinite(value) && value >= minimum && value <= maximum))].sort((a, b) => a - b);
+  return { inputRange, outputRange: inputRange.map((scale) => calendarPinchPreviewGeometry(anchor, baseRowHeight, scale * baseRowHeight, viewportHeight).translateY) };
+}
+
 /** The pinned time rail covers the left portion of the scrolling content. Reveal the
  * selected date in the remaining viewport without moving an already visible column. */
 export function revealCalendarDay(offset: number, dayIndex: number, layout: ReturnType<typeof calendarGridLayout>) {

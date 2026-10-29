@@ -13,6 +13,7 @@ import { CellActionMenu } from '../components/CellActionMenu';
 import { CellActionIcon } from '../components/CellActionIcon';
 import { CompactMinuteOverview } from '../components/CompactMinuteOverview';
 import { CalendarPinchPreview } from '../components/CalendarPinchPreview';
+import { CalendarCellText } from '../components/CalendarCellText';
 import { MinuteSpanEditor, type MinuteSpanEditorSession } from '../components/MinuteSpanEditor';
 
 import { deleteMinuteEntry, getDayEntries, getMinuteEntry, getEntriesForBlock, saveMinuteRange } from '../data/database';
@@ -42,6 +43,7 @@ import { calendarGridLayout, calendarGridPaint, calendarZoomOffsets, normalizeCa
   CALENDAR_BASE_ROW_HEIGHT, CALENDAR_COMPACT_ROW_HEIGHT, revealCalendarDay,
   type CalendarZoomAnchor } from '../utils/calendar-layout';
 import { compactCalendarBands, compactCalendarOutlines, type CompactMinute } from '../utils/calendar-compact';
+import { calendarAnnotationKey, calendarCellTextOpacity, type CalendarCellAnnotation } from '../utils/calendar-cell-text';
 import { minuteDetailsCount } from '../utils/minute-details';
 import { createCalendarPeriodSwipe, type CalendarPeriodDirection } from '../utils/calendar-period-swipe';
 import { getAccounts } from '../sync/accounts';
@@ -65,10 +67,11 @@ type DayData = { entries: MinuteEntry[]; plans: PlannedEvent[]; calendarReadErro
   formats?: Map<number, CellFormat>; formatReadError?: boolean; groups?: ActivityGroup[]; groupReadError?: boolean };
 type CellCommandSelection = { selection: CalendarMinuteSelection; range: MinuteCellRange; generation: number };
 type PinchPreviewSnapshot = Pick<Parameters<typeof CalendarPinchPreview>[0],
-  'days' | 'bands' | 'outlines' | 'rowHeight' | 'railWidth' | 'dayWidth' | 'colors' | 'current' | 'selection' | 'backgroundColor' | 'gridLineColor'>;
+  'days' | 'bands' | 'outlines' | 'annotations' | 'rowHeight' | 'railWidth' | 'dayWidth' | 'colors' | 'current' | 'selection' | 'backgroundColor' | 'gridLineColor' | 'fontScale' | 'viewportHeight'> & { anchor?: CalendarZoomAnchor };
 type PinchHandoff = { generation: number; token: number; rowHeight: number; offset: number;
   first: number; last: number; compact: boolean; initialIndex?: number; contentReady: boolean;
-  cellsReady: boolean; restored: boolean; queued: boolean };
+  cellsReady: boolean; restored: boolean; queued: boolean; remainingLabels: Set<string>;
+  annotationSnapshot?: ReadonlyMap<string, readonly CalendarCellAnnotation[]> };
 function calendarAccessDenied(error: unknown) {
   if (!error || typeof error !== 'object') return false;
   const value = error as { code?: unknown; status?: unknown };
@@ -119,13 +122,12 @@ export function TodayScreen({
   const timeWidthKey = clockFormat + '|' + fontScale;
   const [viewportWidth, setViewportWidth] = useState(windowWidth);
   const [minuteViewportHeight, setMinuteViewportHeight] = useState(500);
+  const [previewScrollOffset, setPreviewScrollOffset] = useState(0);
   const [liveZoom, setLiveZoom] = useState(() => normalizeCalendarZoom(zoom));
   const [pinching, setPinching] = useState(false);
   const [pinchPreview, setPinchPreview] = useState<PinchPreviewSnapshot | null>(null);
   const pinchPreviewDataRef = useRef<PinchPreviewSnapshot | null>(null);
   const pinchPreviewScale = useRef(new Animated.Value(1, { useNativeDriver: true })).current;
-  const pinchPreviewInverseScale = useRef(new Animated.Value(1, { useNativeDriver: true })).current;
-  const pinchPreviewOffset = useRef(new Animated.Value(0, { useNativeDriver: true })).current;
   const pinchSettlingRef = useRef<PinchHandoff | null>(null);
   const pinchSequenceRef = useRef(0);
   const visibleMinuteIndicesRef = useRef(new Set<number>());
@@ -214,8 +216,7 @@ export function TodayScreen({
   const [editor, setEditor] = useState<CalendarMinuteSelection | null>(null);
   const [inlineSelection, setInlineSelection] = useState<CalendarMinuteSelection | null>(null);
   const [inlineEditing, setInlineEditing] = useState(false);
-  const [entryBarMode, setEntryBarMode] = useState<'entry' | 'format' | null>(null);
-  const [formatPalette, setFormatPalette] = useState<'text' | 'cell' | null>(null);
+  const [entryBarMode, setEntryBarMode] = useState<'entry' | null>(null);
   const inlineEditingRef = useRef(inlineEditing);
   inlineEditingRef.current = inlineEditing;
   const inlineSelectionRef = useRef(inlineSelection);
@@ -306,7 +307,7 @@ export function TodayScreen({
   editorRef.current = editor;
   inlineSelectionRef.current = inlineSelection;
   periodSwipeStateRef.current = { onPage: onPeriodSwipe, blocked: dateSelectionOpen || cellMenuOpen || rangeSelecting ||
-    groupComposerOpen || groupPaletteOpen || Boolean(formatPalette) || inlineEditing || Boolean(editor) };
+    groupComposerOpen || groupPaletteOpen || inlineEditing || Boolean(editor) };
   currentFocusRef.current = focusRequest;
 
   const projectionConfigRef = useRef({ enabled: preferences.syncActuals, calendarId: preferences.writeCalendarId });
@@ -350,6 +351,7 @@ export function TodayScreen({
   function scrollMinuteOffset(offset: number, animated = false) {
     const layout = gridLayoutRef.current;
     const value = Math.max(0, Math.min(1440 * layout.rowHeight - bodyWindowRef.current.height, offset));
+    setPreviewScrollOffset((previous) => Math.abs(previous - value) >= 1 ? value : previous);
     if (compactViewRef.current) compactListRef.current?.scrollTo({ y: value, animated });
     else listRef.current?.scrollToOffset({ offset: value, animated });
   }
@@ -743,7 +745,7 @@ export function TodayScreen({
   useEffect(() => () => cancelRangeDrag(false), []);
   useEffect(() => () => cancelGroupDrag(false), []);
 
-  function timeLabel(minute: number) { return minuteLabel(minute, clockFormatRef.current === '12h'); }
+  const timeLabel = useCallback((minute: number) => minuteLabel(minute, clockFormat === '12h'), [clockFormat]);
 
   function recordTimeLabelWidth(width: number, key: string) {
     if (!mountedRef.current || key !== measurementKeyRef.current || !Number.isFinite(width) || width <= 0) return;
@@ -791,8 +793,6 @@ export function TodayScreen({
     const transform = calendarPinchPreviewGeometry(pinch.anchor, pinch.rowHeight,
       CALENDAR_BASE_ROW_HEIGHT * value, bodyWindowRef.current.height);
     pinchPreviewScale.setValue(transform.scaleY);
-    pinchPreviewInverseScale.setValue(transform.inverseScaleY);
-    pinchPreviewOffset.setValue(transform.translateY);
   }
 
   function cancelPinchPreview() {
@@ -803,16 +803,35 @@ export function TodayScreen({
   }
 
   function finishPinchHandoff(handoff: PinchHandoff) {
-    if (handoff.queued || !handoff.restored || !handoff.cellsReady || !handoff.contentReady) return;
+    if (handoff.queued || !handoff.restored || !handoff.cellsReady || !handoff.contentReady || handoff.remainingLabels.size) return;
     handoff.queued = true;
     // Content/layout readiness comes first. Two paint opportunities then cover
     // the new native cells; a slow FlatList batch never reveals an empty frame.
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (!mountedRef.current || pinchSettlingRef.current !== handoff || pinchRef.current ||
           handoff.generation !== navigationGenerationRef.current) return;
+      if (handoff.remainingLabels.size || !handoff.cellsReady || !handoff.contentReady) { handoff.queued = false; return; }
       pinchSettlingRef.current = null; pendingZoomAnchorRef.current = null;
       setPinchPreview(null); setPinching(false);
     }));
+  }
+
+  function pinchVisibleLabelKeys(offset: number, rowHeight: number) {
+    const first = Math.max(0, Math.floor(offset / rowHeight));
+    const last = Math.min(1439, Math.ceil((offset + bodyWindowRef.current.height) / rowHeight) - 1);
+    const keys = new Set<string>();
+    for (const [day, cells] of pinchPreviewDataRef.current?.annotations ?? []) for (const cell of cells) {
+      if (cell.minute < first || cell.minute > last) continue;
+      if (cell.text) keys.add(calendarAnnotationKey(day, cell));
+      if (cell.title) keys.add(calendarAnnotationKey(day, cell, true));
+    }
+    return keys;
+  }
+
+  function pinchLabelReady(key: string, rowHeight: number) {
+    const handoff = pinchSettlingRef.current;
+    if (!handoff || handoff.generation !== navigationGenerationRef.current || Math.abs(handoff.rowHeight - rowHeight) > 1e-6) return;
+    handoff.remainingLabels.delete(key); finishPinchHandoff(handoff);
   }
 
   function pinchContentReady(contentHeight: number, compact: boolean) {
@@ -864,6 +883,8 @@ export function TodayScreen({
       ...(compactViewRef.current && !compact ? { initialIndex: Math.floor(target.offset / rowHeight) } : {}),
       contentReady: Boolean(previousContent && previousContent.compact === compact &&
         Math.abs(previousContent.height - rowHeight * 1440) <= 1), restored: false, queued: false,
+      remainingLabels: compact ? new Set() : pinchVisibleLabelKeys(target.offset, rowHeight),
+      annotationSnapshot: pinchPreviewDataRef.current?.annotations,
       cellsReady: compact || Array.from({ length: last - first + 1 }, (_, index) => first + index)
         .every((index) => visibleMinuteIndicesRef.current.has(index)) };
     applyLiveZoom(next, pinch.anchor);
@@ -908,8 +929,8 @@ export function TodayScreen({
       scrollMinuteOffset(verticalOffsetRef.current);
       pinchRef.current = { distance, zoom: gridLayoutRef.current.zoom, rowHeight: gridLayoutRef.current.rowHeight, generation: navigationGenerationRef.current,
         anchor: captureZoomAnchor({ x: (first.pageX + second.pageX) / 2, y: (first.pageY + second.pageY) / 2 }) };
-      pinchPreviewScale.setValue(1); pinchPreviewInverseScale.setValue(1); pinchPreviewOffset.setValue(-verticalOffsetRef.current);
-      setPinchPreview(snapshot);
+      pinchPreviewScale.setValue(1);
+      setPinchPreview({ ...snapshot, anchor: pinchRef.current.anchor });
       setPinching(true);
     },
     onPanResponderMove: (event: GestureResponderEvent, gesture) => {
@@ -1405,7 +1426,7 @@ export function TodayScreen({
   }
 
   const openInlineMinute = useCallback(async (day: string, minute: number, editText = false,
-    group?: ActivityGroup, selectRange = false, keepViewport = false, entryMode: 'entry' | 'format' = 'entry') => {
+    group?: ActivityGroup, selectRange = false, keepViewport = false, entryMode: 'entry' | null = 'entry') => {
     const token = ++selectionTokenRef.current;
     const request = { dateKey: day, minuteIndex: minute, rangeKey: rangeRef.current, token };
     const currentState = () => ({ mounted: mountedRef.current, rangeKey: rangeRef.current,
@@ -1432,7 +1453,7 @@ export function TodayScreen({
       focusedDayRef.current = day;
       focusCallbackRef.current?.({ dateKey: day, minuteIndex: minute });
       setInlineEditing(editText);
-      setEntryBarMode(entryMode); setFormatPalette(null);
+      setEntryBarMode(entryMode);
       setCellMenuOpen(false);
       setGroupComposerOpen(false);
       setRangeSelecting(false);
@@ -1473,7 +1494,7 @@ export function TodayScreen({
         setActionError('This minute could not be saved. Your text is kept here. Try again.'); return;
       }
       cellTouchRef.current = null; cellActivationRef.current = null;
-      setInlineEditing(false); setCellMenuOpen(false); setEntryBarMode('format'); setFormatPalette(null);
+      setInlineEditing(false); setCellMenuOpen(false); setEntryBarMode(null);
       setActionError(null); Keyboard.dismiss();
     } catch {
       if (selectionStillCurrent(selection, token, generation)) setActionError('This minute could not be saved. Your text is kept here. Try again.');
@@ -1709,15 +1730,37 @@ export function TodayScreen({
         text: draft?.text ?? entry?.text ?? '',
         ...(group ? { groupId: group.blockId, title: group.title } : boundedPlan && plan ? { groupId: `plan:${plan.calendarId}:${plan.id}`, title: plan.title } : {}) };
     });
-    return [day, { bands: compactCalendarBands(cells), outlines: compactCalendarOutlines(cells) }] as const;
+    const annotations: CalendarCellAnnotation[] = cells.flatMap((cell, minute) => {
+      const group = groups?.get(minute), plan = index?.plansByMinute.get(minute)?.[0];
+      const format = dayData[day]?.formats?.get(minute) ?? {};
+      const bounds = plan && !format.noFill ? sourceBounds.get(plan) : null;
+      const starts = group ? group.startMinute === minute : bounds?.startMinute === minute;
+      if (!cell.text && !starts) return [];
+      return [{ minute, text: cell.text ?? '', title: starts ? cell.title : undefined,
+        color: cell.textColor ?? colors.ink, titleColor: activityTextColor(cell.color, colors.ink),
+        bold: format.bold, italic: format.italic, underline: format.underline }];
+    });
+    return [day, { bands: compactCalendarBands(cells), outlines: compactCalendarOutlines(cells), annotations }] as const;
   }); return { bands: new Map(values.map(([day, value]) => [day, value.bands])),
-    outlines: new Map(values.map(([day, value]) => [day, value.outlines])) }; }, [days, indexedDays, indexedGroups, draftsByKey, dayData, availableColors, colors.ink,
+    outlines: new Map(values.map(([day, value]) => [day, value.outlines])),
+    annotations: new Map(values.map(([day, value]) => [day, value.annotations])) }; }, [days, indexedDays, indexedGroups, draftsByKey, dayData, availableColors, colors.ink,
     rangeSelecting, rangeColorChosen, groupHasGoogleColor, rangeColorId, selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute]);
-  pinchPreviewDataRef.current = { days, bands: compactData.bands, outlines: compactData.outlines,
+  pinchPreviewDataRef.current = useMemo(() => ({ days, bands: compactData.bands, outlines: compactData.outlines, annotations: compactData.annotations,
     rowHeight: gridLayout.rowHeight, railWidth: gridLayout.railWidth, dayWidth: gridLayout.dayWidth, colors,
+    fontScale, viewportHeight: minuteViewportHeight,
+    anchor: { minute: (previewScrollOffset + minuteViewportHeight / 2) / gridLayout.rowHeight,
+      day: 0, viewportX: 0, viewportY: minuteViewportHeight / 2 },
     backgroundColor: gridPaint.background, gridLineColor: gridPaint.line,
     current: { day: today, minute: currentMinute },
-    selection: selectedRange ? { day: selectedRange.dateKey, first: selectedRange.startMinute, last: selectedRange.endMinute } : undefined };
+    selection: selectedRange ? { day: selectedRange.dateKey, first: selectedRange.startMinute, last: selectedRange.endMinute } : undefined }),
+    [days, compactData, gridLayout.rowHeight, gridLayout.railWidth, gridLayout.dayWidth, colors, fontScale, minuteViewportHeight, previewScrollOffset,
+      gridPaint, today, currentMinute, selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute]);
+  const pendingHandoff = pinchSettlingRef.current;
+  if (pendingHandoff && !pendingHandoff.compact && pendingHandoff.annotationSnapshot !== compactData.annotations) {
+    // Refresh the expected keys before child effects acknowledge cached labels.
+    pendingHandoff.annotationSnapshot = compactData.annotations;
+    pendingHandoff.remainingLabels = pinchVisibleLabelKeys(pendingHandoff.offset, pendingHandoff.rowHeight);
+  }
   const cellPolicy = useMemo(() => {
     if (!selectedRange) return analyzeCellSelection([]);
     const index = indexedDays.get(selectedRange.dateKey);
@@ -1859,9 +1902,9 @@ export function TodayScreen({
       const focus = preview.ranges.find((range) => visibleDaysRef.current.includes(range.dateKey));
       inlineMinuteDrafts.close(inlineMinuteKey(scope.selection.dateKey, scope.selection.minuteIndex));
       inlineSelectionRef.current = null; setInlineSelection(null); setInlineEditing(false);
-      setEntryBarMode(null); setFormatPalette(null); setRangeSelecting(false); setRangeStart(null); setRangeEnd(null);
+      setEntryBarMode(null); setRangeSelecting(false); setRangeStart(null); setRangeEnd(null);
       if (focus) {
-        await openInlineMinute(focus.dateKey, focus.startMinute, false, undefined, false, true, 'format');
+        await openInlineMinute(focus.dateKey, focus.startMinute, false, undefined, false, true, null);
       }
       // Reselection deliberately advances the selection token after the write.
       return true;
@@ -1870,7 +1913,7 @@ export function TodayScreen({
 
   function cancelGroupComposer() {
     setGroupComposerOpen(false); setGroupPaletteOpen(false); setRangeColorChosen(false); setCellMenuOpen(false);
-    setEntryBarMode('format'); setFormatPalette(null);
+    setEntryBarMode(null);
     Keyboard.dismiss(); positionFillHandle();
   }
 
@@ -1913,7 +1956,7 @@ export function TodayScreen({
     });
     if (applied && mountedRef.current && generation === navigationGenerationRef.current && token === selectionTokenRef.current) {
       setCellMenuOpen(false); setGroupComposerOpen(false); setRangeSelecting(false); setRangeStart(null); setRangeEnd(null);
-      setGroupPaletteOpen(false); setEntryBarMode('format'); setFormatPalette(null); Keyboard.dismiss();
+      setGroupPaletteOpen(false); setEntryBarMode(null); Keyboard.dismiss();
     }
   }
 
@@ -2223,6 +2266,7 @@ export function TodayScreen({
       <View ref={minuteViewportRef} collapsable={false} style={styles.minuteViewport} onLayout={measureMinuteViewport}>
       {compactView ? <CompactMinuteOverview scrollRef={compactListRef} days={days} labels={dayLabels} bands={compactData.bands} outlines={compactData.outlines}
         hidden={Boolean(pinchPreview)}
+        fontScale={fontScale}
         backgroundColor={gridPaint.background} gridLineColor={gridPaint.line}
         rowHeight={gridLayout.rowHeight} railWidth={gridLayout.railWidth} dayWidth={gridLayout.dayWidth} colors={colors}
         current={{ day: today, minute: currentMinute }} selection={selectedRange ? { day: selectedRange.dateKey, first: selectedRange.startMinute, last: selectedRange.endMinute } : undefined}
@@ -2230,7 +2274,7 @@ export function TodayScreen({
         timeLabel={timeLabel} onSelect={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current)
           void openInlineMinute(day, minute, false, undefined, false, true); }}
         onHold={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current) void openLongPressMenu(day, minute); }}
-        onBegin={() => { manualFocusScroll.current = true; }} onEnd={() => { manualFocusScroll.current = false; }}
+        onBegin={() => { manualFocusScroll.current = true; }} onEnd={() => { manualFocusScroll.current = false; setPreviewScrollOffset(verticalOffsetRef.current); }}
         onScroll={(event) => {
           verticalOffsetRef.current = event.nativeEvent.contentOffset.y; positionFillHandle();
           if (manualFocusScroll.current && !inlineEditingRef.current && !rangeSelecting) {
@@ -2251,9 +2295,9 @@ export function TodayScreen({
         keyboardDismissMode="on-drag" removeClippedSubviews={false}
         scrollEnabled={!pinching && !rangeDragging && !groupDragging} scrollEventThrottle={16}
         onScrollBeginDrag={() => { manualFocusScroll.current = true; }}
-        onScrollEndDrag={() => { manualFocusScroll.current = false; }}
+        onScrollEndDrag={() => { manualFocusScroll.current = false; setPreviewScrollOffset(verticalOffsetRef.current); }}
         onMomentumScrollBegin={() => { manualFocusScroll.current = true; }}
-        onMomentumScrollEnd={() => { manualFocusScroll.current = false; }}
+        onMomentumScrollEnd={() => { manualFocusScroll.current = false; setPreviewScrollOffset(verticalOffsetRef.current); }}
         onScroll={(event) => {
           if (manualFocusScroll.current && !inlineEditingRef.current && !rangeSelecting && !rangeDragRef.current && !groupDragRef.current) {
             const day = visibleDaysRef.current.includes(focusedDayRef.current) ? focusedDayRef.current : visibleDaysRef.current[0]!;
@@ -2310,10 +2354,6 @@ export function TodayScreen({
               const cellVisibleWidth = Math.max(1, Math.min(gridLayout.dayWidth, gridLayout.viewportWidth - gridLayout.railWidth));
               const badgeWidth = groupStarts ? Math.min(cellVisibleWidth * 0.45, Math.max(28, cellVisibleWidth * 0.4)) : 0;
               const noteWidth = Math.max(1, cellVisibleWidth - badgeWidth - (groupStarts ? 18 : 12));
-              const textStyle = { fontWeight: format.bold ? '700' as const : '400' as const,
-                fontStyle: format.italic ? 'italic' as const : 'normal' as const,
-                textDecorationLine: format.underline ? 'underline' as const : 'none' as const,
-                color: format.textColor ?? defaultTextColor };
               const displayedText = draft?.text ?? entry?.text ?? '';
               const isCurrent = day === today && minute === currentMinute;
               return (
@@ -2369,14 +2409,19 @@ export function TodayScreen({
                   {spreadsheetState.clipboard?.mode === 'cut' && spreadsheetState.clipboard.range.dateKey === day &&
                     minute >= spreadsheetState.clipboard.range.startMinute && minute <= spreadsheetState.clipboard.range.endMinute
                     ? <View pointerEvents="none" style={styles.cutCellOutline} /> : null}
-                  {<Text numberOfLines={1} maxFontSizeMultiplier={1.4}
-                      style={[styles.cellText, !entry && !draft && styles.planText,
-                        !displayedText && styles.placeholder, groupStarts && { maxWidth: noteWidth }, textStyle]}>
-                      {displayedText ?? ''}
-                    </Text>}
+                  <CalendarCellText text={displayedText} width={groupStarts ? noteWidth : Math.max(1, cellVisibleWidth - 12)}
+                    height={gridLayout.rowHeight} rowHeight={gridLayout.rowHeight}
+                    color={format.textColor ?? defaultTextColor} bold={format.bold} italic={format.italic}
+                    underline={format.underline} fontScale={fontScale}
+                    onReady={() => pinchLabelReady(calendarAnnotationKey(day, { minute, text: displayedText,
+                      color: format.textColor ?? defaultTextColor, titleColor: titleTextColor,
+                      bold: format.bold, italic: format.italic, underline: format.underline }), gridLayout.rowHeight)} />
                   {outline && groupStarts ? <View pointerEvents="none"
                     style={[styles.activityBadge, { left: noteWidth + 9, width: badgeWidth, borderColor: titleTextColor + '80' }]}>
-                    <Text numberOfLines={1} style={[styles.activityTitle, { color: titleTextColor }]}>{outline.title}</Text>
+                    <CalendarCellText text={outline.title} width={Math.max(1, badgeWidth - 5)} height={gridLayout.rowHeight} inset={3}
+                      rowHeight={gridLayout.rowHeight} color={titleTextColor} bold fontSize={11} lineHeight={14} fontScale={fontScale}
+                      onReady={() => pinchLabelReady(calendarAnnotationKey(day, { minute, text: displayedText,
+                        title: outline.title, color: format.textColor ?? defaultTextColor, titleColor: titleTextColor }, true), gridLayout.rowHeight)} />
                   </View> : null}
                   {isCurrent ? <View pointerEvents="none" style={styles.currentLine}>
                     <View style={styles.currentDot} />
@@ -2387,8 +2432,8 @@ export function TodayScreen({
           </View>
         )}
       />}
-      {pinchPreview ? <CalendarPinchPreview {...pinchPreview} scaleY={pinchPreviewScale}
-        inverseScaleY={pinchPreviewInverseScale} translateY={pinchPreviewOffset} timeLabel={timeLabel} /> : null}
+      <CalendarPinchPreview {...(pinchPreview ?? pinchPreviewDataRef.current!)} active={Boolean(pinchPreview)}
+        scaleY={pinchPreviewScale} timeLabel={timeLabel} />
       {groupDragging && groupDragPreview ? (() => {
         const target = groupDragPreview.target;
         const top = Math.max(0, target.startMinute * gridLayout.rowHeight - verticalOffsetRef.current);
@@ -2439,6 +2484,7 @@ export function TodayScreen({
         }]}>
           <CellActionMenu busy={menuCommandPending || toolBusy || spreadsheetState.busy}
             onEdit={() => void dispatchCellCommand(openSpanDetails)}
+            onEvent={inlineSelection.plan ? () => void dispatchCellCommand((scope) => showMinuteDetails(scope.selection.dateKey, scope.selection.minuteIndex)) : undefined}
             onCut={() => void dispatchCellCommand((scope) => captureSelectedCells('cut', scope))}
             onCopy={() => void dispatchCellCommand((scope) => captureSelectedCells('copy', scope))}
             onAutoFill={cellPolicy.canAutoFill ? () => void dispatchCellCommand(autoFillSelection) : undefined}
@@ -2446,6 +2492,14 @@ export function TodayScreen({
             onGroup={cellPolicy.canGroup ? () => void dispatchCellCommand(openCurrentRangeOptions) : undefined}
             onUngroup={cellPolicy.canUngroup ? () => void dispatchCellCommand(ungroupSelection) : undefined}
             onPaste={() => void dispatchCellCommand(pasteSelectedCells)} canPaste
+            format={selectedFormat} textColor={menuTextColor} fillColor={menuFillColor}
+            colorChoices={pickerColors} selectedColorId={selectedDraft?.categoryId ?? inlineSelection.entry?.categoryId}
+            onToggleBold={() => void dispatchCellCommand((scope) => formatSelection({ bold: !selectedFormat.bold }, scope))}
+            onToggleItalic={() => void dispatchCellCommand((scope) => formatSelection({ italic: !selectedFormat.italic }, scope))}
+            onToggleUnderline={() => void dispatchCellCommand((scope) => formatSelection({ underline: !selectedFormat.underline }, scope))}
+            onTextColor={(color) => void dispatchCellCommand((scope) => formatSelection({ textColor: color ?? undefined }, scope))}
+            onCellColor={(id) => void dispatchCellCommand((scope) => colorSelection(id, scope))}
+            onResetCellColor={() => void dispatchCellCommand(resetSelectionFill)}
             maxHeight={Math.max(80, bodyWindowRef.current.height - 12)} error={toolbarError}
             width={Math.min(440, gridLayout.viewportWidth - 16, cellMenuWidth)}
             maxWidth={Math.min(440, gridLayout.viewportWidth - 16)}
@@ -2459,15 +2513,14 @@ export function TodayScreen({
         </View>
       ) : null}
 
-      {inlineSelection && entryBarMode && !groupDragging && !rangeDragging && !groupComposerOpen && !editor ? (
-        <View accessibilityLabel={entryBarMode === 'entry' ? 'Minute text entry bar' : 'Minute formatting bar'}
-          style={[styles.bottomBar, entryBarMode === 'format' && !formatPalette && styles.compactBottomBar]}>
-          {entryBarMode === 'entry' ? <View style={styles.entryBarRow}>
+      {inlineSelection && entryBarMode === 'entry' && !cellMenuOpen && !groupDragging && !rangeDragging && !groupComposerOpen && !editor ? (
+        <View accessibilityLabel="Minute text entry bar" style={styles.bottomBar}>
+          <View style={styles.entryBarRow}>
             <TextInput ref={inlineInputRef} value={selectedDraft?.text ?? inlineSelection.entry?.text ?? ''}
               editable={!spreadsheetState.busy && !toolBusy} contextMenuHidden={false} rejectResponderTermination={false}
               multiline scrollEnabled maxLength={50000} returnKeyType="done" submitBehavior="submit"
               accessibilityLabel={dayLabels.get(inlineSelection.dateKey) + ', ' + timeLabel(inlineSelection.minuteIndex) + ', minute text'}
-              accessibilityHint="Tap to type. Hold text to select part of it and use Cut, Copy or Paste. The checkmark saves and opens formatting."
+              accessibilityHint="Tap to type. Hold text to select part of it and use Cut, Copy or Paste. The checkmark saves and closes the keyboard."
               placeholder="Record" placeholderTextColor={colors.muted} selectionColor={colors.currentTime}
               onSelectionChange={(event) => { inlineTextSelectionRef.current = event.nativeEvent.selection; }}
               onChangeText={(text) => {
@@ -2495,70 +2548,12 @@ export function TodayScreen({
               disabled={entrySaving || toolBusy || spreadsheetState.busy} onPress={() => void dispatchCellCommand(openSpanDetails)} style={styles.bottomTool}>
               <CellActionIcon name="edit" color={colors.ink} />
             </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Save minute text and show formatting"
+            <Pressable accessibilityRole="button" accessibilityLabel="Save minute text and close keyboard"
               disabled={entrySaving || toolBusy || spreadsheetState.busy}
               onPress={() => void finishInlineEditing()} style={styles.bottomTool}>
               <Text allowFontScaling={false} style={styles.bottomCheck}>✓</Text>
             </Pressable>
-          </View> : <>
-            {formatPalette ? <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="always" keyboardDismissMode="none"
-              style={{ maxHeight: Math.max(96, Math.min(240, windowHeight * 0.3)) }}>
-              <CellColorPalette key={formatPalette} mode={formatPalette} busy={menuCommandPending || toolBusy || spreadsheetState.busy}
-                textColor={menuTextColor} explicitTextColor={selectedFormat.textColor}
-                selectedColorId={selectedDraft?.categoryId ?? inlineSelection.entry?.categoryId} colorChoices={pickerColors}
-                onTextColor={(color) => { setFormatPalette(null);
-                  void dispatchCellCommand((scope) => formatSelection({ textColor: color ?? undefined }, scope)); }}
-                onCellColor={(id) => { setFormatPalette(null); void dispatchCellCommand((scope) => colorSelection(id, scope)); }}
-                onResetCellColor={() => { setFormatPalette(null); void dispatchCellCommand(resetSelectionFill); }}
-                onClose={() => setFormatPalette(null)} />
-              {formatPalette === 'cell' && inlineSelection.plan ? <View style={styles.fillPanelActions}>
-                {inlineSelection.plan ? <Pressable accessibilityRole="button" accessibilityLabel="Open source calendar event details"
-                  disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
-                  onPress={() => { setFormatPalette(null); void dispatchCellCommand((scope) => showMinuteDetails(scope.selection.dateKey, scope.selection.minuteIndex)); }}
-                  style={styles.fillPanelAction}><Text style={styles.fillPanelActionText}>Event</Text>
-                </Pressable> : null}
-              </View> : null}
-            </ScrollView> : null}
-            <View accessibilityRole="toolbar" accessibilityLabel="Format selected minute cells" style={styles.formatBarRow}>
-              {([{ label: 'Bold', glyph: 'B', selected: selectedFormat.bold, patch: { bold: !selectedFormat.bold },
-                style: { fontWeight: '800' as const } },
-              { label: 'Italic', glyph: 'I', selected: selectedFormat.italic, patch: { italic: !selectedFormat.italic },
-                style: { fontStyle: 'italic' as const } },
-              { label: 'Underline', glyph: 'U', selected: selectedFormat.underline, patch: { underline: !selectedFormat.underline },
-                style: { textDecorationLine: 'underline' as const } }]).map((tool) => <Pressable key={tool.label}
-                accessibilityRole="button" accessibilityLabel={tool.label} accessibilityState={{ selected: Boolean(tool.selected) }}
-                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
-                onPress={() => void dispatchCellCommand((scope) => formatSelection(tool.patch, scope))}
-                style={[styles.bottomTool, tool.selected && styles.bottomToolSelected]}>
-                <Text allowFontScaling={false} style={[styles.bottomToolText, tool.style]}>{tool.glyph}</Text>
-              </Pressable>)}
-              <Pressable accessibilityRole="button" accessibilityLabel="Choose text color" accessibilityState={{ expanded: formatPalette === 'text' }}
-                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
-                onPress={() => { Keyboard.dismiss(); setFormatPalette((value) => value === 'text' ? null : 'text'); }} style={styles.bottomTool}>
-                <Text allowFontScaling={false} style={styles.bottomToolText}>A</Text>
-                <View style={[styles.bottomTextColorLine, { backgroundColor: menuTextColor }]} />
-              </Pressable>
-              <Pressable accessibilityRole="button" accessibilityLabel="Choose cell color" accessibilityState={{ expanded: formatPalette === 'cell' }}
-                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
-                onPress={() => { Keyboard.dismiss(); setFormatPalette((value) => value === 'cell' ? null : 'cell'); }} style={styles.bottomTool}>
-                <View style={[styles.groupColorDot, { backgroundColor: menuFillColor }]} />
-              </Pressable>
-              <Pressable accessibilityRole="button" accessibilityLabel="Edit selected minutes and time range"
-                disabled={menuCommandPending || toolBusy || spreadsheetState.busy} onPress={() => void dispatchCellCommand(openSpanDetails)} style={styles.bottomTool}>
-                <CellActionIcon name="edit" color={colors.ink} />
-              </Pressable>
-              <Pressable accessibilityRole="button" accessibilityLabel="Apply event border" accessibilityHint="Name the selected minutes as one calendar event without changing their notes."
-                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
-                onPress={() => void dispatchCellCommand(openCurrentRangeOptions)} style={styles.bottomTool}>
-                <View style={styles.eventBorderIcon}><View style={styles.eventBorderIconLine} /></View>
-              </Pressable>
-              <Pressable accessibilityRole="button" accessibilityLabel="Finish formatting"
-                disabled={menuCommandPending || toolBusy || spreadsheetState.busy}
-                onPress={() => { setEntryBarMode(null); setFormatPalette(null); setInlineEditing(false); Keyboard.dismiss(); }} style={styles.bottomTool}>
-                <Text allowFontScaling={false} style={styles.bottomCheck}>✓</Text>
-              </Pressable>
-            </View>
-          </>}
+          </View>
         </View>
       ) : null}
 
@@ -2592,21 +2587,12 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     container: { flex: 1, backgroundColor: colors.paper },
     bottomBar: { flexShrink: 0, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline,
       backgroundColor: colors.panel },
-    compactBottomBar: { alignSelf: 'flex-start', maxWidth: '100%', marginHorizontal: 6, borderRadius: 8 },
     entryBarRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6, paddingVertical: 4, gap: 4 },
     bottomTextInput: { flex: 1, minHeight: 44, maxHeight: 132, paddingHorizontal: 10, paddingVertical: 10,
       color: colors.ink, fontSize: 16, textAlignVertical: 'top', borderWidth: StyleSheet.hairlineWidth,
       borderColor: colors.hairline, borderRadius: 6, backgroundColor: colors.surface },
-    formatBarRow: { flexDirection: 'row', flexWrap: 'wrap', alignSelf: 'flex-start', alignItems: 'center',
-      paddingHorizontal: 8, paddingVertical: 4, gap: 2 },
-    fillPanelActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, paddingHorizontal: 8, paddingBottom: 4 },
-    fillPanelAction: { minHeight: 44, paddingHorizontal: 12, justifyContent: 'center' },
-    fillPanelActionText: { color: colors.ink, fontSize: 14 },
     bottomTool: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
-    bottomToolSelected: { backgroundColor: colors.selectedDay },
-    bottomToolText: { fontSize: 23, lineHeight: 27, color: colors.ink },
     bottomCheck: { fontSize: 27, color: colors.ink },
-    bottomTextColorLine: { width: 23, height: 3, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.swatchBorder },
     createEventButton: { position: 'absolute', right: 16, bottom: 16, width: 56, height: 56, borderRadius: 16,
       justifyContent: 'center', alignItems: 'center', backgroundColor: colors.accent },
     createEventIcon: { color: colors.onAccent, fontSize: 34, fontWeight: '400', lineHeight: 40 },
@@ -2656,8 +2642,9 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     timeRail: { width: railWidth, height: rowHeight, justifyContent: 'center', alignItems: 'flex-end', paddingLeft: 0, paddingRight: 1,
       borderRightWidth: 1, borderBottomWidth: 1, borderColor: gridLine },
     timeMeasurement: { position: 'absolute', left: 0, top: 0, width: 4096, opacity: 0 },
-    timeMeasurementText: { alignSelf: 'flex-start', fontWeight: '600' },
-    minuteTime: { color: colors.ink, fontSize: 16, fontWeight: '400', fontVariant: ['tabular-nums'], includeFontPadding: false },
+    timeMeasurementText: { alignSelf: 'flex-start', fontWeight: '600', fontSize: 16, lineHeight: 21, opacity: 1 },
+    minuteTime: { color: colors.ink, fontSize: 16 * Math.min(1, rowHeight / 34), lineHeight: 21 * Math.min(1, rowHeight / 34),
+      opacity: calendarCellTextOpacity(Math.min(1, rowHeight / 34)), fontWeight: '400', fontVariant: ['tabular-nums'], includeFontPadding: false },
     currentMinuteText: { color: colors.ink, fontWeight: '600' },
     selectionPrompt: { flexDirection: 'row', alignItems: 'center', paddingLeft: 12, paddingRight: 4,
       borderBottomWidth: 1, borderBottomColor: colors.hairline, backgroundColor: colors.panel },
@@ -2676,13 +2663,11 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     dayCell: { height: rowHeight, justifyContent: 'center', paddingLeft: 5, paddingRight: 4,
       borderRightWidth: 1, borderBottomWidth: 1, borderColor: gridLine },
     cellBackground: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: grid },
-    eventBorderIcon: { width: 24, height: 24, borderWidth: 2.5, borderColor: colors.ink, justifyContent: 'center' },
-    eventBorderIconLine: { height: StyleSheet.hairlineWidth, backgroundColor: colors.muted },
     activityOutline: { position: 'absolute', left: 1, right: 1, top: 0, bottom: 0,
       borderLeftWidth: 2.5, borderRightWidth: 2.5 },
     activityFirstCell: { borderTopWidth: 2.5 },
     activityLastCell: { borderBottomWidth: 2.5 },
-    activityBadge: { position: 'absolute', top: 2, bottom: 2, justifyContent: 'center', paddingLeft: 4,
+    activityBadge: { position: 'absolute', top: 0, bottom: 0, justifyContent: 'center', paddingLeft: 4,
       borderLeftWidth: 1, backgroundColor: 'transparent' },
     activityTitle: { color: colors.ink, fontSize: 11, fontWeight: '600' },
     cellText: { color: colors.ink, fontSize: 16, lineHeight: 21, fontWeight: '400', includeFontPadding: false },

@@ -10,6 +10,7 @@ function component(t, file, name, initial) {
   const slots = [], effects = [], modules = new Map();
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
   const react = {
+    memo: (component) => component,
     useRef(value) { const i = hook++; return slots[i] ??= { current: value }; },
     useState(value) { const i = hook++; slots[i] ??= { value: typeof value === 'function' ? value() : value };
       return [slots[i].value, (next) => { const value = typeof next === 'function' ? next(slots[i].value) : next;
@@ -145,7 +146,7 @@ test('icon-only held menu keeps named one-tap actions, relevant options and busy
   h.action('Edit selected minutes and time range').onPress(); assert.equal(calls.at(-1), 'edit');
   assert.equal(h.action('Clear selected minute cells'), undefined, 'Reset is the sole cell-erasure action');
   assert.equal(h.find('Text'), undefined, 'action captions are not rendered');
-  assert.equal(h.action('Bold'), undefined, 'formatting remains in the existing bottom bar');
+  assert.equal(h.action('Bold'), undefined, 'format controls stay hidden until the popup Format action is requested');
   await h.update({ busy: true }); assert.equal(h.action('Copy selected minute cells').disabled, true);
 });
 
