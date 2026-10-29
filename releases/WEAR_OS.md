@@ -2,6 +2,20 @@
 
 ## Current matching releases
 
+Use the [Wear-enabled phone 0.1.31/code32](https://github.com/khushbakhtm-star/context/releases/download/v0.1.31/context-0.1.31-wear-phone-preview.apk) with the separately published [Watch 0.1.13/code100014](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.13). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
+
+## Published 0.1.13 Watch update
+
+The separate [Watch 0.1.13/code100014 release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.13) and all five verified assets were available by **2026-10-29 at 19:51:02 UTC**, release **428326341**. [Watch APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.13/context-0.1.13-wear-preview.apk) (asset 689718782): **11,413,206 bytes**, SHA-256 `88e241c8b94b96790c104e2f5988186705131449cbf2bee2b7420a009e8e5b1a`. Public asset sizes/digests match verified local files. The exact tag points to application source `fddefda295c5103fec26ef75ea2f2c7ab4a17b23`; [build 40942573091](https://github.com/khushbakhtm-star/context/actions/runs/40942573091) used controller `ab332f2f9c1481a18e2cb755a1dd942fbc4f1fa3`. Signing stayed local with the existing publisher certificate.
+
+Dictate starts listening directly: available on-device speech is preferred; otherwise the installed system speech provider starts automatically and may need internet on the watch or paired phone. An unavailable on-device recognizer or language model can fall back to system speech once per visible note. Other failures retain Continue and Type; no automatic error-retry loop is introduced. Phrase completion retains displayed words, and only Done confirms a durable note. The compact clock and original selected minute remain separate; dismissal, background and stale callbacks cannot save another minute.
+
+The actual native build ran 58 JVM cases (0 skipped) across all six required suites with zero failures/errors. Nine actual native class definitions, compiled Tile/logo and microphone/query/clock checks, protected ZIP contents, original publisher certificate, official supported-SDK v3 verification, separate contained-v2 proof and 16 KiB alignment passed. No runtime support below minimum SDK30 is claimed. These automated checks do not establish physical-watch speed, offline-model availability or live paired-phone delivery.
+
+Use with the separate Wear-enabled phone **0.1.31/code32**. Install as an Update on the watch to preserve its saved data. Phone APKs and their update feed remain unchanged. This optional Google-dependent companion is separate from official Play/Apple store or F-Droid catalog availability.
+
+## Previous matching releases: phone 0.1.31 / Watch 0.1.12
+
 Use the [Wear-enabled phone 0.1.31/code32](https://github.com/khushbakhtm-star/context/releases/download/v0.1.31/context-0.1.31-wear-phone-preview.apk) with the separately published [Watch 0.1.12/code100013](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.12). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
 
 ## Previous matching releases: 0.1.30

@@ -56,9 +56,11 @@ Sources: [Obtainium links](https://wiki.obtainium.imranr.dev/deep_links/),
 
 ## Galaxy Watch7 tile and watch update
 
-The separate [Watch 0.1.12 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.12/context-0.1.12-wear-preview.apk)
-adds a **Record now** tile and current-minute entry. Install it on the watch as an Update
+The separate [Watch 0.1.13 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.13/context-0.1.13-wear-preview.apk)
+opens **Dictate** directly and retains the **Record now** tile and current-minute entry.
+System speech may need internet. Press **Done** to confirm the displayed note.
+Install it on the watch as an Update
 using the previously paired PC; phone Obtainium filters update their phone edition.
 After updating, swipe left from the watch face to **Add tiles**, then select **Context**.
-The [watch release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.12)
+The [watch release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.13)
 includes the exact source, signatures, compiled Tile and package verification receipts.
