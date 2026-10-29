@@ -37,6 +37,7 @@ class WatchDictationDialog(
     private var active = true
     private var recognizer: SpeechRecognizer? = null
     private var backend = WatchSpeechBackend.UNAVAILABLE
+    private var systemAttempted = false
     private val onDevice = Build.VERSION.SDK_INT >= 31 && runCatching {
         SpeechRecognizer.isOnDeviceRecognitionAvailable(activity)
     }.getOrDefault(false)
@@ -49,7 +50,6 @@ class WatchDictationDialog(
         note.confirmDisplayed()?.let { close(confirmed = it) }
     }
     private val continueButton = button("Continue", "Continue dictating without losing the displayed words") { start(backend == WatchSpeechBackend.SYSTEM) }
-    private val systemButton = button("Use system speech", "Use system speech, which may require internet") { start(true) }
     private val dialog: Dialog
     private val nextPhrase = Runnable {
         if (active && isCurrent()) start(backend == WatchSpeechBackend.SYSTEM)
@@ -69,8 +69,6 @@ class WatchDictationDialog(
             LinearLayout.LayoutParams(-1, dp(22)))
         val body = column()
         body.addView(message); body.addView(words)
-        systemButton.visibility = View.GONE
-        body.addView(systemButton, LinearLayout.LayoutParams(-1, dp(32)))
         continueButton.visibility = View.GONE
         body.addView(continueButton, LinearLayout.LayoutParams(-1, dp(32)))
         root.addView(ScrollView(activity).apply { isFillViewport = true; addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -90,22 +88,18 @@ class WatchDictationDialog(
     fun show() {
         if (!active || !isCurrent()) { close(); return }
         dialog.show(); handler.post(ticker)
-        if (WatchDictationPolicy.backend(Build.VERSION.SDK_INT, onDevice, system) == WatchSpeechBackend.ON_DEVICE) start(false)
-        else {
-            message.text = "On-device speech isn't available to Context. System speech may need internet on the watch or paired phone."
-            systemButton.visibility = if (system) View.VISIBLE else View.GONE
-            doneState("Done", false)
-        }
+        start(false)
     }
 
     fun cancel(preserveDraft: Boolean = false) = close(preserveDraft = preserveDraft)
 
-    private fun start(systemExplicitlyChosen: Boolean) {
+    private fun start(preferSystem: Boolean) {
         if (!active || !isCurrent()) { close(); return }
         handler.removeCallbacks(nextPhrase)
         stopRecognizer()
-        backend = WatchDictationPolicy.backend(Build.VERSION.SDK_INT, onDevice, system, systemExplicitlyChosen)
+        backend = WatchDictationPolicy.backend(Build.VERSION.SDK_INT, onDevice, system, preferSystem)
         if (backend == WatchSpeechBackend.UNAVAILABLE) { failed(WatchSpeechFailure.UNAVAILABLE); return }
+        if (backend == WatchSpeechBackend.SYSTEM) systemAttempted = true
         val token = guard.begin()
         val current = {
             active && guard.accepts(token) && isCurrent()
@@ -158,7 +152,7 @@ class WatchDictationDialog(
                 }
                 override fun onEvent(eventType: Int, params: Bundle?) = Unit
             })
-            systemButton.visibility = View.GONE; continueButton.visibility = View.GONE
+            continueButton.visibility = View.GONE
             doneState("Done", note.text.isNotBlank())
             message.text = if (backend == WatchSpeechBackend.ON_DEVICE) "Starting on-watch speech…" else "System speech may require internet."
             speech.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
@@ -174,10 +168,13 @@ class WatchDictationDialog(
         if (!active) return
         handler.removeCallbacks(nextPhrase)
         stopRecognizer()
+        if (isCurrent() && WatchDictationPolicy.retryWithSystem(backend, reason, system, systemAttempted)) {
+            start(true)
+            return
+        }
         message.text = WatchDictationPolicy.failure(reason, backend == WatchSpeechBackend.ON_DEVICE) +
             if (note.text.isNotBlank()) " Your words are kept. Tap Done to save, Continue, or Type." else ""
         words.text = note.text
-        systemButton.visibility = if (system && backend != WatchSpeechBackend.SYSTEM) View.VISIBLE else View.GONE
         continueButton.visibility = if (backend != WatchSpeechBackend.UNAVAILABLE) View.VISIBLE else View.GONE
         doneState("Done", note.text.isNotBlank())
     }

@@ -10,11 +10,17 @@ enum class WatchSpeechFailure { NETWORK, MODEL, MICROPHONE, EMPTY, BUSY, UNAVAIL
 /** Clock display never retargets the immutable minute being recorded. */
 object WatchDictationPolicy {
     fun backend(api: Int, onDeviceAvailable: Boolean, systemAvailable: Boolean,
-        systemExplicitlyChosen: Boolean = false): WatchSpeechBackend = when {
-        systemExplicitlyChosen && systemAvailable -> WatchSpeechBackend.SYSTEM
-        !systemExplicitlyChosen && api >= 31 && onDeviceAvailable -> WatchSpeechBackend.ON_DEVICE
+        preferSystem: Boolean = false): WatchSpeechBackend = when {
+        preferSystem && systemAvailable -> WatchSpeechBackend.SYSTEM
+        !preferSystem && api >= 31 && onDeviceAvailable -> WatchSpeechBackend.ON_DEVICE
+        systemAvailable -> WatchSpeechBackend.SYSTEM
         else -> WatchSpeechBackend.UNAVAILABLE
     }
+    /** Dictate authorizes the available provider; an unusable on-device model may fall back once. */
+    fun retryWithSystem(failedBackend: WatchSpeechBackend, failure: WatchSpeechFailure,
+        systemAvailable: Boolean, systemAttempted: Boolean): Boolean =
+        failedBackend == WatchSpeechBackend.ON_DEVICE && systemAvailable && !systemAttempted &&
+            failure in setOf(WatchSpeechFailure.MODEL, WatchSpeechFailure.UNAVAILABLE)
     fun clock(current: LocalDateTime, twelveHour: Boolean = false): String = current.format(
         DateTimeFormatter.ofPattern(if (twelveHour) "h:mm:ss a" else "HH:mm:ss", Locale.ROOT))
     fun minuteLabel(target: Coordinate, twelveHour: Boolean = false): String {
@@ -30,14 +36,14 @@ object WatchDictationPolicy {
         return partial.trim().takeIf { it.isNotEmpty() }
     }
     fun failure(kind: WatchSpeechFailure, onDevice: Boolean): String = when (kind) {
-        WatchSpeechFailure.MODEL -> if (onDevice) "Offline speech is unavailable for this language on this watch. Tap Type, or explicitly choose system speech."
+        WatchSpeechFailure.MODEL -> if (onDevice) "Offline speech is unavailable for this language on this watch. Tap Type or retry."
             else "This system speech provider cannot use the selected language. Tap Type, or change the watch speech language."
         WatchSpeechFailure.NETWORK -> if (onDevice) "On-watch speech could not finish. Tap Type or retry."
             else "System speech could not connect. It may need internet on the watch or paired phone. Tap Type or retry."
         WatchSpeechFailure.MICROPHONE -> "Microphone access is unavailable. Tap Type, or allow microphone access in watch Settings."
         WatchSpeechFailure.EMPTY -> "No words were confirmed. Tap Type or try speaking again."
         WatchSpeechFailure.BUSY -> "Speech recognition is busy. Tap Type or retry."
-        WatchSpeechFailure.UNAVAILABLE -> "On-watch speech is unavailable. Tap Type, or explicitly choose system speech if offered."
+        WatchSpeechFailure.UNAVAILABLE -> "Speech recognition is unavailable. Tap Type or retry."
     }
 }
 

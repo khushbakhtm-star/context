@@ -20,13 +20,17 @@ test('watch dictation owns its visible clock while retaining a separate immutabl
   assert.doesNotMatch(dialog, /startActivityForResult|WatchStore|WatchTransport|MediaRecorder|AudioRecord|FileOutputStream/);
 });
 
-test('watch speech selects a genuine on-device recognizer and requires an explicit action before using system speech', () => {
+test('Dictate begins available speech directly, preferring on-device recognition without an extra provider-choice button', () => {
   assert.match(dialog, /Build\.VERSION\.SDK_INT >= 31 && runCatching\s*\{\s*SpeechRecognizer\.isOnDeviceRecognitionAvailable/);
   assert.match(dialog, /SpeechRecognizer\.createOnDeviceSpeechRecognizer\(activity\)/);
-  assert.match(dialog, /button\("Use system speech",[\s\S]*?\{ start\(true\) \}/);
   const automaticShow = dialog.slice(dialog.indexOf('fun show()'), dialog.indexOf('fun cancel('));
-  assert.match(automaticShow, /WatchSpeechBackend\.ON_DEVICE\) start\(false\)/);
-  assert.doesNotMatch(automaticShow, /start\(true\)|createSpeechRecognizer/);
+  assert.match(automaticShow, /dialog\.show\(\); handler\.post\(ticker\)\s*start\(false\)/);
+  assert.doesNotMatch(dialog, /Use system speech|systemButton/);
+  assert.match(policy, /!preferSystem && api >= 31 && onDeviceAvailable -> WatchSpeechBackend\.ON_DEVICE\s*systemAvailable -> WatchSpeechBackend\.SYSTEM/);
+  assert.match(dialog, /if \(backend == WatchSpeechBackend\.SYSTEM\) systemAttempted = true/);
+  const failure = dialog.slice(dialog.indexOf('private fun failed('), dialog.indexOf('private fun stopRecognizer'));
+  assert.match(failure, /isCurrent\(\) && WatchDictationPolicy\.retryWithSystem\(backend, reason, system, systemAttempted\)/);
+  assert.match(failure, /start\(true\)\s*return/);
   assert.match(dialog, /EXTRA_PREFER_OFFLINE, true/);
   assert.match(dialog, /setRecognitionListener[\s\S]*speech\.startListening/);
 });

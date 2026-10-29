@@ -9,14 +9,42 @@ class JVMWatchDictationPolicyTest {
     private fun editor() = EditorSession(point, true, "known-version", sessionId = "editor-current")
     private fun speech(editor: EditorSession = editor()) = SpeechSession(107, editor.sessionId, editor.coordinate, "speech-current")
 
-    @Test fun onDeviceSpeechIsPreferredAndSystemRecognitionAlwaysRequiresExplicitChoice() {
+    @Test fun dictatePrefersOnDeviceRecognitionButStartsSystemSpeechWithoutAnotherChoice() {
         assertEquals(WatchSpeechBackend.ON_DEVICE, WatchDictationPolicy.backend(31, true, true))
         assertEquals(WatchSpeechBackend.ON_DEVICE, WatchDictationPolicy.backend(36, true, false))
-        assertEquals(WatchSpeechBackend.UNAVAILABLE, WatchDictationPolicy.backend(30, true, true))
-        assertEquals(WatchSpeechBackend.UNAVAILABLE, WatchDictationPolicy.backend(36, false, true))
+        assertEquals(WatchSpeechBackend.SYSTEM, WatchDictationPolicy.backend(30, true, true))
+        assertEquals(WatchSpeechBackend.SYSTEM, WatchDictationPolicy.backend(36, false, true))
         assertEquals(WatchSpeechBackend.SYSTEM, WatchDictationPolicy.backend(36, false, true, true))
         assertEquals(WatchSpeechBackend.SYSTEM, WatchDictationPolicy.backend(30, false, true, true))
         assertEquals(WatchSpeechBackend.UNAVAILABLE, WatchDictationPolicy.backend(36, true, false, true))
+    }
+    @Test fun noAvailableProviderFailsWithoutPretendingAnOfflineModelExists() {
+        for (api in listOf(30, 31, 36)) {
+            assertEquals(WatchSpeechBackend.UNAVAILABLE, WatchDictationPolicy.backend(api, false, false))
+            assertEquals(WatchSpeechBackend.UNAVAILABLE, WatchDictationPolicy.backend(api, false, false, true))
+        }
+        assertEquals(WatchSpeechBackend.UNAVAILABLE, WatchDictationPolicy.backend(30, true, false))
+    }
+    @Test fun unavailableOnDeviceConstructionOrLanguageFallsBackToSystemOnlyOnce() {
+        for (failure in listOf(WatchSpeechFailure.UNAVAILABLE, WatchSpeechFailure.MODEL)) {
+            assertTrue(WatchDictationPolicy.retryWithSystem(WatchSpeechBackend.ON_DEVICE, failure, true, false))
+            assertFalse(WatchDictationPolicy.retryWithSystem(WatchSpeechBackend.ON_DEVICE, failure, false, false))
+            assertFalse(WatchDictationPolicy.retryWithSystem(WatchSpeechBackend.ON_DEVICE, failure, true, true))
+            assertEquals(WatchSpeechBackend.SYSTEM, WatchDictationPolicy.backend(36, true, true, true))
+        }
+    }
+    @Test fun microphonePauseBusyAndSystemFailuresNeverCreateAnAutomaticRetryLoop() {
+        for (failure in WatchSpeechFailure.values()) {
+            assertFalse(WatchDictationPolicy.retryWithSystem(WatchSpeechBackend.SYSTEM, failure, true, false))
+            assertFalse(WatchDictationPolicy.retryWithSystem(WatchSpeechBackend.UNAVAILABLE, failure, true, false))
+        }
+        for (failure in listOf(WatchSpeechFailure.MICROPHONE, WatchSpeechFailure.EMPTY,
+            WatchSpeechFailure.BUSY, WatchSpeechFailure.NETWORK)) {
+            assertFalse(WatchDictationPolicy.retryWithSystem(WatchSpeechBackend.ON_DEVICE, failure, true, false))
+        }
+        // A normal phrase restart retains the selected system provider, even if on-device
+        // recognition still advertises itself after failing to initialize.
+        assertEquals(WatchSpeechBackend.SYSTEM, WatchDictationPolicy.backend(36, true, true, true))
     }
     @Test fun liveClockShowsSecondsAndMinuteRolloverWithoutRetargetingTheNote() {
         val before = LocalDateTime.parse("2026-10-28T12:59:59")
