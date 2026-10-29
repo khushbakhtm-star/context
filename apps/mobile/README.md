@@ -2,6 +2,10 @@
 
 ## Current published phone builds
 
+Phone **0.1.29/code30** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.29/context-0.1.29-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.29/context-0.1.29-foss-preview.apk) updates. Context 0.1.29 adds a pencil range editor with text, start/end dates and times, and an optional named event border. An overnight span can fill yesterday and today in one undoable edit. The held-cell menu uses compact icons, and vertical zoom changes minute height while retaining the selected day columns. Event titles remain separate from minute notes; exact source identity and conflict checks remain in force. Hold Sync for its actual current step. Automated source/native checks passed; physical-phone and live-calendar behavior still need confirmation. Use the Wear-enabled edition with the independent Watch 0.1.12 release.
+
+## Previous phone release: 0.1.28
+
 Phone **0.1.28/code29** is available as [Wear-enabled](https://github.com/khushbakhtm-star/context/releases/download/v0.1.28/context-0.1.28-wear-phone-preview.apk) and [FOSS](https://github.com/khushbakhtm-star/context/releases/download/v0.1.28/context-0.1.28-foss-preview.apk) updates. Context 0.1.28 uses a static closed arrow loop while synchronization is active and an open arrow loop while idle. The error badge and accessible Sync status remain visible without a moving spinner. The paired-watch path prioritizes local note acknowledgements over optional day snapshots; cloud synchronization remains independent. Existing phone-linked events retain their original identity. Hold Sync for its actual current step. Local editing stays available and source/ledger checks remain in force. Automated source/native checks passed; physical-phone and live-calendar behavior still need confirmation. Use the Wear-enabled edition with the independent Watch 0.1.11 release.
 
 ## Previous phone release: 0.1.27

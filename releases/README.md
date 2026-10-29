@@ -1,6 +1,35 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.28/code29** in both channels, verified at **2026-10-28 at 19:51:00 UTC**. Watch **0.1.11/code100012** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability: **0.1.29/code30** in both channels, verified at **2026-10-29 at 12:20:52 UTC**. Watch **0.1.12/code100013** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+
+## Published 0.1.29 phone updates
+
+Both phone editions, code30, and all twelve checked public assets were available by **2026-10-29 at 12:20:52 UTC**, release **427181998**. [Wear-enabled APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.29/context-0.1.29-wear-phone-preview.apk) (asset 686314417) and [FOSS APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.29/context-0.1.29-foss-preview.apk) (asset 688476054) update the existing installation. The separate Watch 0.1.12/code100013 remains the current matching watch release.
+
+Context 0.1.29 adds a pencil range editor with text, start/end dates and times, and an optional named event border. An overnight span can fill yesterday and today in one undoable edit. The held-cell menu uses compact icons, and vertical zoom changes minute height while retaining the selected day columns.
+
+Your local notes, event borders, titles and source-calendar conflict guards remain intact. Choose **Update** over the existing phone installation. The Wear-enabled phone includes native Google sign-in and the optional watch bridge; the FOSS phone omits those native dependencies. The separate Watch 0.1.12 release remains independent.
+
+Source: [5586f4a305a71956aeabaa035fa350861b6b6cf9](https://github.com/khushbakhtm-star/context/commit/5586f4a305a71956aeabaa035fa350861b6b6cf9). TypeScript and 956 mobile tests passed, including 224 focused UI/range-editor/overnight/calendar/crypto/storage/watch checks within that run. Static packaged checks cover 94 required UI labels and 15 obsolete labels. These are automated checks, not physical-phone or live-calendar verification.
+
+- Wear-enabled phone: 79,166,634 bytes; SHA-256 `7677d93e57962c43d47468935f95227f9eaebdbcda7dc3455d9fae4d102c1112`.
+- FOSS phone: 78,450,591 bytes; SHA-256 `86f090d5bee608996e8a133616a6c9487112134e0d4021914e4dd120f1bfbacb`.
+
+Both are code30, signed with the existing publisher certificate; official signatures, protected source-built content and 16 KiB alignment passed. [Independent F-Droid verification](https://github.com/khushbakhtm-star/context/actions/runs/40765295915) reported zero source errors/warnings and 108 removed inputs, 5 source patches and 39 reviewed Wear removals. The attached permanent evidence ZIP preserves 23 checked entries. This publisher preview does not establish official F-Droid catalog acceptance or Apple/Google store availability.
+
+The [phone build](https://github.com/khushbakhtm-star/context/actions/runs/40765247665) used controller `a901778614532fe27d19e4af586d28a1351b14e1`; FOSS used `a901778614532fe27d19e4af586d28a1351b14e1`. The [source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40767725383) passed at the exact application source.
+
+The [permanent FOSS evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.29/context-0.1.29-foss-build-evidence.zip) is **7,753,397 bytes**, SHA-256 `54af233d5f35e1fecba42aa42d02c8d557173d1f3e04991b3e8d96f6b594cf3e`. Public/local file sizes and digests match. No physical phone/watch, live account or store/catalog result is implied.
+
+## Published 0.1.12 Watch update
+
+The separate [Watch 0.1.12/code100013 release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.12) contains five checked public assets. [Watch APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.12/context-0.1.12-wear-preview.apk): **11,413,206 bytes**, SHA-256 e561adbd89f9a07e0e1e12df80c2d7a11300f513f8ef31947ae243a7db321e35.
+
+[Build 40765201069](https://github.com/khushbakhtm-star/context/actions/runs/40765201069) used controller a901778614532fe27d19e4af586d28a1351b14e1 and exact application source 5586f4a305a71956aeabaa035fa350861b6b6cf9.
+
+Dictation keeps a compact 10sp clock in an 18dp row and a fixed selected-note minute. Phrase completion retains words without saving or closing; recognition restarts only while the same note dialog is current and visible. Done explicitly confirms the displayed note, including the latest hypothesis, as one durable operation. Type or lifecycle interruption keeps an editable draft; Cancel never autosaves, and late callbacks are rejected. On-device recognition depends on watch/model support; system speech is an explicit choice and may need internet. Keep Context active on the phone to apply its durable inbox to the ledger.
+
+The actual build ran 55 JVM cases (0 skipped), including all six required suites. Nine actual native class definitions, compiled Tile/logo resources, microphone/query/clock checks, protected ZIP contents, original publisher certificate, official supported-SDK v3 verification, separate contained-v2 proof and 16 KiB alignment passed. No runtime support below minimum SDK30 is claimed. Install as an Update on the watch. Speech/model availability, Bluetooth delivery speed and physical Watch7 behavior still require device confirmation. This optional companion remains separate from phone APKs and store/catalog availability.
 
 ## Published 0.1.28 phone updates
 
