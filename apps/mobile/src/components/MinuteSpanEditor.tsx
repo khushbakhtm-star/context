@@ -4,7 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '../appearance';
 import type { ActivityCategory, AppColors } from '../theme';
 import type { MinuteSpan, MinuteSpanFillInput } from '../services/spreadsheet';
-import { minuteDetailsCount, minuteDetailsDate, minuteDetailsSpan, minuteDetailsTitle } from '../utils/minute-details';
+import { minuteDetailsCount, minuteDetailsDate, minuteDetailsLastCell, minuteDetailsSpan, minuteDetailsTitle } from '../utils/minute-details';
 import { minuteLabel } from '../utils/time';
 import { DateSelectionPopup } from './DateSelectionPopup';
 import { CellColorPalette } from './CellColorPalette';
@@ -30,8 +30,9 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
   useEffect(() => {
     sequence.current++; busyRef.current = false; setBusy(false); setError(null); setPalette(false); setDateField(null);
     if (!session) return;
-    setText(session.text ?? ''); setTextEdited(false); setStartDate(session.span.startDateKey); setEndDate(session.span.endDateKey);
-    setStartTime(minuteLabel(session.span.startMinute, clockFormat === '12h')); setEndTime(minuteLabel(session.span.endMinute, clockFormat === '12h'));
+    const last = minuteDetailsLastCell(session.span);
+    setText(session.text ?? ''); setTextEdited(false); setStartDate(session.span.startDateKey); setEndDate(last.dateKey);
+    setStartTime(minuteLabel(session.span.startMinute, clockFormat === '12h')); setEndTime(minuteLabel(last.minuteIndex, clockFormat === '12h'));
     setEndDateExplicit(Boolean(session.event?.blockId)); setGroup(Boolean(session.event));
     setTitle(session.event?.title ?? minuteDetailsTitle(session.text ?? '')); setTitleEdited(Boolean(session.event));
     setCategoryId(session.event?.categoryId ?? session.categoryId);
@@ -43,6 +44,7 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
       return { span, count: minuteDetailsCount(span), error: null }; }
     catch (failure) { return { span: null, count: 0, error: failure instanceof Error ? failure.message : 'Choose a valid time range.' }; }
   }, [startDate, startTime, endDate, endTime, endDateExplicit]);
+  const throughDate = parsed.span ? minuteDetailsLastCell(parsed.span).dateKey : endDate;
   const selectedColor = colorChoices.find((value) => value.id === categoryId);
   const canSave = Boolean(parsed.span && (!group || title.trim()) && !busy && !dateField);
   const close = () => { if (!busyRef.current) onClose(); };
@@ -60,7 +62,7 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
       style={[styles.overlay, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
       <View accessibilityViewIsModal onAccessibilityEscape={close} style={styles.card}>
         <View style={styles.heading}><Text accessibilityRole="header" style={styles.title}>Edit minutes</Text>
-          <InfoButton title="Edit minutes" message="The end time is exclusive: ending at 07:00 fills through 06:59. An earlier end time suggests the following day until you choose an end date. Text fills every selected minute. Untouched mixed notes stay unchanged; explicitly clearing Text clears the notes. Group as event adds one named border across the range. Text-only edits keep existing colors and borders. Use Ungroup in cell actions to remove an existing event border. Confirmed changes can be undone together." />
+          <InfoButton title="Edit minutes" message="Through includes the whole final minute: 07:24 fills the 07:24 cell, and the calendar event ends at 07:25. An earlier Through time suggests the following day until you choose a date. Text fills each included minute. Untouched mixed notes stay unchanged; explicitly clearing Text clears the notes. Editing an event replaces its old repeated fill and border; distinct notes outside the new bounds remain private without the old fill. Group as event adds one named border. Text-only edits keep existing colors and borders. Confirmed changes can be undone together." />
         </View>
         <ScrollView keyboardShouldPersistTaps="always" style={styles.scroll} contentContainerStyle={styles.content}>
           <Text style={styles.label}>Text</Text>
@@ -73,9 +75,9 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
             <TextInput accessibilityLabel="Start time" editable={!busy} value={startTime} onChangeText={setStartTime}
               autoCapitalize="characters" maxLength={12} style={styles.time} />
           </View>
-          <Text style={styles.label}>End</Text><View style={styles.row}>
+          <Text style={styles.label}>Through</Text><View style={styles.row}>
             <Pressable accessibilityRole="button" accessibilityLabel="Choose end date" disabled={busy}
-              onPress={() => { Keyboard.dismiss(); setDateField('end'); }} style={styles.date}><Text style={styles.value}>{minuteDetailsDate(parsed.span?.endDateKey ?? endDate)}</Text></Pressable>
+              onPress={() => { Keyboard.dismiss(); setDateField('end'); }} style={styles.date}><Text style={styles.value}>{minuteDetailsDate(throughDate)}</Text></Pressable>
             <TextInput accessibilityLabel="End time" editable={!busy} value={endTime} onChangeText={setEndTime}
               autoCapitalize="characters" maxLength={12} style={styles.time} />
           </View>
@@ -98,8 +100,8 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
           <Pressable accessibilityRole="button" accessibilityLabel="Save minute range" accessibilityState={{ disabled: !canSave, busy }} disabled={!canSave}
             onPress={() => void save()} style={[styles.action, !canSave && styles.disabled]}><Text style={styles.value}>{busy ? 'Saving…' : 'Save'}</Text></Pressable></View>
       </View>
-      <DateSelectionPopup visible={Boolean(session && dateField)} singleDate selectedDates={[dateField === 'start' ? startDate : parsed.span?.endDateKey ?? endDate]}
-        anchorDate={dateField === 'start' ? startDate : parsed.span?.endDateKey ?? endDate} onClose={() => setDateField(null)}
+      <DateSelectionPopup visible={Boolean(session && dateField)} singleDate selectedDates={[dateField === 'start' ? startDate : throughDate]}
+        anchorDate={dateField === 'start' ? startDate : throughDate} onClose={() => setDateField(null)}
         onApply={(values) => { if (values[0] && dateField === 'start') setStartDate(values[0]);
           if (values[0] && dateField === 'end') { setEndDate(values[0]); setEndDateExplicit(true); } setDateField(null); }} />
     </KeyboardAvoidingView>

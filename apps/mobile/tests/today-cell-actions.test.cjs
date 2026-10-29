@@ -8,7 +8,7 @@ const ts = require('typescript');
 // Exercise the production screen's event callbacks without a native device.
 // Native views are inert elements; state/effects advance deterministically between events.
 function screen(t, options = {}) {
-  const day = '2026-10-25'; let now = 10000; let hook = 0; let dirty = true; let tree;
+  const day = '2026-10-25'; let now = 10000; let hook = 0; let dirty = true; let tree; let renders = 0;
   const slots = []; const effects = []; const timers = new Map(); const animationFrames = new Map(); let timerId = 0;
   const calls = []; const pastePreviews = []; const externalPreviews = []; const spanPreviews = []; const alerts = [];
   const listeners = new Set(); const appStateListeners = new Set(); const keyboardListeners = new Map(); const rows = new Map(); const modules = new Map();
@@ -30,7 +30,7 @@ function screen(t, options = {}) {
   react.useCallback = (work, deps) => react.useMemo(() => work, deps);
   const jsx = (type, props) => ({ type, props: props ?? {} });
   class ClockDate extends Date { constructor(...args) { super(...(args.length ? args : ['2026-10-25T12:00:00-04:00'])); } static now() { return now; } }
-  class Value { constructor(value) { this.value = value; } setValue(value) { this.value = value; } }
+  class Value { constructor(value, config) { this.value = value; this.nativeDriver = config?.useNativeDriver === true; } setValue(value) { this.value = value; } }
   const native = { View: 'View', Text: 'Text', Pressable: 'Pressable', ScrollView: 'ScrollView', FlatList: 'FlatList',
     TextInput: 'TextInput', KeyboardAvoidingView: 'KeyboardAvoidingView', RefreshControl: 'RefreshControl',
     Platform: { OS: options.platform ?? 'android' }, StyleSheet: { create: (value) => value, hairlineWidth: 0.5 },
@@ -67,7 +67,12 @@ function screen(t, options = {}) {
       if (options.prepareSpanGate) await options.prepareSpanGate;
       return { token: 'span-preview', span, ranges, cellCount: ranges.reduce((n, r) => n + r.endMinute - r.startMinute + 1, 0), occupiedCount: options.spanOccupied ?? 0 };
     },
-    fillMinuteSpan: async (span, input, applyOptions) => command('span-fill', { span, input, ...applyOptions }),
+    fillMinuteSpan: async (span, input, applyOptions) => {
+      command('span-fill', { span, input, ...applyOptions });
+      if (options.applySpan) return options.applySpan(span, input, { rows, drafts });
+      const ranges = load(source('utils/minute-span.ts')).minuteSpanRanges(span);
+      return { affectedDates: ranges.map((range) => range.dateKey), blockId: input.event?.blockId ?? null };
+    },
     cancelMinuteRangeMove() {},
     getMovableActivityGroup: options.readMovableGroup ?? (async () => null),
     prepareActivityGroupMove: async (source, destination) => { command('prepare-group-move', { source, destination });
@@ -123,8 +128,8 @@ function screen(t, options = {}) {
         if (name === 'react-native') return native;
         if (name === 'react-native-safe-area-context') return { useSafeAreaInsets: () => ({ top: 24, bottom: 24 }) };
         const resolved = path.resolve(path.dirname(filename), name);
-        if (resolved === source('appearance')) return { useAppTheme: () => ({ colors: load(source('theme.ts')).darkColors, resolvedMode: 'dark' }) };
-        for (const name of ['CellActionIcon', 'CompactMinuteOverview', 'MinuteSpanEditor']) {
+        if (resolved === source('appearance')) return { useAppTheme: () => ({ colors: load(source('theme.ts'))[options.appearanceMode === 'light' ? 'lightColors' : 'darkColors'], resolvedMode: options.appearanceMode ?? 'dark' }) };
+        for (const name of ['CellActionIcon', 'CompactMinuteOverview', 'CalendarPinchPreview', 'MinuteSpanEditor']) {
           if (resolved.endsWith('/components/' + name) || resolved.endsWith('\\components\\' + name)) return { [name]: name };
         }
         if (resolved.endsWith('/components/CellActionMenu') || resolved.endsWith('\\components\\CellActionMenu')) return { CellActionMenu: 'CellActionMenu' };
@@ -132,7 +137,7 @@ function screen(t, options = {}) {
         if (resolved.endsWith('/components/MinuteEditor') || resolved.endsWith('\\components\\MinuteEditor')) return { MinuteEditor: 'MinuteEditor' };
         if (resolved === source('data/database')) return { getDayEntries: options.readEntries ?? (async (date) => [...rows.values()].filter((row) => row.dateKey === date).map((row) => ({ ...row }))),
           getEntriesForBlock: async (blockId) => [...rows.values()].filter((row) => row.blockId === blockId).map((row) => ({ ...row })),
-          getMinuteEntry: async (date, minute) => rows.get(`${date}:${minute}`) ? { ...rows.get(`${date}:${minute}`) } : null };
+          getMinuteEntry: options.readMinuteEntry ?? (async (date, minute) => rows.get(`${date}:${minute}`) ? { ...rows.get(`${date}:${minute}`) } : null) };
         if (resolved === source('services/calendar')) return { loadPlannedEventsResult: options.readNative ?? (async () => ({ plans: [], failures: [] })),
           reconcileLinkedNativeColors: options.reconcileColors ?? (async () => []), flushPendingActuals: async () => ({}) };
         if (resolved === source('services/categories')) return {
@@ -169,7 +174,7 @@ function screen(t, options = {}) {
   const Today = load(source('screens/TodayScreen.tsx')).TodayScreen;
   const props = { activeDate: day, calendars: [], preferences: { selectedCalendarIds: [], syncActuals: false }, dataVersion: 0,
     focusRequest: null, onFocusConsumed() {}, onDataChanged() {}, onDateChange() {}, onOpenSettings() {}, ...options.props };
-  function render() { hook = 0; dirty = false; tree = Today(props); while (effects.length) effects.shift()(); }
+  function render() { renders++; hook = 0; dirty = false; tree = Today(props); while (effects.length) effects.shift()(); }
   async function settle() { for (let round = 0; round < 80; round++) { await Promise.resolve(); if (dirty) render(); } }
   function find(node, type) { if (!node || typeof node !== 'object') return null; if (node.type === type) return node;
     for (const child of [node.props?.children].flat(Infinity)) { const result = find(child, type); if (result) return result; } return null; }
@@ -221,6 +226,9 @@ function screen(t, options = {}) {
       handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
     },
     details: () => find(tree, 'MinuteSpanEditor')?.props, overview: () => find(tree, 'CompactMinuteOverview')?.props,
+    pinchPreview: () => find(tree, 'CalendarPinchPreview')?.props, list: () => find(tree, 'FlatList')?.props,
+    pinchResponder: () => [tree.props.children.props.children].flat(Infinity).find((node) => node?.props?.onPanResponderGrant)?.props,
+    renderCount: () => renders,
     menu: () => find(tree, 'CellActionMenu')?.props, menuPosition, menuAncestors, measureViewport,
     palette: () => find(tree, 'CellColorPalette')?.props,
     menuBox: () => { const style = menuAncestors()?.at(-1)?.props.style[1];
@@ -288,6 +296,100 @@ test('pencil preserves full existing cross-day event identity and independent no
   assert.equal(h.details().session.text, undefined, 'mixed notes stay separate from the event title');
 });
 
+test('pencil reads a newly committed group even before the displayed group cache refreshes', async (t) => {
+  let groups = [];
+  const group = { dateKey: '2026-10-25', blockId: 'activity_fresh', title: 'Game', categoryId: 'study', startMinute: 1200, endMinute: 1256 };
+  const h = screen(t, { readGroups: async () => groups });
+  for (let minute = 1200; minute <= 1256; minute++) h.rows.set(`${h.day}:${minute}`,
+    { dateKey: h.day, minuteIndex: minute, text: 'Game', categoryId: 'study', blockId: group.blockId });
+  await h.start(); await h.tap(1200);
+  groups = [group]; // The committed service has advanced, but no rendered refresh has run.
+  h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  assert.equal(h.details().session.event.blockId, group.blockId);
+  assert.equal(h.details().session.span.startMinute, 1200);
+  assert.equal(h.details().session.span.endMinute, 1257);
+});
+
+test('pencil does not reuse an obsolete rendered group after the committed border is removed', async (t) => {
+  let groups = [{ dateKey: '2026-10-25', blockId: 'activity_old', title: 'Old event', categoryId: 'study', startMinute: 600, endMinute: 600 }];
+  const h = screen(t, { readGroups: async () => groups });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Kept note', categoryId: 'study', blockId: 'activity_old' });
+  await h.start(); await h.tap(600);
+  groups = []; h.rows.get(`${h.day}:600`).blockId = 'sheet_private';
+  h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  assert.equal(h.details().session.event, undefined);
+  assert.equal(h.details().session.text, 'Kept note');
+});
+
+test('saving a range outside its original anchor selects the new group for the next Edit', async (t) => {
+  let appliedBlockId = null;
+  const h = screen(t, {
+    readGroups: async (day) => {
+      if (!appliedBlockId) return [];
+      const minutes = [...h.rows.values()].filter((row) => row.dateKey === day && row.blockId === appliedBlockId).map((row) => row.minuteIndex).sort((a, b) => a - b);
+      return minutes.length ? [{ dateKey: day, blockId: appliedBlockId, title: 'Sleep', categoryId: 'study', startMinute: minutes[0], endMinute: minutes.at(-1) }] : [];
+    },
+    applySpan: async (span, input, { rows }) => {
+      appliedBlockId = input.event.blockId ?? 'activity_sleep';
+      const first = Date.parse(`${span.startDateKey}T00:00:00Z`) / 60000 + span.startMinute;
+      const end = Date.parse(`${span.endDateKey}T00:00:00Z`) / 60000 + span.endMinute;
+      const affectedDates = new Set();
+      for (let minute = first; minute < end; minute++) {
+        const day = new Date(minute * 60000).toISOString().slice(0, 10), minuteIndex = minute % 1440;
+        affectedDates.add(day); rows.set(`${day}:${minuteIndex}`, { dateKey: day, minuteIndex, text: input.text, categoryId: 'study', blockId: appliedBlockId });
+      }
+      return { affectedDates: [...affectedDates], blockId: appliedBlockId };
+    },
+  });
+  h.rows.set(`${h.day}:444`, { dateKey: h.day, minuteIndex: 444, text: 'Asleep', categoryId: 'study', blockId: 'sheet_source' });
+  await h.start(); await h.tap(444); h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  const span = { startDateKey: h.day, startMinute: 724, endDateKey: '2026-10-26', endMinute: 444 };
+  assert.equal(await h.details().onSave(span, { text: 'Sleep', event: { title: 'Sleep', categoryId: 'study' } }), true);
+  h.details().onClose(); await h.settle();
+  h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  assert.equal(h.details().session.event.blockId, appliedBlockId, 'the second Edit must resize the saved event, not create another one');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.details().session.span)), span);
+  assert.equal(h.details().session.text, 'Sleep');
+});
+
+test('a committed range remains saved when selecting its new anchor fails, without leaving the old anchor editable', async (t) => {
+  let committed = false;
+  const h = screen(t, {
+    readMinuteEntry: async (day, minute) => {
+      if (committed && minute === 720) throw Error('Read unavailable');
+      const value = h.rows.get(`${day}:${minute}`); return value ? { ...value } : null;
+    },
+    applySpan: async (span) => { committed = true; return { affectedDates: [span.startDateKey], blockId: 'activity_saved' }; },
+  });
+  await h.start(); await h.tap(600); h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  const span = { startDateKey: h.day, startMinute: 720, endDateKey: h.day, endMinute: 725 };
+  assert.equal(await h.details().onSave(span, { text: 'Saved', event: { title: 'Saved', categoryId: 'study' } }), true);
+  h.details().onClose(); await h.settle();
+  assert.equal(h.calls.filter((call) => call.action === 'span-fill').length, 1);
+  assert.equal(h.bar('entry'), undefined); assert.equal(h.bar('format'), undefined);
+  assert.equal(h.action('Edit selected minutes and time range'), undefined);
+  assert.match(JSON.stringify(h.tree), /This minute could not be opened/);
+});
+
+test('backgrounding during a post-commit refresh reports the saved range without selecting a stale minute', async (t) => {
+  let committed = false, release; const refreshGate = new Promise((resolve) => { release = resolve; }); const focused = [];
+  const h = screen(t, {
+    props: { onFocusedMinuteChange: (point) => focused.push(point) },
+    readEntries: async (day) => {
+      if (committed) await refreshGate;
+      return [...h.rows.values()].filter((row) => row.dateKey === day).map((row) => ({ ...row }));
+    },
+    applySpan: async (span) => { committed = true; return { affectedDates: [span.startDateKey], blockId: 'activity_saved' }; },
+  });
+  await h.start(); await h.tap(600); h.action('Edit selected minutes and time range').onPress(); await h.settle();
+  const span = { startDateKey: h.day, startMinute: 720, endDateKey: h.day, endMinute: 725 };
+  const saving = h.details().onSave(span, { text: 'Saved', event: { title: 'Saved', categoryId: 'study' } });
+  await h.settle(); assert.equal(committed, true); const focusCount = focused.length;
+  await h.background(); release(); assert.equal(await saving, true); await h.settle();
+  assert.equal(focused.length, focusCount); assert.equal(h.drafts.get(h.day, 720), null);
+  assert.equal(h.calls.filter((call) => call.action === 'span-fill').length, 1);
+});
+
 test('navigation during a pencil preview prevents the old range from committing', async (t) => {
   let release; const gate = new Promise((resolve) => { release = resolve; }); const h = screen(t, { prepareSpanGate: gate });
   await h.start(); await h.tap(600); h.action('Edit selected minutes and time range').onPress(); await h.settle();
@@ -348,7 +450,7 @@ test('the bottom border button names even one blank minute without copying the t
   assert.equal(h.text(600), '');
 });
 
-test('Reset cells executes on one tap for a text-free colored cell while Clear remains text-only', async (t) => {
+test('Reset cells executes on one tap for a text-free colored cell and the obsolete Clear action is absent', async (t) => {
   const h = screen(t); h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: '', categoryId: 'family', blockId: 'note' });
   await h.start(); await h.hold(600);
   assert.equal(h.menu().onClear, undefined); assert.equal(typeof h.menu().onReset, 'function');
@@ -615,14 +717,15 @@ test('Paste forwards every selected minute to both overwrite preview and applica
   assert.equal(applied.startMinute, 601); assert.equal(applied.endMinute, 604);
 });
 
-test('Cut remains deferred until Paste and Clear flushes pending typing before applying', async (t) => {
+test('Cut remains deferred until Paste and the single Reset action flushes pending typing before applying', async (t) => {
   const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Initial note', categoryId: 'work', blockId: 'note' });
   await r.start(); await r.tap(600); await r.tap(600); assert.ok(r.input()); r.input().onChangeText('Latest complete cell'); await r.settle();
   r.input().onSubmitEditing(); await r.settle();
   await r.hold(600); await r.menu().onCut(); await r.settle(); assert.equal(r.rows.get(`${r.day}:600`).text, 'Latest complete cell');
   await r.tap(601); await r.hold(601); await r.menu().onPaste(); await r.settle();
   assert.equal(r.rows.has(`${r.day}:600`), false); assert.equal(r.rows.get(`${r.day}:601`).text, 'Latest complete cell');
-  await r.hold(601); await r.menu().onClear(); await r.settle(); assert.equal(r.rows.get(`${r.day}:601`).text, '');
+  await r.hold(601); assert.equal(r.menu().onClear, undefined);
+  await r.menu().onReset(); await r.settle(); assert.equal(r.rows.has(`${r.day}:601`), false);
 });
 
 test('failed menu commands keep the selected menu and actionable error instead of silently disappearing', async (t) => {

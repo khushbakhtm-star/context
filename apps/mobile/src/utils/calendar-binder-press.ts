@@ -1,54 +1,31 @@
-export const CALENDAR_BINDER_DOUBLE_TAP_MS = 300;
-
-/** Defer view choices until a second tap can claim Now. A second touch-down
- * pauses the first action; a long hold consumes the gesture without navigation. */
+/** A released tap goes straight to Now. Holding opens view choices and consumes
+ * that release, so a held icon cannot also navigate underneath its menu. */
 export function createCalendarBinderPress(actions: {
   allowed: () => boolean;
   single: () => void;
-  double: () => void;
   long: () => void;
 }) {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let waitingAt: number | null = null;
-  let second = false;
-  let held = false;
-  let generation = 0;
   let gesture = 0;
   let delivered = false;
+  let cancelled = false;
   let releaseTimer: ReturnType<typeof setTimeout> | null = null;
-  const clearTimer = () => { if (timer != null) clearTimeout(timer); timer = null; generation += 1; };
   const clearRelease = () => { if (releaseTimer != null) clearTimeout(releaseTimer); releaseTimer = null; };
-  function cancel() { clearTimer(); clearRelease(); waitingAt = null; second = false; gesture += 1; }
+  function cancel() { clearRelease(); cancelled = true; delivered = true; gesture += 1; }
   return {
     pressIn() {
-      clearRelease(); gesture += 1; delivered = false;
-      held = false;
-      const elapsed = waitingAt == null ? null : Date.now() - waitingAt;
-      clearTimer();
-      second = elapsed != null && elapsed >= 0 && elapsed <= CALENDAR_BINDER_DOUBLE_TAP_MS;
-      if (waitingAt != null && !second) {
-        waitingAt = null;
-        if (actions.allowed()) actions.single();
-      }
+      clearRelease(); gesture += 1; delivered = false; cancelled = false;
     },
     press() {
-      clearRelease(); delivered = true;
-      if (held) { held = false; return; }
+      clearRelease();
+      if (cancelled || delivered) return;
+      delivered = true;
       if (!actions.allowed()) { cancel(); return; }
-      if (second && waitingAt != null) { cancel(); actions.double(); return; }
-      cancel();
-      waitingAt = Date.now();
-      const expected = generation;
-      timer = setTimeout(() => {
-        if (generation !== expected) return;
-        timer = null; waitingAt = null;
-        if (actions.allowed()) actions.single();
-      }, CALENDAR_BINDER_DOUBLE_TAP_MS);
+      actions.single();
     },
     // Raw touch-end is paired with the physical gesture. onPressOut cannot be
     // used here: Pressability may delay it until after a valid onPress.
     touchEnd() {
-      if (delivered || held) return;
+      if (delivered || cancelled) return;
       clearRelease();
       const expected = gesture;
       releaseTimer = setTimeout(() => {
@@ -57,11 +34,11 @@ export function createCalendarBinderPress(actions: {
       }, 0);
     },
     longPress() {
-      if (held) return;
-      cancel(); held = true; delivered = true;
+      if (cancelled || delivered) return;
+      cancel();
       if (actions.allowed()) actions.long();
     },
-    cancelPress() { cancel(); held = true; delivered = true; },
+    cancelPress: cancel,
     cancel,
   };
 }

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.29",
-  "sourceAndroidVersionCode": 30,
-  "sourceIosBuildNumber": "30",
+  "version": "0.1.30",
+  "sourceAndroidVersionCode": 31,
+  "sourceIosBuildNumber": "31",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context phone 0.1.29/code30 and independent Watch 0.1.12/code100013. An icon cell menu and pencil editor fill explicit minute spans across midnight, optionally giving the span one event border. Existing mixed notes can be preserved while changing event bounds. Fixed-width day/week columns use faster height-only pinch zoom with a compact full-day overview. Native and account writers retain exact source identities for unambiguous bordered overnight events. The watch uses a compact live clock and retains dictated phrases until one explicit Done action; pauses do not save or close the note. Available on-device speech is preferred; explicit system speech may require internet. Consent, fresh source revisions, conflict checks, guarded atomic Undo, immutable operation IDs and encrypted calendar/storage checks remain protected. Exact Wear-source inventories, independent builds, native class definitions and original publisher-certificate checks must pass before availability records change. Physical devices, live speech/transport, Apple/Google stores and official F-Droid inclusion require separate confirmation."
+  "notes": "Prepare Context phone 0.1.30/code31. Resizing an event replaces its old uniform range fill; distinct removed minute annotations remain private without the old fill or border. Editing continues from the saved range using fresh committed group membership. Through includes the entire final minute and translates to the matching exclusive calendar boundary. A tap on the view icon returns to today and now; holding it opens view choices. Pinch uses a bounded native visual preview before one final grid-layout commit, retaining fixed day/week columns. Matching monochrome pencil, hollow scissors, circular Reset and static oval Sync icons use consistent strokes. One Reset action replaces Clear and removes cell text and all formatting. Provider identity, source-version/conflict checks, consent, atomic Undo and encrypted-ledger checks remain protected. Watch 0.1.12 is a separate unchanged release. Independent native builds and publisher-certificate checks must pass before availability records change. Physical-phone and live-calendar behavior, stores and official F-Droid inclusion require separate confirmation."
 }

@@ -18,10 +18,10 @@ export function CalendarHeaderIcon({ name, active = false }: {
       <View style={styles.searchRing} /><View style={styles.searchHandle} />
     </> : name === 'sync' ? <>
       <View testID={active ? 'sync-loop-closed' : 'sync-loop-open'} style={[styles.syncRing, !active && styles.syncOpen]} />
-      <View style={[styles.syncArrow, { left: 17, top: 2, transform: [{ rotate: '45deg' }] }]} />
-      <View style={[styles.syncArrow, { left: 17, top: 6, transform: [{ rotate: '-45deg' }] }]} />
-      <View style={[styles.syncArrow, { left: 1, top: 16, transform: [{ rotate: '-45deg' }] }]} />
-      <View style={[styles.syncArrow, { left: 1, top: 20, transform: [{ rotate: '45deg' }] }]} />
+      <View testID="sync-top-arrow" style={[styles.syncArrow, { left: 8, top: 2, transform: [{ rotate: '-45deg' }] }]} />
+      <View testID="sync-top-arrow" style={[styles.syncArrow, { left: 8, top: 6, transform: [{ rotate: '45deg' }] }]} />
+      <View testID="sync-bottom-arrow" style={[styles.syncArrow, { left: 10, top: 16, transform: [{ rotate: '45deg' }] }]} />
+      <View testID="sync-bottom-arrow" style={[styles.syncArrow, { left: 10, top: 20, transform: [{ rotate: '-45deg' }] }]} />
     </> : name === 'print' ? <>
       <View style={styles.printPaperTop} /><View style={styles.printBody} />
       <View style={styles.printPaperBottom} /><View style={styles.printIndicator} />
@@ -52,8 +52,8 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   graphAxes: { position: 'absolute', left: 1, bottom: 1, width: 22, height: 22,
     borderLeftWidth: 1.5, borderBottomWidth: 1.5, borderColor: colors.graphite },
   graphBar: { position: 'absolute', bottom: 4, width: 3, borderRadius: 0.5, backgroundColor: colors.graphite },
-  syncRing: { position: 'absolute', left: 3, top: 3, width: 18, height: 18,
-    borderWidth: 2, borderRadius: 9, borderColor: colors.graphite },
+  syncRing: { position: 'absolute', left: 1, top: 4, width: 22, height: 16,
+    borderWidth: 2, borderRadius: 8, borderColor: colors.graphite },
   syncOpen: { borderLeftColor: 'transparent', borderRightColor: 'transparent' },
   syncArrow: { position: 'absolute', width: 6, height: 2, borderRadius: 1, backgroundColor: colors.graphite },
   printPaperTop: { position: 'absolute', left: 6, top: 1, width: 12, height: 8,

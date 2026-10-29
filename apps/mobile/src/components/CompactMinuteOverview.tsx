@@ -7,7 +7,7 @@ import { compactMinuteAt, type CompactBand } from '../utils/calendar-compact';
 type Touch = { day: string; minute: number; x: number; y: number; long: boolean };
 export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines, rowHeight, railWidth, dayWidth, colors,
   current, selection, disabled, scrolling, timeLabel, onSelect, onHold, onScroll, onBegin, onEnd, onLayout, onContentSizeChange,
-  refreshControl,
+  refreshControl, hidden = false, backgroundColor = colors.calendarCell, gridLineColor = colors.hairline,
 }: { scrollRef: RefObject<ComponentRef<typeof ScrollView> | null>; days: readonly string[]; labels: ReadonlyMap<string, string>;
   bands: ReadonlyMap<string, readonly CompactBand[]>; outlines?: ReadonlyMap<string, readonly CompactBand[]>;
   rowHeight: number; railWidth: number; dayWidth: number; colors: AppColors;
@@ -15,7 +15,8 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
   disabled: boolean; scrolling: boolean; timeLabel: (minute: number) => string;
   onSelect: (day: string, minute: number) => void; onHold: (day: string, minute: number) => void;
   onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void; onBegin: () => void; onEnd: () => void;
-  onLayout: () => void; onContentSizeChange: () => void; refreshControl?: ReactElement;
+  onLayout: () => void; onContentSizeChange: (width: number, height: number) => void; refreshControl?: ReactElement; hidden?: boolean;
+  backgroundColor?: string; gridLineColor?: string;
 }) {
   const touch = useRef<Touch | null>(null);
   const previousGeometry = useRef({ days: days.join('|'), rowHeight });
@@ -32,12 +33,12 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
     const held = touch.current;
     if (held && (event.nativeEvent.touches.length !== 1 || Math.hypot(event.nativeEvent.pageX - held.x, event.nativeEvent.pageY - held.y) > 8)) touch.current = null;
   }
-  return <ScrollView ref={scrollRef} style={{ flex: 1 }} scrollEnabled={scrolling} nestedScrollEnabled
+  return <ScrollView ref={scrollRef} style={{ flex: 1, opacity: hidden ? 0 : 1 }} pointerEvents={hidden ? 'none' : 'auto'} scrollEnabled={scrolling} nestedScrollEnabled
     keyboardShouldPersistTaps="always" keyboardDismissMode="on-drag" scrollEventThrottle={16} refreshControl={refreshControl}
     onScroll={onScroll} onScrollBeginDrag={onBegin} onMomentumScrollBegin={onBegin}
     onScrollEndDrag={onEnd} onMomentumScrollEnd={onEnd} onLayout={onLayout} onContentSizeChange={onContentSizeChange}>
     <View style={{ height, width: railWidth + days.length * dayWidth, flexDirection: 'row' }}>
-      <View accessible={false} pointerEvents="none" style={{ width: railWidth, height, backgroundColor: colors.surface }}>
+      <View accessible={false} pointerEvents="none" style={{ width: railWidth, height, backgroundColor }}>
         {Array.from({ length: 25 }, (_, hour) => hour % hourStep === 0 || hour === 24 ? <Text key={hour} numberOfLines={1} maxFontSizeMultiplier={1.4}
           style={{ position: 'absolute', right: 2, top: Math.max(0, Math.min(height - 20, hour * 60 * rowHeight - 10)),
             fontSize: 16, lineHeight: 20, color: colors.muted }}>{hour === 24 ? timeLabel(0) : timeLabel(hour * 60)}</Text> : null)}
@@ -51,7 +52,7 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
         onTouchStart={(event) => start(day, event)} onTouchMove={move} onTouchCancel={() => { touch.current = null; }}
         onLongPress={() => { const held = touch.current; if (held && held.day === day && !disabled) { held.long = true; onHold(day, held.minute); } }}
         onPress={() => { const held = touch.current; touch.current = null; if (held && held.day === day && !held.long && !disabled) onSelect(day, held.minute); }}
-        style={{ width: dayWidth, height, backgroundColor: colors.calendarCell, borderLeftWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline }}>
+        style={{ width: dayWidth, height, backgroundColor, borderLeftWidth: StyleSheet.hairlineWidth, borderColor: gridLineColor }}>
         <View pointerEvents="none" accessible={false} style={StyleSheet.absoluteFill}>
           {(bands.get(day) ?? []).map((band, index) => {
             const bandHeight = (band.endMinute - band.startMinute) * rowHeight;
@@ -71,7 +72,7 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
             </View> : null;
           })}
           {Array.from({ length: 25 }, (_, hour) => <View key={hour} style={{ position: 'absolute', left: 0, right: 0,
-            top: Math.min(height - StyleSheet.hairlineWidth, hour * 60 * rowHeight), height: StyleSheet.hairlineWidth, backgroundColor: colors.hairline }} />)}
+            top: Math.min(height - StyleSheet.hairlineWidth, hour * 60 * rowHeight), height: StyleSheet.hairlineWidth, backgroundColor: gridLineColor }} />)}
           {current.day === day ? <View style={{ position: 'absolute', left: 0, right: 0, top: (current.minute + 1) * rowHeight,
             height: 2, backgroundColor: colors.currentTime }} /> : null}
           {selection?.day === day ? <View style={{ position: 'absolute', left: 0, right: 0, top: selection.first * rowHeight,

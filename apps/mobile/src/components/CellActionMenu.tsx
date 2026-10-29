@@ -12,7 +12,6 @@ export type CellActionMenuProps = {
   onCut: () => void;
   onCopy: () => void;
   onAutoFill?: () => void;
-  onClear?: () => void;
   onReset?: () => void;
   onGroup?: () => void;
   onUngroup?: () => void;
@@ -41,7 +40,7 @@ export type CellActionMenuProps = {
   onTouchActiveChange?: (active: boolean) => void;
 };
 
-export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onReset, onGroup, onUngroup, onEvent, onEdit, onPaste,
+export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onReset, onGroup, onUngroup, onEvent, onEdit, onPaste,
   canPaste = Boolean(onPaste), onClose, error, maxHeight, maxWidth, width, onWidthChange, onHeightChange, onTouchActiveChange,
 }: CellActionMenuProps) {
   const { colors } = useAppTheme();
@@ -57,7 +56,6 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onClear, onRes
     { id: 'cut', label: 'Cut selected minute cells', run: onCut },
     { id: 'copy', label: 'Copy selected minute cells', run: onCopy },
     { id: 'paste', label: 'Paste into selected minute cells', run: onPaste, disabled: !canPaste || !onPaste },
-    ...(onClear ? [{ id: 'clear' as const, label: 'Clear selected minute cells', run: onClear }] : []),
     ...(onAutoFill ? [{ id: 'fill' as const, label: 'Auto fill selected minute cells', run: onAutoFill }] : []),
     ...(onGroup ? [{ id: 'group' as const, label: 'Group selected minute cells', run: onGroup }] : []),
     ...(onUngroup ? [{ id: 'ungroup' as const, label: 'Ungroup selected minute cells', run: onUngroup }] : []),

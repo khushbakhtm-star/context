@@ -33,6 +33,19 @@ function nodes(tree) {
   return !tree || typeof tree !== 'object' ? [] : [tree, ...[tree.props?.children].flat(Infinity).flatMap(nodes)];
 }
 const flatStyle = (style) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
+function arrowTip(arms) {
+  const endpoints = arms.map((style) => {
+    const angle = parseFloat(style.transform[0].rotate) * Math.PI / 180;
+    const x = style.left + style.width / 2, y = style.top + style.height / 2;
+    return [-1, 1].map((sign) => [x + sign * style.width / 2 * Math.cos(angle), y + sign * style.width / 2 * Math.sin(angle)]);
+  });
+  const pairs = endpoints[0].flatMap((first) => endpoints[1].map((second) => ({
+    distance: Math.hypot(first[0] - second[0], first[1] - second[1]),
+    x: (first[0] + second[0]) / 2, y: (first[1] + second[1]) / 2,
+  }))).sort((a, b) => a.distance - b.distance);
+  assert.ok(pairs[0].distance < 0.5, 'the arrow arms must join at one tip');
+  return pairs[0];
+}
 
 test('active and idle sync use distinct static grayscale loops with the existing stroke weight', () => {
   for (const graphite of ['#333333', '#E3E1DD']) {
@@ -42,6 +55,7 @@ test('active and idle sync use distinct static grayscale loops with the existing
     const open = nodes(idle).find((node) => node.props.testID === 'sync-loop-open');
     const closedStyle = flatStyle(closed.props.style), openStyle = flatStyle(open.props.style);
     assert.equal(closedStyle.borderWidth, 2); assert.equal(closedStyle.borderColor, graphite);
+    assert.ok(closedStyle.width > closedStyle.height, 'the loop is a horizontally oriented oval');
     assert.equal(closedStyle.borderLeftColor, undefined); assert.equal(closedStyle.borderRightColor, undefined);
     assert.equal(openStyle.borderWidth, 2); assert.equal(openStyle.borderColor, graphite);
     assert.equal(openStyle.borderLeftColor, 'transparent'); assert.equal(openStyle.borderRightColor, 'transparent');
@@ -49,6 +63,14 @@ test('active and idle sync use distinct static grayscale loops with the existing
       assert.equal(nodes(tree).filter((node) => flatStyle(node.props.style).width === 6 && flatStyle(node.props.style).height === 2).length, 4,
         'both loop states retain the same pair of arrowheads');
       assert.ok(nodes(tree).every((node) => node.type === 'View' || node.type === 'Fragment'));
+      const upper = nodes(tree).filter((node) => node.props.testID === 'sync-top-arrow').map((node) => flatStyle(node.props.style));
+      const lower = nodes(tree).filter((node) => node.props.testID === 'sync-bottom-arrow').map((node) => flatStyle(node.props.style));
+      assert.equal(upper.length, 2); assert.equal(lower.length, 2);
+      const topTip = arrowTip(upper), bottomTip = arrowTip(lower);
+      assert.ok(upper.every((style) => topTip.x < style.left + style.width / 2), 'top arrow points left');
+      assert.ok(lower.every((style) => bottomTip.x > style.left + style.width / 2), 'bottom arrow points right');
+      assert.ok(Math.abs(topTip.x - 9) < 0.5 && Math.abs(topTip.y - 5) < 0.5, 'top arrow sits on the upper horizontal run');
+      assert.ok(Math.abs(bottomTip.x - 15) < 0.5 && Math.abs(bottomTip.y - 19) < 0.5, 'bottom arrow sits on the lower horizontal run');
     }
   }
 });

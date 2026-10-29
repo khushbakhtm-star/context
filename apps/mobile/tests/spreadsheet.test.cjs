@@ -61,7 +61,7 @@ test('overnight text fills preserve complete text, fills, formats and borders wi
   await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(next, 1)).text, text);
 });
 
-test('explicit pencil resizing retains the exact source border and leaves old outside notes private without creating remainder events', async (t) => {
+test('explicit pencil resizing retains the exact source border and keeps distinct outside notes private without the old event fill', async (t) => {
   const { api, sheet } = harness(t); await api.initializeDatabase(); const next = '2026-10-26';
   await save(api, 1438, 'Before sleep', 'family'); await save(api, 1439, 'Lights off', 'family');
   await sheet.groupMinuteRange(range(1438, 1439), { title: 'Old name', categoryId: 'family' });
@@ -73,14 +73,74 @@ test('explicit pencil resizing retains the exact source border and leaves old ou
   await sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
   assert.deepEqual((await api.getEntriesForBlock(blockId)).map((entry) => [entry.dateKey, entry.minuteIndex]), [[next, 0], [next, 1], [next, 2]]);
   assert.equal((await api.getMinuteEntry(day, 1438)).text, 'Before sleep');
-  assert.equal((await api.getMinuteEntry(day, 1438)).categoryId, 'family');
+  assert.equal((await api.getMinuteEntry(day, 1438)).categoryId, 'unaccounted');
   assert.ok((await api.getMinuteEntry(day, 1438)).blockId.startsWith('sheet_'));
-  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(1438)), { bold: true });
+  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(1438)), { bold: true, noFill: true });
   assert.deepEqual(plain(await sheet.getDayActivityGroups(day)), []);
   assert.equal((await sheet.getDayActivityGroups(next))[0].blockId, blockId);
   await sheet.undoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 1438)).blockId, blockId);
   assert.equal(await api.getMinuteEntry(next, 0), null);
   await sheet.redoSpreadsheetEdit(); assert.equal((await api.getEntriesForBlock(blockId)).length, 3);
+});
+
+test('correcting an overnight uniform Sleep fill replaces both old dates with one same-day border and one Undo', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  const startDay = '2026-10-29', endDay = '2026-10-30';
+  await api.saveMinuteEntry({ dateKey: startDay, minuteIndex: 600, text: 'Outside before the fill', categoryId: 'work' });
+  await api.saveMinuteEntry({ dateKey: endDay, minuteIndex: 600, text: 'Outside after the fill', categoryId: 'family' });
+  const wrong = { startDateKey: startDay, startMinute: 724, endDateKey: endDay, endMinute: 444 };
+  let input = { text: 'Sleep', event: { title: 'Sleep', categoryId: 'sleep' } };
+  let preview = await sheet.prepareMinuteSpanFill(wrong, input);
+  const created = await sheet.fillMinuteSpan(wrong, input, { previewToken: preview.token });
+  const blockId = created.blockId; assert.ok(blockId);
+  assert.deepEqual(plain(created.affectedDates), [startDay, endDay]);
+  const oldCount = (await api.getEntriesForBlock(blockId)).length;
+  assert.equal(oldCount, 1160);
+  // A single Undo must restore the complete old range, including these styles.
+  await sheet.applyCellFormat(range(725, 725, startDay), { italic: true, textColor: '#123456' });
+  const corrected = { startDateKey: startDay, startMinute: 0, endDateKey: startDay, endMinute: 444 };
+  input = { text: 'Sleep', event: { blockId, title: 'Sleep', categoryId: 'sleep' } };
+  preview = await sheet.prepareMinuteSpanFill(corrected, input);
+  const applied = await sheet.fillMinuteSpan(corrected, input, { previewToken: preview.token });
+  assert.equal(applied.blockId, blockId); assert.deepEqual(new Set(applied.affectedDates), new Set([startDay, endDay]));
+  const members = await api.getEntriesForBlock(blockId);
+  assert.equal(members.length, 444);
+  assert.ok(members.every((entry) => entry.dateKey === startDay && entry.minuteIndex < 444 && entry.text === 'Sleep' && entry.categoryId === 'sleep'));
+  for (const dateKey of [startDay, endDay]) {
+    const oldCells = await api.getSpreadsheetCells(range(dateKey === startDay ? 724 : 0, dateKey === startDay ? 1439 : 443, dateKey));
+    assert.ok(oldCells.every((cell) => cell.entry === null && Object.keys(cell.format).length === 0), 'removed uniform fill is a default cell');
+  }
+  assert.equal(await api.getMinuteEntry(startDay, 444), null, 'the calendar endpoint starts the next minute');
+  assert.equal((await api.getMinuteEntry(startDay, 600)).text, 'Outside before the fill');
+  assert.equal((await api.getMinuteEntry(endDay, 600)).text, 'Outside after the fill');
+  assert.deepEqual(plain(await sheet.getDayActivityGroups(endDay)), []);
+  await sheet.undoSpreadsheetEdit();
+  assert.equal((await api.getEntriesForBlock(blockId)).length, oldCount);
+  assert.equal(await api.getMinuteEntry(startDay, 0), null);
+  assert.deepEqual(plain((await sheet.getDayCellFormats(startDay)).get(725)), { italic: true, textColor: '#123456', activityGroup: { id: blockId, title: 'Sleep' } });
+  await sheet.redoSpreadsheetEdit();
+  assert.equal((await api.getEntriesForBlock(blockId)).length, 444);
+  assert.equal(await api.getMinuteEntry(endDay, 0), null);
+});
+
+test('extending a uniform event fills each newly included minute while preserving its exact block identity', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  let span = { startDateKey: day, startMinute: 1200, endDateKey: day, endMinute: 1256 };
+  let input = { text: 'Gaming', event: { title: 'Gaming', categoryId: 'study' } };
+  let preview = await sheet.prepareMinuteSpanFill(span, input);
+  const { blockId } = await sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  assert.equal(await api.getMinuteEntry(day, 1256), null);
+  span = { ...span, endMinute: 1257 }; input = { ...input, event: { ...input.event, blockId } };
+  preview = await sheet.prepareMinuteSpanFill(span, input);
+  const applied = await sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  assert.equal(applied.blockId, blockId);
+  const added = await api.getMinuteEntry(day, 1256);
+  assert.equal(added.text, 'Gaming'); assert.equal(added.categoryId, 'study'); assert.equal(added.blockId, blockId);
+  assert.equal((await api.getEntriesForBlock(blockId)).length, 57);
+  assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(1256).activityGroup), { id: blockId, title: 'Gaming' });
+  assert.equal(await api.getMinuteEntry(day, 1257), null, 'the next activity begins at the calendar endpoint');
+  await sheet.undoSpreadsheetEdit(); assert.equal(await api.getMinuteEntry(day, 1256), null);
+  await sheet.redoSpreadsheetEdit(); assert.equal((await api.getMinuteEntry(day, 1256)).text, 'Gaming');
 });
 
 test('overnight preview guards all destination cells and the complete old border including disjoint members and ABA changes', async (t) => {

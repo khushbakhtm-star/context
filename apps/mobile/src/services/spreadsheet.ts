@@ -15,6 +15,7 @@ export type { MinuteSpan } from '../utils/minute-span';
 export type MinuteSpanFillInput = { text?: string; event?: { title: string; categoryId: string; blockId?: string } };
 export type MinuteSpanFillPreview = { token: string; span: MinuteSpan; ranges: MinuteCellRange[];
   cellCount: number; occupiedCount: number };
+export type MinuteSpanFillResult = { affectedDates: string[]; blockId: string | null };
 export type CellFormatPatch = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string | null };
 export type MinuteDisplayedColorFallback = { minuteIndex: number; categoryId: string };
 export type SpreadsheetCommit = { affectedDates: string[]; textChanged: boolean };
@@ -482,7 +483,7 @@ class SpreadsheetEditor {
         cellCount: preview.cellCount, occupiedCount: preview.occupiedCount };
     });
   }
-  fillSpan(span: MinuteSpan, input: MinuteSpanFillInput, options: { previewToken: string }) {
+  fillSpan(span: MinuteSpan, input: MinuteSpanFillInput, options: { previewToken: string }): Promise<MinuteSpanFillResult> {
     minuteSpanRanges(span); const normalized = this.spanInput(input);
     const requested = { startDateKey: span.startDateKey, startMinute: span.startMinute,
       endDateKey: span.endDateKey, endMinute: span.endMinute };
@@ -517,11 +518,17 @@ class SpreadsheetEditor {
         const remainder = member.cells.filter(({ day, cell }) => !isSelected(day, cell.minuteIndex))
           .sort((a, b) => a.day.localeCompare(b.day) || a.cell.minuteIndex - b.cell.minuteIndex);
         if (member.blockId === normalized.event?.blockId) {
-          // Explicit pencil resizing retains the source identity only on the new
-          // bounds. Outside notes stay private, with their colors/styles intact.
+          // Resizing replaces the old event bounds rather than leaving a second
+          // colored copy of a uniform range fill. Distinct minute annotations
+          // remain private notes, without the removed event's fill or border.
+          const uniformText = new Set(member.cells.map(({ cell }) => cell.entry!.text)).size === 1;
           for (const { day, cell: original } of remainder) {
-            const cell = include(day, original); cell.entry = { ...cell.entry!, blockId: this.newToken('sheet') };
-            cell.format = withoutEventLabel(cell.format);
+            const cell = include(day, original);
+            const keepNote = !uniformText && Boolean(cell.entry!.text.trim());
+            cell.entry = keepNote ? { ...cell.entry!, categoryId: 'unaccounted', blockId: this.newToken('sheet') } : null;
+            cell.format = keepNote ? normalizeCellFormat({ ...withoutEventLabel(cell.format), noFill: true }) : {};
+            if (cell.display) cell.display = { ...cell.display, text: cell.entry?.text ?? '',
+              categoryId: 'unaccounted', keepColor: false };
           }
           continue;
         }
@@ -575,6 +582,7 @@ class SpreadsheetEditor {
           canApply: () => this.spanFillPreview?.token === preview.token });
       }
       this.spanFillPreview = null;
+      return { affectedDates: patches.map((patch) => patch.day), blockId: targetId };
     });
   }
   resetCells(range: MinuteCellRange) {

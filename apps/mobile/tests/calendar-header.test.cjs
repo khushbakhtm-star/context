@@ -77,7 +77,9 @@ function headerHarness(props = {}, options = {}) {
   }
   const press = (button) => { button.props.onPressIn?.({ nativeEvent: { touches: [{}] } }); button.props.onPress(); };
   render();
-  return { calls, advance, render, nodes, press, binder: () => nodes().find((node) => /^.* view\. Choose a view/.test(node.props.accessibilityLabel ?? '')),
+  const hold = (button) => { button.props.onPressIn?.({ nativeEvent: { touches: [{}] } }); advance(450);
+    button.props.onLongPress(); button.props.onPress(); };
+  return { calls, advance, render, nodes, press, hold, binder: () => nodes().find((node) => /^.* view\. Go to now/.test(node.props.accessibilityLabel ?? '')),
     async settle() { for (let i = 0; i < 25; i++) await Promise.resolve(); render(); },
     changeHeight: (height) => { dimensions.height = height; render(); },
     background: () => { state.currentState = 'background'; for (const listener of listeners) listener('background'); },
@@ -85,71 +87,76 @@ function headerHarness(props = {}, options = {}) {
   };
 }
 
-test('single binder tap opens choices after saving; double tap goes only to Now', async () => {
-  const h = headerHarness({ viewMode: 'week' }); assert.equal(h.binder().props.children.props.mode, 'week');
-  h.press(h.binder()); h.advance(299); assert.equal(h.calls.now, 0); h.advance(1); await h.settle();
+test('one released view-icon tap goes immediately to Now in every current view without opening choices', async () => {
+  for (const viewMode of ['day', 'week', 'month', 'year', 'schedule']) {
+    const h = headerHarness({ viewMode }); assert.equal(h.binder().props.children.props.mode, viewMode);
+    h.press(h.binder()); assert.equal(h.calls.now, 1, 'Now does not wait for a second-tap timer');
+    h.advance(600); await h.settle();
+    assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
+  }
+});
+
+test('holding the current-view icon opens choices after saving and consumes its release', async () => {
+  const h = headerHarness({ viewMode: 'week' }); h.hold(h.binder()); await h.settle();
   const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible); assert.ok(menu);
   assert.deepEqual(h.nodes(menu).filter((node) => node.type === 'Pressable' && / view$/.test(node.props.accessibilityLabel ?? ''))
     .map((node) => node.props.accessibilityLabel), ['Day view', 'Week view', 'Month view', 'Year view', 'Schedule view']);
   h.nodes(menu).find((node) => node.props.accessibilityLabel === 'Month view').props.onPress();
   assert.deepEqual(h.calls.modes, ['month']); assert.equal(h.calls.now, 0);
-  const double = headerHarness(); double.press(double.binder()); double.advance(100); double.press(double.binder());
-  double.advance(400); await double.settle(); assert.equal(double.calls.now, 1);
-  assert.equal(double.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
 });
 
-test('long hold consumes the binder gesture and lifecycle cancellation never opens choices or dates', async () => {
-  const h = headerHarness(); h.press(h.binder()); h.advance(100);
+test('lifecycle cancellation consumes an unfinished view-icon touch and cannot open choices or dates later', async () => {
+  const h = headerHarness();
   const binder = h.binder(); binder.props.onPressIn({ nativeEvent: { touches: [{}] } });
-  h.advance(450); binder.props.onLongPress(); binder.props.onLongPress(); binder.props.onPress(); h.advance(500); await h.settle();
+  h.background(); h.advance(450); binder.props.onLongPress(); binder.props.onPress(); await h.settle();
   assert.equal(h.calls.picker, 0); assert.equal(h.calls.now, 0);
   assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
-  h.press(h.binder()); h.background(); h.advance(400); await h.settle();
-  assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
-  const active = headerHarness(); active.press(active.binder()); active.unmount(); active.advance(400); assert.equal(active.calls.now, 0);
+  const active = headerHarness(); const old = active.binder(); old.props.onPressIn({ nativeEvent: { touches: [{}] } });
+  active.unmount(); old.props.onPress(); active.advance(400); assert.equal(active.calls.now, 0);
 });
 
-test('second down pauses the single action so its later release still goes only to Now', async () => {
-  const h = headerHarness(); h.press(h.binder()); h.advance(250);
+test('duplicate release callbacks navigate once and the next separate tap works immediately', async () => {
+  const h = headerHarness();
   const binder = h.binder(); binder.props.onPressIn({ nativeEvent: { touches: [{}] } });
-  h.advance(200); assert.equal(h.calls.now, 0); binder.props.onPress(); h.advance(400); await h.settle();
-  assert.equal(h.calls.now, 1); assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
+  binder.props.onPress(); binder.props.onPress(); assert.equal(h.calls.now, 1);
+  h.press(h.binder()); assert.equal(h.calls.now, 2);
+  h.advance(400); await h.settle(); assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
 });
 
 test('canceled second release cannot cause a later stray action and Pick / Range is an ordinary menu option', async () => {
-  const h = headerHarness(); h.press(h.binder()); h.advance(100);
+  const h = headerHarness();
   const binder = h.binder(); binder.props.onPressIn({ nativeEvent: { touches: [{}] } });
   h.advance(250); binder.props.onTouchEnd(); h.advance(0); h.advance(600); await h.settle(); assert.equal(h.calls.now, 0);
-  h.press(h.binder()); h.advance(300); await h.settle();
+  h.hold(h.binder()); await h.settle();
   const option = h.nodes().find((node) => node.props.accessibilityLabel === 'Pick or range dates'); assert.ok(option);
   option.props.onPress(); assert.equal(h.calls.picker, 0); h.advance(0); assert.equal(h.calls.picker, 1);
 });
 
-test('touching another header control cancels the delayed view action', async () => {
-  const h = headerHarness(); h.press(h.binder()); h.advance(100);
+test('touching another header control cancels an unfinished view-icon gesture', async () => {
+  const h = headerHarness(); const binder = h.binder(); binder.props.onPressIn({ nativeEvent: { touches: [{}] } });
   const sync = h.nodes().find((node) => node.props.accessibilityLabel === 'Sync attached calendars');
-  sync.props.onPressIn(); h.advance(400); await h.settle();
+  sync.props.onPressIn(); binder.props.onPress(); h.advance(400); await h.settle(); assert.equal(h.calls.now, 0);
   assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
   sync.props.onPress(); assert.equal(h.calls.sync, 1);
 });
 
 test('view choices wait for the dated draft acknowledgement and refuse a failed save', async () => {
   let release; const wait = new Promise((resolve) => release = resolve);
-  const h = headerHarness({}, { flush: () => wait }); h.press(h.binder()); h.advance(300); await h.settle();
+  const h = headerHarness({}, { flush: () => wait }); h.hold(h.binder()); await h.settle();
   assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
   release(); await h.settle(); assert.ok(h.nodes().some((node) => node.type === 'Modal' && node.props.visible));
   const failed = headerHarness({}, { drafts: [{ error: true, revision: 1, savedRevision: 0 }] });
-  failed.press(failed.binder()); failed.advance(300); await failed.settle(); assert.equal(failed.calls.errors.length, 1);
+  failed.hold(failed.binder()); await failed.settle(); assert.equal(failed.calls.errors.length, 1);
   assert.equal(failed.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
 });
 
 test('iOS opens Pick / Range only after the view sheet dismisses and cancels a stale background handoff', async () => {
-  const h = headerHarness({}, { os: 'ios' }); h.press(h.binder()); h.advance(300); await h.settle();
+  const h = headerHarness({}, { os: 'ios' }); h.hold(h.binder()); await h.settle();
   const modal = h.nodes().find((node) => node.type === 'Modal' && node.props.visible);
   h.nodes(modal).find((node) => node.props.accessibilityLabel === 'Pick or range dates').props.onPress();
   h.advance(0); assert.equal(h.calls.picker, 0); modal.props.onDismiss(); assert.equal(h.calls.picker, 1);
   modal.props.onDismiss(); assert.equal(h.calls.picker, 1);
-  const stale = headerHarness({}, { os: 'ios' }); stale.press(stale.binder()); stale.advance(300); await stale.settle();
+  const stale = headerHarness({}, { os: 'ios' }); stale.hold(stale.binder()); await stale.settle();
   const old = stale.nodes().find((node) => node.type === 'Modal' && node.props.visible);
   stale.nodes(old).find((node) => node.props.accessibilityLabel === 'Pick or range dates').props.onPress();
   stale.background(); old.props.onDismiss(); assert.equal(stale.calls.picker, 0);

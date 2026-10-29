@@ -4,6 +4,11 @@ export const CALENDAR_TIME_RAIL = 88;
 export const CALENDAR_BASE_ROW_HEIGHT = 34;
 export const CALENDAR_COMPACT_ROW_HEIGHT = 9;
 
+export function calendarGridPaint(colors: { surface: string; hairline: string }, mode: 'light' | 'dark') {
+  return { background: mode === 'dark' ? '#000000' : colors.surface,
+    line: mode === 'dark' ? '#3A393D' : colors.hairline };
+}
+
 export function normalizeCalendarZoom(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.round(Math.max(0.0001, Math.min(2.5, value)) * 1_000_000) / 1_000_000 : 1;
@@ -45,7 +50,7 @@ export function calendarGridLayout(viewport: number, preset: CalendarDayCount, v
   const dayWidth = (viewportWidth - railWidth) / dayCount;
   const contentWidth = viewportWidth;
   const height = CALENDAR_BASE_ROW_HEIGHT * zoom;
-  return { viewportWidth, dayWidth, contentWidth, railWidth, zoom, rowHeight: height < CALENDAR_COMPACT_ROW_HEIGHT ? height : Math.round(height),
+  return { viewportWidth, dayWidth, contentWidth, railWidth, zoom, rowHeight: height,
     maxOffset: Math.max(0, contentWidth - viewportWidth), dayCount };
 }
 
@@ -56,6 +61,20 @@ export function calendarZoomOffsets(anchor: CalendarZoomAnchor, layout: ReturnTy
     x: Math.max(0, Math.min(layout.maxOffset, layout.railWidth + anchor.day * layout.dayWidth - anchor.viewportX)),
     y: Math.max(0, Math.min(1440 * layout.rowHeight - Math.max(0, viewportHeight), anchor.minute * layout.rowHeight - anchor.viewportY)),
   };
+}
+
+/** A passive full-day preview uses only native transforms while the committed
+ * virtualized grid keeps its existing item layout until the gesture is released. */
+export function calendarPinchPreviewGeometry(anchor: CalendarZoomAnchor, baseRowHeight: number,
+  targetRowHeight: number, viewportHeight: number) {
+  if (![baseRowHeight, targetRowHeight, viewportHeight, anchor.minute, anchor.viewportY].every(Number.isFinite) ||
+      baseRowHeight <= 0 || targetRowHeight <= 0 || viewportHeight <= 0) {
+    throw new Error('Invalid calendar pinch geometry.');
+  }
+  const offset = Math.max(0, Math.min(1440 * targetRowHeight - viewportHeight,
+    anchor.minute * targetRowHeight - anchor.viewportY));
+  const scaleY = targetRowHeight / baseRowHeight;
+  return { scaleY, inverseScaleY: 1 / scaleY, translateY: -offset, offset };
 }
 
 /** The pinned time rail covers the left portion of the scrolling content. Reveal the

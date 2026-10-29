@@ -1194,9 +1194,9 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   };
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
-  const binderActions = useRef({ single: () => {}, double: () => {}, long: () => {} });
+  const binderActions = useRef({ single: () => {}, long: () => {} });
   const binderPress = useMemo(() => createCalendarBinderPress({ allowed: () => headerMayNavigate(),
-    single: () => binderActions.current.single(), double: () => binderActions.current.double(),
+    single: () => binderActions.current.single(),
     long: () => binderActions.current.long() }), []);
 
   function invalidateMenus(render = true) {
@@ -1372,7 +1372,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       gearActionFrame.current = null; viewClosingRef.current = false; finishGearAction(sequence);
     });
   };
-  binderActions.current = { single: openViews, double: onJumpToNow, long: () => {} };
+  binderActions.current = { single: onJumpToNow, long: openViews };
   const viewLabel = CALENDAR_VIEW_OPTIONS.find((option) => option.mode === viewMode)?.label ?? 'Day';
 
   return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
@@ -1394,8 +1394,8 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
     </Pressable>
     <View ref={viewMenuAnchor} collapsable={false}>
-      <Pressable accessibilityRole="button" accessibilityLabel={`${viewLabel} view. Choose a view`}
-        accessibilityHint="Tap to change view. Double tap to go to the current minute."
+      <Pressable accessibilityRole="button" accessibilityLabel={`${viewLabel} view. Go to now`}
+        accessibilityHint="Tap to go to the current minute. Press and hold to choose a view."
         accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy, busy: viewChanging }} disabled={navigationBusy}
         accessibilityActions={[{ name: 'showViews', label: 'Choose calendar view' }, { name: 'goToNow', label: 'Go to the current minute' }]}
         onAccessibilityAction={(event) => {

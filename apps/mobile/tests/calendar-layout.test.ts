@@ -123,7 +123,7 @@ test('all seven dates fit narrow S23 layouts at every zoom and supported font sc
         assert.equal(layout.dayWidth, (viewport - layout.railWidth) / count);
         assert.ok(Math.abs(layout.railWidth + count * layout.dayWidth - viewport) < 0.000001);
         assert.equal(layout.contentWidth, viewport); assert.equal(layout.maxOffset, 0);
-        assert.equal(layout.rowHeight, Math.max(17, Math.round(34 * zoom)));
+        assert.equal(layout.rowHeight, 34 * zoom, 'minute height stays continuous during zoom');
       }
     }
   }

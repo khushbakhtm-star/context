@@ -12,6 +12,7 @@ import { CellColorPalette } from '../components/CellColorPalette';
 import { CellActionMenu } from '../components/CellActionMenu';
 import { CellActionIcon } from '../components/CellActionIcon';
 import { CompactMinuteOverview } from '../components/CompactMinuteOverview';
+import { CalendarPinchPreview } from '../components/CalendarPinchPreview';
 import { MinuteSpanEditor, type MinuteSpanEditorSession } from '../components/MinuteSpanEditor';
 
 import { deleteMinuteEntry, getDayEntries, getMinuteEntry, getEntriesForBlock, saveMinuteRange } from '../data/database';
@@ -19,7 +20,7 @@ import { flushPendingActuals, loadPlannedEventsResult, openPlannedEvent, reconci
 import { ensureSourceColorCategory, listSelectableActivityCategories, subscribeWritablePaletteChanges } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits,
   subscribeInlineMinuteLinkWarnings } from '../services/inline-minutes';
-import { applyCellFormat, clearTextMinuteRange, colorMinuteRange, resetMinuteFill, resetMinuteCells, copyMinuteRange, cutMinuteRange, editInlineMinute,
+import { applyCellFormat, colorMinuteRange, resetMinuteFill, resetMinuteCells, copyMinuteRange, cutMinuteRange, editInlineMinute,
   fillMinuteRange, getDayActivityGroups, getDayCellFormats, getSpreadsheetClipboard, groupMinuteRange, pasteMinuteRange,
   prepareMinutePaste, prepareExternalMinutePaste, pasteExternalMinuteRange,
   prepareMinuteSpanFill, fillMinuteSpan, type MinuteSpan, type MinuteSpanFillInput,
@@ -37,7 +38,8 @@ import { analyzeCellSelection } from '../utils/cell-action-policy';
 import { calendarCellColor, calendarColor } from '../utils/calendar-cell-color';
 import { activityGroupDragGrip, activityGroupDropTarget, activityGroupDragScrollOffsets,
   type ActivityGroupDragGrip, type ActivityGroupDropTarget } from '../utils/activity-group-drag';
-import { calendarGridLayout, calendarZoomOffsets, normalizeCalendarZoom, calendarFitDayZoom, calendarPinchZoom, CALENDAR_COMPACT_ROW_HEIGHT, revealCalendarDay,
+import { calendarGridLayout, calendarGridPaint, calendarZoomOffsets, normalizeCalendarZoom, calendarFitDayZoom, calendarPinchZoom, calendarPinchPreviewGeometry,
+  CALENDAR_BASE_ROW_HEIGHT, CALENDAR_COMPACT_ROW_HEIGHT, revealCalendarDay,
   type CalendarZoomAnchor } from '../utils/calendar-layout';
 import { compactCalendarBands, compactCalendarOutlines, type CompactMinute } from '../utils/calendar-compact';
 import { minuteDetailsCount } from '../utils/minute-details';
@@ -55,12 +57,18 @@ import {
 } from '../utils/time';
 
 const MINUTE_ITEMS = Array.from({ length: MINUTES_PER_DAY }, (_, index) => index);
+const MINUTE_VIEWABILITY = { itemVisiblePercentThreshold: 0, waitForInteraction: false };
 
 type FocusRequest = { dateKey: string; minuteIndex: number; token: number; openEditor?: boolean } | null;
 type DayData = { entries: MinuteEntry[]; plans: PlannedEvent[]; calendarReadError: boolean;
   nativeReadError?: boolean; accountReadError?: boolean; colorReadError?: boolean; colorReadCause?: string;
   formats?: Map<number, CellFormat>; formatReadError?: boolean; groups?: ActivityGroup[]; groupReadError?: boolean };
 type CellCommandSelection = { selection: CalendarMinuteSelection; range: MinuteCellRange; generation: number };
+type PinchPreviewSnapshot = Pick<Parameters<typeof CalendarPinchPreview>[0],
+  'days' | 'bands' | 'outlines' | 'rowHeight' | 'railWidth' | 'dayWidth' | 'colors' | 'current' | 'selection' | 'backgroundColor' | 'gridLineColor'>;
+type PinchHandoff = { generation: number; token: number; rowHeight: number; offset: number;
+  first: number; last: number; compact: boolean; initialIndex?: number; contentReady: boolean;
+  cellsReady: boolean; restored: boolean; queued: boolean };
 function calendarAccessDenied(error: unknown) {
   if (!error || typeof error !== 'object') return false;
   const value = error as { code?: unknown; status?: unknown };
@@ -113,6 +121,15 @@ export function TodayScreen({
   const [minuteViewportHeight, setMinuteViewportHeight] = useState(500);
   const [liveZoom, setLiveZoom] = useState(() => normalizeCalendarZoom(zoom));
   const [pinching, setPinching] = useState(false);
+  const [pinchPreview, setPinchPreview] = useState<PinchPreviewSnapshot | null>(null);
+  const pinchPreviewDataRef = useRef<PinchPreviewSnapshot | null>(null);
+  const pinchPreviewScale = useRef(new Animated.Value(1, { useNativeDriver: true })).current;
+  const pinchPreviewInverseScale = useRef(new Animated.Value(1, { useNativeDriver: true })).current;
+  const pinchPreviewOffset = useRef(new Animated.Value(0, { useNativeDriver: true })).current;
+  const pinchSettlingRef = useRef<PinchHandoff | null>(null);
+  const pinchSequenceRef = useRef(0);
+  const visibleMinuteIndicesRef = useRef(new Set<number>());
+  const lastMinuteContentRef = useRef<{ height: number; compact: boolean } | null>(null);
   const zoomRef = useRef(liveZoom);
   const onZoomChangeRef = useRef(onZoomChange);
   onZoomChangeRef.current = onZoomChange;
@@ -135,6 +152,7 @@ export function TodayScreen({
     return layout;
   }, [viewportWidth, gridDayCount, liveZoom, navigationKey, measuredTimeWidths, timeWidthKey, explicitDays, minuteViewportHeight]);
   const styles = useMemo(() => createStyles(colors, resolvedMode, gridLayout), [colors, resolvedMode, gridLayout]);
+  const gridPaint = useMemo(() => calendarGridPaint(colors, resolvedMode), [colors, resolvedMode]);
   const days = useMemo(() => explicitDays ?? Array.from({ length: gridLayout.dayCount }, (_, index) => dateKey(addDays(baseDays[0]!, index))),
     [baseDays, gridLayout.dayCount, explicitDays]);
   const dayLabels = useMemo(() => new Map(days.map((day) => [day, formatDayHeading(day)])), [days]);
@@ -163,7 +181,7 @@ export function TodayScreen({
   const viewportMeasurementRef = useRef(0);
   const bodyWindowRef = useRef({ x: 0, y: insets.top + 110, height: 500 });
   const pendingZoomAnchorRef = useRef<(CalendarZoomAnchor & { generation: number }) | null>(null);
-  const pinchRef = useRef<{ distance: number; zoom: number; anchor: CalendarZoomAnchor; generation: number } | null>(null);
+  const pinchRef = useRef<{ distance: number; zoom: number; rowHeight: number; anchor: CalendarZoomAnchor; generation: number } | null>(null);
   const pinchFrameRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null);
   const pendingPinchZoomRef = useRef<number | null>(null);
   const periodSwipeRef = useRef(createCalendarPeriodSwipe());
@@ -485,9 +503,7 @@ export function TodayScreen({
     if (!target) return;
     cancelRangeDrag(false); cancelCellHold();
     selectionTokenRef.current += 1;
-    if (pinchFrameRef.current != null) cancelAnimationFrame(pinchFrameRef.current);
-    pinchFrameRef.current = null; pinchRef.current = null; pendingPinchZoomRef.current = null;
-    pendingZoomAnchorRef.current = null; setPinching(false);
+    cancelPinchPreview();
     // Keep the original input/Pressable mounted until the parent owns the held pointer.
     setGroupComposerOpen(false); setCellMenuOpen(false);
     cellTouchRef.current = null; cellActivationRef.current = null;
@@ -670,9 +686,7 @@ export function TodayScreen({
       verticalOffsetRef.current, gridLayoutRef.current.rowHeight, initialEnd);
     if (gripOffset == null) return;
     cancelRangeDrag(false);
-    if (pinchFrameRef.current != null) cancelAnimationFrame(pinchFrameRef.current);
-    pinchFrameRef.current = null; pinchRef.current = null; pendingPinchZoomRef.current = null;
-    pendingZoomAnchorRef.current = null; setPinching(false);
+    cancelPinchPreview();
     horizontalRef.current?.scrollTo({ x: horizontalOffsetRef.current, animated: false });
     scrollMinuteOffset(verticalOffsetRef.current);
     cellTouchRef.current = null; cellActivationRef.current = null;
@@ -752,7 +766,7 @@ export function TodayScreen({
   }
 
   function restoreZoomAnchor() {
-    if (rangeDragRef.current || groupDragRef.current) return;
+    if (rangeDragRef.current || groupDragRef.current || pinchRef.current) return;
     const anchor = pendingZoomAnchorRef.current;
     if (!anchor || !mountedRef.current || anchor.generation !== navigationGenerationRef.current) return;
     const offsets = calendarZoomOffsets(anchor, gridLayoutRef.current, bodyWindowRef.current.height);
@@ -771,29 +785,89 @@ export function TodayScreen({
     setLiveZoom(next);
   }
 
+  function previewPinchZoom(value: number) {
+    const pinch = pinchRef.current;
+    if (!pinch || pinch.generation !== navigationGenerationRef.current || !mountedRef.current) return;
+    const transform = calendarPinchPreviewGeometry(pinch.anchor, pinch.rowHeight,
+      CALENDAR_BASE_ROW_HEIGHT * value, bodyWindowRef.current.height);
+    pinchPreviewScale.setValue(transform.scaleY);
+    pinchPreviewInverseScale.setValue(transform.inverseScaleY);
+    pinchPreviewOffset.setValue(transform.translateY);
+  }
+
+  function cancelPinchPreview() {
+    if (pinchFrameRef.current != null) cancelAnimationFrame(pinchFrameRef.current);
+    pinchFrameRef.current = null; pinchRef.current = null; pendingPinchZoomRef.current = null;
+    pinchSettlingRef.current = null; pinchSequenceRef.current++;
+    pendingZoomAnchorRef.current = null; setPinchPreview(null); setPinching(false);
+  }
+
+  function finishPinchHandoff(handoff: PinchHandoff) {
+    if (handoff.queued || !handoff.restored || !handoff.cellsReady || !handoff.contentReady) return;
+    handoff.queued = true;
+    // Content/layout readiness comes first. Two paint opportunities then cover
+    // the new native cells; a slow FlatList batch never reveals an empty frame.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (!mountedRef.current || pinchSettlingRef.current !== handoff || pinchRef.current ||
+          handoff.generation !== navigationGenerationRef.current) return;
+      pinchSettlingRef.current = null; pendingZoomAnchorRef.current = null;
+      setPinchPreview(null); setPinching(false);
+    }));
+  }
+
+  function pinchContentReady(contentHeight: number, compact: boolean) {
+    lastMinuteContentRef.current = { height: contentHeight, compact };
+    const handoff = pinchSettlingRef.current;
+    if (!handoff || compact !== handoff.compact || handoff.generation !== navigationGenerationRef.current ||
+        Math.abs(contentHeight - handoff.rowHeight * 1440) > Math.max(2, contentHeight * 0.0001)) return;
+    handoff.contentReady = true;
+    if (!handoff.restored && Math.abs(gridLayoutRef.current.rowHeight - handoff.rowHeight) < 1e-6) {
+      handoff.restored = true; restoreZoomAnchor();
+    }
+    finishPinchHandoff(handoff);
+  }
+
+  const onMinuteViewableItemsChanged = useMemo(() => ({ viewableItems }: { viewableItems: { index?: number | null }[] }) => {
+    const indices = new Set(viewableItems.flatMap((item) => item.index == null ? [] : [item.index]));
+    visibleMinuteIndicesRef.current = indices;
+    const handoff = pinchSettlingRef.current;
+    if (!handoff || handoff.compact) return;
+    handoff.cellsReady = Array.from({ length: handoff.last - handoff.first + 1 }, (_, offset) => handoff.first + offset)
+      .every((index) => indices.has(index));
+    finishPinchHandoff(handoff);
+  }, []);
+
   function finishPinch() {
     if (pinchFrameRef.current != null) cancelAnimationFrame(pinchFrameRef.current);
     pinchFrameRef.current = null;
     const pinch = pinchRef.current;
-    if (!pinch || pinch.generation !== navigationGenerationRef.current || !mountedRef.current) {
-      pinchRef.current = null; pendingPinchZoomRef.current = null; pendingZoomAnchorRef.current = null;
-      setPinching(false); return;
+    if (!pinch) return;
+    if (pinch.generation !== navigationGenerationRef.current || !mountedRef.current || AppState.currentState !== 'active') {
+      cancelPinchPreview(); return;
     }
-    if (pinch && pendingPinchZoomRef.current != null) applyLiveZoom(pendingPinchZoomRef.current, pinch.anchor);
+    const next = pendingPinchZoomRef.current ?? pinch.zoom;
+    previewPinchZoom(next);
     pendingPinchZoomRef.current = null;
     pinchRef.current = null;
-    setPinching(false);
+    if (next === zoomRef.current) { cancelPinchPreview(); return; }
+    const rowHeight = CALENDAR_BASE_ROW_HEIGHT * next;
+    const target = calendarPinchPreviewGeometry(pinch.anchor, pinch.rowHeight, rowHeight, bodyWindowRef.current.height);
+    // Partial edge rows may be rounded out of native viewability at a device's
+    // pixel ratio. Only fully interior rows are needed to prove a painted window.
+    const middle = Math.min(1439, Math.floor((target.offset + bodyWindowRef.current.height / 2) / rowHeight));
+    const first = Math.min(middle, Math.ceil(target.offset / rowHeight));
+    const last = Math.max(middle, Math.min(1439, Math.floor((target.offset + bodyWindowRef.current.height) / rowHeight) - 1));
+    const compact = rowHeight < CALENDAR_COMPACT_ROW_HEIGHT;
+    const previousContent = lastMinuteContentRef.current;
+    pinchSettlingRef.current = { generation: pinch.generation, token: ++pinchSequenceRef.current,
+      rowHeight, offset: target.offset, first, last, compact,
+      ...(compactViewRef.current && !compact ? { initialIndex: Math.floor(target.offset / rowHeight) } : {}),
+      contentReady: Boolean(previousContent && previousContent.compact === compact &&
+        Math.abs(previousContent.height - rowHeight * 1440) <= 1), restored: false, queued: false,
+      cellsReady: compact || Array.from({ length: last - first + 1 }, (_, index) => first + index)
+        .every((index) => visibleMinuteIndicesRef.current.has(index)) };
+    applyLiveZoom(next, pinch.anchor);
     onZoomChangeRef.current?.(zoomRef.current);
-    const generation = navigationGenerationRef.current;
-    const anchor = pendingZoomAnchorRef.current;
-    requestAnimationFrame(() => {
-      if (!mountedRef.current || generation !== navigationGenerationRef.current || pendingZoomAnchorRef.current !== anchor) return;
-      restoreZoomAnchor();
-      requestAnimationFrame(() => {
-        if (mountedRef.current && generation === navigationGenerationRef.current &&
-            !pinchRef.current && pendingZoomAnchorRef.current === anchor) pendingZoomAnchorRef.current = null;
-      });
-    });
   }
 
   function periodSwipeBlocked() {
@@ -805,10 +879,10 @@ export function TodayScreen({
   const pinchResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponderCapture: (event) => {
       periodSwipeRef.current.start(event.nativeEvent.touches.length, periodSwipeBlocked());
-      return Boolean(groupDragRef.current) || (!rangeDragRef.current && event.nativeEvent.touches.length === 2);
+      return Boolean(groupDragRef.current) || (!rangeDragRef.current && !pinchSettlingRef.current && event.nativeEvent.touches.length === 2);
     },
     onMoveShouldSetPanResponderCapture: (event, gesture) => {
-      if (groupDragRef.current || (!rangeDragRef.current && event.nativeEvent.touches.length === 2)) {
+      if (groupDragRef.current || (!rangeDragRef.current && !pinchSettlingRef.current && event.nativeEvent.touches.length === 2)) {
         periodSwipeRef.current.cancel(); return true;
       }
       return periodSwipeRef.current.move(gesture, periodSwipeBlocked());
@@ -826,13 +900,16 @@ export function TodayScreen({
         return;
       }
       const [first, second] = event.nativeEvent.touches;
-      if (!first || !second) return;
+      const snapshot = pinchPreviewDataRef.current;
+      if (!first || !second || !snapshot || pinchSettlingRef.current) return;
       const distance = Math.hypot(second.pageX - first.pageX, second.pageY - first.pageY);
       if (distance < 8) return;
       horizontalRef.current?.scrollTo({ x: horizontalOffsetRef.current, animated: false });
       scrollMinuteOffset(verticalOffsetRef.current);
-      pinchRef.current = { distance, zoom: zoomRef.current, generation: navigationGenerationRef.current,
+      pinchRef.current = { distance, zoom: gridLayoutRef.current.zoom, rowHeight: gridLayoutRef.current.rowHeight, generation: navigationGenerationRef.current,
         anchor: captureZoomAnchor({ x: (first.pageX + second.pageX) / 2, y: (first.pageY + second.pageY) / 2 }) };
+      pinchPreviewScale.setValue(1); pinchPreviewInverseScale.setValue(1); pinchPreviewOffset.setValue(-verticalOffsetRef.current);
+      setPinchPreview(snapshot);
       setPinching(true);
     },
     onPanResponderMove: (event: GestureResponderEvent, gesture) => {
@@ -852,7 +929,7 @@ export function TodayScreen({
       if (pinchFrameRef.current == null) pinchFrameRef.current = requestAnimationFrame(() => {
         pinchFrameRef.current = null;
         if (mountedRef.current && pinchRef.current && pinchRef.current.generation === navigationGenerationRef.current &&
-            pendingPinchZoomRef.current != null) applyLiveZoom(pendingPinchZoomRef.current, pinchRef.current.anchor);
+            pendingPinchZoomRef.current != null) previewPinchZoom(pendingPinchZoomRef.current);
       });
     },
     onPanResponderRelease: (event, gesture) => {
@@ -864,8 +941,8 @@ export function TodayScreen({
       }
       else finishPinch();
     },
-    onPanResponderTerminate: () => { periodSwipeGenerationRef.current = null; periodSwipeRef.current.cancel(); cancelGroupDrag(); finishPinch(); },
-    onPanResponderReject: () => { periodSwipeGenerationRef.current = null; periodSwipeRef.current.cancel(); cancelGroupDrag(); finishPinch(); },
+    onPanResponderTerminate: () => { periodSwipeGenerationRef.current = null; periodSwipeRef.current.cancel(); cancelGroupDrag(); cancelPinchPreview(); },
+    onPanResponderReject: () => { periodSwipeGenerationRef.current = null; periodSwipeRef.current.cancel(); cancelGroupDrag(); cancelPinchPreview(); },
     onPanResponderTerminationRequest: () => false,
     onShouldBlockNativeResponder: () => true,
   }), []);
@@ -880,18 +957,34 @@ export function TodayScreen({
     requestAnimationFrame(() => {
       if (!mountedRef.current || generation !== navigationGenerationRef.current) return;
       measureMinuteViewport();
+      const handoff = pinchSettlingRef.current;
+      if (handoff) {
+        // A subpixel height change can round to the same native content size and
+        // legitimately emit no new size callback. The old acknowledgement is
+        // reusable only for this same renderer, after the new layout commits.
+        if (handoff.contentReady && !handoff.restored && Math.abs(gridLayoutRef.current.rowHeight - handoff.rowHeight) < 1e-6) {
+          handoff.restored = true; restoreZoomAnchor(); finishPinchHandoff(handoff);
+        }
+        return;
+      }
       if (pendingZoomAnchorRef.current) {
         const anchor = pendingZoomAnchorRef.current;
         restoreZoomAnchor();
         requestAnimationFrame(() => {
           if (mountedRef.current && generation === navigationGenerationRef.current && !pinchRef.current &&
-              pendingZoomAnchorRef.current === anchor) pendingZoomAnchorRef.current = null;
+              pendingZoomAnchorRef.current === anchor) {
+            pendingZoomAnchorRef.current = null;
+          }
         });
       } else if (horizontalOffsetRef.current > gridLayout.maxOffset) {
         horizontalRef.current?.scrollTo({ x: gridLayout.maxOffset, animated: false });
       }
     });
   }, [gridLayout]);
+
+  useEffect(() => {
+    if (pinchRef.current || pinchSettlingRef.current) cancelPinchPreview();
+  }, [viewportWidth, minuteViewportHeight, gridLayout.railWidth]);
 
   useEffect(() => () => { if (pinchFrameRef.current != null) cancelAnimationFrame(pinchFrameRef.current); }, []);
   const onHorizontalScroll = useMemo(() => Animated.event(
@@ -1026,12 +1119,7 @@ export function TodayScreen({
     cancelMenuTouch();
     cancelRangeDrag();
     cancelGroupDrag();
-    if (pinchFrameRef.current != null) cancelAnimationFrame(pinchFrameRef.current);
-    pinchFrameRef.current = null;
-    pinchRef.current = null;
-    pendingPinchZoomRef.current = null;
-    pendingZoomAnchorRef.current = null;
-    setPinching(false);
+    cancelPinchPreview();
     const requestedZoom = normalizeCalendarZoom(zoom);
     if (zoomRef.current !== requestedZoom) {
       dateBufferRef.current = { key: navigationKey, count: gridDayCount };
@@ -1109,6 +1197,7 @@ export function TodayScreen({
       const wasAway = appStateRef.current !== 'active';
       appStateRef.current = state;
       if (state !== 'active') {
+        cancelPinchPreview();
         cancelMenuTouch();
         cancelRangeDrag();
         cancelGroupDrag();
@@ -1316,7 +1405,7 @@ export function TodayScreen({
   }
 
   const openInlineMinute = useCallback(async (day: string, minute: number, editText = false,
-    group?: ActivityGroup, selectRange = false, keepViewport = false) => {
+    group?: ActivityGroup, selectRange = false, keepViewport = false, entryMode: 'entry' | 'format' = 'entry') => {
     const token = ++selectionTokenRef.current;
     const request = { dateKey: day, minuteIndex: minute, rangeKey: rangeRef.current, token };
     const currentState = () => ({ mounted: mountedRef.current, rangeKey: rangeRef.current,
@@ -1332,7 +1421,7 @@ export function TodayScreen({
       if (!calendarSelectionIsCurrent(request, currentState())) return;
       const selection = await loadCalendarMinuteSelection(request, { readEntry: getMinuteEntry,
         readPlans: (value) => dayDataRef.current[value]?.plans ?? [], currentState });
-      if (!selection || !calendarSelectionIsCurrent(request, currentState())) return;
+      if (!selection || !calendarSelectionIsCurrent(request, currentState()) || AppState.currentState !== 'active') return;
       inlineMinuteDrafts.activate({ dateKey: day, minuteIndex: minute,
         text: selection.entry?.text ?? '',
         categoryId: selection.entry?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted',
@@ -1343,7 +1432,7 @@ export function TodayScreen({
       focusedDayRef.current = day;
       focusCallbackRef.current?.({ dateKey: day, minuteIndex: minute });
       setInlineEditing(editText);
-      setEntryBarMode('entry'); setFormatPalette(null);
+      setEntryBarMode(entryMode); setFormatPalette(null);
       setCellMenuOpen(false);
       setGroupComposerOpen(false);
       setRangeSelecting(false);
@@ -1624,6 +1713,11 @@ export function TodayScreen({
   }); return { bands: new Map(values.map(([day, value]) => [day, value.bands])),
     outlines: new Map(values.map(([day, value]) => [day, value.outlines])) }; }, [days, indexedDays, indexedGroups, draftsByKey, dayData, availableColors, colors.ink,
     rangeSelecting, rangeColorChosen, groupHasGoogleColor, rangeColorId, selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute]);
+  pinchPreviewDataRef.current = { days, bands: compactData.bands, outlines: compactData.outlines,
+    rowHeight: gridLayout.rowHeight, railWidth: gridLayout.railWidth, dayWidth: gridLayout.dayWidth, colors,
+    backgroundColor: gridPaint.background, gridLineColor: gridPaint.line,
+    current: { day: today, minute: currentMinute },
+    selection: selectedRange ? { day: selectedRange.dateKey, first: selectedRange.startMinute, last: selectedRange.endMinute } : undefined };
   const cellPolicy = useMemo(() => {
     if (!selectedRange) return analyzeCellSelection([]);
     const index = indexedDays.get(selectedRange.dateKey);
@@ -1705,7 +1799,15 @@ export function TodayScreen({
     const range = command?.range ?? parsedRange();
     if (!selection || !range || !await prepareOptions(selection)) return;
     const token = selectionTokenRef.current, generation = navigationGenerationRef.current;
-    const group = indexedGroups.get(selection.dateKey)?.get(selection.minuteIndex);
+    // A just-saved border may not yet have reached the rendered day cache.
+    // Resolve this edit from committed cells rather than turning a stale tap
+    // into a new, unrelated event.
+    const [groups, selectedEntry] = await Promise.all([
+      getDayActivityGroups(selection.dateKey), getMinuteEntry(selection.dateKey, selection.minuteIndex),
+    ]);
+    if (!selectionStillCurrent(selection, token, generation)) return;
+    const group = groups.find((value) => value.blockId === selectedEntry?.blockId &&
+      selection.minuteIndex >= value.startMinute && selection.minuteIndex <= value.endMinute);
     const entries = group ? await getEntriesForBlock(group.blockId) : (await getDayEntries(range.dateKey))
       .filter((entry) => entry.minuteIndex >= range.startMinute && entry.minuteIndex <= range.endMinute);
     if (!selectionStillCurrent(selection, token, generation)) return;
@@ -1748,9 +1850,21 @@ export function TodayScreen({
       }
       if (input.event) for (const range of preview.ranges) recordExplicitColor(range.dateKey, range.startMinute, range.endMinute);
       markLocalChange(preview.ranges.map((range) => range.dateKey));
-      await fillMinuteSpan(span, input, { previewToken: preview.token });
-      for (const range of preview.ranges) await refreshLocalEntries(range.dateKey);
-      return current();
+      const applied = await fillMinuteSpan(span, input, { previewToken: preview.token });
+      markLocalChange(applied.affectedDates);
+      await Promise.all(applied.affectedDates.map(refreshLocalEntries));
+      if (!current()) return true;
+      // The source minute can be outside the new border (for example, a wake-up
+      // note at the exclusive end). Keep the next edit inside the saved range.
+      const focus = preview.ranges.find((range) => visibleDaysRef.current.includes(range.dateKey));
+      inlineMinuteDrafts.close(inlineMinuteKey(scope.selection.dateKey, scope.selection.minuteIndex));
+      inlineSelectionRef.current = null; setInlineSelection(null); setInlineEditing(false);
+      setEntryBarMode(null); setFormatPalette(null); setRangeSelecting(false); setRangeStart(null); setRangeEnd(null);
+      if (focus) {
+        await openInlineMinute(focus.dateKey, focus.startMinute, false, undefined, false, true, 'format');
+      }
+      // Reselection deliberately advances the selection token after the write.
+      return true;
     } finally { toolBusyRef.current = false; if (mountedRef.current) setToolBusy(false); }
   }
 
@@ -1831,25 +1945,6 @@ export function TodayScreen({
     if (applied && mountedRef.current && token === selectionTokenRef.current && generation === navigationGenerationRef.current) {
       closeRangeOptions();
     }
-  }
-
-  async function clearSelection(command?: CellCommandSelection) {
-    const range = command?.range ?? parsedRange();
-    const selection = command?.selection ?? inlineSelectionRef.current;
-    if (!range || !selection || !await prepareOptions(selection)) return;
-    const token = selectionTokenRef.current;
-    const generation = navigationGenerationRef.current;
-    markLocalChange([range.dateKey]);
-    const applied = await runSpreadsheetTool(async () => {
-      const day = indexedDays.get(range.dateKey);
-      const displayedColors = [];
-      for (let minuteIndex = range.startMinute; minuteIndex <= range.endMinute; minuteIndex++) {
-        const plan = day?.plansByMinute.get(minuteIndex)?.[0];
-        if (plan?.title.trim() && plan.categoryId) displayedColors.push({ minuteIndex, categoryId: plan.categoryId });
-      }
-      await clearTextMinuteRange(range, displayedColors); await refreshLocalEntries(range.dateKey);
-    });
-    if (applied && mountedRef.current && token === selectionTokenRef.current && generation === navigationGenerationRef.current) closeRangeOptions();
   }
 
   async function ungroupSelection(command?: CellCommandSelection) {
@@ -1995,9 +2090,7 @@ export function TodayScreen({
     const day = dateKey(current);
     navigationGenerationRef.current += 1;
     selectionTokenRef.current += 1;
-    if (pinchFrameRef.current != null) cancelAnimationFrame(pinchFrameRef.current);
-    pinchFrameRef.current = null; pinchRef.current = null; pendingPinchZoomRef.current = null;
-    pendingZoomAnchorRef.current = null; setPinching(false);
+    cancelPinchPreview();
     const selection = inlineSelectionRef.current;
     if (selection) inlineMinuteDrafts.close(inlineMinuteKey(selection.dateKey, selection.minuteIndex));
     setInlineSelection(null); setCellMenuOpen(false); setGroupComposerOpen(false); setRangeSelecting(false);
@@ -2129,6 +2222,8 @@ export function TodayScreen({
 
       <View ref={minuteViewportRef} collapsable={false} style={styles.minuteViewport} onLayout={measureMinuteViewport}>
       {compactView ? <CompactMinuteOverview scrollRef={compactListRef} days={days} labels={dayLabels} bands={compactData.bands} outlines={compactData.outlines}
+        hidden={Boolean(pinchPreview)}
+        backgroundColor={gridPaint.background} gridLineColor={gridPaint.line}
         rowHeight={gridLayout.rowHeight} railWidth={gridLayout.railWidth} dayWidth={gridLayout.dayWidth} colors={colors}
         current={{ day: today, minute: currentMinute }} selection={selectedRange ? { day: selectedRange.dateKey, first: selectedRange.startMinute, last: selectedRange.endMinute } : undefined}
         disabled={pinching || toolBusy || menuCommandPending || spreadsheetState.busy} scrolling={!pinching && !rangeDragging && !groupDragging}
@@ -2142,13 +2237,17 @@ export function TodayScreen({
             const day = visibleDaysRef.current.includes(focusedDayRef.current) ? focusedDayRef.current : visibleDaysRef.current[0]!;
             focusCallbackRef.current?.({ dateKey: day, minuteIndex: Math.max(0, Math.min(1439, Math.floor(event.nativeEvent.contentOffset.y / gridLayoutRef.current.rowHeight))) });
           }
-        }} onLayout={() => { measureMinuteViewport(); if (pendingZoomAnchorRef.current) restoreZoomAnchor(); }}
-        onContentSizeChange={() => { if (pendingZoomAnchorRef.current) restoreZoomAnchor(); }}
+        }} onLayout={() => { measureMinuteViewport(); if (pendingZoomAnchorRef.current && !pinchSettlingRef.current) restoreZoomAnchor(); }}
+        onContentSizeChange={(_width, height) => { pinchContentReady(height, true); if (pendingZoomAnchorRef.current && !pinchSettlingRef.current) restoreZoomAnchor(); }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.ink} colors={[colors.currentTime]} progressBackgroundColor={colors.surface} />}
       /> : <FlatList ref={listRef} data={MINUTE_ITEMS} keyExtractor={(minute) => minute.toString()}
-        style={styles.minuteList} contentContainerStyle={styles.minuteListContent}
+        style={[styles.minuteList, pinchPreview && { opacity: 0 }]} pointerEvents={pinchPreview ? 'none' : 'auto'} contentContainerStyle={styles.minuteListContent}
         getItemLayout={(_, index) => ({ length: gridLayout.rowHeight, offset: gridLayout.rowHeight * index, index })}
-        initialNumToRender={24} maxToRenderPerBatch={24} windowSize={9} keyboardShouldPersistTaps="always"
+        initialScrollIndex={pinchSettlingRef.current?.initialIndex}
+        initialNumToRender={Math.max(24, Math.ceil(bodyWindowRef.current.height / gridLayout.rowHeight) + 2)}
+        maxToRenderPerBatch={Math.max(24, Math.ceil(bodyWindowRef.current.height / gridLayout.rowHeight) + 2)}
+        updateCellsBatchingPeriod={16} windowSize={9} keyboardShouldPersistTaps="always"
+        viewabilityConfig={MINUTE_VIEWABILITY} onViewableItemsChanged={onMinuteViewableItemsChanged}
         keyboardDismissMode="on-drag" removeClippedSubviews={false}
         scrollEnabled={!pinching && !rangeDragging && !groupDragging} scrollEventThrottle={16}
         onScrollBeginDrag={() => { manualFocusScroll.current = true; }}
@@ -2164,7 +2263,7 @@ export function TodayScreen({
           if (Math.abs(event.nativeEvent.contentOffset.y - verticalOffsetRef.current) > 0.5) cellActivationRef.current = null;
           verticalOffsetRef.current = event.nativeEvent.contentOffset.y; positionFillHandle();
         }}
-        onContentSizeChange={() => { if (pendingZoomAnchorRef.current) restoreZoomAnchor(); }}
+        onContentSizeChange={(_width, height) => { pinchContentReady(height, false); if (pendingZoomAnchorRef.current && !pinchSettlingRef.current) restoreZoomAnchor(); }}
         onLayout={() => {
           measureMinuteViewport();
           if (pinchRef.current || pendingZoomAnchorRef.current || rangeDragRef.current || groupDragRef.current || cellHoldRef.current) return;
@@ -2288,6 +2387,8 @@ export function TodayScreen({
           </View>
         )}
       />}
+      {pinchPreview ? <CalendarPinchPreview {...pinchPreview} scaleY={pinchPreviewScale}
+        inverseScaleY={pinchPreviewInverseScale} translateY={pinchPreviewOffset} timeLabel={timeLabel} /> : null}
       {groupDragging && groupDragPreview ? (() => {
         const target = groupDragPreview.target;
         const top = Math.max(0, target.startMinute * gridLayout.rowHeight - verticalOffsetRef.current);
@@ -2341,7 +2442,6 @@ export function TodayScreen({
             onCut={() => void dispatchCellCommand((scope) => captureSelectedCells('cut', scope))}
             onCopy={() => void dispatchCellCommand((scope) => captureSelectedCells('copy', scope))}
             onAutoFill={cellPolicy.canAutoFill ? () => void dispatchCellCommand(autoFillSelection) : undefined}
-            onClear={cellPolicy.canClear ? () => void dispatchCellCommand(clearSelection) : undefined}
             onReset={cellPolicy.canReset ? () => void dispatchCellCommand(resetSelection) : undefined}
             onGroup={cellPolicy.canGroup ? () => void dispatchCellCommand(openCurrentRangeOptions) : undefined}
             onUngroup={cellPolicy.canUngroup ? () => void dispatchCellCommand(ungroupSelection) : undefined}
@@ -2484,8 +2584,7 @@ export function TodayScreen({
 }
 
 function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnType<typeof calendarGridLayout>) {
-  const grid = mode === 'dark' ? '#000000' : colors.surface;
-  const gridLine = mode === 'dark' ? '#3A393D' : colors.hairline;
+  const { background: grid, line: gridLine } = calendarGridPaint(colors, mode);
   const focusedCell = mode === 'dark' ? '#C4B8E7' : '#8D7FAD';
   const rowHeight = layout.rowHeight;
   const railWidth = layout.railWidth;

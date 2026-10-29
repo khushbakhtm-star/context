@@ -71,7 +71,7 @@ test('pencil form explicitly fills overnight text and optionally creates one sep
   h.action('Group as event').onValueChange(true); await h.settle();
   assert.equal(h.action('Event title').value, 'Rest'); assert.equal(h.action('Save minute range').disabled, false);
   h.action('Save minute range').onPress(); await h.settle();
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ span: { startDateKey: '2026-10-28', startMinute: 1350, endDateKey: '2026-10-29', endMinute: 420 },
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ span: { startDateKey: '2026-10-28', startMinute: 1350, endDateKey: '2026-10-29', endMinute: 421 },
     input: { text: 'Rest', event: { title: 'Rest', categoryId: 'rest' } } }]);
   assert.equal(closes, 1);
 });
@@ -86,6 +86,31 @@ test('blank mixed-note text preserves notes and an existing border cannot be mis
   h.action('Save minute range').onPress(); await h.settle();
   assert.equal(Object.hasOwn(input, 'text'), false);
   assert.equal(input.event.blockId, 'activity_existing'); assert.equal(input.event.title, 'Named activity');
+});
+
+test('existing event form displays its last included minute and extends Gaming through the new final cell', async (t) => {
+  const calls = [];
+  const h = component(t, 'MinuteSpanEditor.tsx', 'MinuteSpanEditor', {
+    session: { ...session(), span: { startDateKey: '2026-10-28', startMinute: 1200, endDateKey: '2026-10-28', endMinute: 1257 }, text: 'Game',
+      event: { title: 'Gaming', categoryId: 'rest', blockId: 'activity_game' } },
+    clockFormat: '24h', colorChoices: [], onClose() {}, onSave: async (span, input) => { calls.push({ span, input }); return false; },
+  });
+  await h.start(); assert.equal(h.action('Start time').value, '20:00'); assert.equal(h.action('End time').value, '20:56');
+  h.action('Save minute range').onPress(); await h.settle();
+  assert.equal(calls[0].span.endMinute, 1257, 'opening and saving preserves the existing calendar endpoint');
+  h.action('End time').onChangeText('20:57'); await h.settle(); h.action('Save minute range').onPress(); await h.settle();
+  assert.equal(calls[1].span.endMinute, 1258, 'the complete 20:57 cell is included');
+  assert.equal(calls[1].input.event.blockId, 'activity_game');
+});
+
+test('an existing border ending at midnight displays the prior day final cell and round-trips unchanged', async (t) => {
+  let saved;
+  const span = { startDateKey: '2026-10-28', startMinute: 1350, endDateKey: '2026-10-29', endMinute: 0 };
+  const h = component(t, 'MinuteSpanEditor.tsx', 'MinuteSpanEditor', { session: { ...session(), span,
+    event: { title: 'Sleep', categoryId: 'rest', blockId: 'activity_sleep' } }, clockFormat: '24h', colorChoices: [], onClose() {},
+    onSave: async (value) => { saved = value; return true; } });
+  await h.start(); assert.equal(h.action('End time').value, '23:59');
+  h.action('Save minute range').onPress(); await h.settle(); assert.deepEqual(JSON.parse(JSON.stringify(saved)), span);
 });
 
 test('explicitly emptying pencil Text is a deliberate text clear rather than mixed-note preservation', async (t) => {
@@ -111,13 +136,14 @@ test('an open pencil draft survives source refresh and a stale completed Save ca
 test('icon-only held menu keeps named one-tap actions, relevant options and busy guards', async (t) => {
   const calls = []; const h = component(t, 'CellActionMenu.tsx', 'CellActionMenu', { busy: false,
     onCut: () => calls.push('cut'), onCopy: () => calls.push('copy'), onPaste: () => calls.push('paste'),
-    onClear: () => calls.push('clear'), onReset: () => calls.push('reset'), onGroup: () => calls.push('group'), onEdit: () => calls.push('edit'), onClose() {} });
+    onReset: () => calls.push('reset'), onGroup: () => calls.push('group'), onEdit: () => calls.push('edit'), onClose() {} });
   await h.start(); h.find('ScrollView').onContentSizeChange(320); await h.settle();
-  for (const [name, label] of [['cut', 'Cut'], ['copy', 'Copy'], ['paste', 'Paste into'], ['clear', 'Clear'], ['reset', 'Reset'], ['group', 'Group']]) {
+  for (const [name, label] of [['cut', 'Cut'], ['copy', 'Copy'], ['paste', 'Paste into'], ['reset', 'Reset'], ['group', 'Group']]) {
     const full = label === 'Paste into' ? 'Paste into selected minute cells' : `${label} selected minute cells`;
     const button = h.action(full); assert.ok(button); assert.equal(Boolean(button.disabled), false); button.onPress(); assert.equal(calls.at(-1), name);
   }
   h.action('Edit selected minutes and time range').onPress(); assert.equal(calls.at(-1), 'edit');
+  assert.equal(h.action('Clear selected minute cells'), undefined, 'Reset is the sole cell-erasure action');
   assert.equal(h.find('Text'), undefined, 'action captions are not rendered');
   assert.equal(h.action('Bold'), undefined, 'formatting remains in the existing bottom bar');
   await h.update({ busy: true }); assert.equal(h.action('Copy selected minute cells').disabled, true);

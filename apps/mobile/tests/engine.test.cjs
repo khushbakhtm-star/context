@@ -1409,8 +1409,8 @@ test('pencil overnight fill and explicit bounds edits keep one account event and
   const event = remote.events.get(`personal:${original.id}`);
   assert.equal(remote.events.size, 1); assert.equal(event.start, iso(1448)); assert.equal(event.end, iso(1453));
   assert.equal(event.location, 'Home'); assert.equal(event.title, 'Sleep');
-  assert.equal((await device.db.getMinuteEntry(day, 1438)).text, 'Sleep note', 'outside notes stay private after explicit resize');
-  assert.ok((await device.db.getMinuteEntry(day, 1438)).blockId.startsWith('sheet_'));
+  assert.equal(await device.db.getMinuteEntry(day, 1438), null, 'the removed uniform range fill returns to a default cell');
+  assert.equal(await device.db.getMinuteEntry(next, 0), null, 'account synchronization cannot restore the old range');
   assert.equal((await device.engine.listProjections()).filter((projection) => projection.state !== 'deleted').length, 1);
   await device.sheet.undoSpreadsheetEdit();
   await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();

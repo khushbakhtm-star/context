@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { calendarFitDayZoom, calendarGridLayout, calendarPinchZoom, calendarZoomOffsets, normalizeCalendarZoom } from '../src/utils/calendar-layout';
+import { calendarFitDayZoom, calendarGridLayout, calendarPinchZoom, calendarPinchPreviewGeometry, calendarZoomOffsets, normalizeCalendarZoom } from '../src/utils/calendar-layout';
 import { compactCalendarBands, compactCalendarOutlines, compactMinuteAt, type CompactMinute } from '../src/utils/calendar-compact';
 
 test('a single inward pinch can fit all 1440 minutes with fixed Day or Week columns', () => {
@@ -38,6 +38,29 @@ test('fractional-density geometry preserves continuous minute coordinates and bo
   assert.equal(compactMinuteAt(1440 * fit.rowHeight, fit.rowHeight), null);
   assert.equal(compactMinuteAt(-1, fit.rowHeight), null); assert.equal(compactMinuteAt(1, 0), null);
   assert.deepEqual(calendarZoomOffsets(anchor, fit, 500), { x: 0, y: 0 });
+});
+
+test('passive pinch transforms keep the same focal minute and cover the full viewport without changing date widths', () => {
+  for (const height of [240, 500, 844]) for (const count of [1, 7] as const) {
+    const anchor = { minute: 731.25, day: count - 1, viewportX: 120, viewportY: height / 2 };
+    const base = calendarGridLayout(390, count, 1, count, 44, false, height);
+    for (const zoom of [calendarFitDayZoom(height), 0.27, 0.5001, 1.125, 2.5]) {
+      const target = calendarGridLayout(390, count, zoom, count, 44, false, height);
+      const preview = calendarPinchPreviewGeometry(anchor, base.rowHeight, target.rowHeight, height);
+      const offset = calendarZoomOffsets(anchor, target, height);
+      assert.equal(preview.offset, offset.y);
+      assert.equal(preview.translateY + preview.offset, 0);
+      assert.equal(preview.scaleY * preview.inverseScaleY, 1);
+      assert.ok(preview.translateY <= 0);
+      assert.ok(1440 * base.rowHeight * preview.scaleY + preview.translateY >= height - 1e-6);
+      assert.equal(target.dayWidth, base.dayWidth);
+      if (offset.y > 0 && offset.y < 1440 * target.rowHeight - height) {
+        assert.ok(Math.abs(anchor.minute * base.rowHeight * preview.scaleY + preview.translateY - anchor.viewportY) < 1e-6);
+      }
+    }
+  }
+  const before = calendarGridLayout(390, 1, 0.5).rowHeight;
+  assert.ok(calendarGridLayout(390, 1, 0.5001).rowHeight > before, 'small gestures must not jump between rounded pixel heights');
 });
 
 test('compact overview keeps exact coalesced event bounds and repeated notes without minute controls', () => {

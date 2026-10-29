@@ -62,7 +62,7 @@ test('a blank selection uses native action width with no empty formatting row or
 });
 
 test('measured icon actions expand only up to the actual viewport bound without a formatting row', () => {
-  const h = menu({ onClear() {}, onGroup() {}, onToggleBold() {}, onToggleItalic() {}, onToggleUnderline() {}, onTextColor() {}, onCellColor() {} });
+  const h = menu({ onReset() {}, onGroup() {}, onToggleBold() {}, onToggleItalic() {}, onToggleUnderline() {}, onTextColor() {}, onCellColor() {} });
   h.measureActions(244); assert.equal(h.style().opacity, 1);
   assert.equal(h.rows().length, 1); assert.equal(h.style().width, 245);
   h.measureActions(690); assert.equal(h.style().width, 374, 'native large-font content scrolls rather than exceeding the phone');

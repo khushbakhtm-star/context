@@ -14,6 +14,7 @@ vm.runInNewContext(source.slice(0, source.indexOf('\ntest(')) + '\nmodule.export
   __dirname, __filename: fixture, console, Date, TextEncoder, TextDecoder, setTimeout, clearTimeout,
 });
 const { runtime, day, plain } = moduleObject.exports;
+const { minuteDetailsSpan } = require('../src/utils/minute-details.ts');
 const next = '2026-10-26';
 const night = { startDateKey: day, startMinute: 1380, endDateKey: next, endMinute: 462 };
 async function fill(r, span = night, blockId) {
@@ -23,6 +24,22 @@ async function fill(r, span = night, blockId) {
   return (await r.db.getMinuteEntry(span.startDateKey, span.startMinute)).blockId;
 }
 const localTime = (date, minute) => new Date(`${date}T00:00:00`).setMinutes(minute);
+
+test('inclusive Through edits fill the last named Sleep and Gaming cells and synchronize one matching calendar boundary', async (t) => {
+  for (const [startTime, endTime, throughMinute, title] of [['00:00', '07:24', 444, 'Sleep'], ['20:00', '20:57', 1257, 'Gaming']]) {
+    const r = runtime(t); await r.db.initializeDatabase();
+    const span = minuteDetailsSpan({ startDateKey: day, startTime, endDateKey: day, endTime, endDateExplicit: true });
+    const input = { text: title, event: { title, categoryId: 'unaccounted' } };
+    const preview = await r.sheet.prepareMinuteSpanFill(span, input);
+    const result = await r.sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+    await r.calendar.syncActualDay(day, 'personal');
+    assert.equal(r.events.size, 1);
+    const entry = await r.db.getMinuteEntry(day, throughMinute);
+    assert.equal(entry.blockId, result.blockId); assert.equal(entry.text, title);
+    assert.equal(await r.db.getMinuteEntry(day, throughMinute + 1), null);
+    assert.equal(new Date([...r.events.values()][0].endDate).getTime(), localTime(day, throughMinute + 1));
+  }
+});
 
 test('one overnight border exports one exact native event and canonical binding from either day, retaining all minute annotations', async (t) => {
   const r = runtime(t); await r.db.initializeDatabase(); const blockId = await fill(r);
@@ -44,7 +61,7 @@ test('one overnight border exports one exact native event and canonical binding 
   assert.equal((await r.db.getSyncBindingsForBlock(blockId))[0].eventId, binding.eventId);
 });
 
-test('an explicit overnight resize moves the same source ID far from its old anchor and preserves location and private detached notes', async (t) => {
+test('an explicit overnight resize moves the same source ID far from its old anchor and clears the old uniform fill', async (t) => {
   const r = runtime(t); await r.db.initializeDatabase(); const blockId = await fill(r);
   await r.calendar.syncActualDay(day, 'personal'); const id = [...r.events.keys()][0];
   r.events.get(id).location = 'Original source location';
@@ -56,8 +73,63 @@ test('an explicit overnight resize moves the same source ID far from its old anc
   assert.equal(new Date(r.events.get(id).startDate).getTime(), localTime(moved.startDateKey, 1410));
   assert.equal(new Date(r.events.get(id).endDate).getTime(), localTime(moved.endDateKey, 310));
   assert.equal((await r.db.getSyncBindingsForBlock(blockId))[0].dateKey, moved.startDateKey);
-  const detached = await r.db.getMinuteEntry(day, 1380);
-  assert.equal(detached.text, 'Sleep'); assert.notEqual(detached.blockId, blockId);
+  assert.equal(await r.db.getMinuteEntry(day, 1380), null);
+  assert.equal((await r.sheet.getDayCellFormats(day)).get(1380), undefined);
+  assert.equal(r.calls.filter((call) => call.type === 'create').length, 1);
+  assert.equal(r.calls.filter((call) => call.type === 'delete').length, 0);
+});
+
+test('correcting an overnight Sleep event to the same morning updates one native source and removes every former border cell', async (t) => {
+  const r = runtime(t); await r.db.initializeDatabase();
+  const startDay = '2026-10-29', endDay = '2026-10-30';
+  const wrong = { startDateKey: startDay, startMinute: 724, endDateKey: endDay, endMinute: 444 };
+  const blockId = await fill(r, wrong);
+  await r.db.saveMinuteEntry({ dateKey: startDay, minuteIndex: 600, text: 'Separate private annotation', categoryId: 'unaccounted' });
+  await r.calendar.syncActualDay(startDay, 'personal');
+  const id = [...r.events.keys()][0]; r.events.get(id).location = 'Retained exact location';
+  assert.equal(new Date(r.events.get(id).endDate).getTime(), localTime(endDay, 444));
+  const corrected = { startDateKey: startDay, startMinute: 0, endDateKey: startDay, endMinute: 444 };
+  await fill(r, corrected, blockId);
+  await r.calendar.syncActualDay(endDay, 'personal');
+  await r.calendar.syncActualDay(startDay, 'personal');
+  assert.deepEqual([...r.events.keys()], [id]);
+  const event = r.events.get(id);
+  assert.equal(event.title, 'Sleep'); assert.equal(event.location, 'Retained exact location');
+  assert.equal(new Date(event.startDate).getTime(), localTime(startDay, 0));
+  assert.equal(new Date(event.endDate).getTime(), localTime(startDay, 444));
+  assert.equal(event.notes, '12:00 AM  Sleep');
+  assert.equal(r.calls.filter((call) => call.type === 'create').length, 1);
+  assert.equal(r.calls.filter((call) => call.type === 'delete').length, 0);
+  assert.equal((await r.db.getSyncBindingsForBlock(blockId)).length, 1);
+  assert.equal((await r.db.getSyncBindingsForBlock(blockId))[0].segmentKey, `${startDay}:${blockId}:0-443`);
+  assert.equal((await r.db.getEntriesForBlock(blockId)).length, 444);
+  for (const dateKey of [startDay, endDay]) {
+    const cells = await r.db.getSpreadsheetCells({ dateKey, startMinute: dateKey === startDay ? 724 : 0,
+      endMinute: dateKey === startDay ? 1439 : 443 });
+    assert.ok(cells.every((cell) => cell.entry === null && Object.keys(cell.format).length === 0));
+  }
+  assert.equal((await r.db.getMinuteEntry(startDay, 600)).text, 'Separate private annotation');
+  assert.equal((await r.sheet.getDayActivityGroups(endDay)).length, 0);
+});
+
+test('extending a gaming event by one minute updates the same native event and fills the newly included cell', async (t) => {
+  const r = runtime(t); await r.db.initializeDatabase();
+  let span = { startDateKey: day, startMinute: 1200, endDateKey: day, endMinute: 1256 };
+  let input = { text: 'Gaming', event: { title: 'Gaming', categoryId: 'unaccounted' } };
+  let preview = await r.sheet.prepareMinuteSpanFill(span, input);
+  const { blockId } = await r.sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  await r.calendar.syncActualDay(day, 'personal'); const id = [...r.events.keys()][0];
+  span = { ...span, endMinute: 1257 }; input = { ...input, event: { ...input.event, blockId } };
+  preview = await r.sheet.prepareMinuteSpanFill(span, input);
+  await r.sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  await r.calendar.syncActualDay(day, 'personal');
+  assert.deepEqual([...r.events.keys()], [id]);
+  const added = await r.db.getMinuteEntry(day, 1256);
+  assert.equal(added.text, 'Gaming'); assert.equal(added.categoryId, 'unaccounted'); assert.equal(added.blockId, blockId);
+  assert.equal((await r.sheet.getDayCellFormats(day)).get(1256).activityGroup.id, blockId);
+  assert.equal(await r.db.getMinuteEntry(day, 1257), null);
+  assert.equal(new Date(r.events.get(id).endDate).getTime(), localTime(day, 1257));
+  assert.equal(r.events.get(id).title, 'Gaming'); assert.equal(r.events.get(id).notes, '8:00 PM  Gaming');
   assert.equal(r.calls.filter((call) => call.type === 'create').length, 1);
   assert.equal(r.calls.filter((call) => call.type === 'delete').length, 0);
 });
