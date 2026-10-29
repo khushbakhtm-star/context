@@ -2,6 +2,10 @@
 
 ## Current matching releases
 
+Use the [Wear-enabled phone 0.1.31/code32](https://github.com/khushbakhtm-star/context/releases/download/v0.1.31/context-0.1.31-wear-phone-preview.apk) with the separately published [Watch 0.1.12/code100013](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.12). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
+
+## Previous matching releases: 0.1.30
+
 Use the [Wear-enabled phone 0.1.30/code31](https://github.com/khushbakhtm-star/context/releases/download/v0.1.30/context-0.1.30-wear-phone-preview.apk) with the separately published [Watch 0.1.12/code100013](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.12). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
 
 ## Previous matching releases: 0.1.29

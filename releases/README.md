@@ -1,6 +1,25 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.30/code31** in both channels, verified at **2026-10-29 at 13:34:18 UTC**. Watch **0.1.12/code100013** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability: **0.1.31/code32** in both channels, verified at **2026-10-29 at 17:43:31 UTC**. Watch **0.1.12/code100013** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+
+## Published 0.1.31 phone updates
+
+Both phone editions, code32, and all twelve checked public assets were available by **2026-10-29 at 17:43:31 UTC**, release **428193823**. [Wear-enabled APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.31/context-0.1.31-wear-phone-preview.apk) (asset 689364477) and [FOSS APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.31/context-0.1.31-foss-preview.apk) (asset 689377529) update the existing installation. The separate Watch 0.1.12/code100013 remains the current matching watch release.
+
+Context 0.1.31 moves cell formatting into the selected-cell popup and closes the text bar after saving. The popup centers its icons and offers a circled bold, italic, underlined A for formatting, with matching cut, copy, paste, event-border, Reset and static Sync artwork. Wrapped minute text is measured as a whole before display, fitted to the cell height and width, then shrinks and fades as rows contract. Pinching uses a prewarmed native-animation graph with one value updated per gesture frame, and keeps its preview until the visible labels are ready. Day columns retain their widths.
+
+Your local notes, event borders, titles and source-calendar conflict guards remain intact. Choose **Update** over the existing phone installation. The Wear-enabled phone includes native Google sign-in and the optional watch bridge; the FOSS phone omits those native dependencies. The separate Watch 0.1.12 release remains independent.
+
+Source: [af6352ce02a813547d817500c5045f87417aa8da](https://github.com/khushbakhtm-star/context/commit/af6352ce02a813547d817500c5045f87417aa8da). TypeScript and 1015 mobile tests passed, including 473 focused UI/range-editor/overnight/calendar/crypto/storage/watch checks within that run. Static packaged checks cover 94 required UI labels and 24 obsolete labels. These are automated checks, not physical-phone or live-calendar verification.
+
+- Wear-enabled phone: 79,187,114 bytes; SHA-256 `1b4f1096b27df676ad9190d75307b2dbf103fc39862f0283f3fa4aabe9e42f7a`.
+- FOSS phone: 78,475,167 bytes; SHA-256 `8dfd6d2e28ff0a96cb51bb72f05dad084883fb7acde272af8a876f83e025f5e5`.
+
+Both are code32, signed with the existing publisher certificate; official signatures, protected source-built content and 16 KiB alignment passed. [Independent F-Droid verification](https://github.com/khushbakhtm-star/context/actions/runs/40920918728) reported zero source errors/warnings and 108 removed inputs, 5 source patches and 39 reviewed Wear removals. The attached permanent evidence ZIP preserves 23 checked entries. This publisher preview does not establish official F-Droid catalog acceptance or Apple/Google store availability.
+
+The [phone build](https://github.com/khushbakhtm-star/context/actions/runs/40920846235) used controller `fb2a9d9ee69d0ffd2b053fd6283ffc52f69c7cfc`; FOSS used `fb2a9d9ee69d0ffd2b053fd6283ffc52f69c7cfc`. The [source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40923320236) passed at the exact application source.
+
+The [permanent FOSS evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.31/context-0.1.31-foss-build-evidence.zip) is **7,753,474 bytes**, SHA-256 `7639eb28cc0284d5dd8bffbf8696fb01f0076ccf844a5db5a40b361f2ce7e407`. Public/local file sizes and digests match. No physical phone/watch, live account or store/catalog result is implied.
 
 ## Published 0.1.30 phone updates
 
