@@ -1,6 +1,25 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.29/code30** in both channels, verified at **2026-10-29 at 12:20:52 UTC**. Watch **0.1.12/code100013** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability: **0.1.30/code31** in both channels, verified at **2026-10-29 at 13:34:18 UTC**. Watch **0.1.12/code100013** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+
+## Published 0.1.30 phone updates
+
+Both phone editions, code31, and all twelve checked public assets were available by **2026-10-29 at 13:34:18 UTC**, release **427899403**. [Wear-enabled APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.30/context-0.1.30-wear-phone-preview.apk) (asset 688649429) and [FOSS APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.30/context-0.1.30-foss-preview.apk) (asset 688668066) update the existing installation. The separate Watch 0.1.12/code100013 remains the current matching watch release.
+
+Context 0.1.30 replaces an edited event range while retaining the original calendar event identity. Removed uniform range-fill cells return to their default state; distinct notes outside the new bounds remain private without the old fill or border. The editor uses inclusive Through minutes: Through 07:24 includes the whole 07:24 cell, and Google Calendar ends at 07:25. Pinching uses a passive native-transform preview and commits the minute layout once on release, keeping day-column widths fixed. A tap on the view icon returns to today and now; a press-and-hold opens the view choices. One circular Reset clears text and all formatting. Pencil, hollow scissors and the static Sync circuit use matching strokes.
+
+Your local notes, event borders, titles and source-calendar conflict guards remain intact. Choose **Update** over the existing phone installation. The Wear-enabled phone includes native Google sign-in and the optional watch bridge; the FOSS phone omits those native dependencies. The separate Watch 0.1.12 release remains independent.
+
+Source: [b0f633cd04478ef2558a8212a3bb549d92d4c391](https://github.com/khushbakhtm-star/context/commit/b0f633cd04478ef2558a8212a3bb549d92d4c391). TypeScript and 982 mobile tests passed, including 440 focused UI/range-editor/overnight/calendar/crypto/storage/watch checks within that run. Static packaged checks cover 96 required UI labels and 19 obsolete labels. These are automated checks, not physical-phone or live-calendar verification.
+
+- Wear-enabled phone: 79,170,730 bytes; SHA-256 `df8a518a4184949559128bfe4aa373a1ce92b7241ec66db85f1d63c1a0906efa`.
+- FOSS phone: 78,458,783 bytes; SHA-256 `04e5a59ca8a812be573728fa393d45f37ac76ade5ca005df52d54af9a43815bc`.
+
+Both are code31, signed with the existing publisher certificate; official signatures, protected source-built content and 16 KiB alignment passed. [Independent F-Droid verification](https://github.com/khushbakhtm-star/context/actions/runs/40879707594) reported zero source errors/warnings and 108 removed inputs, 5 source patches and 39 reviewed Wear removals. The attached permanent evidence ZIP preserves 23 checked entries. This publisher preview does not establish official F-Droid catalog acceptance or Apple/Google store availability.
+
+The [phone build](https://github.com/khushbakhtm-star/context/actions/runs/40879643141) used controller `0ecbc3cbea087720defc0826d4e12e3e36285e6b`; FOSS used `0ecbc3cbea087720defc0826d4e12e3e36285e6b`. The [source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/40882051238) passed at the exact application source.
+
+The [permanent FOSS evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.30/context-0.1.30-foss-build-evidence.zip) is **7,753,147 bytes**, SHA-256 `d246afb3d811a3cbb15fa050abbeedc8e983dbdfd2470d223a56b8aeba9ed62e`. Public/local file sizes and digests match. No physical phone/watch, live account or store/catalog result is implied.
 
 ## Published 0.1.29 phone updates
 
