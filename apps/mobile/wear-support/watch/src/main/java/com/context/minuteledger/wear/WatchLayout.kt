@@ -3,7 +3,7 @@ package com.context.minuteledger.wear
 /** Keep the primary ledger usable on 198 dp round watches; the IME may resize dialogs. */
 object WatchLayout {
     const val TOP = 20
-    const val HEADER = 30
+    const val HEADER = 44
     const val STATUS = 16
     const val MINUTE = 52
     const val EDITOR_BOTTOM = 22

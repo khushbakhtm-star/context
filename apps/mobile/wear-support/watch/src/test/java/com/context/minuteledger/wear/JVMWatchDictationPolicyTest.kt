@@ -25,6 +25,15 @@ class JVMWatchDictationPolicyTest {
         }
         assertEquals(WatchSpeechBackend.UNAVAILABLE, WatchDictationPolicy.backend(30, true, false))
     }
+    @Test fun emptySpeechNeverDiscardsTypedWordsChosenColorOrAnUncommittedSaveRetry() {
+        assertTrue(WatchDictationPolicy.mayCloseEmptyCapture("", "", false, false))
+        assertTrue(WatchDictationPolicy.mayCloseEmptyCapture("Previously saved words", "Previously saved words", false, false))
+        assertFalse(WatchDictationPolicy.mayCloseEmptyCapture("", "Unsaved typed words", false, false))
+        assertFalse(WatchDictationPolicy.mayCloseEmptyCapture("Original", "Changed", false, false))
+        assertFalse(WatchDictationPolicy.mayCloseEmptyCapture("Original", null, false, false))
+        assertFalse(WatchDictationPolicy.mayCloseEmptyCapture("", "", true, false))
+        assertFalse(WatchDictationPolicy.mayCloseEmptyCapture("Retry words", "Retry words", false, true))
+    }
     @Test fun unavailableOnDeviceConstructionOrLanguageFallsBackToSystemOnlyOnce() {
         for (failure in listOf(WatchSpeechFailure.UNAVAILABLE, WatchSpeechFailure.MODEL)) {
             assertTrue(WatchDictationPolicy.retryWithSystem(WatchSpeechBackend.ON_DEVICE, failure, true, false))

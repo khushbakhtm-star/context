@@ -8,6 +8,7 @@ class JVMLaunchPolicyTest {
         val previous = Coordinate("2026-10-26", 650)
         val decision = LaunchPolicy.decide(LaunchTrigger.LAUNCHER_OR_TILE, LaunchState())
         assertTrue(decision.resetToNow); assertFalse(decision.deferredNow)
+        assertTrue(decision.startDictation)
         var current = Coordinate("2026-10-26", 1439)
         assertEquals(current, decision.target(previous) { current })
         current = Coordinate("2026-10-27", 0)
@@ -19,6 +20,7 @@ class JVMLaunchPolicyTest {
         val decision = LaunchPolicy.decide(LaunchTrigger.ON_START, LaunchState())
         assertEquals(Coordinate("2026-10-27", 5), decision.target(selected) { Coordinate("2026-10-27", 5) })
         assertFalse(decision.deferredNow)
+        assertFalse(decision.startDictation)
     }
 
     @Test fun speechImePickerAndPendingRestoreNeverAcquireANewMinuteOnStart() {
@@ -27,6 +29,7 @@ class JVMLaunchPolicyTest {
             LaunchState(speechInFlight = true), LaunchState(pickerOpen = true))) {
             val decision = LaunchPolicy.decide(LaunchTrigger.ON_START, state)
             assertFalse(decision.resetToNow); assertFalse(decision.deferredNow)
+            assertFalse(decision.startDictation)
             assertEquals(selected, decision.target(selected) { error("A protected resume must not sample Now") })
         }
     }
@@ -34,17 +37,20 @@ class JVMLaunchPolicyTest {
     @Test fun explicitReentryDefersUntilTheEditorActuallyCloses() {
         val request = LaunchPolicy.decide(LaunchTrigger.LAUNCHER_OR_TILE, LaunchState(editorOpen = true))
         assertFalse(request.resetToNow); assertTrue(request.deferredNow)
+        assertFalse(request.startDictation)
         val resume = LaunchPolicy.decide(LaunchTrigger.ON_START, LaunchState(editorOpen = true,
             speechInFlight = true, deferredNow = request.deferredNow))
         assertFalse(resume.resetToNow); assertTrue(resume.deferredNow)
         val closed = LaunchPolicy.decide(LaunchTrigger.EDITOR_CLOSED, LaunchState(deferredNow = resume.deferredNow))
         assertTrue(closed.resetToNow); assertFalse(closed.deferredNow)
+        assertFalse(closed.startDictation)
         assertEquals(Coordinate("2026-10-27", 1), closed.target(Coordinate("2026-10-26", 1439)) { Coordinate("2026-10-27", 1) })
     }
 
     @Test fun ordinarySaveOrCancelDoesNotInventAnotherEntryRequest() {
         val closed = LaunchPolicy.decide(LaunchTrigger.EDITOR_CLOSED, LaunchState())
         assertFalse(closed.resetToNow); assertFalse(closed.deferredNow)
+        assertFalse(closed.startDictation)
     }
 
     @Test fun remainingPickerOrSpeechKeepsAnExplicitDeferredRequestProtected() {
@@ -59,6 +65,7 @@ class JVMLaunchPolicyTest {
         val state = LaunchState(restoringEditor = true, deferredNow = true)
         val decision = LaunchPolicy.decide(LaunchTrigger.RESTORE, state)
         assertFalse(decision.resetToNow); assertTrue(decision.deferredNow)
+        assertFalse(decision.startDictation)
         val selected = Coordinate("2026-10-26", 1438)
         assertEquals(selected, decision.target(selected) { error("Restoration is not a new launch") })
     }
@@ -96,5 +103,40 @@ class JVMLaunchPolicyTest {
         assertEquals("prayer", original.chosenCategory)
         val unknown = EditorSession(Coordinate("2026-10-27", 0), false, null)
         assertEquals(unknown, unknown.copy()); assertNull(unknown.expectedVersion)
+    }
+    @Test fun onlyAFreshLauncherOrTileIntentMayArmAnAutomaticCapture() {
+        assertTrue(LaunchPolicy.freshEntry(false, true))
+        assertFalse(LaunchPolicy.freshEntry(true, true))
+        assertFalse(LaunchPolicy.freshEntry(false, false))
+        assertFalse(LaunchPolicy.freshEntry(true, false))
+        // Returning from settings, permissions, an IME or an auto-saved note is ON_START,
+        // and a deferred old launch can move the view without starting another microphone.
+        for (trigger in listOf(LaunchTrigger.ON_START, LaunchTrigger.RESTORE, LaunchTrigger.EDITOR_CLOSED)) {
+            assertFalse(LaunchPolicy.decide(trigger, LaunchState(deferredNow = true)).startDictation)
+        }
+    }
+    @Test fun aPermissionGrantMayResumeOnlyItsExactVisibleEditorOnceItIsResumed() {
+        val original = EditorSession(Coordinate("2026-10-30", 1439), true, "original-version")
+        assertTrue(LaunchPolicy.mayResumeMicrophone(original, original.copy(), true, true, true, false))
+        assertFalse(LaunchPolicy.mayResumeMicrophone(null, original, true, true, true, false))
+        assertFalse(LaunchPolicy.mayResumeMicrophone(original, null, true, true, true, false))
+        assertFalse(LaunchPolicy.mayResumeMicrophone(original, original.copy(sessionId = "another-editor"), true, true, true, false))
+        assertFalse(LaunchPolicy.mayResumeMicrophone(original,
+            original.copy(coordinate = Coordinate("2026-10-31", 0)), true, true, true, false))
+        assertFalse(LaunchPolicy.mayResumeMicrophone(original, original, false, true, true, false))
+        assertFalse(LaunchPolicy.mayResumeMicrophone(original, original, true, false, true, false))
+        assertFalse(LaunchPolicy.mayResumeMicrophone(original, original, true, true, false, false))
+        assertFalse(LaunchPolicy.mayResumeMicrophone(original, original, true, true, true, true))
+        assertEquals("original-version", original.expectedVersion)
+    }
+    @Test fun aLateOrReplayedPermissionCallbackCannotConsumeAnotherEditorRequest() {
+        val original = EditorSession(Coordinate("2026-10-30", 1400), true, "old-baseline")
+        assertTrue(LaunchPolicy.acceptsMicrophoneGrant(101, 101, original, original.copy()))
+        assertFalse(LaunchPolicy.acceptsMicrophoneGrant(100, 101, original, original))
+        assertFalse(LaunchPolicy.acceptsMicrophoneGrant(101, null, original, original))
+        assertFalse(LaunchPolicy.acceptsMicrophoneGrant(101, 101, null, original))
+        assertFalse(LaunchPolicy.acceptsMicrophoneGrant(101, 101, original, original.copy(sessionId = "new-editor")))
+        assertFalse(LaunchPolicy.acceptsMicrophoneGrant(101, 101, original,
+            original.copy(coordinate = Coordinate("2026-10-31", 0))))
     }
 }

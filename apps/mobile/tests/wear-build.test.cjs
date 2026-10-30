@@ -41,9 +41,9 @@ test('watch project generation carries its independent release identity, approve
   project.generateWear(root, output, { version: '0.9.0', android: { versionCode: 91 } });
   const gradle = fs.readFileSync(path.join(output, 'wear/build.gradle'), 'utf8');
   assert.match(gradle, /applicationId 'com\.context\.minuteledger'/);
-  assert.match(gradle, /versionCode 100014 as int/);
-  assert.match(gradle, /versionName "0\.1\.13"/);
-  assert.deepEqual(JSON.parse(JSON.stringify(project.readWatchVersion(root))), { version: '0.1.13', versionCode: 100014 });
+  assert.match(gradle, /versionCode 100015 as int/);
+  assert.match(gradle, /versionName "0\.1\.14"/);
+  assert.deepEqual(JSON.parse(JSON.stringify(project.readWatchVersion(root))), { version: '0.1.14', versionCode: 100015 });
   project.generateWear(root, output, { version: '22.1.0', android: { versionCode: 500 } });
   assert.equal(fs.readFileSync(path.join(output, 'wear/build.gradle'), 'utf8'), gradle,
     'phone version changes cannot silently change the watch package identity');

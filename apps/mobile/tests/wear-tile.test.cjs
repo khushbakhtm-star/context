@@ -37,3 +37,11 @@ test('the public Tile has no ledger/network/clock reads and uses an explicit Now
   assert.equal((layout.match(/addKeyToExtraMapping/g) ?? []).length, 1);
   assert.doesNotMatch(source + layout, /WatchStore|WatchTransport|LocalDateTime|System\.currentTimeMillis|SharedPreferences|https?:\/\/|setFreshnessIntervalMillis/);
 });
+
+test('the Tile launches the current-minute capture through the same protected one-shot entry as the launcher', () => {
+  const activity = fs.readFileSync(path.join(root, 'wear-support/watch/src/main/java/com/context/minuteledger/wear/MinuteActivity.kt'), 'utf8');
+  const launch = fs.readFileSync(path.join(root, 'wear-support/watch/src/main/java/com/context/minuteledger/wear/LaunchPolicy.kt'), 'utf8');
+  assert.match(activity, /intent\.getStringExtra\(LAUNCH_ACTION\) == RECORD_NOW/);
+  assert.match(activity, /LaunchPolicy\.freshEntry\(savedInstanceState != null, requestsRecordNow\(intent\)\)/);
+  assert.match(launch, /LaunchTrigger\.LAUNCHER_OR_TILE -> if \(state\.protectsEditing\) LaunchDecision\(false, true\)\s*else LaunchDecision\(true, false, startDictation = true\)/);
+});

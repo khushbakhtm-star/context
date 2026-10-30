@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -18,22 +19,28 @@ import android.view.ViewGroup
 import android.view.Window
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ImageButton
 import android.widget.ScrollView
 import android.widget.TextView
 import java.time.LocalDateTime
 
-/** A visible, user-initiated note session. Phrase pauses never save or close the note. */
+/** A visible note session. Monotonic quiet time, not a provider's phrase boundary, confirms it. */
 class WatchDictationDialog(
     private val activity: Activity,
     private val target: Coordinate,
     private val twelveHourClock: Boolean,
+    initialSilenceDelaySeconds: Int,
     private val isCurrent: () -> Boolean,
+    private val openSettings: ((Int) -> Unit) -> Unit,
     private val onConfirmed: (String) -> Unit,
+    private val onEmpty: () -> Unit,
     private val onClosed: (Boolean, String?) -> Unit,
 ) {
     private val handler = Handler(Looper.getMainLooper())
     private val guard = WatchDictationRunGuard()
     private val note = WatchDictationNote()
+    private var silenceDelaySeconds = WatchSilencePolicy.normalizeDelay(initialSilenceDelaySeconds)
+    private val silence = WatchSilencePolicy(SystemClock.elapsedRealtime(), silenceDelaySeconds)
     private var active = true
     private var recognizer: SpeechRecognizer? = null
     private var backend = WatchSpeechBackend.UNAVAILABLE
@@ -46,13 +53,21 @@ class WatchDictationDialog(
     private val message = label("", 11f).apply { gravity = Gravity.CENTER; setTextColor(MUTED) }
     private val words = label("", 14f)
     private val done: Button = button("Done", "Save the displayed dictation and return to your minutes") {
-        // Done is the sole confirmation. Invalidate callbacks before stopping the microphone.
+        // Done and the silence deadline share close's single completion gate.
         note.confirmDisplayed()?.let { close(confirmed = it) }
     }
-    private val continueButton = button("Continue", "Continue dictating without losing the displayed words") { start(backend == WatchSpeechBackend.SYSTEM) }
+    private val continueButton = button("Continue", "Continue dictating without losing the displayed words") { continueDictating() }
     private val dialog: Dialog
     private val nextPhrase = Runnable {
-        if (active && isCurrent()) start(backend == WatchSpeechBackend.SYSTEM)
+        if (active && isCurrent() && silence.canListen) start(backend == WatchSpeechBackend.SYSTEM)
+    }
+    private val silenceTicker = object : Runnable {
+        override fun run() {
+            if (!active) return
+            if (!isCurrent()) { close(preserveDraft = true); return }
+            checkSilence()
+            if (active && silence.isArmed) handler.postDelayed(this, 250)
+        }
     }
     private val ticker = object : Runnable {
         override fun run() {
@@ -64,7 +79,14 @@ class WatchDictationDialog(
 
     init {
         val root = column().apply { setPadding(dp(24), dp(20), dp(24), dp(22)) }
-        root.addView(clock, LinearLayout.LayoutParams(-1, dp(18)))
+        val heading = LinearLayout(activity).apply { gravity = Gravity.CENTER_VERTICAL }
+        heading.addView(clock, LinearLayout.LayoutParams(0, dp(18), 1f))
+        heading.addView(ImageButton(activity).apply {
+            contentDescription = "Dictation settings"; setImageResource(R.drawable.context_settings)
+            setBackgroundColor(Color.TRANSPARENT); setPadding(dp(10), dp(10), dp(10), dp(10))
+            setOnClickListener { settings() }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        root.addView(heading)
         root.addView(label(WatchDictationPolicy.minuteLabel(target, twelveHourClock), if (twelveHourClock) 10f else 11f).apply { gravity = Gravity.CENTER },
             LinearLayout.LayoutParams(-1, dp(22)))
         val body = column()
@@ -88,6 +110,8 @@ class WatchDictationDialog(
     fun show() {
         if (!active || !isCurrent()) { close(); return }
         dialog.show(); handler.post(ticker)
+        silence.resume(SystemClock.elapsedRealtime(), silenceDelaySeconds)
+        handler.post(silenceTicker)
         start(false)
     }
 
@@ -95,6 +119,7 @@ class WatchDictationDialog(
 
     private fun start(preferSystem: Boolean) {
         if (!active || !isCurrent()) { close(); return }
+        if (!silence.canListen) return
         handler.removeCallbacks(nextPhrase)
         stopRecognizer()
         backend = WatchDictationPolicy.backend(Build.VERSION.SDK_INT, onDevice, system, preferSystem)
@@ -105,6 +130,7 @@ class WatchDictationDialog(
             active && guard.accepts(token) && isCurrent()
         }
         note.beginPhrase()
+        silence.providerStarted()
         words.text = note.text
         try {
             val speech = if (backend == WatchSpeechBackend.ON_DEVICE && Build.VERSION.SDK_INT >= 31)
@@ -115,11 +141,16 @@ class WatchDictationDialog(
                 override fun onReadyForSpeech(params: Bundle?) {
                     if (current()) message.text = if (backend == WatchSpeechBackend.ON_DEVICE) "Listening on watch…" else "Listening with system speech…"
                 }
-                override fun onBeginningOfSpeech() = Unit
+                override fun onBeginningOfSpeech() {
+                    if (current()) silence.began(SystemClock.elapsedRealtime())
+                }
                 override fun onRmsChanged(rmsdB: Float) = Unit
                 override fun onBufferReceived(buffer: ByteArray?) = Unit
                 override fun onEndOfSpeech() {
-                    if (current()) { message.text = "Keeping your words…"; doneState("Done", note.text.isNotBlank()) }
+                    if (current()) {
+                        silence.ended(SystemClock.elapsedRealtime())
+                        message.text = "Keeping your words…"; doneState("Done", note.text.isNotBlank())
+                    }
                 }
                 override fun onError(error: Int) {
                     if (!current()) return
@@ -137,8 +168,10 @@ class WatchDictationDialog(
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                     if (text.isNullOrBlank() || !note.acceptPhrase(text)) { failed(WatchSpeechFailure.EMPTY); return }
                     stopRecognizer()
+                    silence.providerFinished(SystemClock.elapsedRealtime())
                     words.text = note.text; doneState("Done", true)
-                    message.text = "Words kept. Continue speaking, or tap Done."
+                    if (checkSilence()) return
+                    message.text = "Words kept. Speak, or pause ${silenceDelaySeconds}s to save."
                     // Some providers finalize on a breath. Start a new phrase only while this
                     // same visible note session is current; never restart after Done or dismissal.
                     handler.postDelayed(nextPhrase, 200)
@@ -146,7 +179,9 @@ class WatchDictationDialog(
                 override fun onPartialResults(partialResults: Bundle?) {
                     if (!current()) return
                     val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                    val previous = note.text
                     if (partial != null && note.preview(partial)) {
+                        if (note.text != previous) silence.changedPartial(SystemClock.elapsedRealtime())
                         words.text = note.text; doneState("Done", note.text.isNotBlank())
                     }
                 }
@@ -164,31 +199,76 @@ class WatchDictationDialog(
         catch (_: Exception) { if (current()) failed(WatchSpeechFailure.UNAVAILABLE) }
     }
 
-    private fun failed(reason: WatchSpeechFailure) {
+    private fun failed(reason: WatchSpeechFailure, allowFallback: Boolean = true) {
         if (!active) return
         handler.removeCallbacks(nextPhrase)
         stopRecognizer()
-        if (isCurrent() && WatchDictationPolicy.retryWithSystem(backend, reason, system, systemAttempted)) {
+        silence.providerFinished(SystemClock.elapsedRealtime())
+        if (allowFallback && isCurrent() && WatchDictationPolicy.retryWithSystem(backend, reason, system, systemAttempted)) {
             start(true)
             return
         }
+        if (reason == WatchSpeechFailure.EMPTY && silence.isArmed && isCurrent()) {
+            words.text = note.text; doneState("Done", note.text.isNotBlank())
+            if (!checkSilence()) handler.postDelayed(nextPhrase, 500)
+            return
+        }
+        silence.hardFailure(); handler.removeCallbacks(silenceTicker)
         message.text = WatchDictationPolicy.failure(reason, backend == WatchSpeechBackend.ON_DEVICE) +
             if (note.text.isNotBlank()) " Your words are kept. Tap Done to save, Continue, or Type." else ""
         words.text = note.text
         continueButton.visibility = if (backend != WatchSpeechBackend.UNAVAILABLE) View.VISIBLE else View.GONE
         doneState("Done", note.text.isNotBlank())
     }
+    private fun continueDictating() {
+        if (!active || !isCurrent()) return
+        silence.resume(SystemClock.elapsedRealtime(), silenceDelaySeconds)
+        handler.removeCallbacks(silenceTicker); handler.post(silenceTicker)
+        start(backend == WatchSpeechBackend.SYSTEM)
+    }
+    private fun settings() {
+        if (!active || !isCurrent()) return
+        silence.pause(); handler.removeCallbacks(silenceTicker); handler.removeCallbacks(nextPhrase)
+        stopRecognizer()
+        message.text = "Dictation paused."
+        continueButton.visibility = View.VISIBLE
+        openSettings { seconds ->
+            if (active && isCurrent()) {
+                silenceDelaySeconds = WatchSilencePolicy.normalizeDelay(seconds)
+                continueDictating()
+            }
+        }
+    }
+    private fun checkSilence(): Boolean {
+        if (!active || !isCurrent()) return false
+        when (silence.poll(SystemClock.elapsedRealtime())) {
+            WatchSilenceAction.NONE -> Unit
+            WatchSilenceAction.STOP_LISTENING -> {
+                handler.removeCallbacks(nextPhrase)
+                try { recognizer?.stopListening() }
+                catch (_: SecurityException) { failed(WatchSpeechFailure.MICROPHONE, allowFallback = false) }
+                catch (_: Exception) { failed(WatchSpeechFailure.UNAVAILABLE, allowFallback = false) }
+            }
+            WatchSilenceAction.FINISH -> {
+                val text = note.confirmDisplayed()
+                if (text == null) close(empty = true) else close(confirmed = text)
+                return true
+            }
+        }
+        return !active
+    }
     private fun stopRecognizer() {
         guard.invalidate()
         val previous = recognizer; recognizer = null
         runCatching { previous?.cancel() }; runCatching { previous?.destroy() }
     }
-    private fun close(confirmed: String? = null, type: Boolean = false, preserveDraft: Boolean = false) {
+    private fun close(confirmed: String? = null, type: Boolean = false, preserveDraft: Boolean = false, empty: Boolean = false) {
         if (!active) return
         val partial = if (type || preserveDraft) words.text?.toString() else null
-        active = false; guard.close(); stopRecognizer(); handler.removeCallbacks(ticker); handler.removeCallbacks(nextPhrase)
+        active = false; silence.close(); guard.close(); stopRecognizer()
+        handler.removeCallbacks(ticker); handler.removeCallbacks(nextPhrase); handler.removeCallbacks(silenceTicker)
         dialog.setOnDismissListener(null); dialog.dismiss()
-        if (confirmed != null) onConfirmed(confirmed) else onClosed(type, partial)
+        if (confirmed != null) onConfirmed(confirmed) else if (empty) onEmpty() else onClosed(type, partial)
     }
     private fun doneState(text: String, enabled: Boolean) { done.text = text; done.isEnabled = enabled }
     private fun column() = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(BACKGROUND) }

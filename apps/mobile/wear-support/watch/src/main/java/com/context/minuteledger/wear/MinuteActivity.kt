@@ -30,6 +30,7 @@ import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ImageButton
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
@@ -59,6 +60,9 @@ class MinuteActivity : Activity() {
     private var pendingSpeech: SpeechSession? = null
     private var watchDictation: WatchDictationDialog? = null
     private var microphoneRequestSession: EditorSession? = null
+    private var microphoneRequestCode: Int? = null
+    private var microphoneReadySession: EditorSession? = null
+    private var freshEntryPending = false
     private var retryDictation: DictationSavePlan? = null
     private var nextSpeechRequest = SPEECH
     private var preserveSpeechResume = false
@@ -95,6 +99,7 @@ class MinuteActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = WatchStore(this)
+        freshEntryPending = LaunchPolicy.freshEntry(savedInstanceState != null, requestsRecordNow(intent))
         restoringEditor = savedInstanceState?.containsKey("editorText") == true
         deferredNow = savedInstanceState?.getBoolean("deferredNow", false) ?: false
         nextSpeechRequest = savedInstanceState?.getInt("nextSpeechRequest", SPEECH) ?: SPEECH
@@ -110,8 +115,9 @@ class MinuteActivity : Activity() {
         dateButton = button("", "Choose ledger date") { chooseDate() }
         dates.addView(dateButton, LinearLayout.LayoutParams(0, dp(WatchLayout.HEADER), 1f))
         dates.addView(button("Now", "Return to the current minute") {
-            applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
+            applyLaunch(LaunchTrigger.ON_START)
         }, LinearLayout.LayoutParams(dp(42), dp(WatchLayout.HEADER)))
+        dates.addView(settingsButton { showDictationSettings() }, LinearLayout.LayoutParams(dp(44), dp(44)))
         root.addView(dates)
         status = label("", 10f).apply { setTextColor(MUTED); maxLines = 1; gravity = Gravity.CENTER }
         root.addView(status, LinearLayout.LayoutParams(-1, dp(WatchLayout.STATUS)))
@@ -187,7 +193,9 @@ class MinuteActivity : Activity() {
     }
     override fun onStop() {
         visible = false; wasStopped = true; launchGeneration++
-        microphoneRequestSession = null
+        // An OS permission window may stop this Activity. Retain only that exact
+        // in-flight request; a granted ready-to-start token never survives a stop.
+        microphoneReadySession = null; freshEntryPending = false
         handler.removeCallbacks(ticker); unregisterReceiver(receiver); super.onStop()
     }
     override fun onResume() {
@@ -196,9 +204,13 @@ class MinuteActivity : Activity() {
         preserveSpeechResume = false
         wasStopped = false
         if (pendingRestore != null) list.post { restoreEditor() }
+        resumePermissionDictation()
         val resumeTrigger = DictationSavePolicy.resumeTrigger(confirmedSpeechReturn, deferredNow)
         confirmedSpeechReturn = false
-        if (resumeTrigger != null) applyLaunch(resumeTrigger)
+        if (freshEntryPending) {
+            freshEntryPending = false
+            applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
+        } else if (resumeTrigger != null) applyLaunch(resumeTrigger)
         else { render(); centerMinute() }
     }
     override fun onPause() {
@@ -206,19 +218,31 @@ class MinuteActivity : Activity() {
         if (watchDictation != null) { preserveSpeechResume = true; watchDictation?.cancel(preserveDraft = true) }
         super.onPause()
     }
+    override fun onUserLeaveHint() {
+        // Home/app switching is a user departure, not an OS permission interruption.
+        cancelMicrophoneRequest(); freshEntryPending = false
+        if (watchDictation != null) { preserveSpeechResume = true; watchDictation?.cancel(preserveDraft = true) }
+        super.onUserLeaveHint()
+    }
     override fun onDestroy() {
         visible = false; resumed = false; launchGeneration++
-        microphoneRequestSession = null; watchDictation?.cancel(); watchDictation = null
+        cancelMicrophoneRequest()
+        watchDictation?.cancel(); watchDictation = null
         editorDialog?.dismiss(); pickers.toList().forEach { it.dismiss() }
         super.onDestroy()
     }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.action == RECORD_NOW || intent.getStringExtra(LAUNCH_ACTION) == RECORD_NOW ||
-            intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER)) {
+        if (requestsRecordNow(intent)) {
             discardPristineNowEditor()
-            applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
+            if (visible && resumed) applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
+            else {
+                val decision = LaunchPolicy.decide(LaunchTrigger.LAUNCHER_OR_TILE,
+                    LaunchState(editing != null, restoringEditor, speechInputInFlight(), pickers.isNotEmpty(), deferredNow))
+                freshEntryPending = decision.startDictation
+                deferredNow = !decision.startDictation || decision.deferredNow
+            }
         }
     }
     override fun onSaveInstanceState(out: Bundle) {
@@ -262,16 +286,29 @@ class MinuteActivity : Activity() {
     private fun discardPristineNowEditor() {
         if (!LaunchPolicy.mayReplacePristineAutoEditor(editorAutoNow, editor?.text?.toString(), editorInitialText,
             editorSession?.chosenCategory != null, LaunchState(editing != null, restoringEditor,
-                pendingSpeech != null, pickers.isNotEmpty(), deferredNow))) return
+                speechInputInFlight(), pickers.isNotEmpty(), deferredNow))) return
         val previous = editorDialog ?: return
         // Clear ownership first: a queued old onDismiss must not erase the next editor.
         editorDialog = null; editor = null; editing = null; editorSession = null
+        cancelMicrophoneRequest()
         previous.dismiss()
     }
-    private fun cancelPendingLaunch() { launchGeneration++; deferredNow = false }
+    private fun requestsRecordNow(intent: Intent?) = intent != null &&
+        (intent.action == RECORD_NOW || intent.getStringExtra(LAUNCH_ACTION) == RECORD_NOW ||
+            intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER))
+    private fun cancelPendingLaunch() { launchGeneration++; deferredNow = false; freshEntryPending = false }
+    private fun speechInputInFlight() = pendingSpeech != null || microphoneRequestSession != null || microphoneReadySession != null
+    private fun cancelMicrophoneRequest() {
+        microphoneRequestSession = null; microphoneRequestCode = null; microphoneReadySession = null
+    }
+    private fun nextInputRequest(): Int {
+        val request = nextSpeechRequest
+        nextSpeechRequest = if (request >= 65535) SPEECH else request + 1
+        return request
+    }
     private fun applyLaunch(trigger: LaunchTrigger) {
         val decision = LaunchPolicy.decide(trigger, LaunchState(editing != null, restoringEditor,
-            pendingSpeech != null, pickers.isNotEmpty(), deferredNow))
+            speechInputInFlight(), pickers.isNotEmpty(), deferredNow))
         deferredNow = decision.deferredNow
         if (!decision.resetToNow) return
         // Retain this request if backgrounding or an editor/picker delays its posted work.
@@ -279,12 +316,13 @@ class MinuteActivity : Activity() {
         val generation = ++launchGeneration
         list.post {
             if (!visible || !resumed || isFinishing || isDestroyed || generation != launchGeneration ||
-                editing != null || restoringEditor || pendingSpeech != null || pickers.isNotEmpty()) return@post
+                editing != null || restoringEditor || speechInputInFlight() || pickers.isNotEmpty()) return@post
             selected = decision.target(selected, ::now); followingNow = true
             deferredNow = false
             render(); centerMinute()
             // Show the cached editor immediately; requesting the phone never gates entry.
             openEditor(selected, autoNow = true)
+            if (decision.startDictation) editorSession?.takeIf { it.coordinate == selected }?.let { beginWatchDictation(it) }
             WatchTransport.requestDay(this, selected.dateKey); WatchTransport.synchronize(this, selected.dateKey)
         }
     }
@@ -382,6 +420,7 @@ class MinuteActivity : Activity() {
 
     private fun openEditor(target: Coordinate, restored: String? = null, restoredSession: EditorSession? = null,
         autoNow: Boolean = false, restoredInitialText: String? = null, restoreInputFocus: Boolean = false) {
+        cancelMicrophoneRequest()
         editorDialog?.dismiss(); followingNow = false
         if (restoredSession == null) retryDictation = null
         val day = store.day(target.dateKey)
@@ -463,7 +502,7 @@ class MinuteActivity : Activity() {
         editorDialog = dialog
         dialog.setOnDismissListener {
             if (editorDialog === dialog && editorSession?.sessionId == session.sessionId) {
-                watchDictation?.cancel(); microphoneRequestSession = null
+                watchDictation?.cancel(); cancelMicrophoneRequest()
                 editing = null; editor = null; editorDialog = null; editorSession = null; pendingSpeech = null; retryDictation = null
                 if (visible && !isChangingConfigurations) applyLaunch(LaunchTrigger.EDITOR_CLOSED)
             }
@@ -486,26 +525,37 @@ class MinuteActivity : Activity() {
     }
     private fun beginWatchDictation(session: EditorSession) {
         if (!visible || !resumed || isFinishing || isDestroyed ||
-            editorSession?.sessionId != session.sessionId || editing != session.coordinate || pendingSpeech != null) return
+            editorSession?.sessionId != session.sessionId || editing != session.coordinate || speechInputInFlight()) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             microphoneRequestSession = session; preserveSpeechResume = true
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), MICROPHONE)
+            val request = nextInputRequest(); microphoneRequestCode = request
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), request)
             return
         }
-        val request = nextSpeechRequest
-        nextSpeechRequest = if (request >= 65535) SPEECH else request + 1
+        val request = nextInputRequest()
         val speech = SpeechSession(request, session.sessionId, session.coordinate)
         pendingSpeech = speech
         val originalText = editor?.text?.toString() ?: ""
         (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
             .hideSoftInputFromWindow(editor?.windowToken, 0)
         lateinit var screen: WatchDictationDialog
-        screen = WatchDictationDialog(this, session.coordinate, twelveHourClock,
-            isCurrent = { visible && resumed && !isFinishing && !isDestroyed && pendingSpeech == speech &&
+        screen = WatchDictationDialog(this, session.coordinate, twelveHourClock, silenceDelaySeconds(),
+            isCurrent = { visible && resumed && !isFinishing && !isDestroyed && pickers.isEmpty() && pendingSpeech == speech &&
                 SpeechSessionGuard.accepts(speech, request, editorSession) },
+            openSettings = { onSelected -> showDictationSettings(onSelected) },
             onConfirmed = { text ->
                 if (watchDictation === screen) watchDictation = null
                 acceptDictationResult(request, true, text)
+            },
+            onEmpty = {
+                if (watchDictation === screen) watchDictation = null
+                if (pendingSpeech == speech && SpeechSessionGuard.accepts(speech, request, editorSession)) {
+                    pendingSpeech = null
+                    if (WatchDictationPolicy.mayCloseEmptyCapture(editorInitialText, editor?.text?.toString(),
+                        editorSession?.chosenCategory != null, retryDictation != null)) {
+                        finishEditor(session, fromDictation = true, saved = false)
+                    }
+                }
             },
             onClosed = { type, partial ->
                 if (watchDictation === screen) watchDictation = null
@@ -529,13 +579,24 @@ class MinuteActivity : Activity() {
     @Deprecated("Activity runtime permission callback retained for supported Wear OS versions")
     override fun onRequestPermissionsResult(request: Int, permissions: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(request, permissions, results)
-        if (request != MICROPHONE) return
-        val session = microphoneRequestSession; microphoneRequestSession = null
-        if (session == null || editorSession?.sessionId != session.sessionId || editing != session.coordinate) return
+        if (request != microphoneRequestCode) return
+        val session = microphoneRequestSession
+        val matching = LaunchPolicy.acceptsMicrophoneGrant(request, microphoneRequestCode, session, editorSession)
+        microphoneRequestSession = null; microphoneRequestCode = null
+        if (session == null || !matching || editing != session.coordinate) return
         if (permissions.indexOf(Manifest.permission.RECORD_AUDIO).let { it >= 0 && results.getOrNull(it) == PackageManager.PERMISSION_GRANTED }) {
-            if (visible && resumed) beginWatchDictation(session)
-            else toast("Microphone allowed. Tap Dictate when ready.")
+            microphoneReadySession = session
+            preserveSpeechResume = true
+            resumePermissionDictation()
         } else toast("Microphone access was not allowed. Tap the note to type.")
+    }
+    private fun resumePermissionDictation() {
+        val session = microphoneReadySession ?: return
+        if (!visible || !resumed || isFinishing || isDestroyed) return
+        // Consume before opening speech; a permission/IME resume cannot reuse this handoff.
+        microphoneReadySession = null
+        if (editing == session.coordinate && LaunchPolicy.mayResumeMicrophone(session, editorSession,
+            visible, resumed, editorDialog?.isShowing == true, pendingSpeech != null)) beginWatchDictation(session)
     }
     @Deprecated("Retained only for results already launched by an older restored session")
     override fun onActivityResult(request: Int, result: Int, data: Intent?) {
@@ -575,20 +636,50 @@ class MinuteActivity : Activity() {
         finishSavedEditor(session, fromDictation = false)
     }
     private fun finishSavedEditor(session: EditorSession, fromDictation: Boolean) {
+        finishEditor(session, fromDictation, saved = true)
+    }
+    private fun finishEditor(session: EditorSession, fromDictation: Boolean, saved: Boolean) {
         if (editorSession?.sessionId != session.sessionId) return
         val oldDialog = editorDialog
         // Clear ownership before dismissing: neither restoration nor an old
         // onDismiss callback may reopen or clear a different minute's editor.
         pendingRestore = null; restoringEditor = false
         editing = null; editor = null; editorDialog = null; editorSession = null
-        pendingSpeech = null; retryDictation = null
+        pendingSpeech = null; retryDictation = null; cancelMicrophoneRequest()
         selected = session.coordinate; followingNow = false
-        if (fromDictation) confirmedSpeechReturn = !resumed
+        if (fromDictation) confirmedSpeechReturn = true
         oldDialog?.dismiss()
-        runCatching { render(); centerMinute() }.onFailure { status.text = "Saved on watch" }
+        runCatching { render(); centerMinute() }.onFailure { status.text = if (saved) "Saved on watch" else "Ready" }
         applyLaunch(LaunchTrigger.EDITOR_CLOSED)
         // Connectivity never decides whether the locally committed note saved.
-        runCatching { WatchTransport.sendPending(this) }
+        if (saved) runCatching { WatchTransport.sendPending(this) }
+    }
+    private fun silenceDelaySeconds(): Int = WatchSilencePolicy.normalizeDelay(
+        getSharedPreferences("context-watch-settings", MODE_PRIVATE)
+            .getInt("silence-delay-seconds", WatchSilencePolicy.DEFAULT_DELAY_SECONDS))
+    private fun showDictationSettings(onSelected: ((Int) -> Unit)? = null) {
+        val content = column().apply { setPadding(dp(26), dp(WatchLayout.TOP), dp(26), dp(WatchLayout.EDITOR_BOTTOM)) }
+        content.addView(label("Save after silence", 14f).apply { gravity = Gravity.CENTER })
+        val options = column(); val scrolling = android.widget.ScrollView(this).apply { addView(options) }
+        content.addView(scrolling, LinearLayout.LayoutParams(-1, 0, 1f))
+        val dialog = fullDialog(content)
+        val selectedDelay = silenceDelaySeconds()
+        for (seconds in WatchSilencePolicy.DELAYS_SECONDS) options.addView(button(
+            "${if (seconds == selectedDelay) "✓ " else ""}${seconds}s", "Save after $seconds seconds of silence") {
+            val stored = getSharedPreferences("context-watch-settings", MODE_PRIVATE).edit()
+                .putInt("silence-delay-seconds", seconds).commit()
+            if (!stored) { toast("Could not save this setting. Try again."); return@button }
+            dialog.dismiss()
+            onSelected?.invoke(seconds)
+        }, LinearLayout.LayoutParams(-1, dp(36)))
+        content.addView(button("Back", "Return without changing the silence delay") { dialog.dismiss() },
+            LinearLayout.LayoutParams(-1, dp(WatchLayout.ACTIONS)))
+        showPicker(dialog)
+    }
+    private fun settingsButton(action: () -> Unit) = ImageButton(this).apply {
+        contentDescription = "Dictation settings"; setImageResource(R.drawable.context_settings)
+        setBackgroundColor(Color.TRANSPARENT); setPadding(dp(10), dp(10), dp(10), dp(10))
+        setOnClickListener { action() }
     }
     private fun chooseDate() {
         cancelPendingLaunch()
@@ -658,7 +749,6 @@ class MinuteActivity : Activity() {
         private const val LAUNCH_ACTION = "com.context.minuteledger.action"
         private const val RECORD_NOW = "com.context.minuteledger.action.RECORD_NOW"
         private const val SPEECH = 100
-        private const val MICROPHONE = 99
         private val BACKGROUND = Color.parseColor("#08090B")
         private val PANEL = Color.parseColor("#202024")
         private val FOREGROUND = Color.parseColor("#F3EFF7")

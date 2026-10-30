@@ -28,6 +28,9 @@ object WatchDictationPolicy {
         val time = current.format(DateTimeFormatter.ofPattern(if (twelveHour) "h:mm a" else "HH:mm", Locale.ROOT))
         return "Note ${target.dateKey} $time"
     }
+    /** Empty speech may dismiss an unchanged entry, never a user's unsaved text/color or retry. */
+    fun mayCloseEmptyCapture(initialText: String, currentText: String?, categoryChosen: Boolean,
+        retryPending: Boolean): Boolean = currentText != null && currentText == initialText && !categoryChosen && !retryPending
     /** Unconfirmed words may become an editable draft, never a saved operation. */
     fun preservedDraft(pending: SpeechSession?, requestCode: Int, editor: EditorSession?,
         originalText: String, currentText: String?, partial: String?): String? {
@@ -57,7 +60,7 @@ class WatchDictationRunGuard {
     fun close() { open = false; generation += 1 }
 }
 
-/** Phrase boundaries are not note boundaries. Only the user's Done action confirms this draft. */
+/** Phrase boundaries are not note boundaries. Done or visible-session silence confirms this draft. */
 class WatchDictationNote {
     private var completed = ""
     private var partial = ""

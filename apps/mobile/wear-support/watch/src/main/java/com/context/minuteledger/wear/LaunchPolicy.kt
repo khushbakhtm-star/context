@@ -15,7 +15,7 @@ data class LaunchState(
         get() = editorOpen || restoringEditor || speechInFlight || pickerOpen
 }
 
-data class LaunchDecision(val resetToNow: Boolean, val deferredNow: Boolean) {
+data class LaunchDecision(val resetToNow: Boolean, val deferredNow: Boolean, val startDictation: Boolean = false) {
     /** Evaluate the clock when applying a fresh launch, never when restoring a draft. */
     fun target(selected: Coordinate, now: () -> Coordinate): Coordinate = if (resetToNow) now() else selected
 }
@@ -23,6 +23,15 @@ data class LaunchDecision(val resetToNow: Boolean, val deferredNow: Boolean) {
 /** Lifecycle callbacks must not rebind a note to another minute. A genuine new
  * entry request may wait for Save/Cancel; speech/IME resumes do not create one. */
 object LaunchPolicy {
+    /** A restored activity, permission callback or ordinary resume is not a fresh record request. */
+    fun freshEntry(restoringActivity: Boolean, launcherOrTileIntent: Boolean) = !restoringActivity && launcherOrTileIntent
+    private fun sameEditor(requested: EditorSession?, current: EditorSession?) =
+        requested != null && current != null && requested.sessionId == current.sessionId && requested.coordinate == current.coordinate
+    fun acceptsMicrophoneGrant(callbackCode: Int, requestedCode: Int?, requested: EditorSession?, current: EditorSession?) =
+        requestedCode != null && callbackCode == requestedCode && sameEditor(requested, current)
+    fun mayResumeMicrophone(requested: EditorSession?, current: EditorSession?, visible: Boolean,
+        resumed: Boolean, editorShowing: Boolean, speechInFlight: Boolean): Boolean =
+        sameEditor(requested, current) && visible && resumed && editorShowing && !speechInFlight
     /** An untouched automatic entry may follow a later launch; explicit historical
      * editors and in-progress external input retain their original coordinate. */
     fun mayReplacePristineAutoEditor(autoNow: Boolean, rawText: String?, initialText: String,
@@ -33,7 +42,7 @@ object LaunchPolicy {
     fun decide(trigger: LaunchTrigger, state: LaunchState): LaunchDecision = when (trigger) {
         LaunchTrigger.RESTORE -> LaunchDecision(false, state.deferredNow)
         LaunchTrigger.LAUNCHER_OR_TILE -> if (state.protectsEditing) LaunchDecision(false, true)
-            else LaunchDecision(true, false)
+            else LaunchDecision(true, false, startDictation = true)
         LaunchTrigger.ON_START -> if (state.protectsEditing) LaunchDecision(false, state.deferredNow)
             else LaunchDecision(true, false)
         LaunchTrigger.EDITOR_CLOSED -> if (state.protectsEditing) LaunchDecision(false, state.deferredNow)

@@ -6,7 +6,7 @@ import org.junit.Test
 class WatchLayoutTest {
     @Test fun smallRoundScreensKeepMoreThanTwoMinuteRowsVisible() {
         for (height in listOf(198, 220, 224)) assertTrue(WatchLayout.ledgerViewport(height) >= 2 * WatchLayout.MINUTE)
-        assertEquals(132, WatchLayout.ledgerViewport(198))
+        assertEquals(118, WatchLayout.ledgerViewport(198))
     }
     @Test fun editorTextHasARealViewportOnSmallScreens() {
         for (height in listOf(198, 220, 224)) assertTrue(WatchLayout.editorViewport(height) >= WatchLayout.editorBodyHeight())
