@@ -5,10 +5,16 @@ Context phone APK. Install an updated phone APK, enable **Allow watch access** i
 and open Context on the phone once. The watch does not require a Play developer account,
 calendar login, cloud storage account or separate ledger.
 
-Add the **Context** tile on the watch for **Record now**. It opens the current minute and
-starts dictation immediately, using the clock when the app opens rather than a cached tile time.
-The tile contains no ledger text and does not need to connect to the phone before opening.
-Opening Context from its app icon also starts dictation at the current minute.
+Add the **Context** tile to see five cached minute rows centered around Now. The center
+row resolves the actual current minute when tapped and starts dictation; it does not use an
+older rendered timestamp as the recording destination. Neighboring rows open their exact
+date and minute in the manual editor without starting the microphone. The tile reads the
+watch's local cache; refreshes and phone synchronization may lag, so its visible notes can
+be older than the current ledger. Opening Context from its app icon also starts dictation
+at the current minute. The watch launcher uses a high-contrast circular Context emblem.
+Protected drafts remain at their original coordinate. A different neighboring-row request
+waits until that editor closes, then opens the requested minute manually; it never turns
+into automatic Now dictation.
 An untouched automatic entry returns to the current minute on reopening. An unfinished
 note, intentional historical-minute edit, dictation or color picker retains its original
 minute and text; a new Now request waits for Save or Cancel. Saving a restored note keeps
@@ -37,7 +43,9 @@ dialog with a `YYYY-MM-DD` field and previous/next day controls. Now returns to 
 minute. Downloaded days remain available offline. An uncached day loads after the paired
 phone is running Context.
 
-The small **gear** opens a local silence-delay setting: **5, 10, 15, 30 or 60 seconds**.
+The small **gear** opens a local silence-delay setting: **5, 10, 15, 30 or 60 seconds**,
+or **Custom** for any whole number from **1 to 300 seconds**. The default is 10 seconds.
+Custom input is validated before saving; Cancel or invalid input keeps the old setting.
 Opening it stops the microphone and pauses automatic saving. Selecting a delay saves the
 setting and explicitly resumes the same still-visible capture with a fresh deadline.
 Back leaves capture paused with Continue available. Backgrounding, Cancel and Type stop
@@ -45,6 +53,13 @@ the microphone and timer without saving hidden speech. Restoring a draft, return
 settings/permissions or an IME, and returning to the list after capture do not create a new
 automatic microphone request. A fresh launcher/Tile request preserves a dirty or historical
 editor instead of retargeting it to the current minute.
+
+Only the visible dictation window stays awake while it is listening, waiting for silence
+or flushing a final result. Settings, a speech failure, Type, Done, Cancel and backgrounding
+release that window flag. It does not hold a wake lock or change the watch's global display
+timeout. An explicit screen-off or interrupted capture still keeps an editable draft rather
+than recording hidden speech. Restored drafts do not restart the microphone or hold the
+screen awake until the user starts a new visible capture.
 
 Saving first commits an atomic private watch journal, then sends an immutable operation
 through Wear OS Data Layer. “Waiting for phone” means the phone has not committed it yet.
@@ -66,7 +81,7 @@ The config plugin generates `android/wear` from reviewed sources; the EAS profil
 tests; AGP 9 only creates unit tests for its selected test build type, which defaults to
 debug. Cloud-only `credentials.json` supplies
 the same remote signing key used by the phone. Independent watch identity comes from the
-strict `watch/version.json` metadata (0.1.14/code100015); phone version changes do not alter it.
+strict `watch/version.json` metadata (0.1.15/code100016); phone version changes do not alter it.
 Previous watch 0.1.9 used code100010. Watch and phone update artifacts remain separate.
 Release signing fails if those credentials
 are absent. Never create a new watch key, export credentials or change the watch package ID.

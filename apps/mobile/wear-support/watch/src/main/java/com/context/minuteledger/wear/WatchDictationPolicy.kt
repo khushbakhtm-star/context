@@ -9,6 +9,8 @@ enum class WatchSpeechFailure { NETWORK, MODEL, MICROPHONE, EMPTY, BUSY, UNAVAIL
 
 /** Clock display never retargets the immutable minute being recorded. */
 object WatchDictationPolicy {
+    /** A foreground capture may keep its own window awake; a paused/hidden draft may not. */
+    fun keepScreenAwake(captureVisible: Boolean, timerArmed: Boolean) = captureVisible && timerArmed
     fun backend(api: Int, onDeviceAvailable: Boolean, systemAvailable: Boolean,
         preferSystem: Boolean = false): WatchSpeechBackend = when {
         preferSystem && systemAvailable -> WatchSpeechBackend.SYSTEM

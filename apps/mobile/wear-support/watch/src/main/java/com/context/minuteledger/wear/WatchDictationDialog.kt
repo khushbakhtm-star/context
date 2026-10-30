@@ -17,6 +17,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ImageButton
@@ -111,6 +112,7 @@ class WatchDictationDialog(
         if (!active || !isCurrent()) { close(); return }
         dialog.show(); handler.post(ticker)
         silence.resume(SystemClock.elapsedRealtime(), silenceDelaySeconds)
+        updateScreenAwake()
         handler.post(silenceTicker)
         start(false)
     }
@@ -214,6 +216,7 @@ class WatchDictationDialog(
             return
         }
         silence.hardFailure(); handler.removeCallbacks(silenceTicker)
+        updateScreenAwake()
         message.text = WatchDictationPolicy.failure(reason, backend == WatchSpeechBackend.ON_DEVICE) +
             if (note.text.isNotBlank()) " Your words are kept. Tap Done to save, Continue, or Type." else ""
         words.text = note.text
@@ -223,12 +226,14 @@ class WatchDictationDialog(
     private fun continueDictating() {
         if (!active || !isCurrent()) return
         silence.resume(SystemClock.elapsedRealtime(), silenceDelaySeconds)
+        updateScreenAwake()
         handler.removeCallbacks(silenceTicker); handler.post(silenceTicker)
         start(backend == WatchSpeechBackend.SYSTEM)
     }
     private fun settings() {
         if (!active || !isCurrent()) return
         silence.pause(); handler.removeCallbacks(silenceTicker); handler.removeCallbacks(nextPhrase)
+        updateScreenAwake()
         stopRecognizer()
         message.text = "Dictation paused."
         continueButton.visibility = View.VISIBLE
@@ -262,10 +267,18 @@ class WatchDictationDialog(
         val previous = recognizer; recognizer = null
         runCatching { previous?.cancel() }; runCatching { previous?.destroy() }
     }
+    private fun updateScreenAwake() {
+        val window = dialog.window ?: return
+        if (WatchDictationPolicy.keepScreenAwake(active && isCurrent() && dialog.isShowing, silence.isArmed)) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
     private fun close(confirmed: String? = null, type: Boolean = false, preserveDraft: Boolean = false, empty: Boolean = false) {
         if (!active) return
         val partial = if (type || preserveDraft) words.text?.toString() else null
-        active = false; silence.close(); guard.close(); stopRecognizer()
+        active = false; silence.close(); guard.close(); updateScreenAwake(); stopRecognizer()
         handler.removeCallbacks(ticker); handler.removeCallbacks(nextPhrase); handler.removeCallbacks(silenceTicker)
         dialog.setOnDismissListener(null); dialog.dismiss()
         if (confirmed != null) onConfirmed(confirmed) else if (empty) onEmpty() else onClosed(type, partial)

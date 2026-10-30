@@ -13,7 +13,7 @@ class JVMWatchSilencePolicyTest {
             assertEquals(WatchSilenceAction.NONE, policy.poll(100 + seconds * 1000L - 1))
             assertEquals(WatchSilenceAction.FINISH, policy.poll(100 + seconds * 1000L))
         }
-        for (invalid in listOf(-1, 0, 1, 9, 11, 61, Int.MAX_VALUE))
+        for (invalid in listOf(Int.MIN_VALUE, -1, 0, 301, 1_000, Int.MAX_VALUE))
             assertEquals(10, WatchSilencePolicy.normalizeDelay(invalid))
     }
 

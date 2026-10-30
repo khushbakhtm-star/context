@@ -99,7 +99,7 @@ test('fresh launcher and Tile requests begin capture once, while blank timeout c
   assert.match(activity, /freshEntryPending = LaunchPolicy\.freshEntry\(savedInstanceState != null, requestsRecordNow\(intent\)\)/);
   assert.match(activity, /if \(freshEntryPending\) \{\s*freshEntryPending = false\s*applyLaunch\(LaunchTrigger\.LAUNCHER_OR_TILE\)/);
   assert.match(activity, /openEditor\(selected, autoNow = true\)\s*if \(decision\.startDictation\)/);
-  assert.match(activity, /button\("Now", "Return to the current minute"\) \{\s*applyLaunch\(LaunchTrigger\.ON_START\)/);
+  assert.match(activity, /button\("Now", "Return to the current minute"\) \{\s*cancelPendingLaunch\(\)\s*applyLaunch\(LaunchTrigger\.ON_START\)/);
   const empty = activity.slice(activity.indexOf('onEmpty = {'), activity.indexOf('onClosed = {'));
   assert.match(empty, /SpeechSessionGuard\.accepts/);
   assert.match(empty, /WatchDictationPolicy\.mayCloseEmptyCapture\(editorInitialText, editor\?\.text\?\.toString\(\),\s*editorSession\?\.chosenCategory != null, retryDictation != null\)/);
@@ -142,4 +142,62 @@ test('the compact gear pauses capture before settings and a selected persisted d
   assert.match(dialog, /LinearLayout\.LayoutParams\(dp\(44\), dp\(44\)\)/);
   const icon = fs.readFileSync(path.join(__dirname, '../wear-support/watch/src/main/res/drawable/context_settings.xml'), 'utf8');
   assert.match(icon, /android:width="24dp" android:height="24dp"/);
+});
+
+test('only the visible armed dictation window stays awake, including quiet time and its final flush', () => {
+  const awake = dialog.slice(dialog.indexOf('private fun updateScreenAwake()'), dialog.indexOf('private fun close('));
+  assert.match(awake, /val window = dialog\.window \?: return/);
+  assert.match(awake, /WatchDictationPolicy\.keepScreenAwake\(active && isCurrent\(\) && dialog\.isShowing, silence\.isArmed\)/);
+  assert.match(awake, /window\.addFlags\(WindowManager\.LayoutParams\.FLAG_KEEP_SCREEN_ON\)/);
+  assert.match(awake, /window\.clearFlags\(WindowManager\.LayoutParams\.FLAG_KEEP_SCREEN_ON\)/);
+  assert.doesNotMatch(activity, /FLAG_KEEP_SCREEN_ON|PowerManager|WAKE_LOCK/);
+  const show = dialog.slice(dialog.indexOf('fun show()'), dialog.indexOf('fun cancel('));
+  assert.match(show, /silence\.resume[\s\S]*updateScreenAwake\(\)[\s\S]*start\(false\)/);
+  const resume = dialog.slice(dialog.indexOf('private fun continueDictating()'), dialog.indexOf('private fun settings()'));
+  assert.match(resume, /if \(!active \|\| !isCurrent\(\)\) return[\s\S]*silence\.resume[\s\S]*updateScreenAwake\(\)/);
+  const settings = dialog.slice(dialog.indexOf('private fun settings()'), dialog.indexOf('private fun checkSilence'));
+  assert.ok(settings.indexOf('silence.pause()') < settings.indexOf('updateScreenAwake()'));
+  assert.ok(settings.indexOf('updateScreenAwake()') < settings.indexOf('openSettings {'));
+  const fail = dialog.slice(dialog.indexOf('private fun failed('), dialog.indexOf('private fun continueDictating'));
+  assert.match(fail, /silence\.hardFailure\(\); handler\.removeCallbacks\(silenceTicker\)\s*updateScreenAwake\(\)/);
+  const close = dialog.slice(dialog.indexOf('private fun close('));
+  assert.match(close, /active = false; silence\.close\(\); guard\.close\(\); updateScreenAwake\(\); stopRecognizer\(\)/);
+  const stopped = activity.slice(activity.indexOf('override fun onStop'), activity.indexOf('override fun onResume'));
+  assert.match(stopped, /watchDictation\?\.cancel\(preserveDraft = true\)/);
+});
+
+test('Custom seconds validates raw input before committing and keeps invalid or canceled edits from changing the setting', () => {
+  assert.match(activity, /"✓ Custom · \$\{selectedDelay\}s" else "Custom"/);
+  const custom = activity.slice(activity.indexOf('private fun showCustomSilenceDelay('), activity.indexOf('private fun settingsButton'));
+  assert.match(custom, /val scrolling = android\.widget\.ScrollView\(this\)/);
+  assert.match(custom, /setRawInputType\(InputType\.TYPE_CLASS_NUMBER\)/);
+  assert.doesNotMatch(custom, /DigitsKeyListener|LengthFilter/);
+  assert.match(custom, /val seconds = WatchSilencePolicy\.parseDelayInput\(input\.text\.toString\(\)\)/);
+  assert.match(custom, /if \(seconds == null\) \{ error\.text = "Enter 1–300 whole seconds\."; return@button \}/);
+  assert.match(custom, /if \(!persistSilenceDelay\(seconds\)\) \{ error\.text = "Could not save\. Try again\."; return@button \}/);
+  assert.ok(custom.indexOf('if (seconds == null)') < custom.indexOf('persistSilenceDelay(seconds)'));
+  assert.ok(custom.indexOf('persistSilenceDelay(seconds)') < custom.indexOf('parentSettings.dismiss()'));
+  assert.ok(custom.indexOf('parentSettings.dismiss()') < custom.indexOf('onSelected?.invoke(seconds)'));
+  assert.match(custom, /button\("Cancel", "Keep the current silence delay"\) \{ closeKeyboard\(\); dialog\.dismiss\(\) \}/);
+  assert.match(custom, /content\.addView\(actions\)/);
+});
+
+test('historical Tile extras are strict, deferred by exact coordinate and opened manually without sampling Now', () => {
+  assert.match(activity, /LaunchPolicy\.tileMinute\(intent\?\.extras\?\.get\(DATE_EXTRA\), intent\?\.extras\?\.get\(MINUTE_EXTRA\)\)/);
+  assert.doesNotMatch(activity, /getIntExtra\(MINUTE_EXTRA/);
+  const intent = activity.slice(activity.indexOf('override fun onNewIntent'), activity.indexOf('override fun onSaveInstanceState'));
+  assert.ok(intent.indexOf('if (requestsOpenMinute(intent))') < intent.indexOf('if (requestsRecordNow(intent))'));
+  assert.match(intent, /val target = tileMinuteFrom\(intent\)\s*cancelPendingLaunch\(\)/);
+  assert.match(intent, /if \(requestsRecordNow\(intent\)\) \{\s*cancelPendingLaunch\(\)/);
+  const historical = activity.slice(activity.indexOf('private fun applyTileMinuteRequest()'), activity.indexOf('private fun applyLaunch('));
+  assert.match(historical, /generation != launchGeneration/);
+  assert.match(historical, /tileMinutePending != target/);
+  assert.match(historical, /if \(editing == target\) \{[\s\S]*?tileMinuteRequestPending = false; tileMinutePending = null\s*return/);
+  assert.match(historical, /LaunchPolicy\.mayOpenTileMinute\(currentLaunchState\(\)\)/);
+  const accepted = historical.slice(historical.indexOf('// Consume once'));
+  assert.ok(accepted.indexOf('tileMinuteRequestPending = false; tileMinutePending = null') < accepted.indexOf('openEditor(target)'));
+  assert.doesNotMatch(accepted, /now\(\)|beginWatchDictation|autoNow = true/);
+  assert.match(activity, /out\.putBoolean\("tileMinuteRequestPending", tileMinuteRequestPending\)/);
+  assert.match(activity, /out\.putString\("tileMinuteDate", it\.dateKey\); out\.putInt\("tileMinuteIndex", it\.minuteIndex\)/);
+  assert.match(activity, /tileMinuteRequestPending && trigger != LaunchTrigger\.LAUNCHER_OR_TILE/);
 });

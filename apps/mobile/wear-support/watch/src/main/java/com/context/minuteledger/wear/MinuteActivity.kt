@@ -63,6 +63,8 @@ class MinuteActivity : Activity() {
     private var microphoneRequestCode: Int? = null
     private var microphoneReadySession: EditorSession? = null
     private var freshEntryPending = false
+    private var tileMinuteRequestPending = false
+    private var tileMinutePending: Coordinate? = null
     private var retryDictation: DictationSavePlan? = null
     private var nextSpeechRequest = SPEECH
     private var preserveSpeechResume = false
@@ -100,6 +102,10 @@ class MinuteActivity : Activity() {
         super.onCreate(savedInstanceState)
         store = WatchStore(this)
         freshEntryPending = LaunchPolicy.freshEntry(savedInstanceState != null, requestsRecordNow(intent))
+        tileMinuteRequestPending = savedInstanceState?.getBoolean("tileMinuteRequestPending", false) ?: requestsOpenMinute(intent)
+        if (tileMinuteRequestPending) tileMinutePending = if (savedInstanceState == null) tileMinuteFrom(intent)
+            else runCatching { LaunchPolicy.tileMinute(savedInstanceState.getString("tileMinuteDate"),
+                savedInstanceState.getInt("tileMinuteIndex", -1)) }.getOrNull()
         restoringEditor = savedInstanceState?.containsKey("editorText") == true
         deferredNow = savedInstanceState?.getBoolean("deferredNow", false) ?: false
         nextSpeechRequest = savedInstanceState?.getInt("nextSpeechRequest", SPEECH) ?: SPEECH
@@ -115,6 +121,7 @@ class MinuteActivity : Activity() {
         dateButton = button("", "Choose ledger date") { chooseDate() }
         dates.addView(dateButton, LinearLayout.LayoutParams(0, dp(WatchLayout.HEADER), 1f))
         dates.addView(button("Now", "Return to the current minute") {
+            cancelPendingLaunch()
             applyLaunch(LaunchTrigger.ON_START)
         }, LinearLayout.LayoutParams(dp(42), dp(WatchLayout.HEADER)))
         dates.addView(settingsButton { showDictationSettings() }, LinearLayout.LayoutParams(dp(44), dp(44)))
@@ -193,6 +200,7 @@ class MinuteActivity : Activity() {
     }
     override fun onStop() {
         visible = false; wasStopped = true; launchGeneration++
+        if (watchDictation != null) { preserveSpeechResume = true; watchDictation?.cancel(preserveDraft = true) }
         // An OS permission window may stop this Activity. Retain only that exact
         // in-flight request; a granted ready-to-start token never survives a stop.
         microphoneReadySession = null; freshEntryPending = false
@@ -207,7 +215,8 @@ class MinuteActivity : Activity() {
         resumePermissionDictation()
         val resumeTrigger = DictationSavePolicy.resumeTrigger(confirmedSpeechReturn, deferredNow)
         confirmedSpeechReturn = false
-        if (freshEntryPending) {
+        if (tileMinuteRequestPending) applyTileMinuteRequest()
+        else if (freshEntryPending) {
             freshEntryPending = false
             applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
         } else if (resumeTrigger != null) applyLaunch(resumeTrigger)
@@ -234,7 +243,17 @@ class MinuteActivity : Activity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (requestsOpenMinute(intent)) {
+            val target = tileMinuteFrom(intent)
+            cancelPendingLaunch()
+            if (target == null && !LaunchPolicy.mayOpenTileMinute(currentLaunchState())) return
+            if (target != null) discardPristineNowEditor()
+            tileMinuteRequestPending = true; tileMinutePending = target
+            if (visible && resumed) applyTileMinuteRequest()
+            return
+        }
         if (requestsRecordNow(intent)) {
+            cancelPendingLaunch()
             discardPristineNowEditor()
             if (visible && resumed) applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
             else {
@@ -253,6 +272,8 @@ class MinuteActivity : Activity() {
         out.putBoolean("deferredNow", deferredNow); out.putInt("nextSpeechRequest", nextSpeechRequest)
         out.putBoolean("preserveSpeechResume", preserveSpeechResume)
         out.putBoolean("confirmedSpeechReturn", confirmedSpeechReturn)
+        out.putBoolean("tileMinuteRequestPending", tileMinuteRequestPending)
+        tileMinutePending?.let { out.putString("tileMinuteDate", it.dateKey); out.putInt("tileMinuteIndex", it.minuteIndex) }
         editing?.let { out.putString("editorDate", it.dateKey); out.putInt("editorMinute", it.minuteIndex)
             out.putString("editorText", editor?.text?.toString() ?: pendingRestore?.text ?: "") }
         editorSession?.let {
@@ -293,10 +314,24 @@ class MinuteActivity : Activity() {
         cancelMicrophoneRequest()
         previous.dismiss()
     }
-    private fun requestsRecordNow(intent: Intent?) = intent != null &&
-        (intent.action == RECORD_NOW || intent.getStringExtra(LAUNCH_ACTION) == RECORD_NOW ||
-            intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER))
-    private fun cancelPendingLaunch() { launchGeneration++; deferredNow = false; freshEntryPending = false }
+    @Suppress("DEPRECATION")
+    private fun requestsRecordNow(intent: Intent?) = runCatching {
+        intent != null && LaunchPolicy.recordNowRequested(intent.action, intent.hasCategory(Intent.CATEGORY_LAUNCHER),
+            intent.extras?.get(LAUNCH_ACTION), intent.hasExtra(LAUNCH_ACTION))
+    }.getOrDefault(false)
+    @Suppress("DEPRECATION")
+    private fun requestsOpenMinute(intent: Intent?) = runCatching {
+        intent != null && (intent.action == LaunchPolicy.OPEN_MINUTE_ACTION ||
+            LaunchPolicy.openMinuteRequested(null, intent.extras?.get(LAUNCH_ACTION)))
+    }.getOrDefault(false)
+    @Suppress("DEPRECATION")
+    private fun tileMinuteFrom(intent: Intent?): Coordinate? = runCatching {
+        LaunchPolicy.tileMinute(intent?.extras?.get(DATE_EXTRA), intent?.extras?.get(MINUTE_EXTRA))
+    }.getOrNull()
+    private fun cancelPendingLaunch() {
+        launchGeneration++; deferredNow = false; freshEntryPending = false
+        tileMinuteRequestPending = false; tileMinutePending = null
+    }
     private fun speechInputInFlight() = pendingSpeech != null || microphoneRequestSession != null || microphoneReadySession != null
     private fun cancelMicrophoneRequest() {
         microphoneRequestSession = null; microphoneRequestCode = null; microphoneReadySession = null
@@ -306,7 +341,41 @@ class MinuteActivity : Activity() {
         nextSpeechRequest = if (request >= 65535) SPEECH else request + 1
         return request
     }
+    private fun currentLaunchState() = LaunchState(editing != null, restoringEditor,
+        speechInputInFlight(), pickers.isNotEmpty(), deferredNow)
+    private fun applyTileMinuteRequest() {
+        if (!tileMinuteRequestPending || !visible || !resumed || isFinishing || isDestroyed) return
+        val target = tileMinutePending
+        if (target == null) {
+            tileMinuteRequestPending = false; tileMinutePending = null
+            if (LaunchPolicy.mayOpenTileMinute(currentLaunchState())) {
+                selected = now(); followingNow = true; render(); centerMinute()
+                WatchTransport.requestDay(this, selected.dateKey)
+            }
+            return
+        }
+        if (editing == target) {
+            // An editor already open or being restored at this coordinate fulfils the request.
+            tileMinuteRequestPending = false; tileMinutePending = null
+            return
+        }
+        if (!LaunchPolicy.mayOpenTileMinute(currentLaunchState())) return
+        val generation = ++launchGeneration
+        list.post {
+            if (!visible || !resumed || isFinishing || isDestroyed || generation != launchGeneration ||
+                !tileMinuteRequestPending || tileMinutePending != target ||
+                !LaunchPolicy.mayOpenTileMinute(currentLaunchState())) return@post
+            // Consume once before opening a cached manual editor. No clock or microphone is sampled.
+            tileMinuteRequestPending = false; tileMinutePending = null
+            selected = target; followingNow = false; render(); centerMinute()
+            openEditor(target)
+            WatchTransport.requestDay(this, target.dateKey); WatchTransport.synchronize(this, target.dateKey)
+        }
+    }
     private fun applyLaunch(trigger: LaunchTrigger) {
+        if (tileMinuteRequestPending && trigger != LaunchTrigger.LAUNCHER_OR_TILE) {
+            applyTileMinuteRequest(); return
+        }
         val decision = LaunchPolicy.decide(trigger, LaunchState(editing != null, restoringEditor,
             speechInputInFlight(), pickers.isNotEmpty(), deferredNow))
         deferredNow = decision.deferredNow
@@ -666,14 +735,58 @@ class MinuteActivity : Activity() {
         val selectedDelay = silenceDelaySeconds()
         for (seconds in WatchSilencePolicy.DELAYS_SECONDS) options.addView(button(
             "${if (seconds == selectedDelay) "✓ " else ""}${seconds}s", "Save after $seconds seconds of silence") {
-            val stored = getSharedPreferences("context-watch-settings", MODE_PRIVATE).edit()
-                .putInt("silence-delay-seconds", seconds).commit()
-            if (!stored) { toast("Could not save this setting. Try again."); return@button }
+            if (!persistSilenceDelay(seconds)) { toast("Could not save this setting. Try again."); return@button }
             dialog.dismiss()
             onSelected?.invoke(seconds)
         }, LinearLayout.LayoutParams(-1, dp(36)))
+        options.addView(button(
+            if (selectedDelay !in WatchSilencePolicy.DELAYS_SECONDS) "✓ Custom · ${selectedDelay}s" else "Custom",
+            "Enter a custom silence delay between 1 and 300 seconds") { showCustomSilenceDelay(dialog, onSelected) },
+            LinearLayout.LayoutParams(-1, dp(36)))
         content.addView(button("Back", "Return without changing the silence delay") { dialog.dismiss() },
             LinearLayout.LayoutParams(-1, dp(WatchLayout.ACTIONS)))
+        showPicker(dialog)
+    }
+    private fun persistSilenceDelay(seconds: Int): Boolean {
+        if (seconds !in WatchSilencePolicy.MIN_DELAY_SECONDS..WatchSilencePolicy.MAX_DELAY_SECONDS) return false
+        return getSharedPreferences("context-watch-settings", MODE_PRIVATE).edit()
+            .putInt("silence-delay-seconds", seconds).commit()
+    }
+    private fun showCustomSilenceDelay(parentSettings: Dialog, onSelected: ((Int) -> Unit)?) {
+        val content = column().apply { setPadding(dp(26), dp(WatchLayout.TOP), dp(26), dp(WatchLayout.EDITOR_BOTTOM)) }
+        val body = column()
+        val scrolling = android.widget.ScrollView(this).apply { isFillViewport = true; addView(body) }
+        content.addView(scrolling, LinearLayout.LayoutParams(-1, 0, 1f))
+        body.addView(label("Seconds · 1–300", 13f).apply { gravity = Gravity.CENTER })
+        val input = EditText(this).apply {
+            setText(silenceDelaySeconds().toString()); setTextColor(FOREGROUND); textSize = 18f
+            isSingleLine = true; gravity = Gravity.CENTER
+            // Hint the numeric IME without silently filtering invalid pasted input into a valid value.
+            setRawInputType(InputType.TYPE_CLASS_NUMBER)
+            setSelectAllOnFocus(true)
+        }
+        body.addView(input, LinearLayout.LayoutParams(-1, dp(48)))
+        val error = label("", 11f).apply {
+            setTextColor(WARNING); accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        body.addView(error)
+        val dialog = fullDialog(content)
+        val actions = row()
+        fun closeKeyboard() {
+            (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(input.windowToken, 0)
+            input.clearFocus()
+        }
+        actions.addView(button("Cancel", "Keep the current silence delay") { closeKeyboard(); dialog.dismiss() },
+            LinearLayout.LayoutParams(0, dp(WatchLayout.ACTIONS), 1f))
+        actions.addView(button("Save", "Save the custom silence delay") {
+            val seconds = WatchSilencePolicy.parseDelayInput(input.text.toString())
+            if (seconds == null) { error.text = "Enter 1–300 whole seconds."; return@button }
+            if (!persistSilenceDelay(seconds)) { error.text = "Could not save. Try again."; return@button }
+            closeKeyboard(); dialog.dismiss(); parentSettings.dismiss()
+            onSelected?.invoke(seconds)
+        }, LinearLayout.LayoutParams(0, dp(WatchLayout.ACTIONS), 1f))
+        content.addView(actions)
         showPicker(dialog)
     }
     private fun settingsButton(action: () -> Unit) = ImageButton(this).apply {
@@ -747,7 +860,8 @@ class MinuteActivity : Activity() {
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
     companion object {
         private const val LAUNCH_ACTION = "com.context.minuteledger.action"
-        private const val RECORD_NOW = "com.context.minuteledger.action.RECORD_NOW"
+        private const val DATE_EXTRA = "com.context.minuteledger.date"
+        private const val MINUTE_EXTRA = "com.context.minuteledger.minute"
         private const val SPEECH = 100
         private val BACKGROUND = Color.parseColor("#08090B")
         private val PANEL = Color.parseColor("#202024")

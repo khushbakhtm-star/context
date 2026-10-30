@@ -41,6 +41,8 @@ function generateWear(projectRoot, androidRoot) {
   fs.writeFileSync(buildFile, build);
   const resources = path.join(target, 'src', 'main', 'res', 'drawable-nodpi');
   fs.mkdirSync(resources, { recursive: true });
+  // The approved bitmap stays preview-only. Watch shortcuts use the native round
+  // context_watch_icon vector copied from the watch-only source tree above.
   fs.copyFileSync(path.join(projectRoot, 'assets', 'context-app-logo.png'), path.join(resources, 'context_logo.png'));
 }
 

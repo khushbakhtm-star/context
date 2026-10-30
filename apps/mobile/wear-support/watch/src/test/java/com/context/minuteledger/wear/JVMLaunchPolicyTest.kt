@@ -139,4 +139,45 @@ class JVMLaunchPolicyTest {
         assertFalse(LaunchPolicy.acceptsMicrophoneGrant(101, 101, original,
             original.copy(coordinate = Coordinate("2026-10-31", 0))))
     }
+    @Test fun tileRowsAcceptOnlyAnExactIsoDayAndAnIntegerMinute() {
+        for (minute in 0..1439) assertEquals(Coordinate("2026-10-30", minute), LaunchPolicy.tileMinute("2026-10-30", minute))
+        assertEquals(Coordinate("2028-02-29", 1439), LaunchPolicy.tileMinute("2028-02-29", 1439))
+        assertEquals(Coordinate("2026-10-31", 0), LaunchPolicy.tileMinute("2026-10-31", 0))
+    }
+    @Test fun malformedOrWronglyTypedTileCoordinatesNeverDefaultToAnotherMinute() {
+        for (day in listOf(null, "", "2026-02-29", "2026-13-01", "2026-10-32", "2026-1-01",
+            "2026-10-30 ", "2026-10-30T00:00", 20261030, true)) assertNull(LaunchPolicy.tileMinute(day, 0))
+        for (minute in listOf(null, -1, 1440, Int.MAX_VALUE, "0", "1439", 0L, 1.0, false))
+            assertNull(LaunchPolicy.tileMinute("2026-10-30", minute))
+    }
+    @Test fun openMinuteRoutingAlwaysPrecedesGenericLauncherOrRecordNowFlags() {
+        val open = LaunchPolicy.OPEN_MINUTE_ACTION
+        assertTrue(LaunchPolicy.openMinuteRequested(null, open))
+        assertTrue(LaunchPolicy.openMinuteRequested(open, null))
+        assertTrue(LaunchPolicy.openMinuteRequested("android.intent.action.MAIN", open))
+        assertFalse(LaunchPolicy.recordNowRequested("android.intent.action.MAIN", true, open, true))
+        assertFalse(LaunchPolicy.recordNowRequested(open, true, null, false))
+        assertFalse(LaunchPolicy.recordNowRequested(open, true, LaunchPolicy.RECORD_NOW_ACTION, true))
+        // Even malformed row data is still an OPEN_MINUTE request, never automatic dictation.
+        assertNull(LaunchPolicy.tileMinute("bad-date", "5"))
+        assertFalse(LaunchPolicy.recordNowRequested("android.intent.action.MAIN", true, open, true))
+    }
+    @Test fun currentTileRowUsesFreshNowWhileUnknownOrMistypedActionsCannotStartSpeech() {
+        assertTrue(LaunchPolicy.recordNowRequested(null, false, LaunchPolicy.RECORD_NOW_ACTION, true))
+        assertTrue(LaunchPolicy.recordNowRequested("android.intent.action.MAIN", true, null, false))
+        assertTrue(LaunchPolicy.recordNowRequested(LaunchPolicy.RECORD_NOW_ACTION, false, null, false))
+        for (extra in listOf(null, "unknown", 123, false))
+            assertFalse(LaunchPolicy.recordNowRequested("android.intent.action.MAIN", true, extra, true))
+        assertFalse(LaunchPolicy.recordNowRequested("android.intent.action.MAIN", false, null, false))
+    }
+    @Test fun protectedHistoricalRequestsRetainTheirCoordinateAcrossMidnightAndRestoration() {
+        val pending = LaunchPolicy.tileMinute("2026-10-30", 1439)!!
+        for (state in listOf(LaunchState(editorOpen = true), LaunchState(restoringEditor = true),
+            LaunchState(speechInFlight = true), LaunchState(pickerOpen = true))) assertFalse(LaunchPolicy.mayOpenTileMinute(state))
+        assertTrue(LaunchPolicy.mayOpenTileMinute(LaunchState()))
+        val restored = LaunchPolicy.tileMinute(pending.dateKey, pending.minuteIndex)
+        assertEquals(Coordinate("2026-10-30", 1439), restored)
+        assertNotEquals(Coordinate("2026-10-31", 0), restored)
+        assertFalse(LaunchPolicy.decide(LaunchTrigger.EDITOR_CLOSED, LaunchState()).startDictation)
+    }
 }

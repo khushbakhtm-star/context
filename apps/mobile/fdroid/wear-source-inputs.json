@@ -43,7 +43,7 @@
     },
     {
       "path": "plugins/with-context-wear.cjs",
-      "sha256": "0463b74d05b31dac8b1b0f4ae3d20eeefe8bc98d8f43b12df76a4191c285f2ae"
+      "sha256": "46b1ab6e52c078258a7822d8e8071b88fefac4bee8ab7846a2e66940336ae86a"
     },
     {
       "path": "wear-support/PROTOCOL.md",
@@ -51,7 +51,7 @@
     },
     {
       "path": "wear-support/README.md",
-      "sha256": "99f2729a322182cc581021399e721cb2872a0c51f41a38eb4e54062d76546852"
+      "sha256": "06b61edafdf5835c2e78332ecbdb3422ae96bb95aa602da767469a514b32af18"
     },
     {
       "path": "wear-support/watch/build.gradle",
@@ -59,7 +59,7 @@
     },
     {
       "path": "wear-support/watch/src/main/AndroidManifest.xml",
-      "sha256": "bed19d4645775120ea0e0f977c4ef1600712a0f2a3546a9109950d97ac618069"
+      "sha256": "74523e44578a40f9c01b6e209f2fe5d458eb69d19d21afb99f38e6d7dd64591f"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/CoalescedPendingWork.kt",
@@ -67,11 +67,11 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/ContextTileLayout.kt",
-      "sha256": "806beb92ededce71e4c0dea89ce7a9133206cabb01027cd28dff28a1f3003392"
+      "sha256": "0a8598f0b601d0a4ce271873b8c795a366461f39c805e27115d77a59b7964711"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/ContextTileService.kt",
-      "sha256": "91258932e370bfb6012ff41e2af97ca9039fbbd3bf32a7a7553e1577319a43fb"
+      "sha256": "f17e2f9e4746938c78a99c389a85d582394ab1e5b2735b80cab97a6ef46270d8"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/DictationSavePolicy.kt",
@@ -79,7 +79,7 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/LaunchPolicy.kt",
-      "sha256": "9153a6311026bd17a0b2a862b8a7b1be6cef5e68c1de43b6860d4d1076368715"
+      "sha256": "da1f82ffaa133374e01dddd090d6e73215ae203d6f252999898912cd4652467d"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/LedgerRules.kt",
@@ -87,7 +87,7 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/MinuteActivity.kt",
-      "sha256": "30ee3c743353060948278bb63f35312e2bbcfcfeb43356ebb7b53b52c3423f8c"
+      "sha256": "d3005bb7c74d274f863b4f88d9a2e569c05a9aa871aa98a45c6052f8e2994c1b"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/SpeechSessionGuard.kt",
@@ -95,11 +95,11 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchDictationDialog.kt",
-      "sha256": "d02cf90115555dd714997e5b207e11e19bf8819c2e724434215c3e009f362016"
+      "sha256": "fd9fc5379a9929e5338b86024c757370db09f30b866d17e7483d80b92fd24619"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchDictationPolicy.kt",
-      "sha256": "e9be34c8654df459d7222d53c1409926832089c637443e3107dccaaa958eea7e"
+      "sha256": "4e0edebd54a217c82cee9306cbd4cc0b89930c40be23806db05c0c2eb9f894d2"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchLayout.kt",
@@ -107,7 +107,7 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchSilencePolicy.kt",
-      "sha256": "86328c52d6f6145b10dbf3f7338d148961def1f6e3f2b15e4e938cc3be874a61"
+      "sha256": "20c99e562b679216e4181daa165b7266de7dda1aaf3bbee233f2e5d75cd437c0"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchStore.kt",
@@ -126,12 +126,16 @@
       "sha256": "41b77c12578e9bde13415a439c5afca5e64804bb7c4c1510e00374c2bb45c72b"
     },
     {
+      "path": "wear-support/watch/src/main/res/drawable/context_watch_icon.xml",
+      "sha256": "94ba752a18bc44ce018e3bd2fe084232d1055e891ce9bcc9a74b2ab29a89d475"
+    },
+    {
       "path": "wear-support/watch/src/main/res/values/tile_strings.xml",
-      "sha256": "16bd6b4099e1f73a1a412e48776f752d7c9f1527fd7035a3f4712bbcc01c10f1"
+      "sha256": "09e89fa10da81184856e4afce9161a943e1d096f56b78af60fbbef526edbd2b2"
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/ContextTileLayoutTest.kt",
-      "sha256": "0b788db2c2babea3fb77a467e463be4781ed9e0f202d6cc83658aaebe6ab4aad"
+      "sha256": "3b8cccba504e7f3cedf7f9b1ffb73f2f091beda719d67f115c47673549fce185"
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMCoalescedPendingWorkTest.kt",
@@ -143,11 +147,15 @@
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMLaunchPolicyTest.kt",
-      "sha256": "b93b735244d3646c18a147dff05840710b47a86e7fb65b7e769c3c8656ad008b"
+      "sha256": "0711c60f44419a99d2137d967a254b1b74831040ede35a05795bc85ca43fff86"
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMSpeechSessionGuardTest.kt",
       "sha256": "67c7482a16aff993a0e7fb3d27f35e312b99b2118b129cac8d40fb1462e10fa8"
+    },
+    {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMWatchCustomSilencePolicyTest.kt",
+      "sha256": "32231aeba38b66e5f2150fe832b6712e3e0bf9617a90a1831fe1cef3fa9753d5"
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMWatchDictationPolicyTest.kt",
@@ -155,7 +163,7 @@
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMWatchSilencePolicyTest.kt",
-      "sha256": "6e72045645246b5f8e5abcf41edbc238c0f42b4d9533ee64e3ad1794aec3f45b"
+      "sha256": "7ace93ceaecf020f3413a918a5454d3a5917147a28b25a1f7e594a9a8ee8dc4c"
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/LedgerRulesTest.kt",
@@ -167,7 +175,7 @@
     },
     {
       "path": "wear-support/watch/version.json",
-      "sha256": "d7214fb9bbc3007716b2b0a3543a302de242c1a04ee0f02b9a343a0c481508e8"
+      "sha256": "442d600a40397715b0c8dcf6435b8e785acb8d5dc59dfbbb11bc567c5e91e96d"
     }
   ]
 }

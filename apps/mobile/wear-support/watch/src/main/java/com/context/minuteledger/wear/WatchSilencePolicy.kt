@@ -67,8 +67,16 @@ class WatchSilencePolicy(startedAtMs: Long, delaySeconds: Int = DEFAULT_DELAY_SE
     }
     companion object {
         const val DEFAULT_DELAY_SECONDS = 10
+        const val MIN_DELAY_SECONDS = 1
+        const val MAX_DELAY_SECONDS = 300
         const val FINAL_FLUSH_MS = 1500L
         val DELAYS_SECONDS = listOf(5, 10, 15, 30, 60)
-        fun normalizeDelay(value: Int) = value.takeIf { it in DELAYS_SECONDS } ?: DEFAULT_DELAY_SECONDS
+        fun normalizeDelay(value: Int) = value.takeIf { it in MIN_DELAY_SECONDS..MAX_DELAY_SECONDS } ?: DEFAULT_DELAY_SECONDS
+        /** Validate entered text without replacing an invalid custom value with the default. */
+        fun parseDelayInput(value: String): Int? {
+            val text = value.trim()
+            if (!text.matches(Regex("[0-9]{1,3}"))) return null
+            return text.toIntOrNull()?.takeIf { it in MIN_DELAY_SECONDS..MAX_DELAY_SECONDS }
+        }
     }
 }

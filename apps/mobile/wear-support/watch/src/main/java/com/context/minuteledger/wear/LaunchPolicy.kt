@@ -23,6 +23,19 @@ data class LaunchDecision(val resetToNow: Boolean, val deferredNow: Boolean, val
 /** Lifecycle callbacks must not rebind a note to another minute. A genuine new
  * entry request may wait for Save/Cancel; speech/IME resumes do not create one. */
 object LaunchPolicy {
+    const val RECORD_NOW_ACTION = "com.context.minuteledger.action.RECORD_NOW"
+    const val OPEN_MINUTE_ACTION = "com.context.minuteledger.action.OPEN_MINUTE"
+    fun openMinuteRequested(action: String?, actionExtra: Any?) = action == OPEN_MINUTE_ACTION || actionExtra == OPEN_MINUTE_ACTION
+    fun recordNowRequested(action: String?, launcherCategory: Boolean, actionExtra: Any?, hasActionExtra: Boolean): Boolean {
+        if (openMinuteRequested(action, actionExtra)) return false
+        if (hasActionExtra) return actionExtra == RECORD_NOW_ACTION
+        return action == RECORD_NOW_ACTION || action == "android.intent.action.MAIN" && launcherCategory
+    }
+    fun tileMinute(rawDate: Any?, rawMinute: Any?): Coordinate? {
+        if (rawDate !is String || rawMinute !is Int) return null
+        return runCatching { Coordinate(rawDate, rawMinute) }.getOrNull()
+    }
+    fun mayOpenTileMinute(state: LaunchState) = !state.protectsEditing
     /** A restored activity, permission callback or ordinary resume is not a fresh record request. */
     fun freshEntry(restoringActivity: Boolean, launcherOrTileIntent: Boolean) = !restoringActivity && launcherOrTileIntent
     private fun sameEditor(requested: EditorSession?, current: EditorSession?) =

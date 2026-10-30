@@ -22,26 +22,39 @@ test('generated watch package registers a permission-protected Tile and retains 
   assert.match(manifest, /<activity[^>]*android:name="\.MinuteActivity"[^>]*android:launchMode="singleTop"/);
   assert.ok(fs.existsSync(path.join(generated, 'src/main/res/drawable/context_tile_preview.xml')));
   assert.ok(fs.existsSync(path.join(generated, 'src/main/res/drawable-nodpi/context_logo.png')));
+  assert.match(manifest, /android:icon="@drawable\/context_watch_icon"/);
+  assert.match(manifest, /android:roundIcon="@drawable\/context_watch_icon"/);
+  const icon = fs.readFileSync(path.join(generated, 'src/main/res/drawable/context_watch_icon.xml'), 'utf8');
+  assert.match(icon, /<vector/); assert.match(icon, /android:fillType="evenOdd"/);
+  assert.doesNotMatch(icon, /<bitmap|<shape|android:pathData="M0,0/);
   const gradle = fs.readFileSync(path.join(generated, 'build.gradle'), 'utf8');
   assert.match(gradle, /androidx\.wear\.tiles:tiles:1\.6\.2/); assert.match(gradle, /androidx\.wear\.protolayout:protolayout:1\.4\.2/);
   assert.doesNotMatch(gradle, /androidx\.compose|protolayout-material3|tiles-renderer/);
 });
 
-test('the public Tile has no ledger/network/clock reads and uses an explicit Now request rather than a cached minute', () => {
+test('the Tile reads only bounded local cache and pending edits, with exact neighboring minutes and fresh Now', () => {
   const source = fs.readFileSync(path.join(root, 'wear-support/watch/src/main/java/com/context/minuteledger/wear/ContextTileService.kt'), 'utf8');
   const layout = fs.readFileSync(path.join(root, 'wear-support/watch/src/main/java/com/context/minuteledger/wear/ContextTileLayout.kt'), 'utf8');
   assert.match(source, /MinuteActivity::class\.java\.name/);
   assert.match(layout, /const val ACTION_EXTRA = "com\.context\.minuteledger\.action"/);
   assert.match(layout, /const val RECORD_NOW = "com\.context\.minuteledger\.action\.RECORD_NOW"/);
   assert.match(layout, /\.setPackageName\(packageName\)\.setClassName\(activityClassName\)/);
-  assert.equal((layout.match(/addKeyToExtraMapping/g) ?? []).length, 1);
-  assert.doesNotMatch(source + layout, /WatchStore|WatchTransport|LocalDateTime|System\.currentTimeMillis|SharedPreferences|https?:\/\/|setFreshnessIntervalMillis/);
+  assert.match(layout, /const val OPEN_MINUTE = "com\.context\.minuteledger\.action\.OPEN_MINUTE"/);
+  assert.match(layout, /if \(!nowRow\)[\s\S]*addKeyToExtraMapping\(DATE_EXTRA[\s\S]*addKeyToExtraMapping\(MINUTE_EXTRA/);
+  assert.match(layout, /\.setValue\(if \(nowRow\) RECORD_NOW else OPEN_MINUTE\)/);
+  assert.match(layout, /const val TIMELINE_MINUTES = 5/);
+  assert.match(layout, /const val FRESHNESS_MILLIS = 60_000L/);
+  assert.match(layout, /setValidity\(TimelineBuilders\.TimeInterval/);
+  assert.match(source, /coordinates\.map.*\.distinct\(\)/);
+  assert.equal((source.match(/store\.pendingRecords\(\)/g) ?? []).length, 1);
+  assert.match(source, /if \(coordinate in requested\) notes\[coordinate\]/);
+  assert.doesNotMatch(source + layout, /WatchTransport|https?:\/\/|requestDay|synchronize\(|setExact|AlarmManager/);
 });
 
 test('the Tile launches the current-minute capture through the same protected one-shot entry as the launcher', () => {
   const activity = fs.readFileSync(path.join(root, 'wear-support/watch/src/main/java/com/context/minuteledger/wear/MinuteActivity.kt'), 'utf8');
   const launch = fs.readFileSync(path.join(root, 'wear-support/watch/src/main/java/com/context/minuteledger/wear/LaunchPolicy.kt'), 'utf8');
-  assert.match(activity, /intent\.getStringExtra\(LAUNCH_ACTION\) == RECORD_NOW/);
+  assert.match(activity, /LaunchPolicy\.recordNowRequested\(/);
   assert.match(activity, /LaunchPolicy\.freshEntry\(savedInstanceState != null, requestsRecordNow\(intent\)\)/);
   assert.match(launch, /LaunchTrigger\.LAUNCHER_OR_TILE -> if \(state\.protectsEditing\) LaunchDecision\(false, true\)\s*else LaunchDecision\(true, false, startDictation = true\)/);
 });
