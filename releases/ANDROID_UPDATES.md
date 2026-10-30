@@ -56,14 +56,18 @@ Sources: [Obtainium links](https://wiki.obtainium.imranr.dev/deep_links/),
 
 ## Galaxy Watch7 tile and watch update
 
-The separate [Watch 0.1.14 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.14/context-0.1.14-wear-preview.apk)
-opens at the current minute and starts dictation for a genuine app or Tile entry.
+The separate [Watch 0.1.15 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.15/context-0.1.15-wear-preview.apk)
+opens at the current minute and starts dictation for a fresh app launch or current Tile-row tap.
 The default 10-second silence delay saves a nonempty note and returns to the minute list.
-Use the small settings gear to choose a delay; Done can still save immediately.
+Use the small settings gear for a preset or a custom 1-300 whole-second delay; Done can still save immediately.
+The screen stays awake only during visible listening, the silence wait and final-result flush.
+The app shortcut uses a high-contrast vector emblem. Its Tile shows five cached minute rows;
+the current row starts Now dictation, and neighboring rows open exact-minute manual editors.
+System refresh and cached phone data may lag; protected drafts keep their original minute.
 Speech may need internet, and an empty fresh capture closes without creating a note.
 Existing unsaved text, color choices and save-retry drafts remain editable.
 Install it on the watch as an Update
 using the previously paired PC; phone Obtainium filters update their phone edition.
 After updating, swipe left from the watch face to **Add tiles**, then select **Context**.
-The [watch release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.14)
+The [watch release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.15)
 includes the exact source, signatures, compiled Tile and package verification receipts.

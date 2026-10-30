@@ -1,8 +1,19 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.31/code32** in both channels, verified at **2026-10-29 at 17:43:31 UTC**. Watch **0.1.14/code100015** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability: **0.1.31/code32** in both channels, verified at **2026-10-29 at 17:43:31 UTC**. Watch **0.1.15/code100016** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
 
 
+
+
+## Published 0.1.15 Watch update
+
+The separate [Watch 0.1.15/code100016 release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.15) and all five verified assets were available by **2026-10-30 at 13:44:59 UTC**, release **429082830**. [Watch APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.15/context-0.1.15-wear-preview.apk) (asset 692251130): **11,441,990 bytes**, SHA-256 `f649cfe533b8819eec0709b5e71450e428e8d8e1dec053aafd45077efcd8cfa8`. Public asset sizes/digests match verified local files. The exact tag points to application source `58d9f0e252015821bbb319db51175308701c8533`; [build 41064233780](https://github.com/khushbakhtm-star/context/actions/runs/41064233780) used controller `e5149d1f413d6510b64e9414d5ca72967813b684`. Signing stayed local with the existing publisher certificate.
+
+A fresh app-icon launch or the Tile's current-minute row starts current-minute dictation when no editor is protected. Available on-device speech is preferred; otherwise the installed system speech provider starts and may need internet on the watch or paired phone. A high-contrast vector emblem identifies the app shortcut and Tile. The Tile shows five cached minute rows centered on the current minute: its current row resolves Now when tapped, while neighboring rows open the exact displayed date and minute for manual entry without an automatic microphone. Cached rows do not wait for the phone or network. The bounded minute-valid timeline and requested minute refresh can still be delayed by the system; cached notes can lag phone changes. Active drafts and speech keep their original minute, and deferred navigation does not start a microphone. Recognized phrases are retained across provider phrase endings. After the configured quiet interval, a nonempty note is saved and the minute list returns; an empty fresh capture closes without creating a note. Existing unsaved text, color choices and save-retry drafts remain editable. The default is 10 seconds, with a bounded final-result flush. The small gear retains the 5, 10, 15, 30 and 60-second presets and adds a Seconds field for any whole number from 1 through 300; the chosen delay remains local. Done can still save immediately; errors retain the draft. Normal navigation, dismissal, background, settings cancellation and stale callbacks do not start a hidden microphone or save another minute. The screen stays awake only during active visible dictation, its silence wait and final-result flush; settings, errors, Cancel, Type, Done and background release that wake hold.
+
+The actual native build ran 106 JVM cases (0 skipped) with zero failures/errors; all 8 required suites were verified. 10 actual native class definitions, compiled Tile/logo and microphone/query/clock checks, protected ZIP contents, original publisher certificate, official supported-SDK v3 verification, separate contained-v2 proof and 16 KiB alignment passed. No runtime support below minimum SDK30 is claimed. These automated checks do not establish physical-watch speed, offline-model availability or live paired-phone delivery.
+
+Use with the separate Wear-enabled phone **0.1.31/code32**. Install as an Update on the watch to preserve its saved data. Phone APKs and their update feed remain unchanged. This optional Google-dependent companion is separate from official Play/Apple store or F-Droid catalog availability.
 
 ## Published 0.1.14 Watch update
 
