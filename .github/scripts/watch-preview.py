@@ -17,9 +17,9 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 
-SOURCE = "fddefda295c5103fec26ef75ea2f2c7ab4a17b23"
-VERSION = "0.1.13"
-CODE = 100014
+SOURCE = "0684437feca86ccda22198bf6050e27f1736fb1c"
+VERSION = "0.1.14"
+CODE = 100015
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned watch preview: local publisher signing is separate"
 CERTIFICATE = "44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772"
@@ -33,6 +33,7 @@ MODULES = {
     "speechPolicy": "Lcom/context/minuteledger/wear/WatchDictationPolicy;",
     "pendingWork": "Lcom/context/minuteledger/wear/CoalescedPendingWork;",
     "noteDraft": "Lcom/context/minuteledger/wear/WatchDictationNote;",
+    "silencePolicy": "Lcom/context/minuteledger/wear/WatchSilencePolicy;",
 }
 
 
@@ -282,7 +283,8 @@ def verify(source, reports, receipt):
                        "com.context.minuteledger.wear.JVMSpeechSessionGuardTest",
                        "com.context.minuteledger.wear.JVMDictationSavePolicyTest",
                        "com.context.minuteledger.wear.JVMWatchDictationPolicyTest",
-                       "com.context.minuteledger.wear.JVMCoalescedPendingWorkTest"}
+                       "com.context.minuteledger.wear.JVMCoalescedPendingWorkTest",
+                       "com.context.minuteledger.wear.JVMWatchSilencePolicyTest"}
     completed_suites = set()
     for index, file in enumerate(test_files):
         suite = ET.fromstring(file.read_bytes())
