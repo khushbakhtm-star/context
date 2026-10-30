@@ -1,7 +1,18 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.31/code32** in both channels, verified at **2026-10-29 at 17:43:31 UTC**. Watch **0.1.13/code100014** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability: **0.1.31/code32** in both channels, verified at **2026-10-29 at 17:43:31 UTC**. Watch **0.1.14/code100015** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
 
+
+
+## Published 0.1.14 Watch update
+
+The separate [Watch 0.1.14/code100015 release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.14) and all five verified assets were available by **2026-10-30 at 12:44:31 UTC**, release **429022602**. [Watch APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.14/context-0.1.14-wear-preview.apk) (asset 692095703): **11,429,646 bytes**, SHA-256 `ed2b9edc94b6f84a5fd65dc3225bc97690adbe21be46d687be2ae914423f97c5`. Public asset sizes/digests match verified local files. The exact tag points to application source `0684437feca86ccda22198bf6050e27f1736fb1c`; [build 41056471618](https://github.com/khushbakhtm-star/context/actions/runs/41056471618) used controller `9c714b8a38d24bff6480c9e06e665c715dcdca07`. Signing stayed local with the existing publisher certificate.
+
+Opening Context from a genuine visible app-icon or Tile entry starts one current-minute dictation session. Available on-device speech is preferred; otherwise the installed system speech provider starts and may need internet on the watch or paired phone. Recognized phrases are retained across provider phrase endings. After the configured quiet interval, a nonempty note is saved and the minute list returns; an empty fresh capture closes without creating a note. Existing unsaved text, color choices and save-retry drafts remain editable. The default is 10 seconds, with a bounded final-result flush. The small gear offers 5, 10, 15, 30 or 60 seconds and retains the chosen delay locally. Done can still save immediately; errors retain the draft. Normal navigation, dismissal, background, settings cancellation and stale callbacks do not start a hidden microphone or save another minute.
+
+The actual native build ran 80 JVM cases (0 skipped) across all 7 required suites with zero failures/errors. 10 actual native class definitions, compiled Tile/logo and microphone/query/clock checks, protected ZIP contents, original publisher certificate, official supported-SDK v3 verification, separate contained-v2 proof and 16 KiB alignment passed. No runtime support below minimum SDK30 is claimed. These automated checks do not establish physical-watch speed, offline-model availability or live paired-phone delivery.
+
+Use with the separate Wear-enabled phone **0.1.31/code32**. Install as an Update on the watch to preserve its saved data. Phone APKs and their update feed remain unchanged. This optional Google-dependent companion is separate from official Play/Apple store or F-Droid catalog availability.
 
 ## Published 0.1.13 Watch update
 
