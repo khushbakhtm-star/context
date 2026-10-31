@@ -287,21 +287,27 @@ test('a phone-stage timeout keeps its stage warning even when unrelated account 
 test('the production header retains navigation and allows busy Sync details without a duplicate synchronization', async () => {
   const headerFile = path.join(__dirname, 'calendar-header.test.cjs');
   const contents = fs.readFileSync(headerFile, 'utf8'); const prefix = contents.slice(0, contents.indexOf('\ntest('));
-  const history = { undo: 0, redo: 0 }, navigation = { previous: 0, next: 0 }; const module = { exports: {} };
-  vm.runInNewContext(prefix.replace('undoSpreadsheetEdit: async () => {}, redoSpreadsheetEdit: async () => {},',
-    'undoSpreadsheetEdit: async () => { observedHistory.undo++; }, redoSpreadsheetEdit: async () => { observedHistory.redo++; },') +
-    '\nmodule.exports = { headerHarness };', { module, exports: module.exports, __dirname, require, console, observedHistory: history });
+  const navigation = { previous: 0, next: 0 }; const module = { exports: {} };
+  vm.runInNewContext(prefix + '\nmodule.exports = { headerHarness };', { module, exports: module.exports, __dirname, require, console });
   const h = module.exports.headerHarness({ syncing: true, syncDetails: () => 'Uploading encrypted ledger updates. (3 of 8)',
     onPrevious() { navigation.previous++; }, onNext() { navigation.next++; } });
   const find = (label) => h.nodes().find((node) => node.type === 'Pressable' && node.props.accessibilityLabel === label);
-  for (const label of ['Open menu', 'Previous calendar view', 'Next calendar view', 'Undo Context edit', 'Redo Context edit'])
+  for (const label of ['Open menu', 'Previous calendar view', 'Next calendar view', 'Undo Context edit', 'Open Search'])
     assert.equal(find(label).props.disabled, false, label);
   assert.equal(h.binder().props.disabled, false); const button = find('Synchronizing calendars');
   assert.equal(button.props.disabled, false); assert.equal(button.props.accessibilityState.busy, true);
   h.press(button); assert.equal(h.calls.sync, 0); button.props.onPressIn(); button.props.onLongPress(); button.props.onPress();
   assert.equal(h.calls.errors.length, 1); assert.match(h.calls.errors[0][1], /3 of 8/); assert.equal(h.calls.sync, 0);
   h.press(find('Previous calendar view')); h.press(find('Next calendar view'));
-  h.press(find('Undo Context edit')); await h.settle(); h.press(find('Redo Context edit')); await h.settle();
-  assert.deepEqual(history, { undo: 1, redo: 1 }); assert.deepEqual(navigation, { previous: 1, next: 1 });
+  h.press(find('Open Search')); assert.equal(h.calls.search, 1);
+  h.press(find('Undo Context edit')); await h.settle(); assert.equal(h.calls.undo, 1);
+  h.press(find('Open menu')); h.render();
+  const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible); assert.ok(menu);
+  const redo = h.nodes(menu).find((node) => node.type === 'Pressable' && node.props.accessibilityLabel === 'Redo Context edit');
+  assert.equal(redo.props.disabled, false); assert.equal(redo.props.accessibilityState.disabled, false);
+  h.press(redo); assert.equal(h.calls.redo, 0, 'menu Redo waits for native dismissal');
+  h.advance(0); await h.settle();
+  assert.equal(h.calls.redo, 1); assert.deepEqual(navigation, { previous: 1, next: 1 });
+  assert.equal(h.calls.sync, 0, 'navigation and history never start a duplicate busy synchronization');
   h.press(find('Open menu')); h.render(); assert.ok(h.nodes().some((node) => node.type === 'Modal' && node.props.visible));
 });

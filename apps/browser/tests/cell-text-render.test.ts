@@ -20,7 +20,7 @@ class Node {
   setAttribute(name:string,value:string) { this.attributes[name] = value; }
   addEventListener() {}
 }
-function renderFixture(texts: string[], clock12 = true, minute = 0, planned = false) {
+function renderFixture(texts: string[], clock12 = true, minute = 0, planned = false, visibleDays = [day]) {
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url),'utf8');
   const parsed = ts.createSourceFile('app.ts',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
   const declaration = parsed.statements.find((node:any) => node.name?.text === 'render')!;
@@ -31,15 +31,36 @@ function renderFixture(texts: string[], clock12 = true, minute = 0, planned = fa
   const main = {scrollTop:minute*32+50,scrollLeft:0,clientHeight:64};
   const context:any = {store:{state:{documents:planned?[]:documents}},grid,main,clock12,firstRendered:-1,editor:null,
     document:{activeElement:null,createElement:()=>new Node(),createTextNode:(text:string)=>Object.assign(new Node(),{textContent:text})},
-    HTMLElement:Node,element:()=>welcome,dates:()=>[day],updateHeader(){},updateBars(){},paintSelection(){},dateKey,
+    HTMLElement:Node,element:()=>welcome,dates:()=>visibleDays,updateHeader(){},updateBars(){},paintSelection(){},dateKey,
     minuteKey,cellFormatKey,formatFromDocument,minuteLabel,minuteCellPresentation,calendarCellColor,
     MINUTE_NOTE_STYLE,MINUTE_TIME_STYLE,
     planForMinute:()=>planned?{id:'plan',title:'Planned activity',color:'#8D6F47'}:undefined};
   vm.runInNewContext(ts.transpileModule(declaration.getText(parsed),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
   context.render();
   const row = (index:number) => grid.children.find((child)=>child.dataset.row===String(index))!;
-  return {grid,row,cell:(index:number)=>row(index).children[1]!,note:(index:number)=>row(index).children[1]!.children.find((child)=>child.className==='cell-note')!};
+  return {grid,heading:grid.children[0]!,row,cell:(index:number)=>row(index).children[1]!,note:(index:number)=>row(index).children[1]!.children.find((child)=>child.className==='cell-note')!};
 }
+
+test('Day view left-aligns its weekday and day number while multi-day headings retain their centered layout', () => {
+  const single = renderFixture([]).heading;
+  assert.equal(single.children[1]!.style.textAlign, 'left');
+  assert.equal(single.children[1]!.style.paddingLeft, '8px');
+  assert.equal(single.children[1]!.children[0]!.textContent,
+    new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short' }));
+  assert.equal(single.children[1]!.children[1]!.textContent, '31');
+  assert.equal(single.children[0]!.style.textAlign, undefined, 'the time gutter is unaffected');
+  for (const count of [3, 7]) {
+    const visible = Array.from({ length: count }, (_, index) => dateKey(new Date(2026, 9, 31 + index)));
+    const heading = renderFixture([], true, 0, false, visible).heading;
+    assert.equal(heading.children.length, count + 1);
+    for (const date of heading.children.slice(1)) {
+      assert.equal(date.style.textAlign, undefined, 'multi-day date headings use the existing centered CSS');
+      assert.equal(date.style.paddingLeft, undefined);
+    }
+  }
+  const css = fs.readFileSync(new URL('../app.css', import.meta.url), 'utf8');
+  assert.match(css, /\.grid-heading>div\{[^}]*text-align:center/);
+});
 
 test('actual browser rendering keeps short, long and multiline notes at one size with natural width wrapping', () => {
   const texts=['I','A sentence with natural word boundaries. '.repeat(15),'AReallyLongUnbrokenWord'.repeat(25),'First line\n  keep indentation  '];

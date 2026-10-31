@@ -2185,7 +2185,8 @@ export function TodayScreen({
                   if (day === dateKey(new Date())) goToCurrentMinute();
                   else { onDateChange(day); onDayCountChange?.(1); }
                 }}
-                style={[styles.dateColumn, { width: gridLayout.dayWidth }]}>
+                style={[styles.dateColumn, dayCount === 1 && days.length === 1 && styles.dayDateColumn,
+                  { width: gridLayout.dayWidth }]}>
                 <Text numberOfLines={1} maxFontSizeMultiplier={1.25} style={[styles.weekday, day === today && styles.todayWeekday]}>
                   {new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(parseDateKey(day))}
                 </Text>
@@ -2629,6 +2630,7 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     dateHeader: { flexDirection: 'row', alignItems: 'center', height: 66,
       borderBottomWidth: 1, borderBottomColor: gridLine, backgroundColor: colors.paper },
     dateColumn: { height: 66, alignItems: 'center', justifyContent: 'center' },
+    dayDateColumn: { alignItems: 'flex-start', paddingLeft: 8 },
     weekday: { color: colors.muted, fontSize: 14, fontWeight: '600' },
     todayWeekday: { color: mode === 'dark' ? '#C4B8E7' : '#8D7FAD' },
     dateCircle: { width: 46, height: 46, marginTop: 3, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },

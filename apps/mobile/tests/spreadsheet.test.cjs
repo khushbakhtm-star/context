@@ -83,6 +83,89 @@ test('explicit pencil resizing retains the exact source border and keeps distinc
   await sheet.redoSpreadsheetEdit(); assert.equal((await api.getEntriesForBlock(blockId)).length, 3);
 });
 
+test('overnight color-only pencil fill preserves distinct notes, borders and styles and has one atomic Undo and Redo', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase(); const next = '2026-10-26';
+  await save(api, 100, 'Clipboard stays'); const clipboard = plain(await sheet.copyMinuteRange(range(100)));
+  await save(api, 1438, 'Outside range'); await save(api, 1439, '  Exact bedtime note\nUnicode café 💤  ');
+  await api.saveMinuteEntry({ dateKey: next, minuteIndex: 0, text: 'Wake for a moment', categoryId: 'work' });
+  const groupSpan = { startDateKey: day, startMinute: 1438, endDateKey: next, endMinute: 1 };
+  const groupInput = { event: { title: 'Existing sleep border', categoryId: 'sleep' } };
+  const groupPreview = await sheet.prepareMinuteSpanFill(groupSpan, groupInput);
+  const { blockId } = await sheet.fillMinuteSpan(groupSpan, groupInput, { previewToken: groupPreview.token });
+  const exactText = '  Exact bedtime note\nUnicode café 💤  ';
+  const noteSpan = { startDateKey: day, startMinute: 1439, endDateKey: next, endMinute: 0 };
+  const notePreview = await sheet.prepareMinuteSpanFill(noteSpan, { text: exactText });
+  await sheet.fillMinuteSpan(noteSpan, { text: exactText }, { previewToken: notePreview.token });
+  await sheet.applyCellFormat(range(1439), { bold: true, underline: true, textColor: '#123456' });
+  await sheet.resetMinuteFill(range(1439)); await sheet.applyCellFormat(range(1, 1, next), { italic: true });
+  const outside = plain(await api.getMinuteEntry(day, 1438));
+  const before = [...await api.getSpreadsheetCells(range(1439)), ...await api.getSpreadsheetCells(range(0, 2, next))];
+  const semantic = cells => plain(cells.map(cell => ({ minuteIndex: cell.minuteIndex, entry: cell.entry && {
+    text: cell.entry.text, categoryId: cell.entry.categoryId, blockId: cell.entry.blockId }, format: cell.format })));
+  const span = { startDateKey: day, startMinute: 1439, endDateKey: next, endMinute: 3 }, input = { categoryId: 'family' };
+  const preview = await sheet.prepareMinuteSpanFill(span, input); assert.equal(preview.cellCount, 4);
+  const applied = await sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  assert.equal(applied.blockId, null); assert.deepEqual(plain(applied.affectedDates), [day, next]);
+  const entries = [await api.getMinuteEntry(day, 1439), ...await api.getDayEntries(next)];
+  assert.deepEqual(entries.map(entry => entry.text), [exactText, 'Wake for a moment', '', '']);
+  assert.ok(entries.every(entry => entry.categoryId === 'family'));
+  assert.equal(entries[0].blockId, blockId); assert.equal(entries[1].blockId, blockId);
+  assert.ok(entries.slice(2).every(entry => entry.blockId.startsWith('sheet_')));
+  const format = (await sheet.getDayCellFormats(day)).get(1439);
+  assert.deepEqual(plain(format), { bold: true, underline: true, textColor: '#123456', activityGroup: { id: blockId, title: 'Existing sleep border' } });
+  assert.deepEqual(plain((await sheet.getDayCellFormats(next)).get(1)), { italic: true });
+  assert.deepEqual(plain(await api.getMinuteEntry(day, 1438)), outside);
+  assert.deepEqual(plain(sheet.getSpreadsheetClipboard()), clipboard);
+  await sheet.undoSpreadsheetEdit();
+  assert.deepEqual(semantic([...await api.getSpreadsheetCells(range(1439)), ...await api.getSpreadsheetCells(range(0, 2, next))]), semantic(before));
+  await sheet.redoSpreadsheetEdit();
+  assert.equal((await api.getMinuteEntry(next, 2)).text, ''); assert.equal((await api.getMinuteEntry(next, 2)).categoryId, 'family');
+  assert.equal((await api.getMinuteEntry(day, 1439)).blockId, blockId);
+});
+
+test('pencil fill color is validated and preview-bound, and explicit group and cell colors must agree', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  const span = { startDateKey: day, startMinute: 500, endDateKey: day, endMinute: 502 };
+  for (const categoryId of ['missing', '', 'invalid color', null, 123]) {
+    await assert.rejects(async () => sheet.prepareMinuteSpanFill(span, { categoryId }), /color/);
+  }
+  await assert.rejects(async () => sheet.prepareMinuteSpanFill(span, { categoryId: 'family', event: { title: 'Work', categoryId: 'work' } }), /same fill color/);
+  assert.equal((await api.getDayEntries(day)).length, 0); assert.equal(sheet.spreadsheetEditor.snapshot().canUndo, false);
+  const input = { text: 'Keep exact entered text', categoryId: 'family' };
+  const preview = await sheet.prepareMinuteSpanFill(span, input);
+  await assert.rejects(sheet.fillMinuteSpan(span, { ...input, categoryId: 'work' }, { previewToken: preview.token }), /changed/);
+  assert.equal((await api.getDayEntries(day)).length, 0);
+  await sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  assert.ok((await api.getDayEntries(day)).every(entry => entry.text === input.text && entry.categoryId === 'family'));
+  const grouped = { categoryId: 'study', event: { title: 'Study', categoryId: 'study' } };
+  const groupedPreview = await sheet.prepareMinuteSpanFill(span, grouped);
+  const result = await sheet.fillMinuteSpan(span, grouped, { previewToken: groupedPreview.token });
+  assert.ok((await api.getEntriesForBlock(result.blockId)).every(entry => entry.categoryId === 'study' && entry.text === input.text));
+});
+
+test('color-only pencil fill rolls back both dates on a failed write and guards preview ABA and newer notes during Undo', async (t) => {
+  const { api, sheet, sqlite } = harness(t); await api.initializeDatabase(); const next = '2026-10-26';
+  await save(api, 1439, 'Keep original', 'work');
+  const span = { startDateKey: day, startMinute: 1439, endDateKey: next, endMinute: 2 }, input = { categoryId: 'family' };
+  let preview = await sheet.prepareMinuteSpanFill(span, input);
+  await api.saveMinuteEntry({ dateKey: next, minuteIndex: 0, text: 'Temporary', categoryId: 'work' }); await api.deleteMinuteEntry(next, 0);
+  await assert.rejects(sheet.fillMinuteSpan(span, input, { previewToken: preview.token }), /changed/);
+  assert.equal((await api.getMinuteEntry(day, 1439)).categoryId, 'work');
+  preview = await sheet.prepareMinuteSpanFill(span, input);
+  const documents = plain(await api.getSyncDocuments(''));
+  sqlite.exec(`CREATE TRIGGER reject_color_fill BEFORE INSERT ON ledger_documents
+    WHEN NEW.key='category:minuteFormat:2026-10-26:0' BEGIN SELECT RAISE(ABORT,'color fill unavailable'); END;`);
+  await assert.rejects(sheet.fillMinuteSpan(span, input, { previewToken: preview.token }), /color fill unavailable/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), documents);
+  assert.equal((await api.getMinuteEntry(day, 1439)).categoryId, 'work'); assert.equal(await api.getMinuteEntry(next, 1), null);
+  sqlite.exec('DROP TRIGGER reject_color_fill');
+  preview = await sheet.prepareMinuteSpanFill(span, input); await sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  await api.saveMinuteEntry({ dateKey: next, minuteIndex: 0, text: 'Newer private note', categoryId: 'family' });
+  await assert.rejects(sheet.undoSpreadsheetEdit(), /changed/);
+  assert.equal((await api.getMinuteEntry(next, 0)).text, 'Newer private note');
+  assert.equal((await api.getMinuteEntry(day, 1439)).categoryId, 'family', 'a rejected multi-day Undo changes neither date');
+});
+
 test('correcting an overnight uniform Sleep fill replaces both old dates with one same-day border and one Undo', async (t) => {
   const { api, sheet } = harness(t); await api.initializeDatabase();
   const startDay = '2026-10-29', endDay = '2026-10-30';

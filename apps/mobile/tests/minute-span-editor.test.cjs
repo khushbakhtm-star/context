@@ -122,6 +122,38 @@ test('explicitly emptying pencil Text is a deliberate text clear rather than mix
   assert.equal(saved.text, ''); assert.equal(Object.hasOwn(saved, 'event'), false);
 });
 
+test('pencil Fill color opens without grouping and preserves mixed notes when only a color is chosen', async (t) => {
+  let saved;
+  const choices = [{ id: 'rest', color: '#0B8043', name: 'Basil' }, { id: 'body', color: '#3F51B5', name: 'Blueberry' }];
+  const h = component(t, 'MinuteSpanEditor.tsx', 'MinuteSpanEditor', { session: { ...session(), text: undefined },
+    clockFormat: '24h', colorChoices: choices, onClose() {}, onSave: async (_span, input) => { saved = input; return false; } });
+  await h.start(); const button = h.action('Choose cell fill color'); assert.ok(button);
+  assert.equal(button.accessibilityState.expanded, false);
+  button.onPress(); await h.settle(); assert.equal(h.action('Choose cell fill color').accessibilityState.expanded, true);
+  assert.equal(h.find('CellColorPalette').colorChoices, choices);
+  h.find('CellColorPalette').onCellColor('body'); await h.settle();
+  assert.equal(h.action('Choose cell fill color').accessibilityState.expanded, false);
+  assert.equal(h.action('Group as event').value, false);
+  h.action('Save minute range').onPress(); await h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(saved)), { categoryId: 'body' });
+  await h.update({ session: { ...session(2), text: undefined } });
+  h.action('Save minute range').onPress(); await h.settle();
+  assert.equal(Object.hasOwn(saved, 'categoryId'), false, 'a new untouched editor cannot reuse the previous fill choice');
+});
+
+test('the pencil uses one Fill color choice for the selected cells and their optional calendar border', async (t) => {
+  let saved;
+  const h = component(t, 'MinuteSpanEditor.tsx', 'MinuteSpanEditor', { session: { ...session(), text: 'Sleep' },
+    clockFormat: '24h', colorChoices: [{ id: 'rest', color: '#0B8043', name: 'Basil' }],
+    onClose() {}, onSave: async (_span, input) => { saved = input; return true; } });
+  await h.start(); h.action('Group as event').onValueChange(true); await h.settle();
+  assert.equal(h.action('Choose cell fill color'), undefined);
+  h.action('Choose event color').onPress(); await h.settle();
+  h.find('CellColorPalette').onCellColor('rest'); await h.settle();
+  h.action('Save minute range').onPress(); await h.settle();
+  assert.equal(saved.categoryId, 'rest'); assert.equal(saved.event.categoryId, 'rest'); assert.equal(saved.event.title, 'Sleep');
+});
+
 test('an open pencil draft survives source refresh and a stale completed Save cannot close a new form', async (t) => {
   let finish, calls = 0, closes = 0;
   const h = component(t, 'MinuteSpanEditor.tsx', 'MinuteSpanEditor', { session: session(), clockFormat: '24h', colorChoices: [], onClose() { closes++; },

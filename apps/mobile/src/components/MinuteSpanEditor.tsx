@@ -24,6 +24,7 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
   const [startTime, setStartTime] = useState(''), [endTime, setEndTime] = useState('');
   const [endDateExplicit, setEndDateExplicit] = useState(false), [group, setGroup] = useState(false);
   const [title, setTitle] = useState(''), [titleEdited, setTitleEdited] = useState(false), [categoryId, setCategoryId] = useState('unaccounted');
+  const [colorEdited, setColorEdited] = useState(false);
   const [palette, setPalette] = useState(false), [dateField, setDateField] = useState<'start' | 'end' | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; }; }, []);
@@ -36,6 +37,7 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
     setEndDateExplicit(Boolean(session.event?.blockId)); setGroup(Boolean(session.event));
     setTitle(session.event?.title ?? minuteDetailsTitle(session.text ?? '')); setTitleEdited(Boolean(session.event));
     setCategoryId(session.event?.categoryId ?? session.categoryId);
+    setColorEdited(false);
     // A provider refresh or a clock-format preference update must not reset an open form.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id]);
@@ -52,6 +54,7 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
     if (!session || busyRef.current || !canSave || !parsed.span) return;
     const ticket = ++sequence.current; busyRef.current = true; setBusy(true); setError(null); Keyboard.dismiss();
     const input: MinuteSpanFillInput = { ...((textEdited || session.text !== undefined) ? { text } : {}),
+      ...(colorEdited ? { categoryId } : {}),
       ...(group ? { event: { title: title.trim(), categoryId, ...(session.event?.blockId ? { blockId: session.event.blockId } : {}) } } : {}) };
     try { const applied = await onSave(parsed.span, input); if (mounted.current && ticket === sequence.current && applied) onClose(); }
     catch (failure) { if (mounted.current && ticket === sequence.current) setError(failure instanceof Error ? failure.message : 'This range could not be saved.'); }
@@ -62,7 +65,7 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
       style={[styles.overlay, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
       <View accessibilityViewIsModal onAccessibilityEscape={close} style={styles.card}>
         <View style={styles.heading}><Text accessibilityRole="header" style={styles.title}>Edit minutes</Text>
-          <InfoButton title="Edit minutes" message="Through includes the whole final minute: 07:24 fills the 07:24 cell, and the calendar event ends at 07:25. An earlier Through time suggests the following day until you choose a date. Text fills each included minute. Untouched mixed notes stay unchanged; explicitly clearing Text clears the notes. Editing an event replaces its old repeated fill and border; distinct notes outside the new bounds remain private without the old fill. Group as event adds one named border. Text-only edits keep existing colors and borders. Confirmed changes can be undone together." />
+          <InfoButton title="Edit minutes" message="Through includes the whole final minute: 07:24 fills the 07:24 cell, and the calendar event ends at 07:25. An earlier Through time suggests the following day until you choose a date. Text fills each included minute. Untouched mixed notes stay unchanged; explicitly clearing Text clears the notes. Editing an event replaces its old repeated fill and border; distinct notes outside the new bounds remain private without the old fill. Group as event adds one named border. Fill color applies the chosen calendar color to the included cells, even without creating an event. Leaving it untouched keeps existing colors. Confirmed changes can be undone together." />
         </View>
         <ScrollView keyboardShouldPersistTaps="always" style={styles.scroll} contentContainerStyle={styles.content}>
           <Text style={styles.label}>Text</Text>
@@ -81,17 +84,19 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
             <TextInput accessibilityLabel="End time" editable={!busy} value={endTime} onChangeText={setEndTime}
               autoCapitalize="characters" maxLength={12} style={styles.time} />
           </View>
+          <Pressable accessibilityRole="button" accessibilityLabel={group ? 'Choose event color' : 'Choose cell fill color'}
+            accessibilityState={{ expanded: palette, disabled: busy }} disabled={busy}
+            onPress={() => { Keyboard.dismiss(); setPalette((value) => !value); }} style={styles.colorButton}>
+            <View style={[styles.swatch, { backgroundColor: selectedColor?.color ?? '#96938C' }]} />
+            <Text style={styles.value}>Fill color</Text><Text allowFontScaling={false} style={styles.dropdown}>▾</Text>
+          </Pressable>
+          {palette ? <CellColorPalette mode="cell" busy={busy} colorChoices={colorChoices} selectedColorId={categoryId} textColor={colors.ink}
+            onTextColor={() => {}} onCellColor={(id) => { setCategoryId(id); setColorEdited(true); setPalette(false); }} onClose={() => setPalette(false)} /> : null}
           <View style={styles.row}><Text style={[styles.label, { flex: 1 }]}>Group as event</Text>
             <Switch accessibilityLabel="Group as event" disabled={busy || Boolean(session?.event?.blockId)} value={group} onValueChange={setGroup} />
           </View>
-          {group ? <><TextInput accessibilityLabel="Event title" editable={!busy} value={title} maxLength={200}
-            placeholder="Event title" placeholderTextColor={colors.muted} onChangeText={(value) => { setTitle(value); setTitleEdited(true); }} style={styles.field} />
-            <Pressable accessibilityRole="button" accessibilityLabel="Choose event color" disabled={busy}
-              onPress={() => { Keyboard.dismiss(); setPalette((value) => !value); }} style={styles.colorButton}>
-              <View style={[styles.swatch, { backgroundColor: selectedColor?.color ?? '#96938C' }]} /><Text style={styles.value}>Color</Text>
-            </Pressable>
-            {palette ? <CellColorPalette mode="cell" busy={busy} colorChoices={colorChoices} selectedColorId={categoryId} textColor={colors.ink}
-              onTextColor={() => {}} onCellColor={(id) => { setCategoryId(id); setPalette(false); }} onClose={() => setPalette(false)} /> : null}</> : null}
+          {group ? <TextInput accessibilityLabel="Event title" editable={!busy} value={title} maxLength={200}
+            placeholder="Event title" placeholderTextColor={colors.muted} onChangeText={(value) => { setTitle(value); setTitleEdited(true); }} style={styles.field} /> : null}
           {parsed.count ? <Text style={styles.count}>{parsed.count} {parsed.count === 1 ? 'minute' : 'minutes'}</Text> : null}
           {error || parsed.error ? <Text accessibilityRole="alert" style={styles.error}>{error ?? parsed.error}</Text> : null}
         </ScrollView>
@@ -120,6 +125,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   time: { width: 112, minHeight: 44, padding: 10, color: colors.ink, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 8 },
   field: { minHeight: 44, padding: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 8, color: colors.ink },
   colorButton: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 10 }, swatch: { width: 24, height: 24, borderRadius: 12, borderWidth: 1, borderColor: colors.swatchBorder },
+  dropdown: { color: colors.muted, fontSize: 14, marginLeft: 'auto' },
   count: { color: colors.muted, fontSize: 12 }, error: { color: colors.danger, fontSize: 13 },
   footer: { flexDirection: 'row', justifyContent: 'flex-end', padding: 8, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
   action: { minHeight: 44, paddingHorizontal: 16, justifyContent: 'center', alignItems: 'center' }, disabled: { opacity: 0.4 },

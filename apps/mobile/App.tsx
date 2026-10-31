@@ -1162,7 +1162,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const [gearMenuTop, setGearMenuTop] = useState(48);
   const [gearMenuLeft, setGearMenuLeft] = useState(8);
   const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
-  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'search' | 'reports' | 'dates'; sequence: number } | null>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates'; sequence: number } | null>(null);
   const gearVisibleRef = useRef(false);
   const gearClosingRef = useRef(false);
   const headerMountedRef = useRef(true);
@@ -1258,6 +1258,9 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     Keyboard.dismiss();
     try {
       await flushInlineMinutes();
+      const currentHistory = spreadsheetEditor.snapshot();
+      if (!headerMountedRef.current || AppState.currentState !== 'active' || currentHistory.busy ||
+          !(action === 'undo' ? currentHistory.canUndo : currentHistory.canRedo)) return;
       await (action === 'undo' ? undoSpreadsheetEdit() : redoSpreadsheetEdit());
     } catch (error) {
       if (headerMountedRef.current && AppState.currentState === 'active') {
@@ -1340,7 +1343,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     dispatchingGearAction.current = true;
     if (pending.action === 'settings') onOpenSettings();
     else if (pending.action === 'print') onPrint();
-    else if (pending.action === 'search') onOpenSearch();
+    else if (pending.action === 'redo') void changeHistory('redo');
     else if (pending.action === 'dates') onOpenDatePicker();
     else onOpenReports();
     // Also release the local lock when a transition finishes within the same React batch.
@@ -1349,8 +1352,9 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       if (headerMountedRef.current && !navigationBusyRef.current) dispatchingGearAction.current = false;
     });
   };
-  const chooseGearAction = (action: 'settings' | 'print' | 'search' | 'reports') => {
+  const chooseGearAction = (action: 'settings' | 'print' | 'redo' | 'reports') => {
     if (!headerMayNavigate() || !gearVisibleRef.current || gearClosingRef.current || pendingGearAction.current) return;
+    if (action === 'redo' && !spreadsheetEditor.snapshot().canRedo) return;
     const sequence = ++menuRequestSequence.current;
     pendingGearAction.current = { action, sequence };
     gearVisibleRef.current = false;
@@ -1422,11 +1426,12 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       style={[controlStyle, (!history.canUndo || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.historyArrow}>↶</Text>
     </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
-      accessibilityState={{ disabled: !history.canRedo || navigationBusy }}
-      disabled={!history.canRedo || navigationBusy} onPressIn={() => binderPress.cancel()} onPress={() => void changeHistory('redo')}
-      style={[controlStyle, (!history.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
-      <Text allowFontScaling={false} style={styles.historyArrow}>↷</Text>
+    <Pressable accessibilityRole="button" accessibilityLabel="Open Search"
+      accessibilityState={{ disabled: navigationBusy }} disabled={navigationBusy}
+      onPressIn={() => binderPress.cancel()} onPress={() => {
+        binderPress.cancel(); if (!headerMayNavigate()) return; invalidateMenus(); onOpenSearch();
+      }} style={controlStyle}>
+      <CalendarHeaderIcon name="search" />
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel={syncing ? 'Synchronizing calendars' : syncError ? 'Calendar sync needs attention. Tap to retry' : 'Sync attached calendars'}
       accessibilityHint={hasSyncDetails ? 'Touch and hold for sync details' : undefined}
@@ -1436,11 +1441,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       accessibilityActions={hasSyncDetails ? [{ name: 'longpress', label: 'Show sync details' }] : []}
       onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') showSyncDetails(); }}
       onPress={() => { binderPress.cancel(); if (syncLongPress.current) { syncLongPress.current = false; return; } if (!syncing) onSync(); }} style={controlStyle}>
-      <View style={styles.syncIconWrap}>
-        <CalendarHeaderIcon name="sync" active={syncing} />
-        {syncError ? <Text accessible={false} importantForAccessibility="no" allowFontScaling={false}
-          style={styles.syncAttention}>!</Text> : null}
-      </View>
+      <CalendarHeaderIcon name="sync" active={syncing && !syncError} issue={Boolean(syncError)} />
     </Pressable>
     </View>
   </ScrollView>
@@ -1465,10 +1466,13 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
               <CalendarHeaderIcon name="print" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Print</Text>
             </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Open Search"
-              onPress={() => chooseGearAction('search')} style={styles.viewOption}>
-              <CalendarHeaderIcon name="search" />
-              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Search</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
+              accessibilityState={{ disabled: !history.canRedo || navigationBusy }} disabled={!history.canRedo || navigationBusy}
+              onPress={() => chooseGearAction('redo')} style={[styles.viewOption,
+                (!history.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
+              <Text accessible={false} importantForAccessibility="no" allowFontScaling={false}
+                style={[styles.historyArrow, { width: 24, textAlign: 'center' }]}>↷</Text>
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Redo</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Open Settings"
               onPress={() => chooseGearAction('settings')} style={styles.viewOption}>
@@ -1606,9 +1610,6 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     justifyContent: 'space-between', backgroundColor: colors.paper },
   calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
   historyArrow: { color: colors.graphite, fontSize: 27, lineHeight: 34 },
-  syncIconWrap: { width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
-  syncAttention: { position: 'absolute', top: -4, right: -5, minWidth: 11, height: 15, borderRadius: 4,
-    backgroundColor: colors.paper, color: colors.graphite, fontSize: 13, lineHeight: 15, fontWeight: '800', textAlign: 'center' },
   disabledCalendarNavigation: { opacity: 0.3 },
   viewMenuBackdrop: { flex: 1 },
   viewMenu: { position: 'absolute', width: 208, paddingVertical: 8, borderWidth: StyleSheet.hairlineWidth,

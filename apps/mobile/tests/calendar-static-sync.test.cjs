@@ -15,7 +15,7 @@ function header(props) {
 const syncButton = (h) => h.nodes().find((node) => node.type === 'Pressable' &&
   /^(Synchronizing calendars|Calendar sync needs attention|Sync attached calendars)/.test(node.props.accessibilityLabel ?? ''));
 
-function icon(active, graphite) {
+function icon(active, ink, muted, issue = false) {
   const file = path.join(__dirname, '../src/components/CalendarHeaderIcon.tsx'); const module = { exports: {} };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: {
@@ -24,10 +24,10 @@ function icon(active, graphite) {
     if (name === 'react') return { useMemo: (work) => work() };
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
     if (name === 'react-native') return { View: 'View', StyleSheet: { create: (styles) => styles, absoluteFill: {} } };
-    if (name === '../appearance') return { useAppTheme: () => ({ colors: { graphite, paper: '#F8F7F4' } }) };
+    if (name === '../appearance') return { useAppTheme: () => ({ colors: { ink, muted, graphite: ink, paper: '#F8F7F4' } }) };
     throw Error('Unexpected icon dependency: ' + name);
   } }, { filename: file });
-  return module.exports.CalendarHeaderIcon({ name: 'sync', active });
+  return module.exports.CalendarHeaderIcon({ name: 'sync', active, issue });
 }
 function nodes(tree) {
   return !tree || typeof tree !== 'object' ? [] : [tree, ...[tree.props?.children].flat(Infinity).flatMap(nodes)];
@@ -47,32 +47,54 @@ function arrowTip(arms) {
   return pairs[0];
 }
 
-test('active and idle sync use distinct static grayscale loops with the lighter undo/redo stroke weight', () => {
-  for (const graphite of ['#333333', '#E3E1DD']) {
-    const active = icon(true, graphite), idle = icon(false, graphite);
+test('active, idle and issue sync use static circular loops, muted quiet states and congruent side chevrons', () => {
+  for (const [ink, muted] of [['#171817', '#6E706C'], ['#F0EDF2', '#B0ADB7']]) {
+    const active = icon(true, ink, muted), idle = icon(false, ink, muted), issue = icon(false, ink, muted, true);
     assert.equal(active.props.accessible, false); assert.equal(active.props.pointerEvents, 'none');
     const closed = nodes(active).find((node) => node.props.testID === 'sync-loop-closed');
     const open = nodes(idle).find((node) => node.props.testID === 'sync-loop-open');
     const closedStyle = flatStyle(closed.props.style), openStyle = flatStyle(open.props.style);
-    assert.equal(closedStyle.borderWidth, 1.5); assert.equal(closedStyle.borderColor, graphite);
-    assert.ok(closedStyle.width > closedStyle.height, 'the loop is a horizontally oriented oval');
+    assert.equal(closedStyle.borderWidth, 1.5); assert.equal(closedStyle.borderColor, ink);
+    assert.equal(closedStyle.width, 22); assert.equal(closedStyle.height, 22); assert.equal(closedStyle.borderRadius, 11);
+    assert.equal(closedStyle.left, 1); assert.equal(closedStyle.top, 1);
     assert.equal(closedStyle.borderLeftColor, undefined); assert.equal(closedStyle.borderRightColor, undefined);
-    assert.equal(openStyle.borderWidth, 1.5); assert.equal(openStyle.borderColor, graphite);
+    assert.equal(openStyle.borderWidth, 1.5); assert.equal(openStyle.borderColor, muted);
     assert.equal(openStyle.borderLeftColor, 'transparent'); assert.equal(openStyle.borderRightColor, 'transparent');
-    for (const tree of [active, idle]) {
-      assert.equal(nodes(tree).filter((node) => flatStyle(node.props.style).width === 6 && flatStyle(node.props.style).height === 1.5).length, 4,
-        'both loop states retain the same pair of arrowheads');
+    for (const tree of [active, idle, issue]) {
+      const color = tree === active ? ink : muted;
+      assert.equal(nodes(tree).filter((node) => flatStyle(node.props.style).width === 4 && flatStyle(node.props.style).height === 1.5).length, 4,
+        'all states retain the same pair of side arrowheads');
       assert.ok(nodes(tree).every((node) => node.type === 'View' || node.type === 'Fragment'));
-      const upper = nodes(tree).filter((node) => node.props.testID === 'sync-top-arrow').map((node) => flatStyle(node.props.style));
-      const lower = nodes(tree).filter((node) => node.props.testID === 'sync-bottom-arrow').map((node) => flatStyle(node.props.style));
-      assert.equal(upper.length, 2); assert.equal(lower.length, 2);
-      const topTip = arrowTip(upper), bottomTip = arrowTip(lower);
-      assert.ok(upper.every((style) => topTip.x < style.left + style.width / 2), 'top arrow points left');
-      assert.ok(lower.every((style) => bottomTip.x > style.left + style.width / 2), 'bottom arrow points right');
-      assert.ok(Math.abs(topTip.x - 9) < 0.5 && Math.abs(topTip.y - 5) < 0.5, 'top arrow sits on the upper horizontal run');
-      assert.ok(Math.abs(bottomTip.x - 15) < 0.5 && Math.abs(bottomTip.y - 19) < 0.5, 'bottom arrow sits on the lower horizontal run');
+      const left = nodes(tree).filter((node) => node.props.testID === 'sync-left-arrow').map((node) => flatStyle(node.props.style));
+      const right = nodes(tree).filter((node) => node.props.testID === 'sync-right-arrow').map((node) => flatStyle(node.props.style));
+      assert.equal(left.length, 2); assert.equal(right.length, 2);
+      assert.ok([...left, ...right].every((style) => style.backgroundColor === color && style.height === 1.5));
+      const leftTip = arrowTip(left), rightTip = arrowTip(right);
+      assert.ok(left.every((style) => leftTip.y > style.top + style.height / 2), 'left chevron points down');
+      assert.ok(right.every((style) => rightTip.y < style.top + style.height / 2), 'right chevron points up');
+      assert.ok(Math.abs(leftTip.x - 3) < 0.5 && Math.abs(leftTip.y - 14) < 0.5, 'left arrow follows the circular side');
+      assert.ok(Math.abs(rightTip.x - 21) < 0.5 && Math.abs(rightTip.y - 9) < 0.5, 'right arrow follows the opposite circular side');
     }
   }
+});
+
+test('the issue mark is centered inside one muted closed circle and remains entirely decorative even during sync', () => {
+  for (const active of [false, true]) {
+    const tree = icon(active, '#171817', '#6E706C', true), all = nodes(tree);
+    const ring = flatStyle(all.find((node) => node.props.testID === 'sync-loop-closed').props.style);
+    assert.equal(ring.borderColor, '#6E706C'); assert.equal(ring.borderLeftColor, undefined); assert.equal(ring.borderRightColor, undefined);
+    assert.equal(all.filter((node) => node.props.testID === 'sync-issue-mark').length, 1);
+    const mark = flatStyle(all.find((node) => node.props.testID === 'sync-issue-mark').props.style);
+    assert.equal(mark.left + mark.width / 2, 12); assert.equal(mark.top + mark.height / 2, 12);
+    const stem = flatStyle(all.find((node) => node.props.testID === 'sync-issue-stem').props.style);
+    const dot = flatStyle(all.find((node) => node.props.testID === 'sync-issue-dot').props.style);
+    assert.equal(stem.width, ring.borderWidth); assert.equal(dot.width, ring.borderWidth); assert.equal(dot.height, ring.borderWidth);
+    assert.equal(stem.backgroundColor, '#6E706C'); assert.equal(dot.backgroundColor, '#6E706C');
+    assert.equal(tree.props.accessible, false); assert.equal(tree.props.accessibilityElementsHidden, true);
+    assert.equal(tree.props.importantForAccessibility, 'no-hide-descendants');
+    assert.equal(all.some((node) => node.type === 'Text' || node.props.accessibilityLabel), false);
+  }
+  for (const active of [false, true]) assert.equal(nodes(icon(active, '#171817', '#6E706C')).some((node) => node.props.testID === 'sync-issue-mark'), false);
 });
 
 test('the header never animates Sync and retains real busy state, retry, error and long-press actions', () => {
@@ -80,13 +102,19 @@ test('the header never animates Sync and retains real busy state, retry, error a
   const h = header(props);
   let button = syncButton(h);
   assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.active, false);
+  assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.issue, false);
   h.press(button); assert.equal(h.calls.sync, 1);
+  props.syncing = true; h.render(); button = syncButton(h);
+  assert.equal(button.props.accessibilityLabel, 'Synchronizing calendars');
+  assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.active, true);
+  assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.issue, false);
   props.syncing = true; props.syncError = 'A saved calendar change needs review'; h.render(); button = syncButton(h);
   assert.equal(button.props.accessibilityState.busy, true);
   assert.equal(button.props.accessibilityLabel, 'Synchronizing calendars');
-  assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.active, true);
+  assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.active, false);
+  assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.issue, true);
   assert.equal(h.nodes().some((node) => node.type === 'ActivityIndicator'), false);
-  assert.equal(h.nodes(button).filter((node) => node.type === 'Text' && node.props.children === '!').length, 1);
+  assert.equal(h.nodes(button).filter((node) => node.type === 'Text' && node.props.children === '!').length, 0, 'there is no duplicate outer badge');
   h.press(button); assert.equal(h.calls.sync, 1, 'busy taps cannot start duplicate work');
   button.props.onPressIn(); button.props.onLongPress(); button.props.onPress();
   assert.equal(h.calls.errors.length, 1); assert.equal(h.calls.sync, 1);

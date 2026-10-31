@@ -279,6 +279,39 @@ function plan(id, minute, account = false) {
     ...(account ? { accountEvent: { accountId: 'account', event: {} } } : {}) };
 }
 
+test('only the single-day Day header aligns its weekday and date circle to the left inside the date column', async (t) => {
+  const flatten = (style) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
+  function headers(node, into = []) {
+    if (!node || typeof node !== 'object') return into;
+    const children = node.props?.children;
+    if (node.type === 'Pressable' && Array.isArray(children) && children[0]?.type === 'Text' && children[1]?.type === 'View' &&
+        flatten(children[0].props.style).fontSize === 14 && flatten(children[1].props.style).borderRadius === 23) into.push(node);
+    for (const child of [children].flat(Infinity)) headers(child, into);
+    return into;
+  }
+  for (const props of [{ dayCount: 1 }, { dayCount: 3 }, { dayCount: 7 },
+    { dayCount: 1, selectedDates: ['2026-10-25', '2026-10-27'] }, { dayCount: 7, selectedDates: ['2026-10-25'] }]) {
+    const h = screen(t, { props }); await h.start(); const columns = headers(h.tree);
+    assert.equal(columns.length, props.selectedDates?.length ?? props.dayCount);
+    for (const column of columns) {
+      const singleDay = props.dayCount === 1 && columns.length === 1;
+      const style = flatten(column.props.style), [weekday, circle] = column.props.children;
+      assert.equal(style.alignItems, singleDay ? 'flex-start' : 'center');
+      assert.equal(style.paddingLeft, singleDay ? 8 : undefined);
+      assert.ok(style.width > (style.paddingLeft ?? 0) + 46 || !singleDay, 'the left padding stays inside the date column after the time gutter');
+      assert.equal(weekday.props.numberOfLines, 1); assert.equal(typeof weekday.props.children, 'string');
+      const circleStyle = flatten(circle.props.style);
+      assert.equal(circleStyle.width, circleStyle.height); assert.equal(circleStyle.borderRadius, 23);
+      assert.equal(circleStyle.alignItems, 'center'); assert.equal(circleStyle.justifyContent, 'center');
+      assert.equal(flatten(circle.props.children.props.style).fontSize, 25);
+      if (circle.props.children.props.children === 25) {
+        assert.ok(circleStyle.backgroundColor, 'the current-day circle remains visible');
+        if (singleDay) assert.equal(circleStyle.width, 46);
+      }
+    }
+  }
+});
+
 test('pencil opens a dated mixed-note range and submits one guarded overnight fill', async (t) => {
   const h = screen(t, { spanOccupied: 2 });
   h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'First note', categoryId: 'study', blockId: 'first' });

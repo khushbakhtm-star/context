@@ -14,13 +14,14 @@ import { minuteCellPresentation, MINUTE_NOTE_STYLE, MINUTE_TIME_STYLE } from './
 import { effectiveTextColor } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
+import { applySyncGlyphState } from './sync-glyph';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const main = element('main'), grid = element('grid'), options = element<HTMLDialogElement>('options');
 const dayInput = element<HTMLInputElement>('day'), daysInput = element<HTMLSelectElement>('days');
 const passInput = element<HTMLInputElement>('passphrase');
 let lastStatus = 'Connect Google and unlock the same private ledger you use on your phone.';
-const status = (message: string, error = false) => { lastStatus = message; element('status').textContent = message; element('status').dataset.error = String(error); element('sync-warning').hidden = !error; element('sync').title = `${message} Hold or press Shift+F10 for details.`; element('sync').setAttribute('aria-label', error ? 'Synchronization needs attention. Activate to retry; hold for details.' : 'Synchronize private ledger. Hold for details.'); };
+const status = (message: string, error = false) => { lastStatus = message; element('status').textContent = message; element('status').dataset.error = String(error); applySyncGlyphState(element('sync'), busy, error); element('sync').title = `${message} Hold or press Shift+F10 for details.`; element('sync').setAttribute('aria-label', error ? 'Synchronization needs attention. Activate to retry; hold for details.' : 'Synchronize private ledger. Hold for details.'); };
 const info = (title: string, text: string) => { element('info-title').textContent = title; element('info-text').textContent = text; element<HTMLDialogElement>('info-dialog').showModal(); };
 let connection: GoogleConnection; let store: BrowserStore | null = null; let passphrase = ''; let busy = false;
 let unlockRequest = 0;
@@ -246,6 +247,7 @@ function updateHeader() {
   dayInput.value = day; daysInput.value = String(days); element<HTMLButtonElement>('undo').disabled = !undo || !store;
   element('identity').textContent = connection?.identity?.email ?? 'No Google account connected';
   element<HTMLButtonElement>('unlock').disabled = !connection?.isAuthorized() || busy;
+  applySyncGlyphState(element('sync'), busy, element('status').dataset.error === 'true');
 }
 function select(target: { day: string; minute: number }, extend = false) {
   if (!extend) { selected = target; rangeEnd = null; } else rangeEnd = target;
@@ -313,6 +315,7 @@ function render() {
   grid.style.setProperty('--time-width', timeWidth); grid.style.setProperty('--columns', `${timeWidth} repeat(${visible.length},minmax(0,1fr))`);
   const heading = document.createElement('div'); heading.className = 'grid-heading'; heading.setAttribute('role', 'row'); heading.append(document.createElement('div'));
   for (const date of visible) { const node = document.createElement('div'); const parsed = new Date(`${date}T12:00:00`); node.append(document.createTextNode(parsed.toLocaleDateString(undefined, { weekday: 'short', month: 'short' })));
+    if (visible.length === 1) { node.style.textAlign = 'left'; node.style.paddingLeft = '8px'; }
     const strong = document.createElement('strong'); strong.textContent = String(parsed.getDate()); node.append(strong); heading.append(node); }
   grid.append(heading); const docs = new Map(store.state.documents.map((doc) => [doc.key, doc]));
   const today = dateKey(new Date()); const minuteNow = new Date().getHours() * 60 + new Date().getMinutes();

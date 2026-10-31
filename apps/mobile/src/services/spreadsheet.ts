@@ -12,7 +12,7 @@ import { minuteSpanRanges, type MinuteSpan } from '../utils/minute-span';
 
 export type { CellFormat, MinuteCellRange } from '../utils/cell-format';
 export type { MinuteSpan } from '../utils/minute-span';
-export type MinuteSpanFillInput = { text?: string; event?: { title: string; categoryId: string; blockId?: string } };
+export type MinuteSpanFillInput = { text?: string; categoryId?: string; event?: { title: string; categoryId: string; blockId?: string } };
 export type MinuteSpanFillPreview = { token: string; span: MinuteSpan; ranges: MinuteCellRange[];
   cellCount: number; occupiedCount: number };
 export type MinuteSpanFillResult = { affectedDates: string[]; blockId: string | null };
@@ -422,19 +422,27 @@ class SpreadsheetEditor {
       throw new Error('Use at most 50,000 characters for the selected minutes.');
     }
     const event = input.event;
+    if (input.categoryId !== undefined && (typeof input.categoryId !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/.test(input.categoryId))) {
+      throw new Error('Choose a Google Calendar color before filling these minutes.');
+    }
     if (event && (typeof event.title !== 'string' || !event.title.trim() || event.title.trim().length > 200 ||
         !/^[A-Za-z0-9_-]{1,160}$/.test(event.categoryId) ||
         (event.blockId !== undefined && !/^[A-Za-z0-9_-]{1,160}$/.test(event.blockId)))) {
       throw new Error('Enter an activity title of up to 200 characters and choose a color.');
     }
+    if (event && input.categoryId !== undefined && input.categoryId !== event.categoryId) {
+      throw new Error('Choose the same fill color for the grouped activity and its minutes.');
+    }
     return { ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(input.categoryId !== undefined ? { categoryId: input.categoryId } : {}),
       ...(event ? { event: { title: event.title.trim(), categoryId: event.categoryId,
         ...(event.blockId !== undefined ? { blockId: event.blockId } : {}) } } : {}) };
   }
   private async validateSpanColor(input: MinuteSpanFillInput) {
-    if (input.event && !(await listSelectableActivityCategories({ writableOnly: false }))
-      .some((category) => category.id === input.event!.categoryId)) {
-      throw new Error('Choose a Google Calendar color before grouping these minutes.');
+    const categoryId = input.event?.categoryId ?? input.categoryId;
+    if (categoryId !== undefined && !(await listSelectableActivityCategories({ writableOnly: false }))
+      .some((category) => category.id === categoryId)) {
+      throw new Error('Choose a Google Calendar color before filling these minutes.');
     }
   }
   prepareSpanFill(span: MinuteSpan, input: MinuteSpanFillInput): Promise<MinuteSpanFillPreview> {
@@ -557,11 +565,13 @@ class SpreadsheetEditor {
         if (normalized.event) {
           cell.entry = { ...cell.entry, text, categoryId: normalized.event.categoryId, blockId: targetId! };
           cell.format = withEventLabel({ ...cell.format, noFill: undefined }, targetId!, normalized.event.title);
-        } else if (normalized.text !== undefined) {
-          cell.entry = cell.entry ? { ...cell.entry, text } : text.trim()
-            ? { text, categoryId: 'unaccounted', blockId: this.newToken('sheet') } : null;
+        } else if (normalized.text !== undefined || normalized.categoryId !== undefined) {
+          cell.entry = cell.entry ? { ...cell.entry, text, ...(normalized.categoryId !== undefined ? { categoryId: normalized.categoryId } : {}) }
+            : text.trim() || normalized.categoryId !== undefined
+              ? { text, categoryId: normalized.categoryId ?? 'unaccounted', blockId: this.newToken('sheet') } : null;
+          if (normalized.categoryId !== undefined) cell.format = normalizeCellFormat({ ...cell.format, noFill: undefined });
         }
-        if (cell.display && (normalized.event || normalized.text !== undefined)) cell.display = { ...cell.display, text: cell.entry?.text ?? '',
+        if (cell.display && (normalized.event || normalized.text !== undefined || normalized.categoryId !== undefined)) cell.display = { ...cell.display, text: cell.entry?.text ?? '',
           categoryId: cell.entry?.categoryId ?? 'unaccounted', keepColor: Boolean(cell.entry && !cell.entry.text.trim()) };
       }
       const patches = [...changes].map(([day, change]) => ({ day,
@@ -578,7 +588,7 @@ class SpreadsheetEditor {
         await this.perform({ day: requested.startDateKey, before: Promise.resolve([]), after: [], patches,
           guards: patches.map((patch) => ({ day: patch.day, cells: patch.before })),
           blockGuardsBefore: beforeGuards, blockGuardsAfter: afterGuards,
-          textChanged: true, formatChanged: Boolean(normalized.event),
+          textChanged: true, formatChanged: Boolean(normalized.event || normalized.categoryId !== undefined),
           canApply: () => this.spanFillPreview?.token === preview.token });
       }
       this.spanFillPreview = null;

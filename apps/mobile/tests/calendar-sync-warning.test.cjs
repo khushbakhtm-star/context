@@ -23,6 +23,7 @@ function header(props = {}) {
 }
 const syncButton = (h) => h.nodes().find((node) => node.type === 'Pressable' &&
   /^(?:Calendar sync needs attention|Sync attached calendars|Synchronizing calendars)/.test(node.props.accessibilityLabel ?? ''));
+const syncIcon = (h) => h.nodes(syncButton(h)).find((node) => node.type === 'CalendarHeaderIcon');
 
 function inlineWarning(overrides = {}) {
   const file = path.join(mobile, 'src/screens/TodayScreen.tsx');
@@ -40,13 +41,13 @@ test('active inline-link retry stays progress while a settled retry need shows t
   const pending = inlineWarning({ inlineLinkRunning: true });
   assert.equal(pending, null);
   const active = header({ syncing: true, syncError: pending, syncDetails: () => 'Synchronizing calendar activities.' });
-  assert.equal(active.nodes(syncButton(active)).some((node) => node.props.children === '!'), false);
+  assert.equal(syncIcon(active).props.issue, false); assert.equal(syncIcon(active).props.active, true);
   syncButton(active).props.onPressIn(); syncButton(active).props.onLongPress();
   assert.match(active.alerts[0][1], /Synchronizing calendar activities/);
   const retry = inlineWarning();
   assert.match(retry, /saved on this phone.*needs a retry/);
   const settled = header({ syncing: false, syncError: retry });
-  assert.equal(settled.nodes(syncButton(settled)).some((node) => node.props.children === '!'), true);
+  assert.equal(syncIcon(settled).props.issue, true); assert.equal(syncIcon(settled).props.active, false);
 });
 
 test('actual read or projection failures remain visible while other inline-link work is running', () => {
@@ -55,7 +56,8 @@ test('actual read or projection failures remain visible while other inline-link 
     const error = inlineWarning({ inlineLinkRunning: true, [warning]: message });
     assert.equal(error, message);
     const active = header({ syncing: true, syncError: error });
-    assert.equal(active.nodes(syncButton(active)).some((node) => node.props.children === '!'), true);
+    assert.equal(syncIcon(active).props.issue, true); assert.equal(syncIcon(active).props.active, false);
+    assert.equal(syncButton(active).props.accessibilityState.busy, true);
   }
   const file = path.join(mobile, 'App.tsx');
   const text = fs.readFileSync(file, 'utf8');
@@ -68,18 +70,17 @@ test('actual read or projection failures remain visible while other inline-link 
   assert.match(context.accountSyncFailure({ running: true, outcome: 'running', conflicts: 1 }), /Review calendar conflicts/);
 });
 
-test('the production Sync control shows one quiet exclamation badge and one tap performs a retry', () => {
+test('the production Sync control requests the internal issue mark without an outer badge and one tap retries', () => {
   const props = { syncError: 'Phone-calendar events could not refresh.' }; const h = header(props);
   const button = syncButton(h); assert.ok(button);
   assert.equal(button.props.accessibilityLabel, 'Calendar sync needs attention. Tap to retry');
   assert.equal(button.props.accessibilityHint, 'Touch and hold for sync details');
   const badge = h.nodes(button).filter((node) => node.type === 'Text' && node.props.children === '!');
-  assert.equal(badge.length, 1); assert.equal(badge[0].props.accessible, false);
-  assert.equal(badge[0].props.importantForAccessibility, 'no');
+  assert.equal(badge.length, 0); assert.equal(syncIcon(h).props.issue, true); assert.equal(syncIcon(h).props.active, false);
   h.press(button); assert.equal(h.calls.sync, 1); assert.deepEqual(h.alerts, []);
   props.syncError = null; h.render();
   assert.equal(syncButton(h).props.accessibilityLabel, 'Sync attached calendars');
-  assert.equal(h.nodes(syncButton(h)).some((node) => node.props.children === '!'), false);
+  assert.equal(syncIcon(h).props.issue, false); assert.equal(syncIcon(h).props.active, false);
 });
 
 test('physical and accessible long presses show details without also synchronizing', () => {

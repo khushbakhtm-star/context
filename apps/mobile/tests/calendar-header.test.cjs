@@ -35,8 +35,8 @@ function headerHarness(props = {}, options = {}) {
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => value === b[index]);
   const listeners = new Set(); const state = { currentState: 'active', addEventListener: (_name, callback) => { listeners.add(callback); return { remove: () => listeners.delete(callback) }; } };
   const dimensions = { width: 360, height: 500 };
-  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, sync: 0, modes: [], errors: [], copies: [] };
-  const history = { canUndo: true, canRedo: true, busy: false };
+  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
+  const history = { canUndo: true, canRedo: true, busy: false, ...options.history };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   const module = { exports: {} };
   const context = { module, exports: module.exports, Date: ClockDate, Intl, Math,
@@ -51,7 +51,7 @@ function headerHarness(props = {}, options = {}) {
     createCalendarBinderPress: binderModule.exports.createCalendarBinderPress,
     spreadsheetEditor: { snapshot: () => history, subscribe: () => () => {} }, flushInlineMinutes: options.flush ?? (async () => {}),
     inlineMinuteDrafts: { snapshot: () => options.drafts ?? [] },
-    undoSpreadsheetEdit: async () => {}, redoSpreadsheetEdit: async () => {},
+    undoSpreadsheetEdit: async () => { calls.undo++; }, redoSpreadsheetEdit: async () => { calls.redo++; },
     Keyboard: { dismiss() {} }, Alert: { alert: (...args) => calls.errors.push(args) }, AppState: state, Platform: { OS: options.os ?? 'android' },
     Clipboard: { setStringAsync: async (value) => { calls.copies.push(value); } },
     StyleSheet: { create: (value) => value, absoluteFill: {}, hairlineWidth: 0.5 },
@@ -79,7 +79,7 @@ function headerHarness(props = {}, options = {}) {
   render();
   const hold = (button) => { button.props.onPressIn?.({ nativeEvent: { touches: [{}] } }); advance(450);
     button.props.onLongPress(); button.props.onPress(); };
-  return { calls, advance, render, nodes, press, hold, binder: () => nodes().find((node) => /^.* view\. Go to now/.test(node.props.accessibilityLabel ?? '')),
+  return { calls, history, advance, render, nodes, press, hold, binder: () => nodes().find((node) => /^.* view\. Go to now/.test(node.props.accessibilityLabel ?? '')),
     async settle() { for (let i = 0; i < 25; i++) await Promise.resolve(); render(); },
     changeHeight: (height) => { dimensions.height = height; render(); },
     background: () => { state.currentState = 'background'; for (const listener of listeners) listener('background'); },
@@ -162,11 +162,11 @@ test('iOS opens Pick / Range only after the view sheet dismisses and cancels a s
   stale.background(); old.props.onDismiss(); assert.equal(stale.calls.picker, 0);
 });
 
-test('actual hamburger menu orders Dashboard, Print, Search, Settings and dispatches after dismissal', () => {
+test('actual hamburger menu orders Dashboard, Print, Redo, Settings and dispatches after dismissal', () => {
   const h = headerHarness(); h.nodes().find((node) => node.props.accessibilityLabel === 'Open menu').props.onPress(); h.render();
   const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible);
-  const options = h.nodes(menu).filter((node) => node.type === 'Pressable' && /^(?:Open Dashboard|Print displayed dates|Open Search|Open Settings)$/.test(node.props.accessibilityLabel ?? ''));
-  assert.deepEqual(options.map((node) => node.props.accessibilityLabel), ['Open Dashboard', 'Print displayed dates', 'Open Search', 'Open Settings']);
+  const options = h.nodes(menu).filter((node) => node.type === 'Pressable' && /^(?:Open Dashboard|Print displayed dates|Redo Context edit|Open Settings)$/.test(node.props.accessibilityLabel ?? ''));
+  assert.deepEqual(options.map((node) => node.props.accessibilityLabel), ['Open Dashboard', 'Print displayed dates', 'Redo Context edit', 'Open Settings']);
   h.changeHeight(800);
   assert.ok(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), 'keyboard dismissal must not close the newly requested menu');
   options[0].props.onPress(); assert.equal(h.calls.dashboard, 0); h.advance(0); assert.equal(h.calls.dashboard, 1);
@@ -174,6 +174,43 @@ test('actual hamburger menu orders Dashboard, Print, Search, Settings and dispat
   for (const scroll of h.nodes().filter((node) => node.type === 'ScrollView')) {
     assert.equal(scroll.props.keyboardShouldPersistTaps, 'always');
     assert.equal(scroll.props.keyboardDismissMode, 'none');
+  }
+});
+
+test('Search occupies the old Redo toolbar position and Undo retains its original action', async () => {
+  const h = headerHarness(); const toolbar = h.nodes().find((node) => node.type === 'ScrollView');
+  const buttons = h.nodes(toolbar).filter((node) => node.type === 'Pressable');
+  assert.deepEqual(buttons.map((node) => node.props.accessibilityLabel), ['Open menu', 'Previous calendar view', 'Day view. Go to now',
+    'Next calendar view', 'Undo Context edit', 'Open Search', 'Sync attached calendars']);
+  assert.equal(buttons[5].props.children.props.name, 'search');
+  h.press(buttons[5]); assert.equal(h.calls.search, 1); assert.equal(h.calls.redo, 0);
+  h.press(buttons[4]); await h.settle(); assert.equal(h.calls.undo, 1);
+  const busy = headerHarness({ viewChanging: true });
+  const search = busy.nodes().find((node) => node.props.accessibilityLabel === 'Open Search');
+  assert.equal(search.props.disabled, true); assert.equal(search.props.accessibilityState.disabled, true);
+  busy.press(search); assert.equal(busy.calls.search, 0, 'a stale native activation cannot navigate while a mutation is busy');
+});
+
+test('menu Redo waits for dismissal and draft acknowledgement and rejects disabled or newly invalid history', async () => {
+  const open = (h) => { h.nodes().find((node) => node.props.accessibilityLabel === 'Open menu').props.onPress(); h.render();
+    const modal = h.nodes().find((node) => node.type === 'Modal' && node.props.visible);
+    return { modal, redo: h.nodes(modal).find((node) => node.props.accessibilityLabel === 'Redo Context edit') }; };
+  for (const os of ['android', 'ios']) {
+    const h = headerHarness({}, { os }); const { modal, redo } = open(h);
+    assert.equal(redo.props.disabled, false); assert.equal(redo.props.accessibilityState.disabled, false);
+    redo.props.onPress(); redo.props.onPress(); assert.equal(h.calls.redo, 0);
+    if (os === 'ios') { h.advance(0); assert.equal(h.calls.redo, 0); modal.props.onDismiss(); } else h.advance(0);
+    await h.settle(); assert.equal(h.calls.redo, 1); assert.equal(h.calls.search, 0);
+  }
+  const disabled = headerHarness({}, { history: { canRedo: false } }); const unavailable = open(disabled).redo;
+  assert.equal(unavailable.props.disabled, true); assert.equal(unavailable.props.accessibilityState.disabled, true);
+  unavailable.props.onPress(); disabled.advance(0); await disabled.settle(); assert.equal(disabled.calls.redo, 0);
+  for (const invalidation of ['canRedo', 'busy', 'background']) {
+    let release; const gate = new Promise((resolve) => release = resolve);
+    const h = headerHarness({}, { flush: () => gate }); const { redo } = open(h);
+    redo.props.onPress(); h.advance(0); await Promise.resolve();
+    if (invalidation === 'background') h.background(); else h.history[invalidation] = invalidation === 'busy';
+    release(); await h.settle(); assert.equal(h.calls.redo, 0, invalidation + ' must be checked again before the native history command');
   }
 });
 
