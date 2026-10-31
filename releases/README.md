@@ -1,9 +1,25 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.31/code32** in both channels, verified at **2026-10-29 at 17:43:31 UTC**. Watch **0.1.15/code100016** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability: **0.1.32/code33** in both channels, verified at **2026-10-31 at 03:27:20 UTC**. Watch **0.1.15/code100016** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
 
+## Published 0.1.32 phone updates
 
+Both phone editions, code33, and all twelve checked public assets were available by **2026-10-31 at 03:27:20 UTC**, release **429690621**. [Wear-enabled APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.32/context-0.1.32-wear-phone-preview.apk) (asset 694231651) and [FOSS APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.32/context-0.1.32-foss-preview.apk) (asset 694235358) update the existing installation. The separate Watch 0.1.15/code100016 remains the current matching watch release.
 
+Context 0.1.32 removes the corresponding calendar event when its entire activity border is deliberately ungrouped. Google Calendar event creation, edits and deletion reconcile with Context using genuine provider change times and durable user-edit intent. The latest verifiable change controls conflicts; a missing event retires its existing link without inventing a deletion timestamp. Partial Ungroup retains or splits surviving activity borders, while detached minute notes remain protected from stale imports. User-edit intent travels with the private encrypted ledger between phones and the browser.
+
+Your local notes, event borders, titles and source-calendar conflict guards remain intact. Choose **Update** over the existing phone installation. The Wear-enabled phone includes native Google sign-in and the optional watch bridge; the FOSS phone omits those native dependencies. The separate Watch 0.1.15 release remains independent.
+
+Source: [ce89e973a1c4fedc92f914c6ddefaf385a71b708](https://github.com/khushbakhtm-star/context/commit/ce89e973a1c4fedc92f914c6ddefaf385a71b708). TypeScript and 1078 mobile tests passed, including 644 focused UI/range-editor/overnight/calendar/crypto/storage/watch checks within that run. Static packaged checks cover 94 required UI labels and 24 obsolete labels. These are automated checks, not physical-phone or live-calendar verification.
+
+- Wear-enabled phone: 79,244,458 bytes; SHA-256 `86c2efd0daf17a8d8e0c328a8b246fd34b9979e86117eff1b6f338ac87eadfca`.
+- FOSS phone: 78,532,511 bytes; SHA-256 `b5276d85e14b7cc8f0e143a7e7b93e91aadc54c5bc8a48a65d74c13f038d7ecd`.
+
+Both are code33, signed with the existing publisher certificate; official signatures, protected source-built content and 16 KiB alignment passed. [Independent F-Droid verification](https://github.com/khushbakhtm-star/context/actions/runs/41163199088) reported zero source errors/warnings and 108 removed inputs, 5 source patches and 44 reviewed Wear removals. The attached permanent evidence ZIP preserves 23 checked entries. This publisher preview does not establish official F-Droid catalog acceptance or Apple/Google store availability.
+
+The [phone build](https://github.com/khushbakhtm-star/context/actions/runs/41163163839) used controller `cb0c1c2abaddf06cb7214564f67466df58ea86a8`; FOSS used `cb0c1c2abaddf06cb7214564f67466df58ea86a8`. The [source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/41164444774) passed at the exact application source.
+
+The [permanent FOSS evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.32/context-0.1.32-foss-build-evidence.zip) is **7,754,226 bytes**, SHA-256 `13b8928d4272a611695cb9d1e6d19476fff82025646a2c1e4fdf7b569de37349`. Public/local file sizes and digests match. No physical phone/watch, live account or store/catalog result is implied.
 
 ## Published 0.1.15 Watch update
 
