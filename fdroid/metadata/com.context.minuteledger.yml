@@ -1,4 +1,4 @@
-# Context 0.1.32/code33 source candidate; new independent verification is pending.
+# Context 0.1.33/code34 source candidate; new independent verification is pending.
 # Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
@@ -31,10 +31,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.32
-    versionCode: 33
+  - versionName: 0.1.33
+    versionCode: 34
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: ce89e973a1c4fedc92f914c6ddefaf385a71b708
+    commit: 1764d34595da6e5c749c7fb66661440020877709
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -82,5 +82,5 @@ MaintainerNotes: |-
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.32
-CurrentVersionCode: 33
+CurrentVersion: 0.1.33
+CurrentVersionCode: 34
