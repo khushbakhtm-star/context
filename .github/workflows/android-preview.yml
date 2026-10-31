@@ -6,7 +6,7 @@ on:
       source_commit:
         description: Exact reviewed Context 0.1.33 source commit
         required: true
-        default: 1764d34595da6e5c749c7fb66661440020877709
+        default: 33bdefb4a12cd3467b5955afc3c6dc8778d2f7ea
         type: string
 
 permissions:
@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CONTEXT_SOURCE_COMMIT: 1764d34595da6e5c749c7fb66661440020877709
+  CONTEXT_SOURCE_COMMIT: 33bdefb4a12cd3467b5955afc3c6dc8778d2f7ea
   EXPO_PUBLIC_CONTEXT_DISTRIBUTION: store
   EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL: standalone-wear
   EAS_BUILD_PROFILE: wear-phone-preview
