@@ -914,12 +914,18 @@ test('unchanged account color preserves a local selection and simultaneous color
 for (const authority of ['context', 'calendar']) test(`simultaneous activity colors use the latest ${authority} edit timestamp`, async (t) => {
   const { device, remote, original } = await linkedColoredActivity(t);
   await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1137 }, 'google_palette_2952a3');
-  const projection = (await device.engine.listProjections())[0];
+  const projection = (await device.engine.listProjections()).find((item) => item.eventId === original.id && item.state !== 'deleted');
+  assert.ok(projection, 'the fixture must compare the exact live linked event, not a retired projection');
   const before = plain(await device.db.getDayEntries(day));
   const local = await device.db.getActivityLocalUpdatedAt(projection.blockId);
+  assert.ok(Number.isSafeInteger(local) && local > 0, 'the fixture requires a genuine local edit clock');
   remote.edit('personal', original.id, { displayColor: '#123456',
     updatedAt: new Date(local + (authority === 'context' ? -1000 : 1000)).toISOString() });
   await device.engine.reconcileLinkedAccountColors([day]);
+  // The foreground snapshot deliberately yields to an automatic core pass.
+  // Drain its linking work and join that pass before asserting the final winner.
+  await device.inline.retryInlineMinuteLinks({ synchronize: false });
+  await device.engine.synchronizeAccounts();
   const after = plain(await device.db.getDayEntries(day));
   if (authority === 'context') assert.deepEqual(after, before);
   else {
