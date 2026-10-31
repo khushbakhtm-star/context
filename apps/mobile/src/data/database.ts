@@ -420,7 +420,8 @@ export async function saveMinuteRange(input: {
         cellFormatKey(row.date_key, row.minute_index));
       return Boolean(cellEventLabel(formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null), row.block_id));
     };
-    const matchingRows = await named(existingStart)
+    const startNamed = await named(existingStart);
+    const matchingRows = startNamed
       ? [existingStart!]
       : (await Promise.all(candidates.map(async (row) => await named(row) ? null : row)))
         .filter((row): row is MinuteRow => row !== null);
@@ -432,6 +433,16 @@ export async function saveMinuteRange(input: {
           .filter((candidate) => candidate !== blockId),
       ),
     ];
+    const activityEdits = new Set<string>();
+    const touchedCoordinates = new Set<string>();
+    for (const coordinate of coordinates) {
+      const old = existingByCoordinate.get(`${coordinate.date}:${coordinate.minuteIndex}`);
+      const changed = !old || old.text !== text || old.category_id !== input.categoryId || old.block_id !== blockId;
+      if (!changed) continue;
+      touchedCoordinates.add(`${coordinate.date}:${coordinate.minuteIndex}`);
+      if (old && await named(old)) activityEdits.add(old.block_id);
+      if (isActivityGroupId(blockId) || startNamed) activityEdits.add(blockId);
+    }
 
     for (const mergedBlockId of blocksToMerge) {
       const mergedDates = await txn.getAllAsync<{ date_key: string }>(
@@ -448,6 +459,10 @@ export async function saveMinuteRange(input: {
     }
 
     for (const coordinate of coordinates) {
+      const old = existingByCoordinate.get(`${coordinate.date}:${coordinate.minuteIndex}`);
+      // A repeated autosave is not a newer user change. Keep its original
+      // timestamp/revision instead of turning an import acknowledgement into an edit.
+      if (old && old.text === text && old.category_id === input.categoryId && old.block_id === blockId) continue;
       await txn.runAsync(
         `INSERT INTO minute_entries
           (id, date_key, minute_index, text, category_id, block_id, source, created_at, updated_at)
@@ -481,6 +496,8 @@ export async function saveMinuteRange(input: {
     if (input.queueInlineLink) {
       await queueInlineMinuteLink(txn, input.dateKey, startMinute, [...affectedDates]);
     }
+    await writeActivityEditsInside(txn, activityEdits);
+    if (touchedCoordinates.size) await pruneActivityDetachedMembersInside(txn, touchedCoordinates, activityEdits);
   });
 
   return [...affectedDates];
@@ -491,6 +508,9 @@ export async function deleteMinuteEntry(value: string, minuteIndex: number,
   const db = await database();
   const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async (txn) => {
+    const previous = await txn.getFirstAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ? AND minute_index = ?`, value, minuteIndex);
+    const activityEdits = new Set<string>();
+    if (previous) await collectActivityEditInside(txn, previous, activityEdits);
     await txn.runAsync(
       `DELETE FROM minute_entries WHERE date_key = ? AND minute_index = ?`,
       value,
@@ -504,6 +524,8 @@ export async function deleteMinuteEntry(value: string, minuteIndex: number,
       value,
       now,
     );
+    await writeActivityEditsInside(txn, activityEdits);
+    if (previous) await pruneActivityDetachedMembersInside(txn, new Set([`${value}:${minuteIndex}`]), activityEdits);
     if (options.queueInlineLink) await queueInlineMinuteLink(txn, value, minuteIndex, [value]);
   });
 }
@@ -1069,6 +1091,179 @@ async function putSyncDocumentInside(txn: Pick<SQLite.SQLiteDatabase, 'runAsync'
     key, value === null ? null : JSON.stringify(value));
 }
 
+const ACTIVITY_EDIT_PREFIX = `${CELL_FORMAT_PREFIX}activityEdit:`;
+export type ActivityDetachedMember = { dateKey: string; minuteIndex: number; blockId: string };
+export type ActivityEditIntent = { kind: 'activityEdit'; blockId: string; updatedAt: string; deleted: boolean; revision: string;
+  detachedMembers?: ActivityDetachedMember[]; derivedMembers?: ActivityDetachedMember[] };
+function activityEditFromRow(row: DocumentRow | null | undefined, blockId: string): ActivityEditIntent | null {
+  if (!row?.value_json) return null;
+  const value = JSON.parse(row.value_json) as Record<string, unknown>;
+  if (value.kind !== 'activityEdit' || value.blockId !== blockId || typeof value.updatedAt !== 'string' ||
+      !Number.isFinite(Date.parse(value.updatedAt)) || typeof value.deleted !== 'boolean') return null;
+  const readMembers = (field: 'detachedMembers' | 'derivedMembers') => {
+    if (!Array.isArray(value[field]) || value[field].length > 1440) return undefined;
+    const members = value[field] as ActivityDetachedMember[];
+    try {
+      for (const member of members) {
+        validateMinuteCellRange({ dateKey: member.dateKey, startMinute: member.minuteIndex, endMinute: member.minuteIndex });
+        if (!isCalendarEventId(member.blockId)) throw new Error('Invalid detached member.');
+      }
+      if (new Set(members.map((member) => `${member.dateKey}:${member.minuteIndex}`)).size === members.length) return members;
+    } catch { /* Malformed claims never grant permission to replace another note. */ }
+    return undefined;
+  };
+  const detachedMembers = readMembers('detachedMembers');
+  const derived = readMembers('derivedMembers');
+  const derivedMembers = (detachedMembers?.length ?? 0) + (derived?.length ?? 0) <= 1440 ? derived : undefined;
+  return { kind: 'activityEdit', blockId, updatedAt: value.updatedAt, deleted: value.deleted, revision: row.revision,
+    ...(detachedMembers?.length ? { detachedMembers } : {}), ...(derivedMembers?.length ? { derivedMembers } : {}) };
+}
+async function activityEditInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync'>, blockId: string) {
+  if (!isCalendarEventId(blockId)) return null;
+  return activityEditFromRow(await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
+    `${ACTIVITY_EDIT_PREFIX}${blockId}`), blockId);
+}
+
+/** User intent survives the loss of all activity members and cloud acknowledgement.
+ * The reserved minuteFormat namespace remains opaque to older clients/categories. */
+export async function getActivityEditIntent(blockId: string): Promise<ActivityEditIntent | null> {
+  return activityEditInside(await database(), blockId);
+}
+
+/** Milliseconds, or null when no genuine Context user change can be established.
+ * Provider imports use source:'imported'; their import-now values are never authority.
+ * Legacy browser/peer user payloads retain source:'manual' in the ledger document. */
+export async function getActivityLocalUpdatedAt(blockId: string,
+  coordinates: readonly Pick<MinuteEntry, 'dateKey' | 'minuteIndex'>[] = []): Promise<number | null> {
+  const db = await database();
+  const intent = await activityEditInside(db, blockId);
+  let latest = intent ? Date.parse(intent.updatedAt) : null;
+  const documents = await db.getAllAsync<DocumentRow>(`SELECT d.* FROM minute_entries m JOIN ledger_documents d
+    ON d.key = 'minute:' || m.date_key || ':' || m.minute_index WHERE m.block_id = ?`, blockId);
+  for (const member of intent?.detachedMembers ?? []) {
+    const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, `minute:${member.dateKey}:${member.minuteIndex}`);
+    const value = document?.value_json ? JSON.parse(document.value_json) as Record<string, unknown> : null;
+    if (document && value?.blockId === member.blockId) documents.push(document);
+  }
+  for (const sibling of new Set(intent?.derivedMembers?.map((member) => member.blockId) ?? [])) {
+    const siblingIntent = await activityEditInside(db, sibling);
+    if (siblingIntent) latest = latest === null ? Date.parse(siblingIntent.updatedAt) : Math.max(latest, Date.parse(siblingIntent.updatedAt));
+    for (const member of intent!.derivedMembers!.filter((point) => point.blockId === sibling)) {
+      const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, `minute:${member.dateKey}:${member.minuteIndex}`);
+      const value = document?.value_json ? JSON.parse(document.value_json) as Record<string, unknown> : null;
+      if (document && value?.blockId === sibling) documents.push(document);
+    }
+  }
+  if (!intent) {
+    if (coordinates.length > 10_000) throw new Error('Choose fewer minute coordinates when checking this activity.');
+    for (const point of coordinates) {
+      validateMinuteCellRange({ dateKey: point.dateKey, startMinute: point.minuteIndex, endMinute: point.minuteIndex });
+      const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`,
+        `minute:${point.dateKey}:${point.minuteIndex}`);
+      if (document) documents.push(document);
+    }
+  }
+  for (const document of documents) {
+    const value = document.value_json ? JSON.parse(document.value_json) as Record<string, unknown> : null;
+    const timestamp = value?.source === 'manual' && typeof value.updatedAt === 'string' ? Date.parse(value.updatedAt) : NaN;
+    if (Number.isFinite(timestamp)) latest = latest === null ? timestamp : Math.max(latest, timestamp);
+  }
+  return latest;
+}
+
+async function collectActivityEditInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync'>,
+  row: Pick<MinuteRow, 'date_key' | 'minute_index' | 'block_id'>, ids: Set<string>) {
+  if (isActivityGroupId(row.block_id)) { ids.add(row.block_id); return; }
+  const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, cellFormatKey(row.date_key, row.minute_index));
+  if (cellEventLabel(formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null), row.block_id)) ids.add(row.block_id);
+}
+async function validDetachedMembersInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync'>, members: ActivityDetachedMember[]) {
+  const result: ActivityDetachedMember[] = [];
+  for (const member of members) {
+    const row = await db.getFirstAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ? AND minute_index = ?`, member.dateKey, member.minuteIndex);
+    if (row?.block_id !== member.blockId) continue;
+    const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, cellFormatKey(member.dateKey, member.minuteIndex));
+    if (!cellEventLabel(formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null), row.block_id)) result.push(member);
+  }
+  return result;
+}
+async function validDerivedMembersInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync' | 'getAllAsync'>, members: ActivityDetachedMember[]) {
+  const result: ActivityDetachedMember[] = [];
+  for (const blockId of new Set(members.map((member) => member.blockId))) {
+    const claims = members.filter((member) => member.blockId === blockId);
+    const rows = await db.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE block_id = ?`, blockId);
+    if (rows.length !== claims.length || rows.some((row) => !claims.some((member) => member.dateKey === row.date_key && member.minuteIndex === row.minute_index))) continue;
+    let valid = true;
+    for (const row of rows) {
+      const document = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, cellFormatKey(row.date_key, row.minute_index));
+      if (!cellEventLabel(formatFromDocument(document?.value_json ? JSON.parse(document.value_json) : null), blockId)) { valid = false; break; }
+    }
+    if (valid) result.push(...claims);
+  }
+  return result;
+}
+async function writeActivityEditsInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync' | 'getAllAsync' | 'runAsync'>,
+  ids: Set<string>, detached = new Map<string, ActivityDetachedMember[]>(), regrouped = new Set<string>(),
+  derived = new Map<string, ActivityDetachedMember[]>()) {
+  for (const blockId of ids) {
+    if (!isCalendarEventId(blockId)) continue;
+    const previous = await activityEditInside(db, blockId);
+    const updatedAt = new Date(Math.max(Date.now(), previous ? Date.parse(previous.updatedAt) + 1 : 0)).toISOString();
+    const members = await db.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE block_id = ?`, blockId);
+    let bordered = false;
+    for (const member of members) {
+      const format = await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, cellFormatKey(member.date_key, member.minute_index));
+      if (cellEventLabel(formatFromDocument(format?.value_json ? JSON.parse(format.value_json) : null), blockId)) { bordered = true; break; }
+    }
+    const claims = new Map<string, ActivityDetachedMember>();
+    for (const member of [...(!regrouped.has(blockId) ? previous?.detachedMembers ?? [] : []), ...(detached.get(blockId) ?? [])]) {
+      claims.set(`${member.dateKey}:${member.minuteIndex}`, member);
+    }
+    if (claims.size > 1440) throw new Error('This activity has too many detached minutes. Review it before editing.');
+    const detachedMembers = await validDetachedMembersInside(db, [...claims.values()]);
+    const siblings = new Map<string, ActivityDetachedMember>();
+    for (const member of [...(!regrouped.has(blockId) ? previous?.derivedMembers ?? [] : []), ...(derived.get(blockId) ?? [])]) {
+      siblings.set(`${member.dateKey}:${member.minuteIndex}`, member);
+    }
+    if (siblings.size + claims.size > 1440) throw new Error('This activity has too many split minutes. Review it before editing.');
+    const derivedMembers = await validDerivedMembersInside(db, [...siblings.values()]);
+    await putSyncDocumentInside(db, `${ACTIVITY_EDIT_PREFIX}${blockId}`, { kind: 'activityEdit', blockId, updatedAt, deleted: !bordered,
+      ...(detachedMembers.length ? { detachedMembers } : {}), ...(derivedMembers.length ? { derivedMembers } : {}) });
+  }
+}
+
+async function pruneActivityDetachedMembersInside(db: Pick<SQLite.SQLiteDatabase, 'getFirstAsync' | 'getAllAsync' | 'runAsync'>,
+  touched: Set<string>, updated: Set<string>) {
+  const documents = await db.getAllAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE substr(key, 1, ?) = ?`,
+    ACTIVITY_EDIT_PREFIX.length, ACTIVITY_EDIT_PREFIX);
+  for (const document of documents) {
+    const blockId = document.key.slice(ACTIVITY_EDIT_PREFIX.length);
+    const intent = activityEditFromRow(document, blockId);
+    if (!intent || updated.has(blockId) || ![...(intent.detachedMembers ?? []), ...(intent.derivedMembers ?? [])]
+      .some((member) => touched.has(`${member.dateKey}:${member.minuteIndex}`))) continue;
+    const detachedMembers = await validDetachedMembersInside(db, intent.detachedMembers ?? []);
+    const derivedMembers = await validDerivedMembersInside(db, intent.derivedMembers ?? []);
+    let userMutation = false;
+    for (const member of (intent.detachedMembers ?? []).filter((point) => touched.has(`${point.dateKey}:${point.minuteIndex}`))) {
+      const row = await db.getFirstAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ? AND minute_index = ?`, member.dateKey, member.minuteIndex);
+      const format = row && await db.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, cellFormatKey(member.dateKey, member.minuteIndex));
+      if (!row || !cellEventLabel(formatFromDocument(format?.value_json ? JSON.parse(format.value_json) : null), row.block_id)) {
+        userMutation = true; break;
+      }
+    }
+    if (userMutation) {
+      // Editing a still-detached note is a real user change even when its source
+      // flag is retained as imported. Provider imports never call this user path.
+      await writeActivityEditsInside(db, new Set([blockId])); continue;
+    }
+    if (canonicalValue(detachedMembers) === canonicalValue(intent.detachedMembers ?? []) &&
+        canonicalValue(derivedMembers) === canonicalValue(intent.derivedMembers ?? [])) continue;
+    // Pruning a stale claim is bookkeeping, not a new edit to the former event.
+    await putSyncDocumentInside(db, document.key, { kind: 'activityEdit', blockId, updatedAt: intent.updatedAt, deleted: intent.deleted,
+      ...(detachedMembers.length ? { detachedMembers } : {}), ...(derivedMembers.length ? { derivedMembers } : {}) });
+  }
+}
+
 export type SpreadsheetCellContent = Pick<MinuteEntry, 'text' | 'categoryId'> &
   Partial<Pick<MinuteEntry, 'id' | 'blockId' | 'createdAt' | 'updatedAt' | 'source'>>;
 export type SpreadsheetCellState = { minuteIndex: number; entry: SpreadsheetCellContent | null; format: CellFormat;
@@ -1187,6 +1382,28 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
     };
     for (const { day, expected } of changes) for (const before of expected) await check(day, before, false);
     for (const { day, cells } of guards) for (const before of cells) await check(day, before, true);
+    const activityEdits = new Set<string>();
+    const detachedMembers = new Map<string, ActivityDetachedMember[]>();
+    const derivedMembers = new Map<string, ActivityDetachedMember[]>();
+    // Only a fresh bordered sibling made from unchanged original members can be
+    // reclaimed later. Existing or independently created activities never qualify.
+    const freshIds = new Map<string, boolean>();
+    for (const { day, target, expected } of changes) {
+      const beforeByMinute = new Map(expected.map((cell) => [cell.minuteIndex, cell]));
+      for (const cell of target) {
+        const before = beforeByMinute.get(cell.minuteIndex)!;
+        const oldId = before.entry?.blockId; const nextId = cell.entry?.blockId;
+        const oldLabel = cellEventLabel(before.format, oldId); const nextLabel = cellEventLabel(cell.format, nextId);
+        if (!oldId || !nextId || oldId === nextId || !isActivityGroupId(nextId) || !oldLabel || !nextLabel ||
+            oldLabel.title !== nextLabel.title || semantic(before.entry) !== semantic(cell.entry)) continue;
+        if (!freshIds.has(nextId)) freshIds.set(nextId, !(await txn.getFirstAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE block_id = ? LIMIT 1`, nextId)));
+        if (!freshIds.get(nextId)) continue;
+        const claims = derivedMembers.get(oldId) ?? [];
+        claims.push({ dateKey: day, minuteIndex: cell.minuteIndex, blockId: nextId }); derivedMembers.set(oldId, claims);
+      }
+    }
+    const regrouped = new Set<string>();
+    const touchedCoordinates = new Set<string>();
     const requireCurrent = () => {
       if (options.canApply && !options.canApply()) throw new Error('Paste was canceled. Select Paste again.');
     };
@@ -1197,6 +1414,26 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
       for (const cell of target) {
         requireCurrent();
         const row = byMinute.get(cell.minuteIndex);
+        const before = expectedByMinute.get(cell.minuteIndex)!;
+        const meaningful = options.textChanged && (semantic(row ? mapMinuteRow(row) : null) !== semantic(cell.entry) ||
+            Boolean(row && cell.entry?.blockId && row.block_id !== cell.entry.blockId)) || options.formatChanged &&
+          canonicalValue(normalizeCellFormat(before.format)) !== canonicalValue(normalizeCellFormat(cell.format));
+        if (meaningful) for (const state of [before, cell]) {
+          const blockId = state.entry?.blockId;
+          if (blockId && (isActivityGroupId(blockId) || cellEventLabel(state.format, blockId))) activityEdits.add(blockId);
+        }
+        if (meaningful) {
+          touchedCoordinates.add(`${day}:${cell.minuteIndex}`);
+          const previousId = before.entry?.blockId;
+          const nextId = cell.entry?.blockId;
+          const previousLabel = cellEventLabel(before.format, previousId);
+          const nextLabel = cellEventLabel(cell.format, nextId);
+          if (previousId && previousLabel && cell.entry && nextId && previousId !== nextId && !nextLabel) {
+            const detached = detachedMembers.get(previousId) ?? [];
+            detached.push({ dateKey: day, minuteIndex: cell.minuteIndex, blockId: nextId }); detachedMembers.set(previousId, detached);
+          }
+          if (nextId && nextLabel && (!previousLabel || previousId !== nextId || previousLabel.title !== nextLabel.title)) regrouped.add(nextId);
+        }
         if (options.textChanged && (semantic(row ? mapMinuteRow(row) : null) !== semantic(cell.entry) ||
             Boolean(row && cell.entry?.blockId && row.block_id !== cell.entry.blockId))) {
           textChanged = true; dayTextChanged = true;
@@ -1228,6 +1465,11 @@ export async function applySpreadsheetTransaction(changes: SpreadsheetDayChange[
       if (dayTextChanged) await txn.runAsync(`INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at)
         VALUES (?, 0, NULL, ?) ON CONFLICT(date_key) DO UPDATE SET attempts = 0, last_error = NULL, updated_at = excluded.updated_at`, day, now);
     }
+    // A changed border alone is not Ungroup provenance: the same user command
+    // must have detached a real minute from this original activity.
+    for (const blockId of derivedMembers.keys()) if (!detachedMembers.has(blockId)) derivedMembers.delete(blockId);
+    await writeActivityEditsInside(txn, activityEdits, detachedMembers, regrouped, derivedMembers);
+    if (touchedCoordinates.size) await pruneActivityDetachedMembersInside(txn, touchedCoordinates, activityEdits);
     if (options.localReceipt) await txn.runAsync(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       options.localReceipt.key, JSON.stringify(options.localReceipt.value), now);
@@ -1414,6 +1656,17 @@ export async function replaceProjectedMinutes(input: {
   beforeCommitGuard?: () => void;
   expectedBinding?: SyncBinding;
   nextBinding?: Omit<SyncBinding, 'updatedAt'>;
+  /** Exact absence import may retire only the binding reviewed by the caller. */
+  retireBinding?: true;
+  expectedActivityEditIntent?: ActivityEditIntent | null;
+  /** Fence a source conflict choice or ownership update during network reads. */
+  expectedProjectionDocument?: SyncDocument;
+  /** Exact fresh sibling intents reviewed before reclaiming a partial Ungroup. */
+  expectedDerivedActivityEditIntents?: ActivityEditIntent[];
+  /** Durable provider cleanup is committed with the exact reclaimed cells. */
+  derivedProjectionRetirements?: { expected: SyncDocument; value: Record<string, unknown> }[];
+  authoritativeRemoteUpdatedAt?: number;
+  rejectAccountOwned?: true;
   localReceipt?: { key: string; value: unknown };
   activityTitle?: string;
   entries: { dateKey: string; minuteIndex: number; text: string; categoryId: string }[];
@@ -1440,12 +1693,46 @@ export async function replaceProjectedMinutes(input: {
       input.nextBinding.calendarId !== input.expectedBinding.calendarId || input.nextBinding.eventId !== input.expectedBinding.eventId)) {
     throw new Error('Calendar import cannot change the linked source identity.');
   }
+  if (input.retireBinding && (!input.expectedBinding || input.nextBinding || input.entries.length)) {
+    throw new Error('Review the exact deleted source binding before retiring it.');
+  }
+  if (input.authoritativeRemoteUpdatedAt !== undefined && (!Number.isFinite(input.authoritativeRemoteUpdatedAt) || input.authoritativeRemoteUpdatedAt < 0)) {
+    throw new Error('Use a genuine calendar modification timestamp before restoring detached notes.');
+  }
+  const derivedIntents = new Map<string, ActivityEditIntent>();
+  for (const intent of input.expectedDerivedActivityEditIntents ?? []) {
+    if (!isCalendarEventId(intent.blockId) || intent.blockId === input.blockId || derivedIntents.has(intent.blockId) || derivedIntents.size >= 1440) {
+      throw new Error('Review each exact split activity before restoring the calendar event.');
+    }
+    derivedIntents.set(intent.blockId, intent);
+  }
+  if ((input.derivedProjectionRetirements?.length ?? 0) > 1440) throw new Error('Review fewer split calendar links before restoring this event.');
   if (input.localReceipt && (!/^calendar\.native-write\.v1\.[A-Za-z0-9%._-]{1,500}$/.test(input.localReceipt.key) ||
       JSON.stringify(input.localReceipt.value).length > 65_536)) throw new Error('Invalid local calendar receipt.');
   const db = await database();
   const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async (txn) => {
     input.beforeCommitGuard?.();
+    if (input.rejectAccountOwned) {
+      const projections = await txn.getAllAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key LIKE 'projection:%' AND value_json IS NOT NULL`);
+      if (projections.some((document) => {
+        const value = JSON.parse(document.value_json!) as Record<string, unknown>;
+        return value.blockId === input.blockId && value.state !== 'deleted';
+      })) throw new Error('This activity now belongs to an account calendar. Refresh its original connection before importing.');
+    }
+    const activityIntent = await activityEditInside(txn, input.blockId);
+    if (input.expectedActivityEditIntent !== undefined &&
+        canonicalValue(activityIntent) !== canonicalValue(input.expectedActivityEditIntent)) {
+      throw new Error('The local activity intent changed during calendar import. Review both versions.');
+    }
+    if (input.expectedProjectionDocument) {
+      const expected = input.expectedProjectionDocument;
+      const current = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, expected.key);
+      if (!expected.value || expected.value.blockId !== input.blockId || expected.key !== `projection:${expected.value.id}` ||
+          !current || canonicalValue(mapDocument(current)) !== canonicalValue(expected)) {
+        throw new Error('The original calendar link changed during import. Refresh before trying again.');
+      }
+    }
     const current = await txn.getAllAsync<MinuteRow>(`SELECT * FROM minute_entries
       WHERE block_id = ? AND (date_key > ? OR (date_key = ? AND minute_index >= ?))
       AND (date_key < ? OR (date_key = ? AND minute_index <= ?)) ORDER BY date_key, minute_index`,
@@ -1484,11 +1771,84 @@ export async function replaceProjectedMinutes(input: {
       }
     }
     const targets = new Set(input.entries.map((entry) => coordinate(entry.dateKey, entry.minuteIndex)));
+    const detachedRestores: MinuteRow[] = [];
+    const mayRestore = Boolean(input.expectedActivityEditIntent && activityIntent &&
+      input.authoritativeRemoteUpdatedAt !== undefined && input.authoritativeRemoteUpdatedAt >= Date.parse(activityIntent.updatedAt));
+    const restoredSiblings = new Map<string, ActivityEditIntent>();
+    for (const blockId of new Set(activityIntent?.derivedMembers?.filter((member) => targets.has(coordinate(member.dateKey, member.minuteIndex)))
+      .map((member) => member.blockId) ?? [])) {
+      const claims = activityIntent!.derivedMembers!.filter((member) => member.blockId === blockId);
+      const expected = derivedIntents.get(blockId); const currentIntent = await activityEditInside(txn, blockId);
+      const valid = await validDerivedMembersInside(txn, claims);
+      if (!mayRestore || !expected || !currentIntent || canonicalValue(expected) !== canonicalValue(currentIntent) || currentIntent.deleted ||
+          Date.parse(currentIntent.updatedAt) > input.authoritativeRemoteUpdatedAt! || valid.length !== claims.length ||
+          claims.some((member) => !targets.has(coordinate(member.dateKey, member.minuteIndex)) || !formats.get(coordinate(member.dateKey, member.minuteIndex))?.version)) {
+        throw new Error('A split activity changed or was not completely reviewed. Refresh both activities before restoring the calendar event.');
+      }
+      restoredSiblings.set(blockId, currentIntent);
+    }
+    const retirementKeys = new Set<string>();
+    for (const { expected, value } of input.derivedProjectionRetirements ?? []) {
+      const previous = expected.value;
+      const authority = value.retirementAuthority as Record<string, unknown> | undefined;
+      const currentDocument = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, expected.key);
+      if (!previous || !restoredSiblings.has(String(previous.blockId)) || expected.key !== `projection:${previous.id}` ||
+          retirementKeys.has(expected.key) || !currentDocument || canonicalValue(mapDocument(currentDocument)) !== canonicalValue(expected) ||
+          previous.state === 'deleted' || previous.sourceEventId || value.state !== 'pending' ||
+          ['id', 'accountId', 'calendarId', 'eventId', 'blockId', 'sourceEventId', 'sourceSeriesId'].some((field) => canonicalValue(value[field]) !== canonicalValue(previous[field])) ||
+          !authority || ['projectionId', 'eventId', 'version', 'updatedAt'].some((field) => typeof authority[field] !== 'string' || !(authority[field] as string).length || (authority[field] as string).length > 2000) ||
+          Date.parse(String(authority.updatedAt)) !== input.authoritativeRemoteUpdatedAt) {
+        throw new Error('A split calendar link changed. Refresh its original connection before restoring this event.');
+      }
+      const originalDocument = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, `projection:${authority.projectionId}`);
+      const original = originalDocument?.value_json ? JSON.parse(originalDocument.value_json) as Record<string, unknown> : null;
+      if (!original || original.blockId !== input.blockId || original.accountId !== previous.accountId || original.calendarId !== previous.calendarId ||
+          (original.eventId ?? original.sourceEventId) !== authority.eventId) {
+        throw new Error('The original source calendar ownership changed. Review its connection before restoring this event.');
+      }
+      retirementKeys.add(expected.key);
+    }
+    if (restoredSiblings.size) {
+      const projections = await txn.getAllAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key LIKE 'projection:%' AND value_json IS NOT NULL`);
+      if (projections.some((document) => {
+        const projection = JSON.parse(document.value_json!) as Record<string, unknown>;
+        return restoredSiblings.has(String(projection.blockId)) && projection.state !== 'deleted' && !retirementKeys.has(document.key);
+      })) throw new Error('Review every split calendar link before restoring the original event.');
+      for (const blockId of restoredSiblings.keys()) {
+        if (await txn.getFirstAsync(`SELECT * FROM sync_bindings WHERE block_id = ? LIMIT 1`, blockId)) {
+          throw new Error('A split activity is linked to a device calendar. Review that source before restoring the original event.');
+        }
+      }
+    }
     for (const entry of input.entries) {
-      const existing = await txn.getFirstAsync<{ block_id: string }>(`SELECT block_id FROM minute_entries WHERE date_key = ? AND minute_index = ?`, entry.dateKey, entry.minuteIndex);
-      if (existing && existing.block_id !== input.blockId) throw new Error('This calendar edit overlaps another recorded activity. Resolve it in Context.');
+      const existing = await txn.getFirstAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ? AND minute_index = ?`, entry.dateKey, entry.minuteIndex);
+      if (existing && existing.block_id !== input.blockId) {
+        const point = coordinate(entry.dateKey, entry.minuteIndex);
+        const claimed = activityIntent?.detachedMembers?.some((member) => coordinate(member.dateKey, member.minuteIndex) === point && member.blockId === existing.block_id);
+        const derived = restoredSiblings.has(existing.block_id) && activityIntent?.derivedMembers?.some((member) =>
+          coordinate(member.dateKey, member.minuteIndex) === point && member.blockId === existing.block_id);
+        const snapshot = formats.get(point);
+        const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, `minute:${entry.dateKey}:${entry.minuteIndex}`);
+        const payload = document?.value_json ? JSON.parse(document.value_json) as Record<string, unknown> : null;
+        // Imported payload clocks describe transport time. The exact detach/split
+        // user intent provides authority for those rows; only manual payloads
+        // supply additional user evidence after a private-ledger merge.
+        const memberUpdatedAt = payload?.source === 'manual' && typeof payload.updatedAt === 'string' ? Date.parse(payload.updatedAt) : -Infinity;
+        const format = snapshot?.format;
+        if (!mayRestore || (!claimed && !derived) || !snapshot?.version || Number.isNaN(memberUpdatedAt) ||
+            memberUpdatedAt > input.authoritativeRemoteUpdatedAt! || (!derived && cellEventLabel(format ?? {}, existing.block_id))) {
+          throw new Error('This calendar edit overlaps another or newer recorded activity. Resolve it in Context.');
+        }
+        detachedRestores.push(existing);
+      }
     }
     input.beforeCommitGuard?.();
+    for (const row of detachedRestores) {
+      const removed = await txn.runAsync(`DELETE FROM minute_entries WHERE id = ? AND date_key = ? AND minute_index = ?
+        AND block_id = ? AND text = ? AND category_id = ? AND source = ? AND created_at = ? AND updated_at = ?`,
+        row.id, row.date_key, row.minute_index, row.block_id, row.text, row.category_id, row.source, row.created_at, row.updated_at);
+      if (removed.changes !== 1) throw new Error('A detached minute changed during calendar restoration. Review both versions.');
+    }
     for (const row of current) {
       const key = cellFormatKey(row.date_key, row.minute_index);
       const document = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
@@ -1530,6 +1890,16 @@ export async function replaceProjectedMinutes(input: {
         next.segmentKey, next.blockId, next.dateKey, next.calendarId, next.eventId, now);
       if (input.expectedBinding!.segmentKey !== next.segmentKey) await txn.runAsync(`DELETE FROM sync_bindings WHERE segment_key = ?`, input.expectedBinding!.segmentKey);
     }
+    if (input.retireBinding) await txn.runAsync(`DELETE FROM sync_bindings WHERE segment_key = ?`, input.expectedBinding!.segmentKey);
+    if (mayRestore && input.entries.length && activityIntent) {
+      await putSyncDocumentInside(txn, `${ACTIVITY_EDIT_PREFIX}${input.blockId}`, { kind: 'activityEdit', blockId: input.blockId,
+        updatedAt: activityIntent.updatedAt, deleted: false });
+    }
+    for (const [blockId, intent] of restoredSiblings) {
+      await putSyncDocumentInside(txn, `${ACTIVITY_EDIT_PREFIX}${blockId}`, { kind: 'activityEdit', blockId,
+        updatedAt: intent.updatedAt, deleted: true });
+    }
+    for (const { expected, value } of input.derivedProjectionRetirements ?? []) await putSyncDocumentInside(txn, expected.key, value);
     if (input.localReceipt) await txn.runAsync(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       input.localReceipt.key, JSON.stringify(input.localReceipt.value), now);

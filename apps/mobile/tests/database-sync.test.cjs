@@ -381,7 +381,7 @@ test('calendar import overlap rolls back both old-block deletion and journal tom
   await assert.rejects(api.replaceProjectedMinutes({ blockId: block, previousDate: day,
     previousStart: 200, previousEnd: 201,
     entries: [{ dateKey: day, minuteIndex: 205, text: 'Moved prayer', categoryId: 'prayer' }],
-  }), /overlaps another recorded activity/);
+  }), /overlaps another or newer recorded activity/);
   assert.equal((await api.getMinuteEntry(day, 200)).text, 'Prayer');
   assert.equal((await api.getMinuteEntry(day, 201)).text, 'Prayer');
   assert.equal((await api.getMinuteEntry(day, 205)).text, 'Another activity');

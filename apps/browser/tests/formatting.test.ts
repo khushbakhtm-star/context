@@ -39,7 +39,7 @@ test('browser styles preserve exact note, source/group identity and opaque metad
   assert.deepEqual((value.format as Record<string, unknown>).futureFormat, { value: 'keep' });
   assert.deepEqual(document(result.state, 'projection:owned'), metadata[2]);
   assert.deepEqual(document(result.state, 'category:basil'), metadata[0]);
-  assert.deepEqual(Object.keys(result.state.pending), [cellFormatKey(day, 600)]);
+  assert.deepEqual(Object.keys(result.state.pending), [cellFormatKey(day, 600), 'category:minuteFormat:activityEdit:activity_read']);
   const undone = undoEdit(result.state, result.undo, 3000);
   assert.deepEqual(document(undone, cellFormatKey(day, 600))!.value, metadata[1]!.value);
   assert.deepEqual(state, before);
@@ -188,7 +188,13 @@ test('complete browser Ungroup retains content, fill and styling with independen
     assert.equal(formatFromDocument(document(result.state, cellFormatKey(day, index))?.value).activityGroup, undefined);
   }
   const undone = undoEdit(result.state, result.undo, 4000);
-  for (const doc of grouped.state.documents) assert.deepEqual(document(undone, doc.key)!.value, doc.value);
+  for (const doc of grouped.state.documents) {
+    if (doc.key.startsWith('category:minuteFormat:activityEdit:')) continue;
+    assert.deepEqual(document(undone, doc.key)!.value, doc.value);
+  }
+  const restoredIntent = document(undone, `category:minuteFormat:activityEdit:${getMinute(grouped.state, day, 600)!.value!.blockId}`)!;
+  assert.equal(restoredIntent.value!.updatedAt, new Date(4000).toISOString());
+  assert.equal(restoredIntent.value!.deleted, false);
   const changed = mergeLedger(result.state, [{ ...first, revision: revision(5000), value: { ...first.value!, text: 'Phone edit' } }]);
   assert.throws(() => undoEdit(changed, result.undo, 6000), /newer work/);
   validateBatch({ version: 1, id: 'group_and_ungroup', documents: result.state.documents });

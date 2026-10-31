@@ -25,24 +25,24 @@ function fixture() {
   vm.runInNewContext(code, context);
   return { context, input, node, store, api: module.exports, buttons, get writes() { return writes; }, block(value: Promise<void>) { gate = value; } };
 }
-test('actual browser cell callback opens a bottom draft without focus or writes; first check saves and second closes formatting', async () => {
+test('actual browser cell callback opens a bottom draft without focus or writes; check saves and closes without a formatting strip', async () => {
   const h = fixture(); h.api.beginEdit('2026-10-27', 800);
   assert.equal(h.context.entryBarMode, 'entry'); assert.equal(h.input.focusCount, 0); assert.equal(h.writes, 0);
   h.input.value = 'Raw text\n  keep spaces  '; h.api.mirrorDraft(); assert.equal(h.node.textContent, h.input.value); assert.equal(h.writes, 0);
-  await h.api.saveEditor(true); assert.equal(h.context.entryBarMode, 'format'); assert.equal(h.context.editor, null);
+  await h.api.saveEditor(); assert.equal(h.context.entryBarMode, null); assert.equal(h.context.editor, null); assert.equal(h.input.blurCount, 1);
   assert.equal(getMinute(h.store.state, '2026-10-27', 800)!.value!.text, h.input.value);
   h.buttons['finish-format'].onclick(); assert.equal(h.context.entryBarMode, null);
   assert.equal(h.context.selected.minute, 800, 'the cell remains selected after both checks');
 });
-test('first check on an untouched blank cell opens formatting without creating recorded time', async () => {
-  const h = fixture(); h.api.beginEdit('2026-10-27', 800); await h.api.saveEditor(true);
-  assert.equal(h.context.entryBarMode, 'format'); assert.equal(h.writes, 0); assert.deepEqual(h.store.state.documents, []);
+test('check on an untouched blank cell closes the editor without creating recorded time or formatting', async () => {
+  const h = fixture(); h.api.beginEdit('2026-10-27', 800); await h.api.saveEditor();
+  assert.equal(h.context.entryBarMode, null); assert.equal(h.writes, 0); assert.deepEqual(h.store.state.documents, []);
 });
 
 test('a planned event title never becomes the draft or a saved minute note', async () => {
   const h = fixture(); h.context.planForMinute = () => ({ title: 'Calendar activity' });
   h.api.beginEdit('2026-10-27', 800); assert.equal(h.input.value, '');
-  await h.api.saveEditor(true); assert.equal(h.writes, 0); assert.equal(getMinute(h.store.state, '2026-10-27', 800), undefined);
+  await h.api.saveEditor(); assert.equal(h.writes, 0); assert.equal(getMinute(h.store.state, '2026-10-27', 800), undefined);
 });
 
 test('raw typing updates only the note span and preserves the independently rendered activity title', () => {
@@ -52,35 +52,29 @@ test('raw typing updates only the note span and preserves the independently rend
   assert.equal(note.textContent, 'A separate minute thought'); assert.equal(h.node.textContent, '▣ Calendar activity');
   assert.equal(h.writes, 0);
 });
-test('actual bottom check waits for typing appended during a pending write and preserves all text before format mode', async () => {
+test('actual bottom check waits for typing appended during a pending write and preserves all text before closing', async () => {
   const h = fixture(); let release!: () => void; h.block(new Promise<void>((resolve) => { release = resolve; }));
-  h.api.beginEdit('2026-10-27', 800); h.input.value = 'First'; const check = h.api.saveEditor(true);
+  h.api.beginEdit('2026-10-27', 800); h.input.value = 'First'; const check = h.api.saveEditor();
   await Promise.resolve(); assert.equal(h.context.entryBarMode, 'entry'); h.input.value = 'First and latest tail'; release(); await check;
-  assert.equal(h.writes, 2); assert.equal(h.context.entryBarMode, 'format'); assert.equal(getMinute(h.store.state, '2026-10-27', 800)!.value!.text, 'First and latest tail');
+  assert.equal(h.writes, 2); assert.equal(h.context.entryBarMode, null); assert.equal(getMinute(h.store.state, '2026-10-27', 800)!.value!.text, 'First and latest tail');
 });
 
-test('the bottom event-border control opens the existing Group flow once and respects format, busy and locked-state guards', () => {
+test('formatting opens only as a compact cell popup and its check closes it without changing selection', () => {
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('app.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const nodes = parsed.statements.filter((node: any) => node.name?.text === 'updateBars' ||
-    ts.isExpressionStatement(node) && /element\('format-border'\)\.onclick/.test(node.getText(parsed)));
-  const buttons: Record<string, any> = {}; let opens = 0; let reports = 0;
-  const context: any = { store: {}, entryBarMode: null, commandBusy: true,
-    document: { body: { classList: { toggle() {} } } }, composerViewport: { refresh() {} },
-    element: (id: string) => buttons[id] ??= {}, openGroup() { opens++; }, report() { reports++; } };
+  const nodes = parsed.statements.filter((node: any) => node.name?.text === 'showCellFormatting' ||
+    ts.isExpressionStatement(node) && /element\('finish-format'\)\.onclick/.test(node.getText(parsed)));
+  const popup = { hidden: true, style: {} as any, offsetWidth: 250, offsetHeight: 50 }; const buttons: Record<string, any> = { 'cell-format-menu': popup };
+  const selection = { day: '2026-10-30', minute: 100 };
+  const context: any = { store: null, entryBarMode: null, commandBusy: false, selected: selection, innerWidth: 1000, innerHeight: 700,
+    element: (id: string) => buttons[id] ??= {}, updateBars() { popup.hidden = context.entryBarMode !== 'format'; } };
   const code = ts.transpileModule(nodes.map((node) => node.getText(parsed)).join('\n'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInNewContext(code, context);
-  context.updateBars(); assert.equal(buttons['format-border'].disabled, true);
-  context.commandBusy = false; context.updateBars(); assert.equal(buttons['format-border'].disabled, false);
-  buttons['format-border'].onclick(); assert.equal(opens, 0, 'an entry or closed bar cannot invoke Group');
-  context.entryBarMode = 'format'; buttons['format-border'].onclick(); assert.equal(opens, 1);
-  context.commandBusy = true; buttons['format-border'].onclick(); assert.equal(opens, 1);
-  context.commandBusy = false; context.store = null; buttons['format-border'].onclick(); assert.equal(opens, 1);
-  context.store = {}; context.openGroup = () => { throw new Error('Selection changed'); };
-  buttons['format-border'].onclick(); assert.equal(reports, 1, 'a stale selection reports an error without a write');
+  context.showCellFormatting(990, 690); assert.equal(popup.hidden, true, 'a locked ledger cannot open formatting');
+  context.store = {}; context.showCellFormatting(990, 690); assert.equal(popup.hidden, false); assert.equal(popup.style.left, '744px'); assert.equal(popup.style.top, '644px');
+  buttons['finish-format'].onclick(); assert.equal(popup.hidden, true); assert.equal(context.selected, selection);
   const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  assert.match(html, /id="format-border" aria-label="Apply event border"/);
-  assert.ok(html.indexOf('id="format-fill"') < html.indexOf('id="format-border"'));
-  assert.ok(html.indexOf('id="format-border"') < html.indexOf('id="finish-format"'));
+  assert.match(html, /id="cell-format-menu" role="menu"/); assert.doesNotMatch(html, /id="format-bar"|id="format-border"/);
+  assert.match(source, /formatButton\.setAttribute\('aria-label', 'Format cells'\)/);
 });

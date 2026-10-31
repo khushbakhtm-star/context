@@ -15,7 +15,7 @@ const turn = () => new Promise((resolve) => setImmediate(resolve));
 function harness(existingSettings) {
   const account = { id: 'google:person', provider: 'google', subject: 'person', label: 'Personal',
     consent: { calendarRead: true, calendarWrite: false, ledgerStorage: false, importCalendarEdits: false } };
-  const accounts = [account]; const settings = existingSettings ?? new Map();
+  const accounts = [account]; const settings = existingSettings ?? new Map(); const documents = new Map();
   if (!settings.has('account.calendars.google:person')) settings.set('account.calendars.google:person',
     { selectedCalendarIds: ['personal'], writeCalendarId: null });
   const event = { id: 'coffee', calendarId: 'personal', title: 'Make coffee', description: '12:39 Make coffee\n12:40 Talk to Mum',
@@ -53,6 +53,7 @@ function harness(existingSettings) {
         if (resolved === path.join(root, 'data/database.ts')) return {
           getSetting: async (key, fallback) => settings.has(key) ? plain(settings.get(key)) : fallback,
           setSetting: async (key, value) => { writes.push(key); settings.set(key, plain(value)); },
+          getSyncDocuments: async (prefix) => [...documents.values()].filter((document) => document.key.startsWith(prefix)).map(plain),
           putSyncDocument: () => { throw Error('Display cache must not write private-ledger documents.'); },
         };
         if (resolved === path.join(root, 'sync/accounts.ts')) return { getAccounts: async () => plain(accounts) };
@@ -70,11 +71,24 @@ function harness(existingSettings) {
     return module.exports;
   }
   const engine = load(path.join(root, 'sync/engine.ts'));
-  return { engine, settings, account, accounts, event, calls, writes, network, timers,
+  return { engine, settings, account, accounts, event, calls, writes, network, timers, documents,
     advance: (milliseconds) => { clockNow += milliseconds; },
     preferences: (ids) => settings.set('account.calendars.google:person', { selectedCalendarIds: ids, writeCalendarId: null }),
     expire: () => { const current = [...timers.values()]; timers.clear(); current.forEach((callback) => callback()); } };
 }
+
+test('a retired exact event is hidden from cached plans until Google reports a genuinely newer restoration', async () => {
+  const h = harness(); h.event.updatedAt = '2026-10-30T10:00:00.000Z';
+  await h.engine.loadAccountPlansResult(day);
+  h.documents.set('projection:retired', { key: 'projection:retired', revision: '0000000000000001:00000000:fixture000', value: {
+    id: 'retired', accountId: h.account.id, calendarId: h.event.calendarId, eventId: h.event.id, blockId: 'activity_old',
+    dateKey: day, startMinute: 759, endMinute: 766, state: 'deleted', retiredAt: '2026-10-30T11:00:00.000Z', baseEvent: h.event,
+  } });
+  assert.equal((await h.engine.loadCachedAccountPlans(day)).length, 0);
+  assert.equal((await h.engine.loadAccountPlansResult(day)).plans.length, 0);
+  h.event.updatedAt = '2026-10-30T12:00:00.000Z';
+  assert.equal((await h.engine.loadAccountPlansResult(day)).plans.length, 1);
+});
 
 test('successful reads persist a local Date-hydrated cache with full notes/colors and opaque provider fields', async () => {
   const h = harness(); const result = await h.engine.loadAccountPlansResult(day);

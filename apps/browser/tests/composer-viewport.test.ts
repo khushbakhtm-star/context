@@ -79,7 +79,7 @@ test('app and styles wire measured viewport geometry into the persistent bottom 
   const app = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
   const css = fs.readFileSync(new URL('../app.css', import.meta.url), 'utf8');
   const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  assert.match(app, /bindComposerViewport\(window, main, \[element\('entry-bar'\), element\('format-bar'\)\]\)/);
+  assert.match(app, /bindComposerViewport\(window, main, \[element\('entry-bar'\)\]\)/);
   assert.match(app, /function updateBars\(\)[\s\S]*?composerViewport\.refresh\(\)/);
   assert.match(css, /bottom:var\(--context-viewport-bottom,0px\)/);
   assert.match(css, /height:var\(--context-main-height/);

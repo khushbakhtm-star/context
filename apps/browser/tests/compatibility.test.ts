@@ -40,10 +40,14 @@ test('phone→browser→phone encryption preserves the exact authorized minute i
   const browser = mergeLedger(emptyLedger('browser_actor'), (await decryptBatch(phoneCiphertext, passphrase)).documents);
   const edited = editCells(browser, [{ day, minute: 600, text: 'Browser note\n  Keep exact spaces  ' }], 2000).state;
   const current = getMinute(edited, day, 600)!;
-  for (const field of ['id', 'categoryId', 'blockId', 'source', 'createdAt']) assert.equal(current.value![field], originals[0]!.value![field]);
+  for (const field of ['id', 'categoryId', 'blockId', 'createdAt']) assert.equal(current.value![field], originals[0]!.value![field]);
+  assert.equal(current.value!.source, 'manual', 'the browser user changed this note');
   for (const doc of metadata()) assert.deepEqual(edited.documents.find((item) => item.key === doc.key), doc);
-  assert.deepEqual(Object.keys(edited.pending), [`minute:${day}:600`]);
-  const browserCiphertext = await encryptBatch({ version: 1, id: 'browser_batch', documents: [current] }, passphrase);
+  const activityIntent = edited.documents.find((doc) => doc.key === 'category:minuteFormat:activityEdit:activity_prayer')!;
+  assert.deepEqual(Object.keys(edited.pending), [`minute:${day}:600`, activityIntent.key]);
+  assert.equal(activityIntent.value!.updatedAt, new Date(2000).toISOString());
+  assert.equal(activityIntent.value!.deleted, false);
+  const browserCiphertext = await encryptBatch({ version: 1, id: 'browser_batch', documents: [current, activityIntent] }, passphrase);
   assert.equal(browserCiphertext.includes('Browser note'), false);
   const returned = await decryptBatch(browserCiphertext, passphrase);
   assert.equal(returned.documents[0]!.value!.text, 'Browser note\n  Keep exact spaces  ');

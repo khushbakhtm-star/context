@@ -2,7 +2,7 @@ import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 
 import {
-  acknowledgeInlineMinuteLink, acknowledgeUploaded, deferInlineMinuteLink, getActivityTitleForEntries, getDayEntries, getDaySegments, getDocumentsForUpload,
+  acknowledgeInlineMinuteLink, acknowledgeUploaded, deferInlineMinuteLink, getActivityTitleForEntries, getActivityEditIntent, getActivityLocalUpdatedAt, getDayEntries, getDaySegments, getDocumentsForUpload,
   getEntriesForBlock, getPendingInlineMinuteLinks, getSetting, getSpreadsheetCells, getSyncBindingsForBlock, getSyncDocuments, hasSeenSyncFile,
   markSyncFileSeen, mergeSyncDocuments, promoteInlineMinuteLinkForAccountReview, putSyncDocument, remapActivityProjections, replaceProjectedMinutes, recolorExpectedMinuteEntries, setSetting,
   type PendingInlineMinuteLink,
@@ -26,9 +26,10 @@ import { createLedgerStorage } from './storage';
 import { createAccountSyncTrace, type AccountSyncTrace } from './diagnostics';
 import { zonedMinuteToInstant } from './time';
 import { canCreateAccountProjection } from '../utils/calendar-projection-authority';
+import { calendarMutationTime, latestCalendarChange } from '../utils/calendar-change-authority';
 import type {
   AccountSyncStatus, CalendarEventWrite, ConnectedAccount, Projection,
-  RemoteCalendarEvent, SyncBatch,
+  RemoteCalendarEvent, SyncBatch, SyncDocument,
 } from './types';
 
 const PASSPHRASE_KEY = 'context.ledger.passphrase.v1';
@@ -229,7 +230,38 @@ async function accountPlanScopeIsCurrent(scope: AccountPlanScope): Promise<boole
 async function readCachedAccountScope(scope: AccountPlanScope): Promise<PlannedEvent[] | null> {
   const saved = await getSetting<unknown>(accountPlanCacheKey(scope), null);
   if (!await accountPlanScopeIsCurrent(scope)) return null;
-  return decodeAccountPlanCache(saved, scope);
+  const plans = decodeAccountPlanCache(saved, scope);
+  return plans ? filterRetiredAccountPlans(plans) : null;
+}
+
+/** Exact retired identities suppress old cached/provider echoes. This is a
+ * display fence, not a fabricated edit time: a genuinely newer provider event
+ * can appear again (for example after restoring an event from Calendar trash). */
+async function filterRetiredAccountPlans(plans: PlannedEvent[]): Promise<PlannedEvent[]> {
+  if (!plans.length) return plans;
+  const projections = await listProjections();
+  const intents = new Map((await getSyncDocuments(`${CELL_FORMAT_PREFIX}activityEdit:`))
+    .flatMap((document) => document.value?.kind === 'activityEdit' && typeof document.value.blockId === 'string'
+      ? [[document.value.blockId, document.value] as const] : []));
+  return plans.filter((plan) => {
+    const reference = plan.accountEvent;
+    if (!reference) return true;
+    return !projections.some((projection) => {
+      if (projection.accountId !== reference.accountId || projection.calendarId !== plan.calendarId ||
+          projection.eventId !== reference.event.id) return false;
+      const intent = intents.get(projection.blockId);
+      if (projection.state !== 'deleted' && intent?.deleted !== true) return false;
+      if (projection.state !== 'deleted') {
+        const userTime = calendarMutationTime(intent?.updatedAt);
+        const acceptedRemoteTime = calendarMutationTime(projection.baseEvent?.updatedAt);
+        if (userTime !== null && acceptedRemoteTime !== null && acceptedRemoteTime >= userTime) return false;
+      }
+      const fence = projection.state === 'deleted' ? calendarMutationTime(projection.retiredAt) ??
+        calendarMutationTime(projection.baseEvent?.updatedAt) : calendarMutationTime(intent?.updatedAt);
+      const remote = calendarMutationTime(reference.event.updatedAt);
+      return fence === null || remote === null || remote <= fence;
+    });
+  });
 }
 
 /** Strictly local, permission-scoped display cache; no adapter/token/provider calls. */
@@ -283,7 +315,7 @@ function loadRemoteAccountScope(account: ConnectedAccount, scope: AccountPlanSco
     if (snapshot) await setSetting(accountPlanCacheKey(scope), snapshot);
     if (!await accountPlanScopeIsCurrent(scope)) return null;
     requireCurrentRead();
-    return plans;
+    return filterRetiredAccountPlans(plans);
   })();
   record.job = job;
   const finish = () => { if (accountPlanReads.get(key) === record) accountPlanReads.delete(key); };
@@ -368,7 +400,7 @@ function eventContentHash(event: RemoteCalendarEvent) {
   const { googleColorId: _color, googleEventLabelId: _label, microsoftCategories: _categories,
     displayColor: _display, ...content } = event;
   // Provider version/HTML and read-only display fields are not local minute content.
-  const { version: _version, bodyHtml: _html, ...meaningful } = content;
+  const { version: _version, bodyHtml: _html, createdAt: _created, updatedAt: _updated, ...meaningful } = content;
   return hashValue(meaningful);
 }
 const accountColorReceiptKey = (projection: Projection) => `calendar.color-receipt.account.${encodeURIComponent(projection.id)}`;
@@ -408,8 +440,14 @@ async function importAccountColorOnly(account: ConnectedAccount, projection: Pro
     !(baseColor && segment.entries.every((entry) => categoryById(entry.categoryId).color.toUpperCase() === baseColor));
   const sameColor = segment.entries.every((entry) => categoryById(entry.categoryId).color.toUpperCase() === color);
   if (localChanged && !sameColor) {
-    await saveProjection({ ...projection, state: 'conflict', conflict: 'The activity color changed in Context and the calendar. Choose the version to keep.' });
-    throw new Error('The activity color changed in Context and the calendar. Review both colors before synchronizing.');
+    const authority = latestCalendarChange({ localUpdatedAt: await getActivityLocalUpdatedAt(projection.blockId),
+      remoteUpdatedAt: event.updatedAt });
+    if (authority === 'context') return false;
+    if (authority === 'unknown') {
+      await saveProjection({ ...projection, state: 'conflict', conflictAuthority: 'unknown',
+        conflict: 'The activity color changed in both places without comparable edit timestamps. Choose the version to keep.' });
+      throw new Error('The activity color changed in both places without comparable edit timestamps. Review both colors before synchronizing.');
+    }
   }
   const category = await ensureSourceColorCategory({ color, name: event.title, provider: account.provider === 'google' ? 'google' : 'microsoft',
     accountId: account.id, calendarId: event.calendarId, preferredCategoryId: categoryForEvent(account.id, event)?.id });
@@ -425,7 +463,7 @@ async function importAccountColorOnly(account: ConnectedAccount, projection: Pro
     localColorHash: localActivityColorHash(nextEntries) } satisfies ColorReceipt }, guard);
   const localContentPending = !localProjectionUnchanged(projection, segment);
   const next = { ...projection, baseEvent: { ...event, displayColor: color },
-    state: localContentPending ? 'pending' as const : 'synced' as const, conflict: undefined,
+    state: localContentPending ? 'pending' as const : 'synced' as const, conflict: undefined, conflictAuthority: undefined,
     baseColorSelection: { categoryId: category.id, color: category.color.toUpperCase() } };
   next.baseLocalHash = localContentPending ? null : localWriteHash(buildWrite(next, { ...segment, categoryId: category.id, entries: nextEntries }));
   await saveProjection(next);
@@ -643,6 +681,11 @@ async function linkActuals(
         anchorDate: value, anchorMinute: segment.startMinute,
         pendingSourceScope: event ? sourceScope : undefined,
         pendingSourceOperationId: event && sourceScope === 'series' ? Crypto.randomUUID() : undefined };
+      const retired = projections.find((item) => item.id === projection.id && item.state === 'deleted');
+      if (retired) {
+        projection.id = hashValue({ restoredProjection: retired.id, previousEventId: retired.eventId,
+          localUpdatedAt: await getActivityLocalUpdatedAt(segment.blockId) }).slice(0, 40);
+      }
       const contiguous = await getProjectionSegment(projection);
       if (contiguous) {
         projection.dateKey = contiguous.entries[0]!.dateKey;
@@ -661,7 +704,7 @@ async function linkActuals(
   if (nativeLinksNeedingReview.size) throw new NativeAccountLinkReviewError([...nativeLinksNeedingReview]);
 }
 
-function providerWriteColors(projection: Projection, categoryId: string) {
+function providerWriteColors(projection: Projection, categoryId: string, comparison = false) {
   const provider = projection.accountId.startsWith('google:') ? 'google' : 'microsoft';
   const mapping = categoryProviderColor(categoryId, provider, projection.accountId, projection.calendarId);
   if (mapping.colorId || mapping.eventLabelId || mapping.categoryName) return {
@@ -678,7 +721,7 @@ function providerWriteColors(projection: Projection, categoryId: string) {
     Boolean(projection.baseEvent?.categoryId && projection.baseEvent.categoryId !== categoryId && !legacySourceColor);
   const explicitNewChoice = !projection.baseEvent && Boolean(category && (category.id.startsWith('google_palette_') ||
     category.id.startsWith('custom_') || category.provider));
-  if (provider === 'google' && (explicitChange || explicitNewChoice)) {
+  if (provider === 'google' && (explicitChange || explicitNewChoice) && !comparison) {
     throw new Error('This selected color has no verified Google event or label mapping. Choose a writable Google event color before synchronizing.');
   }
   // Recording a note does not choose a new provider color. Keep the exact known
@@ -697,7 +740,7 @@ function providerWriteColors(projection: Projection, categoryId: string) {
   return { googleColorId: exact?.providerColorId, googleEventLabelId: undefined, microsoftCategories: undefined };
 }
 
-function buildWrite(projection: Projection, segment: ActivitySegment): CalendarEventWrite {
+function buildWrite(projection: Projection, segment: ActivitySegment, comparison = false): CalendarEventWrite {
   const preserved = projection.baseEvent ? readCalendarDescription(projection.baseEvent, projection.id).preserved : '';
   const description = makeCompactCalendarDescription(preserved, segment.entries);
   const zone = projection.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -710,15 +753,16 @@ function buildWrite(projection: Projection, segment: ActivitySegment): CalendarE
       segment.entries.at(-1)!.minuteIndex + 1, zone),
     timeZone: zone,
     projectionId: projection.id, categoryId: segment.categoryId,
-    ...providerWriteColors(projection, segment.categoryId),
+    ...providerWriteColors(projection, segment.categoryId, comparison),
     sourceOperationId: projection.pendingSourceOperationId };
 }
 function eventHash(event: RemoteCalendarEvent) {
-  return hashValue({ title: event.title, description: event.description, start: event.start,
+  const instant = (value: string) => Number.isFinite(Date.parse(value)) ? Date.parse(value) : value;
+  return hashValue({ title: event.title, description: event.description, start: instant(event.start),
     descriptionLog: event.descriptionLog ?? null,
-    end: event.end, categoryId: event.categoryId ?? null, deleted: event.deleted,
+    end: instant(event.end), categoryId: event.categoryId ?? null, deleted: event.deleted,
     googleColorId: event.googleColorId, googleEventLabelId: event.googleEventLabelId,
-    microsoftCategories: event.microsoftCategories });
+    microsoftCategories: event.microsoftCategories ?? [] });
 }
 function localWriteHash(write: CalendarEventWrite) {
   const { sourceOperationId: _operation, ...content } = write;
@@ -727,7 +771,9 @@ function localWriteHash(write: CalendarEventWrite) {
 /** Writer normalization is not a local edit. Compare the acknowledged prior
  * title/color shape, and the version-one formatter where applicable. Real local
  * text/category/title/time changes still retain the normal conflict checks. */
-function localProjectionUnchanged(projection: Projection, segment: ActivitySegment, write = buildWrite(projection, segment)) {
+function localProjectionUnchanged(projection: Projection, segment: ActivitySegment, write = buildWrite(projection, segment, true)) {
+  if (projection.baseColorSelection && (projection.baseColorSelection.categoryId !== segment.categoryId ||
+      projection.baseColorSelection.color.toUpperCase() !== categoryById(segment.categoryId).color.toUpperCase())) return false;
   const mapping = categoryProviderColor(segment.categoryId,
     projection.accountId.startsWith('google:') ? 'google' : 'microsoft', projection.accountId, projection.calendarId);
   const previousWrite = { ...write,
@@ -807,6 +853,9 @@ async function reanchorMovedActivities(projections: Projection[], linkedBlocks: 
 }
 
 async function getProjectionSegment(projection: Projection) {
+  const editIntent = await getActivityEditIntent(projection.blockId);
+  const acceptedRemote = calendarMutationTime(projection.baseEvent?.updatedAt);
+  if (editIntent?.deleted && (acceptedRemote === null || acceptedRemote < Date.parse(editIntent.updatedAt))) return null;
   const namedActivity = isActivityGroupId(projection.blockId);
   const entries = namedActivity ? await getEntriesForBlock(projection.blockId) :
     await getEntriesForBlock(projection.blockId, { startDate: dateKey(addDays(projection.dateKey, -1)),
@@ -848,7 +897,15 @@ async function getProjectionSegment(projection: Projection) {
     activityTitle: await getActivityTitleForEntries(selected) } satisfies ActivitySegment;
 }
 
-async function importCalendarEvent(projection: Projection, event: RemoteCalendarEvent | null) {
+async function importCalendarEvent(projection: Projection, event: RemoteCalendarEvent | null,
+  expectedActivityEditIntent?: Awaited<ReturnType<typeof getActivityEditIntent>>) {
+  const expectedProjectionDocument = (await getSyncDocuments(`projection:${projection.id}`))
+    .find((document) => document.key === `projection:${projection.id}`);
+  if (!expectedProjectionDocument?.value || hashValue(expectedProjectionDocument.value) !== hashValue(projection)) {
+    throw new Error('The calendar activity link changed before importing its event. Retry with the current link.');
+  }
+  const expectedIntent = expectedActivityEditIntent === undefined
+    ? await getActivityEditIntent(projection.blockId) : expectedActivityEditIntent;
   const importAccount = (await getAccounts()).find((item) => item.id === projection.accountId);
   const expectedSegment = await getProjectionSegment(projection);
   const entries: { dateKey: string; minuteIndex: number; text: string; categoryId: string }[] = [];
@@ -927,6 +984,53 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
         createdAt: cell.entry?.createdAt ?? '', updatedAt: cell.entry?.updatedAt ?? '' });
     }
   }
+  const derivedIntents: NonNullable<Awaited<ReturnType<typeof getActivityEditIntent>>>[] = [];
+  const derivedProjectionRetirements: { expected: SyncDocument; value: Record<string, unknown> }[] = [];
+  const remoteTime = calendarMutationTime(event?.updatedAt);
+  if (event && !event.deleted && expectedIntent?.derivedMembers?.length) {
+    const targets = new Set(entries.map((entry) => `${entry.dateKey}:${entry.minuteIndex}`));
+    const derivedIds = new Set(expectedIntent.derivedMembers.filter((member) => targets.has(`${member.dateKey}:${member.minuteIndex}`))
+      .map((member) => member.blockId));
+    const documents = await getSyncDocuments('projection:');
+    for (const blockId of derivedIds) {
+      if (remoteTime === null) throw new Error('The edited calendar event has no modification time to reconcile its split activities.');
+      const intent = await getActivityEditIntent(blockId);
+      const localTime = await getActivityLocalUpdatedAt(blockId);
+      if (!intent || localTime === null || localTime > remoteTime) {
+        throw new Error('A split activity has newer Context edits. Its minute notes were kept.');
+      }
+      derivedIntents.push(intent);
+      for (const savedDocument of documents.filter((item) => item.value?.blockId === blockId && item.value.state !== 'deleted')) {
+        let document = savedDocument;
+        let sibling = document.value as unknown as Projection;
+        if (!projectionIsValid(document.value!) || sibling.accountId !== projection.accountId ||
+            sibling.calendarId !== projection.calendarId || sibling.sourceEventId || sibling.pendingSourceScope === 'series') {
+          throw new Error('A split activity has another source owner. Review its exact calendar link before merging it.');
+        }
+        if (!importAccount) throw new Error('Reconnect this account before reconciling its split activities.');
+        const adapter = createCalendarAdapter(importAccount);
+        if (!sibling.eventId && sibling.pendingCreateWrite && !adapter.findProjectedEvent) {
+          throw new Error('A split calendar create needs an exact identity lookup before retirement.');
+        }
+        const siblingEvent = sibling.eventId ? await adapter.getEvent(sibling.calendarId, sibling.eventId)
+          : adapter.findProjectedEvent ? await adapter.findProjectedEvent(sibling.calendarId, sibling.id) : null;
+        if (siblingEvent && !sibling.eventId) {
+          sibling = { ...sibling, eventId: siblingEvent.id,
+            ...(sibling.pendingCreateWrite ? { baseEvent: { ...siblingEvent, ...sibling.pendingCreateWrite,
+              deleted: false, updatedAt: undefined }, baseLocalHash: localWriteHash(sibling.pendingCreateWrite) } : {}) };
+          await saveProjection(sibling);
+          document = (await getSyncDocuments(`projection:${sibling.id}`)).find((item) => item.key === `projection:${sibling.id}`)!;
+          if (!document?.value || hashValue(document.value) !== hashValue(sibling)) throw new Error('The recovered split calendar link changed. Retry with its current identity.');
+        }
+        if (siblingEvent && !siblingEvent.deleted && (!sibling.baseEvent || eventHash(siblingEvent) !== eventHash(sibling.baseEvent))) {
+          const changedAt = calendarMutationTime(siblingEvent.updatedAt);
+          if (changedAt === null || changedAt >= remoteTime) throw new Error('A split calendar event has newer, equal-time or unorderable edits. Its event and minute notes were kept.');
+        }
+        derivedProjectionRetirements.push({ expected: document, value: sanitized({ ...sibling, state: 'pending', conflict: undefined,
+          retirementAuthority: { projectionId: projection.id, eventId: event.id, version: event.version, updatedAt: event.updatedAt! } }) });
+      }
+    }
+  }
   const latestAccount = (await getAccounts()).find((item) => item.id === projection.accountId &&
     item.subject === importAccount?.subject && item.provider === importAccount?.provider);
   if (!latestAccount?.consent.calendarRead || !latestAccount.consent.importCalendarEdits) {
@@ -938,7 +1042,10 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
     previousEndDate: projection.endDateKey,
     previousStart: projection.startMinute, previousEnd: projection.endMinute,
     expectedEntries: expectedSegment?.entries ?? [], expectedActivityTitle: expectedSegment?.activityTitle,
-    expectedFormats, beforeCommitGuard: guard, clearPreviousFormats: true,
+    expectedFormats, beforeCommitGuard: guard, clearPreviousFormats: true, expectedActivityEditIntent: expectedIntent,
+    authoritativeRemoteUpdatedAt: calendarMutationTime(event?.updatedAt) ?? undefined,
+    expectedDerivedActivityEditIntents: derivedIntents, derivedProjectionRetirements,
+    expectedProjectionDocument,
     activityTitle: event?.title, entries });
   const importedEntries: MinuteEntry[] = [];
   for (const [day, minutes] of coordinates) {
@@ -950,14 +1057,15 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
   }
   notifyCalendarColorImported(importedEntries, true);
   if (!event || event.deleted) {
-    await saveProjection({ ...projection, state: 'deleted', baseEvent: event, baseLocalHash: null });
+    await saveProjection({ ...projection, state: 'deleted', baseEvent: event, baseLocalHash: null,
+      retiredAt: new Date().toISOString(), conflict: undefined });
     return;
   }
   const first = entries[0]!;
   const last = entries.at(-1)!;
   const next = { ...projection, dateKey: first.dateKey, startMinute: first.minuteIndex,
     endDateKey: last.dateKey, endMinute: last.minuteIndex, title: event.title, baseEvent: event, state: 'synced' as const,
-    conflict: undefined, anchorStart: event.start, anchorDate: first.dateKey,
+        conflict: undefined, conflictAuthority: undefined, anchorStart: event.start, anchorDate: first.dateKey,
     anchorMinute: first.minuteIndex, baseColorSelection: { categoryId: entries[0]!.categoryId,
       color: categoryById(entries[0]!.categoryId).color.toUpperCase() } };
   const segment = await getProjectionSegment(next);
@@ -966,7 +1074,7 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
 }
 
 async function reconcileProjection(account: ConnectedAccount, projection: Projection, reads: CalendarSyncReads) {
-  if (projection.state === 'deleted' || projection.state === 'conflict') return;
+  if (projection.state === 'deleted') return;
   await reads.trace.measure('calendar-local', () => serializeColorReconciliation(async () => {
     coreProjectionEpochs.set(projection.id, (coreProjectionEpochs.get(projection.id) ?? 0) + 1);
     activeCoreProjections.add(projection.id);
@@ -984,18 +1092,60 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
   const adapter = createCalendarAdapter(account, reads.metadata);
   const timed = reads.trace.measure.bind(reads.trace);
   let segment = await timed('calendar-local', () => getProjectionSegment(projection));
-  let write = segment ? buildWrite(projection, segment) : null;
+  let write = segment ? buildWrite(projection, segment, true) : null;
   let localHash = write ? localWriteHash(write) : null;
-  const remote = projection.eventId ? await timed('calendar-event-read', () => adapter.getEvent(projection.calendarId, projection.eventId!)) : null;
+  let remote = projection.eventId ? await timed('calendar-event-read', () => adapter.getEvent(projection.calendarId, projection.eventId!)) : null;
+  if (!projection.eventId) {
+    if (projection.pendingCreateWrite && !adapter.findProjectedEvent) {
+      throw new Error('The prior calendar create needs an exact identity lookup before retrying or removing it.');
+    }
+    remote = adapter.findProjectedEvent
+      ? await timed('calendar-event-read', () => adapter.findProjectedEvent!(projection.calendarId, projection.id)) : null;
+    if (remote) {
+      if (remote.calendarId !== projection.calendarId || remote.projectionId !== projection.id) {
+        throw new Error('The recovered calendar event has another owner. Its content was kept.');
+      }
+      if (projection.pendingCreateWrite) {
+        // Compare against the attempted payload, not the later server ACK time.
+        // Actual subsequent Google edits remain visible as remoteChanged below.
+        const baseline = { ...remote, ...projection.pendingCreateWrite, deleted: false, updatedAt: undefined };
+        const acknowledged = eventHash(remote) === eventHash(baseline);
+        Object.assign(projection, { eventId: remote.id, baseEvent: baseline,
+          baseLocalHash: acknowledged || !segment ? localWriteHash(projection.pendingCreateWrite) : null,
+          state: acknowledged ? 'synced' : 'pending', conflict: undefined });
+        await saveProjection(projection);
+      } else {
+        const authority = latestCalendarChange({ localUpdatedAt: await getActivityLocalUpdatedAt(projection.blockId),
+          remoteUpdatedAt: remote.updatedAt, remoteDeleted: remote.deleted });
+        Object.assign(projection, { eventId: remote.id, baseEvent: remote });
+        await saveProjection(projection);
+        if (authority !== 'context') {
+          const current = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject);
+          if (authority === 'calendar' && current?.consent.calendarRead && current.consent.importCalendarEdits) {
+            await importCalendarEvent(projection, remote);
+          } else await saveProjection({ ...projection, state: 'conflict',
+            conflictAuthority: 'unknown',
+            conflict: 'The recovered event has no comparable prior create timestamp. Choose the version to keep.' });
+          return;
+        }
+      }
+    }
+  }
+  if (!remote && projection.eventId) {
+    const calendars = await timed('calendar-event-read', () => adapter.listCalendars());
+    if (!calendars.some((calendar) => calendar.id === projection.calendarId)) {
+      throw new Error('The linked calendar is no longer accessible. Reconnect it before checking whether its event was deleted.');
+    }
+  }
   let currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
   if (!currentAccount?.consent.calendarRead) return;
-  const resolvedColor = remote ? await timed('calendar-color', () => remoteActivityColor(currentAccount!, remote, reads)) : undefined;
+  const resolvedColor = remote && !remote.deleted ? await timed('calendar-color', () => remoteActivityColor(currentAccount!, remote, reads)) : undefined;
   currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
   if (!currentAccount?.consent.calendarRead) return;
   segment = await timed('calendar-local', () => getProjectionSegment(projection));
-  write = segment ? buildWrite(projection, segment) : null;
+  write = segment ? buildWrite(projection, segment, true) : null;
   localHash = write ? localWriteHash(write) : null;
-  if (remote && segment) {
+  if (remote && !remote.deleted && segment) {
     const expected = hashValue(projection); const expectedEntries = hashValue(segment.entries);
     const imported = await timed('calendar-local', () => serializeColorReconciliation(async () => {
       const current = (await listProjections()).find((item) => item.id === projection.id);
@@ -1010,29 +1160,68 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
   const currentProjection = (await listProjections()).find((item) => item.id === projection.id);
   if (!currentProjection || hashValue(currentProjection) !== hashValue(projection)) return;
   segment = await timed('calendar-local', () => getProjectionSegment(projection));
-  write = segment ? buildWrite(projection, segment) : null;
+  write = segment ? buildWrite(projection, segment, true) : null;
   localHash = write ? localWriteHash(write) : null;
   const localChanged = segment && write ? !localProjectionUnchanged(projection, segment, write) : localHash !== projection.baseLocalHash;
+  let localUpdatedAt = await getActivityLocalUpdatedAt(projection.blockId);
+  if (!segment && projection.retirementAuthority) {
+    const authority = projection.retirementAuthority;
+    const inheritedTime = calendarMutationTime(authority.updatedAt);
+    if (projection.sourceEventId || !authority.projectionId || authority.projectionId === projection.id ||
+        !authority.eventId || !authority.version || inheritedTime === null) {
+      throw new Error('The split activity retirement proof is invalid. Its source event was kept.');
+    }
+    localUpdatedAt = Math.max(localUpdatedAt ?? 0, inheritedTime);
+  }
   const remoteChanged = projection.baseEvent
     ? !remote || eventHash(remote) !== eventHash(projection.baseEvent)
     : Boolean(remote);
-  if (remoteChanged && projection.baseEvent) {
+  const unknownAuthority = projection.state === 'conflict' && projection.conflictAuthority === 'unknown';
+  if ((remoteChanged || unknownAuthority) && projection.baseEvent) {
     if (!currentAccount.consent.importCalendarEdits) {
       throw new Error('Calendar activity changed. Allow calendar edit import to reconcile it.');
     }
-    if (localChanged) {
+    const expectedIntent = await getActivityEditIntent(projection.blockId);
+    const authority = localChanged || unknownAuthority ? latestCalendarChange({
+      localUpdatedAt,
+      remoteUpdatedAt: remote?.updatedAt, remoteDeleted: !remote || remote.deleted,
+    }) : 'calendar';
+    if (authority === 'unknown') {
       await saveProjection({ ...projection, state: 'conflict',
-        conflict: 'This activity changed in Context and the calendar. Choose the version to keep.' });
-    } else {
-      try { await timed('calendar-local', () => importCalendarEvent(projection, remote)); }
+        conflictAuthority: 'unknown',
+        conflict: 'This activity changed in both places without comparable edit timestamps. Choose the version to keep.' });
+      return;
+    }
+    if (authority === 'calendar') {
+      try { await timed('calendar-local', () => importCalendarEvent(projection, remote, expectedIntent)); }
       catch (error) { await saveProjection({ ...projection, state: 'conflict',
         conflict: error instanceof Error ? error.message : 'This calendar edit needs review.' }); }
+      return;
     }
-    return;
+    if (remote?.deleted && write) {
+      // A genuine later Context edit may restore an older cancelled activity,
+      // but a provider's deleted event ID must never be patched or reused. Keep
+      // the old link retired and give the still-bordered actual a fresh stable
+      // create identity. A retry resumes this exact pending owner.
+      if (!currentAccount.consent.calendarWrite || (projection.sourceEventId && !currentAccount.consent.replaceOccurrences)) return;
+      const localUpdatedAt = await getActivityLocalUpdatedAt(projection.blockId);
+      const id = hashValue({ restoredProjection: projection.id, deletedVersion: remote.version,
+        localUpdatedAt }).slice(0, 40);
+      await saveProjection({ ...projection, id, eventId: null, sourceEventId: null,
+        sourceSeriesId: undefined, originalStart: undefined, baseEvent: null, baseLocalHash: null,
+        baseColorSelection: undefined, state: 'pending', conflict: undefined, retiredAt: undefined,
+        pendingSourceScope: undefined, pendingSourceOperationId: undefined });
+      await saveProjection({ ...projection, state: 'deleted', baseEvent: remote, baseLocalHash: null,
+        retiredAt: new Date().toISOString(), conflict: undefined });
+      requestAccountSynchronization();
+      return;
+    }
   }
-  if (!localChanged && projection.state === 'synced') {
-    if (!projection.baseColorSelection && segment) await saveProjection({ ...projection,
-      baseColorSelection: { categoryId: segment.categoryId, color: categoryById(segment.categoryId).color.toUpperCase() } });
+  if (!localChanged && !remoteChanged && projection.state !== 'pending') {
+    if (projection.state !== 'synced' || (!projection.baseColorSelection && segment)) await saveProjection({ ...projection,
+      state: 'synced', conflict: undefined,
+      ...(segment ? { baseColorSelection: { categoryId: segment.categoryId,
+        color: categoryById(segment.categoryId).color.toUpperCase() } } : {}) });
     return;
   }
   if (!currentAccount.consent.calendarWrite) return;
@@ -1042,10 +1231,15 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
   }
   const writableAdapter = createCalendarAdapter(currentAccount, reads.metadata);
   if (!write) {
-    if (remote) await timed('calendar-event-write', () => writableAdapter.deleteEvent(remote));
-    await saveProjection({ ...projection, state: 'deleted', baseLocalHash: null });
+    if (remote && !remote.deleted) await timed('calendar-event-write', () => writableAdapter.deleteEvent(remote));
+    await saveProjection({ ...projection, state: 'deleted', baseLocalHash: null, retiredAt: new Date().toISOString(), conflict: undefined });
     return;
   }
+  // Read/import conflict resolution must remain possible even when an older
+  // local fill has no verified write mapping. Only an actual outgoing write
+  // requires that mapping; never send the comparison fallback to a provider.
+  write = buildWrite(projection, segment!);
+  localHash = localWriteHash(write);
   try {
     let saved: RemoteCalendarEvent;
     if (remote && projection.pendingSourceScope === 'series') {
@@ -1054,18 +1248,25 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
       saved = await timed('calendar-event-write', () => writableAdapter.updateEvent(saved, write!));
     } else if (remote) saved = await timed('calendar-event-write', () => writableAdapter.updateEvent(remote, write!));
     else {
+      projection.pendingCreateWrite = write;
+      await saveProjection(projection);
       saved = await timed('calendar-event-write', () => writableAdapter.createEvent(projection.calendarId, write!));
-      // A retry can recover an earlier provider create. Reconcile that content on the next pass.
-      if (saved.description !== write.description || saved.start !== write.start || saved.end !== write.end) {
-        saved = await timed('calendar-event-write', () => writableAdapter.updateEvent(saved, write!));
+      // Another device can win the deterministic ID after our absence read.
+      // A recovered response is never permission to overwrite its newer edits.
+      const attempted = { ...saved, ...write, deleted: false, updatedAt: undefined };
+      if (eventHash(saved) !== eventHash(attempted)) {
+        await saveProjection({ ...projection, eventId: saved.id, baseEvent: attempted,
+          baseLocalHash: null, state: 'pending', conflict: undefined });
+        requestAccountSynchronization();
+        return;
       }
     }
     await saveProjection({ ...projection, eventId: saved.id, baseEvent: saved,
       baseColorSelection: { categoryId: segment!.categoryId, color: categoryById(segment!.categoryId).color.toUpperCase() },
       baseLocalHash: localHash, startMinute: segment!.startMinute, endMinute: segment!.endMinute,
       dateKey: segment!.entries[0]!.dateKey, endDateKey: segment!.entries.at(-1)!.dateKey,
-      state: 'synced', conflict: undefined, pendingSourceScope: undefined,
-      pendingSourceOperationId: undefined });
+      state: 'synced', conflict: undefined, conflictAuthority: undefined, pendingSourceScope: undefined,
+      pendingSourceOperationId: undefined, retirementAuthority: undefined, pendingCreateWrite: undefined });
     const savedColor = await timed('calendar-color', () => remoteActivityColor(currentAccount!, saved, reads));
     if (savedColor && segment) await setSetting(accountColorReceiptKey(projection), { version: 1,
       calendarId: saved.calendarId, eventId: saved.id, remoteColor: savedColor,
@@ -1092,7 +1293,7 @@ export async function resolveProjectionConflict(id: string, choice: 'context' | 
     await importCalendarEvent(projection, event);
   } else {
     if (!account.consent.calendarWrite) throw new Error('Allow calendar updates first.');
-    await saveProjection({ ...projection, baseEvent: event, state: 'pending', conflict: undefined });
+    await saveProjection({ ...projection, baseEvent: event, state: 'pending', conflict: undefined, conflictAuthority: undefined });
   }
 }
 

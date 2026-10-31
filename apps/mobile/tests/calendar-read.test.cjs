@@ -82,6 +82,7 @@ function calendarRuntime(overrides = {}) {
       if (name === '../utils/native-bound-retime') return loadUtility('native-bound-retime');
       if (name === '../utils/calendar-cell-color') return loadUtility('calendar-cell-color');
       if (name === '../utils/native-sync-diagnostics') return loadUtility('native-sync-diagnostics');
+      if (name === '../utils/calendar-change-authority') return loadUtility('calendar-change-authority');
       throw new Error(`Unexpected calendar read test import: ${name}`);
     },
   }, { filename });

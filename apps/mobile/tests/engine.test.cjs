@@ -47,6 +47,10 @@ function cloud() {
         if (onGet) await onGet();
         return copy(events.get(key(calendarId, id)));
       },
+      async findProjectedEvent(calendarId, projectionId) {
+        calls.push({ type: 'findProjection', calendarId, projectionId });
+        return copy([...events.values()].find((event) => event.calendarId === calendarId && event.projectionId === projectionId));
+      },
       async createEvent(calendarId, write) {
         calls.push({ type: 'create', calendarId, write: copy(write) });
         const existing = [...events.values()].find((event) =>
@@ -667,17 +671,35 @@ test('a provider recolor fills exact linked account minutes without rewriting no
   assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete', 'updateSeries'].includes(call.type)).length, 0);
 });
 
-test('unchanged account color preserves a local selection and simultaneous color changes retain local cells as a conflict', async (t) => {
+test('unchanged account color preserves a local selection and simultaneous colors without timestamps retain local cells for review', async (t) => {
   const { device, remote, original } = await linkedColoredActivity(t);
   await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1137 }, 'google_palette_2952a3');
   const local = plain(await device.db.getDayEntries(day)); remote.calls.length = 0;
   await device.engine.reconcileLinkedAccountColors([day]);
   assert.deepEqual(plain(await device.db.getDayEntries(day)), local);
   remote.edit('personal', original.id, { displayColor: '#123456' });
-  await assert.rejects(device.engine.reconcileLinkedAccountColors([day]), /changed in Context and the calendar/);
+  await assert.rejects(device.engine.reconcileLinkedAccountColors([day]), /without comparable edit timestamps/);
   assert.deepEqual(plain(await device.db.getDayEntries(day)), local);
   assert.ok((await device.engine.listProjections()).some((projection) => projection.state === 'conflict'));
   assert.equal(remote.calls.filter((call) => ['update', 'create', 'delete'].includes(call.type)).length, 0);
+});
+
+for (const authority of ['context', 'calendar']) test(`simultaneous activity colors use the latest ${authority} edit timestamp`, async (t) => {
+  const { device, remote, original } = await linkedColoredActivity(t);
+  await device.sheet.colorMinuteRange({ dateKey: day, startMinute: 1135, endMinute: 1137 }, 'google_palette_2952a3');
+  const projection = (await device.engine.listProjections())[0];
+  const before = plain(await device.db.getDayEntries(day));
+  const local = await device.db.getActivityLocalUpdatedAt(projection.blockId);
+  remote.edit('personal', original.id, { displayColor: '#123456',
+    updatedAt: new Date(local + (authority === 'context' ? -1000 : 1000)).toISOString() });
+  await device.engine.reconcileLinkedAccountColors([day]);
+  const after = plain(await device.db.getDayEntries(day));
+  if (authority === 'context') assert.deepEqual(after, before);
+  else {
+    const categories = await device.categories.listCategories();
+    assert.ok(after.every((entry) => categories.find((category) => category.id === entry.categoryId).color === '#123456'));
+  }
+  assert.equal((await device.engine.listProjections()).filter((item) => item.state === 'conflict').length, 0);
 });
 
 test('a color-only account import preserves pending local text for a later authorized write', async (t) => {
@@ -1828,6 +1850,218 @@ test('Ungrouping inside an adopted source keeps that occurrence on its first rem
   assert.equal((await device.db.getMinuteEntry(day, 1139)).text, 'Pray fardh');
   assert.equal(remote.calls.filter((call) => call.type === 'delete' && call.id === original.id).length, 0);
   assert.equal(remote.calls.filter((call) => call.type === 'updateSeries').length, 0);
+});
+
+test('full Ungroup deletes the exact Google event despite an older remote edit and never exports detached notes', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const blockId = await explicitGroup(device, 600, ['Kettle', 'Coffee', 'Pour'], 'Make coffee');
+  const event = [...remote.events.values()][0];
+  remote.edit('personal', event.id, { title: 'Older Google title', updatedAt: new Date(Date.now() - 10000).toISOString() });
+  await device.sheet.ungroupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 602 });
+  assert.equal((await device.db.getActivityEditIntent(blockId)).deleted, true);
+  assert.equal((await device.engine.loadAccountPlans(day)).length, 0, 'pending Ungroup suppresses stale source overlays');
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 0);
+  assert.equal(remote.calls.filter((call) => call.type === 'delete' && call.id === event.id).length, 1);
+  assert.deepEqual((await device.db.getDayEntries(day)).map((entry) => entry.text), ['Kettle', 'Coffee', 'Pour']);
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 0, 'a later pass must not recreate an ungrouped activity');
+  await device.sheet.undoSpreadsheetEdit(); await device.inline.retryInlineMinuteLinks({ synchronize: false });
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1, 'Undo is a new explicit grouping intent');
+  assert.notEqual([...remote.events.values()][0].id, event.id, 'Undo must not reuse a deleted provider event ID');
+});
+
+for (const delta of [0, 1000]) test(`a Google edit restores exact Ungrouped members when its timestamp difference is ${delta}ms`, async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const blockId = await explicitGroup(device, 610, ['Boil water', 'Pour coffee'], 'Coffee');
+  const event = [...remote.events.values()][0];
+  await device.sheet.ungroupMinuteRange({ dateKey: day, startMinute: 610, endMinute: 611 });
+  const local = await device.db.getActivityLocalUpdatedAt(blockId);
+  remote.edit('personal', event.id, { title: 'Coffee with Mum', updatedAt: new Date(local + delta).toISOString() });
+  await device.engine.synchronizeAccounts();
+  const segment = (await device.db.getDaySegments(day))[0];
+  assert.equal(segment.activityTitle, 'Coffee with Mum');
+  assert.deepEqual((await device.db.getDayEntries(day)).map((entry) => entry.text), ['Boil water', 'Pour coffee']);
+  assert.ok((await device.db.getDayEntries(day)).every((entry) => entry.blockId === blockId));
+  assert.equal((await device.db.getActivityEditIntent(blockId)).updatedAt, new Date(local).toISOString(), 'calendar import does not invent a newer Context user time');
+  assert.equal(remote.events.size, 1); assert.equal(remote.calls.filter((call) => call.type === 'delete').length, 0);
+});
+
+test('a newer Google range edit reclaims its exact partial split and durably retires an older edited sibling', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const blockId = await explicitGroup(device, 700, ['One', 'Two', 'Three', 'Four', 'Five'], 'Study');
+  const original = plain([...remote.events.values()][0]);
+  await device.sheet.ungroupMinuteRange({ dateKey: day, startMinute: 702, endMinute: 702 });
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  const sibling = [...remote.events.values()].find((event) => event.id !== original.id); assert.ok(sibling);
+  const local = await device.db.getActivityLocalUpdatedAt(blockId);
+  remote.edit('personal', sibling.id, { title: 'Older sibling change', updatedAt: new Date(local + 500).toISOString() });
+  remote.edit('personal', original.id, { title: 'Rejoined study', start: original.start, end: original.end,
+    description: original.description, descriptionLog: original.descriptionLog, updatedAt: new Date(local + 1000).toISOString() });
+  await device.engine.synchronizeAccounts(); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1); assert.equal([...remote.events.values()][0].id, original.id);
+  assert.deepEqual((await device.db.getDayEntries(day)).map((entry) => entry.text), ['One', 'Two', 'Three', 'Four', 'Five']);
+  assert.ok((await device.db.getDayEntries(day)).every((entry) => entry.blockId === blockId));
+  assert.equal((await device.db.getDaySegments(day))[0].activityTitle, 'Rejoined study');
+  const retired = (await device.engine.listProjections()).find((item) => item.eventId === sibling.id);
+  assert.equal(retired.state, 'deleted'); assert.equal(retired.retirementAuthority.eventId, original.id);
+});
+
+test('a newer independent sibling calendar edit prevents stale original-range reclamation without deleting either event', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const blockId = await explicitGroup(device, 720, ['One', 'Two', 'Three', 'Four', 'Five'], 'Study');
+  const original = plain([...remote.events.values()][0]);
+  await device.sheet.ungroupMinuteRange({ dateKey: day, startMinute: 722, endMinute: 722 });
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  const sibling = [...remote.events.values()].find((event) => event.id !== original.id); assert.ok(sibling);
+  const local = await device.db.getActivityLocalUpdatedAt(blockId);
+  remote.edit('personal', original.id, { title: 'Older rejoin', start: original.start, end: original.end,
+    description: original.description, descriptionLog: original.descriptionLog, updatedAt: new Date(local + 1000).toISOString() });
+  remote.edit('personal', sibling.id, { title: 'Newer separate activity', updatedAt: new Date(local + 2000).toISOString() });
+  const beforeDeletes = remote.calls.filter((call) => call.type === 'delete').length;
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 2); assert.equal(remote.calls.filter((call) => call.type === 'delete').length, beforeDeletes);
+  assert.deepEqual((await device.db.getDayEntries(day)).map((entry) => entry.text), ['One', 'Two', 'Three', 'Four', 'Five']);
+});
+
+for (const authority of ['context', 'calendar', 'equal']) test(`concurrent note and Google event edits use ${authority} timestamp authority`, async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const blockId = await explicitGroup(device, 620, ['Original note', 'Finish'], 'Original title');
+  const event = [...remote.events.values()][0];
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 620, text: 'Latest Context note', categoryId: 'study' });
+  const local = await device.db.getActivityLocalUpdatedAt(blockId); assert.equal(typeof local, 'number');
+  const remoteTime = local + (authority === 'context' ? -1000 : authority === 'calendar' ? 1000 : 0);
+  remote.edit('personal', event.id, { title: 'Google title', updatedAt: new Date(remoteTime).toISOString() });
+  await device.engine.synchronizeAccounts();
+  const saved = remote.events.get(`personal:${event.id}`);
+  assert.equal(remote.events.size, 1); assert.ok(saved);
+  if (authority === 'context') {
+    assert.equal(saved.title, 'Original title'); assert.match(saved.description, /Latest Context note/);
+    assert.equal((await device.db.getMinuteEntry(day, 620)).text, 'Latest Context note');
+  } else {
+    assert.equal(saved.title, 'Google title'); assert.equal((await device.db.getMinuteEntry(day, 620)).text, 'Original note');
+    assert.equal((await device.db.getDaySegments(day))[0].activityTitle, 'Google title');
+  }
+  assert.equal((await device.engine.listProjections()).filter((item) => item.state === 'conflict').length, 0);
+});
+
+for (const edited of [false, true]) test(`confirmed Google deletion clears linked rows and formatting without resurrection (local edit=${edited})`, async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await explicitGroup(device, 640, ['One', 'Two', 'Three'], 'Appointment');
+  const event = [...remote.events.values()][0];
+  await device.engine.loadAccountPlans(day);
+  if (edited) await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 641, text: 'Pending note', categoryId: 'family' });
+  remote.events.delete(`personal:${event.id}`);
+  await device.engine.synchronizeAccounts();
+  assert.equal((await device.db.getDayEntries(day)).length, 0);
+  assert.ok((await device.db.getSpreadsheetCells({ dateKey: day, startMinute: 640, endMinute: 642 })).every((cell) => !cell.entry && !cell.format.activityGroup));
+  assert.equal((await device.engine.loadCachedAccountPlans(day)).length, 0, 'a cached pre-deletion plan cannot repaint the retired activity');
+  await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 0); assert.equal((await device.db.getDayEntries(day)).length, 0);
+});
+
+test('newer Context edits restore an older timestamped cancellation with a fresh Google event identity', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const blockId = await explicitGroup(device, 660, ['Old note', 'Finish'], 'Study');
+  const event = [...remote.events.values()][0];
+  await device.db.saveMinuteEntry({ dateKey: day, minuteIndex: 660, text: 'Continue studying', categoryId: 'study' });
+  const local = await device.db.getActivityLocalUpdatedAt(blockId);
+  remote.edit('personal', event.id, { deleted: true, updatedAt: new Date(local - 1000).toISOString() });
+  await device.engine.synchronizeAccounts(); await device.engine.synchronizeAccounts();
+  const live = [...remote.events.values()].filter((item) => !item.deleted);
+  assert.equal(live.length, 1); assert.notEqual(live[0].id, event.id); assert.match(live[0].description, /Continue studying/);
+  assert.equal(remote.calls.filter((call) => call.type === 'update' && call.id === event.id).length, 0);
+});
+
+test('losing access to the calendar is not interpreted as deleting its linked event', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await explicitGroup(device, 680, ['Keep this note', 'And this'], 'Private appointment');
+  const before = plain(await device.db.getDayEntries(day));
+  remote.adapter.getEvent = async () => null;
+  remote.adapter.listCalendars = async () => [];
+  const result = await device.engine.synchronizeAccounts();
+  assert.match(result.message, /calendar is no longer accessible/);
+  assert.deepEqual(plain(await device.db.getDayEntries(day)), before);
+  assert.equal((await device.engine.listProjections()).some((item) => item.state === 'deleted'), false);
+});
+
+for (const newerGoogleEdit of [false, true]) test(`Ungroup recovers a lost create response before removing its event (newer Google edit=${newerGoogleEdit})`, async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const create = remote.adapter.createEvent; let loseResponse = true;
+  remote.adapter.createEvent = async (...args) => { const saved = await create(...args);
+    if (loseResponse) { loseResponse = false; throw new Error('Create response lost'); } return saved; };
+  const blockId = await explicitGroup(device, 690, ['One', 'Two'], 'Coffee');
+  const event = [...remote.events.values()][0]; assert.ok(event);
+  assert.ok((await device.engine.listProjections())[0].pendingCreateWrite);
+  await device.sheet.ungroupMinuteRange({ dateKey: day, startMinute: 690, endMinute: 691 });
+  if (newerGoogleEdit) {
+    const local = await device.db.getActivityLocalUpdatedAt(blockId);
+    remote.edit('personal', event.id, { title: 'A newer Google title', updatedAt: new Date(local + 1000).toISOString() });
+  }
+  await device.inline.retryInlineMinuteLinks({ synchronize: false }); await device.engine.synchronizeAccounts();
+  if (newerGoogleEdit) {
+    assert.equal(remote.events.size, 1); assert.equal((await device.db.getDaySegments(day))[0].activityTitle, 'A newer Google title');
+  } else {
+    assert.equal(remote.events.size, 0); assert.deepEqual((await device.db.getDayEntries(day)).map((entry) => entry.text), ['One', 'Two']);
+  }
+});
+
+test('legacy unbound projections discover a newer Google event instead of patching it during create recovery', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const blockId = await explicitGroup(device, 695, ['Keep note'], 'Original title');
+  const projection = (await device.engine.listProjections())[0]; const event = [...remote.events.values()][0];
+  await device.db.putSyncDocument(`projection:${projection.id}`, { ...projection, eventId: null, baseEvent: null, baseLocalHash: null, state: 'pending' });
+  const local = await device.db.getActivityLocalUpdatedAt(blockId);
+  remote.edit('personal', event.id, { title: 'New Google title', updatedAt: new Date(local + 1000).toISOString() });
+  remote.calls.length = 0; await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.size, 1); assert.equal(remote.events.get(`personal:${event.id}`).title, 'New Google title');
+  assert.equal((await device.db.getDaySegments(day))[0].activityTitle, 'New Google title');
+  assert.equal(remote.calls.some((call) => call.type === 'create' || call.type === 'update'), false);
+});
+
+test('an idempotent create race returns to timestamp reconciliation rather than overwriting a newer title', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  const create = remote.adapter.createEvent;
+  remote.adapter.createEvent = async (...args) => {
+    const saved = await create(...args);
+    remote.edit(saved.calendarId, saved.id, { title: 'Newer Google title during create', updatedAt: new Date(Date.now() + 10000).toISOString() });
+    return plain(remote.events.get(`personal:${saved.id}`));
+  };
+  await explicitGroup(device, 697, ['One note'], 'Original title');
+  await device.engine.synchronizeAccounts();
+  assert.equal([...remote.events.values()][0].title, 'Newer Google title during create');
+  assert.equal((await device.db.getDaySegments(day))[0].activityTitle, 'Newer Google title during create');
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, 0);
+});
+
+test('unknown-time legacy create recovery stays protected across repeated sync until explicit resolution', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await explicitGroup(device, 699, ['Original note'], 'Original title');
+  const projection = (await device.engine.listProjections())[0]; const event = [...remote.events.values()][0];
+  await device.db.putSyncDocument(`projection:${projection.id}`, { ...projection, eventId: null,
+    baseEvent: null, baseLocalHash: null, state: 'pending' });
+  remote.edit('personal', event.id, { title: 'Google title without timestamp' }); remote.calls.length = 0;
+  await device.engine.synchronizeAccounts(); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.get(`personal:${event.id}`).title, 'Google title without timestamp');
+  assert.equal(remote.calls.filter((call) => call.type === 'update' || call.type === 'create').length, 0);
+  assert.equal((await device.engine.listProjections())[0].conflictAuthority, 'unknown');
+  await device.engine.resolveProjectionConflict(projection.id, 'context'); await device.engine.synchronizeAccounts();
+  assert.equal(remote.events.get(`personal:${event.id}`).title, 'Original title');
+});
+
+test('successful selected-calendar refresh shows new and edited Google events and removes deleted ones', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  assert.equal((await device.engine.loadAccountPlans(day)).length, 0);
+  const event = originalPrayer(); remote.seed(event);
+  assert.equal((await device.engine.loadAccountPlans(day))[0].title, event.title);
+  remote.edit('personal', event.id, { title: 'Updated Google plan', start: iso(900), end: iso(920), updatedAt: new Date().toISOString() });
+  const updated = (await device.engine.loadAccountPlans(day))[0];
+  assert.equal(updated.title, 'Updated Google plan'); assert.equal(updated.startDate.toISOString(), iso(900));
+  remote.events.delete(`personal:${event.id}`);
+  assert.equal((await device.engine.loadAccountPlans(day)).length, 0);
+  assert.equal((await device.engine.loadCachedAccountPlans(day)).length, 0);
+  assert.equal((await device.db.getDayEntries(day)).length, 0, 'read-only source display does not create competing ledger activities');
 });
 
 test('different minute fills inside one border retain one calendar event and independent minute notes', async (t) => {

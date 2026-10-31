@@ -1741,3 +1741,231 @@ test('Reset00:26 stale fill-only and orphan styling leaves a truly blank unborde
  await sheet.redoSpreadsheetEdit();await sheet.applyCellFormat(range(26),{italic:true});
  await sheet.resetMinuteCells(range(26));assert.equal(await api.getMinuteEntry(day,26),null);assert.deepEqual(plain((await sheet.getDayCellFormats(day)).get(26)),{noFill:true});
 });
+
+test('activity intent survives full Ungroup, partial splits, Undo and private-ledger replay without retiring provider identity early', async (t) => {
+  const a = harness(t); const b = harness(t); await a.api.initializeDatabase(); await b.api.initializeDatabase();
+  await save(a.api, 900, 'First note'); await save(a.api, 901, 'Second note');
+  await a.sheet.groupMinuteRange(range(900, 902), { title: 'Study', categoryId: 'study' });
+  const blockId = (await a.api.getMinuteEntry(day, 900)).blockId;
+  const projection = { id: 'owned', blockId, state: 'pending', eventId: 'original-event', sourceEventId: 'original-event' };
+  await a.api.putSyncDocument('projection:owned', projection);
+  const first = await a.api.getActivityEditIntent(blockId);
+  assert.equal(first.deleted, false);
+  await a.sheet.ungroupMinuteRange(range(901));
+  const partial = await a.api.getActivityEditIntent(blockId);
+  assert.equal(partial.deleted, false); assert.ok(Date.parse(partial.updatedAt) > Date.parse(first.updatedAt));
+  assert.equal(partial.detachedMembers.length, 1);
+  await a.sheet.ungroupMinuteRange(range(900));
+  const deleted = await a.api.getActivityEditIntent(blockId);
+  assert.equal(deleted.deleted, true);
+  assert.ok(Date.parse(deleted.updatedAt) > Date.parse(partial.updatedAt));
+  assert.equal(deleted.detachedMembers.length, 2);
+  assert.deepEqual((await a.api.getDayEntries(day)).map((entry) => entry.text), ['First note', 'Second note', '']);
+  assert.deepEqual(plain((await a.api.getSyncDocuments('projection:owned'))[0].value), projection);
+  const documents = plain(await a.api.getSyncDocuments(''));
+  const codec = a.load(a.source('sync/codec.ts')); codec.validateBatch({ version: 1, id: 'ungroup_intent', documents });
+  await b.api.mergeSyncDocuments(documents);
+  assert.equal((await b.api.getActivityEditIntent(blockId)).deleted, true);
+  assert.equal(await b.api.getActivityLocalUpdatedAt(blockId), Date.parse(deleted.updatedAt));
+  assert.equal((await b.sheet.getDayActivityGroups(day)).some((group) => group.blockId === blockId), false);
+  await a.sheet.undoSpreadsheetEdit();
+  const restored = await a.api.getActivityEditIntent(blockId);
+  assert.equal(restored.deleted, false); assert.ok(Date.parse(restored.updatedAt) > Date.parse(deleted.updatedAt));
+  await a.sheet.redoSpreadsheetEdit(); assert.equal((await a.api.getActivityEditIntent(blockId)).deleted, true);
+});
+
+test('activity intent authority excludes no-ops, provider import-now timestamps and upload acknowledgements', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 950, 'Original'); await sheet.groupMinuteRange(range(950), { title: 'Study', categoryId: 'study' });
+  const entry = await api.getMinuteEntry(day, 950); const original = plain(await api.getActivityEditIntent(entry.blockId));
+  const authority = await api.getActivityLocalUpdatedAt(entry.blockId);
+  await api.saveMinuteRange({ dateKey: day, startMinute: 950, durationMinutes: 1, text: 'Original', categoryId: 'study' });
+  await sheet.applyCellFormat(range(950), {});
+  assert.deepEqual(plain(await api.getActivityEditIntent(entry.blockId)), original);
+  assert.equal(await api.getActivityLocalUpdatedAt(entry.blockId), authority);
+  const docs = await api.getDocumentsForUpload('google:person', 500); await api.acknowledgeUploaded('google:person', docs);
+  assert.equal(await api.getActivityLocalUpdatedAt(entry.blockId), authority);
+  const before = await api.getDayEntries(day);
+  await api.replaceProjectedMinutes({ blockId: entry.blockId, previousDate: day, previousStart: 950, previousEnd: 950,
+    expectedEntries: before, expectedActivityTitle: 'Study', expectedActivityEditIntent: original,
+    activityTitle: 'Provider title', entries: [{ dateKey: day, minuteIndex: 950, text: 'Provider edit', categoryId: 'study' }] });
+  assert.deepEqual(plain(await api.getActivityEditIntent(entry.blockId)), original);
+  assert.equal(await api.getActivityLocalUpdatedAt(entry.blockId), authority);
+  await api.replaceProjectedMinutes({ blockId: 'provider_only', previousDate: day, previousStart: 960, previousEnd: 960,
+    expectedActivityEditIntent: null, activityTitle: 'New source', entries: [{ dateKey: day, minuteIndex: 960, text: 'Imported only', categoryId: 'study' }] });
+  assert.equal(await api.getActivityLocalUpdatedAt('provider_only'), null);
+  assert.equal(await api.getActivityLocalUpdatedAt('provider_only', [{ dateKey: day, minuteIndex: 960 }]), null);
+});
+
+test('source import guards an expected null intent and every later intent revision, while tombstone failure rolls local Ungroup back atomically', async (t) => {
+  const { api, sheet, sqlite } = harness(t); await api.initializeDatabase();
+  await api.replaceProjectedMinutes({ blockId: 'source_intent', previousDate: day, previousStart: 980, previousEnd: 981,
+    expectedActivityEditIntent: null, activityTitle: 'Source', entries: [980, 981].map((minuteIndex) => ({ dateKey: day, minuteIndex, text: 'Keep', categoryId: 'study' })) });
+  await sheet.applyCellFormat(range(980), { bold: true });
+  const before = await api.getDayEntries(day);
+  await assert.rejects(api.replaceProjectedMinutes({ blockId: 'source_intent', previousDate: day, previousStart: 980, previousEnd: 981,
+    expectedEntries: before, expectedActivityTitle: 'Source', expectedActivityEditIntent: null, activityTitle: 'Stale import', entries: [] }), /intent changed/);
+  const snapshot = await api.getActivityEditIntent('source_intent');
+  const stored = { ...plain(snapshot) }; delete stored.revision;
+  await api.putSyncDocument('category:minuteFormat:activityEdit:source_intent', stored);
+  await assert.rejects(api.replaceProjectedMinutes({ blockId: 'source_intent', previousDate: day, previousStart: 980, previousEnd: 981,
+    expectedEntries: before, expectedActivityTitle: 'Source', expectedActivityEditIntent: snapshot, entries: [] }), /intent changed/);
+  sqlite.exec(`CREATE TRIGGER reject_activity_tombstone BEFORE INSERT ON ledger_documents
+    WHEN NEW.key='category:minuteFormat:activityEdit:source_intent' BEGIN SELECT RAISE(ABORT,'tombstone unavailable'); END;`);
+  const documents = plain(await api.getSyncDocuments(''));
+  await assert.rejects(sheet.ungroupMinuteRange(range(980, 981)), /tombstone unavailable/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), documents);
+  assert.ok((await api.getDayEntries(day)).every((entry) => entry.blockId === 'source_intent'));
+});
+
+test('a genuinely newer provider edit restores exact imported-origin Ungroup members without fabricating a local timestamp', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  const blockId = 'source_restore';
+  await api.replaceProjectedMinutes({ blockId, previousDate: day, previousStart: 1000, previousEnd: 1002,
+    activityTitle: 'Original event', entries: [1000, 1001, 1002].map((minuteIndex) => ({ dateKey: day, minuteIndex, text: `Note ${minuteIndex}`, categoryId: 'study' })) });
+  await sheet.ungroupMinuteRange(range(1000, 1002));
+  const intent = await api.getActivityEditIntent(blockId);
+  assert.equal(intent.deleted, true); assert.equal(intent.detachedMembers.length, 3);
+  assert.ok((await api.getDayEntries(day)).every((entry) => entry.source === 'imported'));
+  const snapshots = await api.getSpreadsheetCells(range(1000, 1002));
+  await api.replaceProjectedMinutes({ blockId, previousDate: day, previousStart: 1000, previousEnd: 1002,
+    expectedEntries: [], expectedActivityEditIntent: intent, authoritativeRemoteUpdatedAt: Date.parse(intent.updatedAt) + 10_000,
+    expectedFormats: snapshots.map((cell) => ({ dateKey: day, minuteIndex: cell.minuteIndex, format: cell.format, version: cell.version })),
+    activityTitle: 'Newest Google title', entries: [1000, 1001, 1002].map((minuteIndex) => ({ dateKey: day, minuteIndex, text: `Google ${minuteIndex}`, categoryId: 'study' })) });
+  const restored = await api.getActivityEditIntent(blockId);
+  assert.equal(restored.deleted, false); assert.equal(restored.updatedAt, intent.updatedAt); assert.equal(restored.detachedMembers, undefined);
+  assert.equal(await api.getActivityLocalUpdatedAt(blockId), Date.parse(intent.updatedAt));
+  assert.equal((await sheet.getDayActivityGroups(day))[0].title, 'Newest Google title');
+  assert.deepEqual((await api.getDayEntries(day)).map((entry) => entry.text), ['Google 1000', 'Google 1001', 'Google 1002']);
+});
+
+test('newer detached notes or a new unrelated border refuse remote restoration and regroup prunes old claims without advancing its clock', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 1050, 'First'); await save(api, 1051, 'Second');
+  await sheet.groupMinuteRange(range(1050, 1051), { title: 'Study', categoryId: 'study' });
+  const blockId = (await api.getMinuteEntry(day, 1050)).blockId;
+  await sheet.ungroupMinuteRange(range(1050, 1051));
+  let intent = await api.getActivityEditIntent(blockId);
+  const remoteTime = Date.parse(intent.updatedAt) + 1000;
+  const current = await api.getMinuteEntry(day, 1050);
+  await api.mergeSyncDocuments([{ key: `minute:${day}:1050`, revision: `${String(remoteTime + 2000).padStart(16, '0')}:00000000:phone_peer`,
+    value: { ...plain(current), text: 'Newer private note', source: 'manual', updatedAt: new Date(remoteTime + 1000).toISOString() } }]);
+  const snapshots = await api.getSpreadsheetCells(range(1050, 1051));
+  await assert.rejects(api.replaceProjectedMinutes({ blockId, previousDate: day, previousStart: 1050, previousEnd: 1051,
+    expectedEntries: [], expectedActivityEditIntent: intent, authoritativeRemoteUpdatedAt: remoteTime,
+    expectedFormats: snapshots.map((cell) => ({ dateKey: day, minuteIndex: cell.minuteIndex, format: cell.format, version: cell.version })),
+    activityTitle: 'Older Google edit', entries: [1050, 1051].map((minuteIndex) => ({ dateKey: day, minuteIndex, text: 'Remote', categoryId: 'study' })) }), /newer recorded activity/);
+  assert.equal((await api.getMinuteEntry(day, 1050)).text, 'Newer private note');
+  assert.equal(await api.getActivityLocalUpdatedAt(blockId), remoteTime + 1000);
+  await sheet.groupMinuteRange(range(1051), { title: 'Independent activity', categoryId: 'family' });
+  const pruned = await api.getActivityEditIntent(blockId);
+  assert.equal(pruned.updatedAt, intent.updatedAt);
+  assert.equal(pruned.detachedMembers.some((member) => member.minuteIndex === 1051), false);
+  intent = pruned;
+  const next = await api.getSpreadsheetCells(range(1050, 1051));
+  await assert.rejects(api.replaceProjectedMinutes({ blockId, previousDate: day, previousStart: 1050, previousEnd: 1051,
+    expectedEntries: [], expectedActivityEditIntent: intent, authoritativeRemoteUpdatedAt: remoteTime + 10_000,
+    expectedFormats: next.map((cell) => ({ dateKey: day, minuteIndex: cell.minuteIndex, format: cell.format, version: cell.version })),
+    activityTitle: 'Cannot overwrite other activity', entries: [1050, 1051].map((minuteIndex) => ({ dateKey: day, minuteIndex, text: 'Remote', categoryId: 'study' })) }), /another or newer/);
+  assert.equal((await api.getMinuteEntry(day, 1050)).text, 'Newer private note');
+});
+
+test('calendar authority wins an exact timestamp tie when restoring fully Ungrouped minute claims', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase(); const blockId = 'source_tie';
+  await api.replaceProjectedMinutes({ blockId, previousDate: day, previousStart: 1080, previousEnd: 1081,
+    activityTitle: 'Source', entries: [1080, 1081].map((minuteIndex) => ({ dateKey: day, minuteIndex, text: 'Original', categoryId: 'study' })) });
+  await sheet.ungroupMinuteRange(range(1080, 1081));
+  const intent = await api.getActivityEditIntent(blockId); const cells = await api.getSpreadsheetCells(range(1080, 1081));
+  await api.replaceProjectedMinutes({ blockId, previousDate: day, previousStart: 1080, previousEnd: 1081,
+    expectedEntries: [], expectedActivityEditIntent: intent, authoritativeRemoteUpdatedAt: Date.parse(intent.updatedAt),
+    expectedFormats: cells.map((cell) => ({ dateKey: day, minuteIndex: cell.minuteIndex, format: cell.format, version: cell.version })),
+    activityTitle: 'Calendar tie wins', entries: [1080, 1081].map((minuteIndex) => ({ dateKey: day, minuteIndex, text: 'Google', categoryId: 'study' })) });
+  assert.equal((await sheet.getDayActivityGroups(day))[0].title, 'Calendar tie wins');
+  assert.equal((await api.getActivityEditIntent(blockId)).updatedAt, intent.updatedAt);
+});
+
+test('a newer calendar restores a partial Ungroup only through complete exact fresh sibling provenance and intent snapshots', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase(); const blockId = 'source_partial_restore';
+  const indexes = [1100, 1101, 1102, 1103, 1104];
+  await api.replaceProjectedMinutes({ blockId, previousDate: day, previousStart: 1100, previousEnd: 1104,
+    activityTitle: 'Original source', entries: indexes.map((minuteIndex) => ({ dateKey: day, minuteIndex, text: `Keep ${minuteIndex}`, categoryId: 'study' })) });
+  await sheet.applyCellFormat(range(1104), { italic: true });
+  await sheet.ungroupMinuteRange(range(1102));
+  const intent = await api.getActivityEditIntent(blockId); const siblingId = (await api.getMinuteEntry(day, 1103)).blockId;
+  assert.equal(intent.deleted, false); assert.equal(intent.detachedMembers.length, 1);
+  assert.deepEqual(plain(intent.derivedMembers), [1103, 1104].map((minuteIndex) => ({ dateKey: day, minuteIndex, blockId: siblingId })));
+  const siblingIntent = await api.getActivityEditIntent(siblingId);
+  const latest = Math.max(Date.parse(intent.updatedAt), Date.parse(siblingIntent.updatedAt));
+  assert.equal(await api.getActivityLocalUpdatedAt(blockId), latest);
+  const originalProjection = { id: 'partial_original', accountId: 'google:owner', calendarId: 'primary', eventId: 'google_original', sourceEventId: 'google_original', blockId, state: 'synced' };
+  const siblingProjection = { id: 'partial_sibling', accountId: 'google:owner', calendarId: 'primary', eventId: 'google_sibling', sourceEventId: null, blockId: siblingId, state: 'synced' };
+  await api.putSyncDocument('projection:partial_original', originalProjection);
+  await api.putSyncDocument('projection:partial_sibling', siblingProjection);
+  let expectedProjection = (await api.getSyncDocuments('projection:partial_sibling'))[0];
+  const retirement = () => ({ expected: expectedProjection, value: { ...siblingProjection, state: 'pending',
+    retirementAuthority: { projectionId: originalProjection.id, eventId: originalProjection.eventId, version: 'google_version_2', updatedAt: new Date(latest).toISOString() } } });
+  const cells = await api.getSpreadsheetCells(range(1100, 1104));
+  const request = { blockId, previousDate: day, previousStart: 1100, previousEnd: 1104,
+    expectedEntries: await api.getEntriesForBlock(blockId), expectedActivityTitle: 'Original source', expectedActivityEditIntent: intent,
+    expectedProjectionDocument: (await api.getSyncDocuments('projection:partial_original'))[0],
+    authoritativeRemoteUpdatedAt: latest,
+    expectedFormats: cells.map((cell) => ({ dateKey: day, minuteIndex: cell.minuteIndex, format: cell.format, version: cell.version })),
+    activityTitle: 'Newest Google title', entries: indexes.map((minuteIndex) => ({ dateKey: day, minuteIndex, text: `Google ${minuteIndex}`, categoryId: 'study' })) };
+  const before = plain(await api.getSyncDocuments(''));
+  await assert.rejects(api.replaceProjectedMinutes(request), /split activity changed|not completely reviewed/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before);
+  await assert.rejects(api.replaceProjectedMinutes({ ...request, expectedDerivedActivityEditIntents: [siblingIntent], entries: request.entries.slice(0, 4) }), /split activity changed|not completely reviewed/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before);
+  await assert.rejects(api.replaceProjectedMinutes({ ...request, expectedDerivedActivityEditIntents: [siblingIntent] }), /every split calendar link/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), before);
+  // A same-content projection rewrite still fences a preflighted ownership snapshot.
+  await api.putSyncDocument('projection:partial_sibling', siblingProjection);
+  const changed = plain(await api.getSyncDocuments(''));
+  await assert.rejects(api.replaceProjectedMinutes({ ...request, expectedDerivedActivityEditIntents: [siblingIntent], derivedProjectionRetirements: [retirement()] }), /split calendar link changed/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), changed);
+  expectedProjection = (await api.getSyncDocuments('projection:partial_sibling'))[0];
+  // A concurrent source conflict choice keeps its identity but changes metadata.
+  await api.putSyncDocument('projection:partial_original', { ...originalProjection, title: 'Chosen on another phone' });
+  const changedOriginal = plain(await api.getSyncDocuments(''));
+  await assert.rejects(api.replaceProjectedMinutes({ ...request, expectedDerivedActivityEditIntents: [siblingIntent], derivedProjectionRetirements: [retirement()] }), /original calendar link changed/);
+  assert.deepEqual(plain(await api.getSyncDocuments('')), changedOriginal);
+  request.expectedProjectionDocument = (await api.getSyncDocuments('projection:partial_original'))[0];
+  await api.replaceProjectedMinutes({ ...request, expectedDerivedActivityEditIntents: [siblingIntent], derivedProjectionRetirements: [retirement()] });
+  assert.deepEqual((await api.getDayEntries(day)).map((entry) => entry.blockId), indexes.map(() => blockId));
+  assert.equal((await api.getEntriesForBlock(siblingId)).length, 0);
+  const next = await api.getActivityEditIntent(blockId); const retired = await api.getActivityEditIntent(siblingId);
+  assert.equal(next.deleted, false); assert.equal(next.derivedMembers, undefined); assert.equal(next.detachedMembers, undefined);
+  assert.equal(next.updatedAt, intent.updatedAt); assert.equal(retired.deleted, true); assert.equal(retired.updatedAt, siblingIntent.updatedAt);
+  const receipt = (await api.getSyncDocuments('projection:partial_sibling'))[0];
+  assert.equal(receipt.value.state, 'pending'); assert.equal(receipt.value.eventId, 'google_sibling');
+  assert.deepEqual(plain(receipt.value.retirementAuthority), retirement().value.retirementAuthority);
+  assert.equal((await sheet.getDayCellFormats(day)).get(1104).italic, true);
+  assert.deepEqual(plain((await sheet.getDayActivityGroups(day)).map((group) => group.title)), ['Newest Google title']);
+});
+
+test('partial Ungroup restoration refuses newer sibling edits, stale sibling revisions and unrelated regrouped borders', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase(); const blockId = 'source_partial_guard';
+  const indexes = [1130, 1131, 1132, 1133, 1134];
+  await api.replaceProjectedMinutes({ blockId, previousDate: day, previousStart: 1130, previousEnd: 1134,
+    activityTitle: 'Source', entries: indexes.map((minuteIndex) => ({ dateKey: day, minuteIndex, text: 'Keep', categoryId: 'study' })) });
+  await sheet.ungroupMinuteRange(range(1132));
+  const intent = await api.getActivityEditIntent(blockId); const siblingId = (await api.getMinuteEntry(day, 1133)).blockId;
+  const sibling = await api.getActivityEditIntent(siblingId); const remoteTime = Math.max(Date.parse(intent.updatedAt), Date.parse(sibling.updatedAt)) + 1000;
+  const makeRequest = async () => ({ blockId, previousDate: day, previousStart: 1130, previousEnd: 1134,
+    expectedEntries: await api.getEntriesForBlock(blockId), expectedActivityTitle: 'Source', expectedActivityEditIntent: await api.getActivityEditIntent(blockId),
+    authoritativeRemoteUpdatedAt: remoteTime,
+    expectedFormats: (await api.getSpreadsheetCells(range(1130, 1134))).map((cell) => ({ dateKey: day, minuteIndex: cell.minuteIndex, format: cell.format, version: cell.version })),
+    activityTitle: 'Remote', entries: indexes.map((minuteIndex) => ({ dateKey: day, minuteIndex, text: 'Remote', categoryId: 'study' })) });
+  const stored = { ...plain(sibling), updatedAt: new Date(remoteTime + 1000).toISOString() }; delete stored.revision;
+  await api.putSyncDocument(`category:minuteFormat:activityEdit:${siblingId}`, stored);
+  await assert.rejects(api.replaceProjectedMinutes({ ...await makeRequest(), expectedDerivedActivityEditIntents: [sibling] }), /split activity changed/);
+  const newer = await api.getActivityEditIntent(siblingId);
+  await assert.rejects(api.replaceProjectedMinutes({ ...await makeRequest(), expectedDerivedActivityEditIntents: [newer] }), /split activity changed/);
+  assert.equal(await api.getActivityLocalUpdatedAt(blockId), remoteTime + 1000);
+  await sheet.groupMinuteRange(range(1132, 1133), { title: 'Independent border', categoryId: 'family' });
+  const pruned = await api.getActivityEditIntent(blockId);
+  assert.equal(pruned.updatedAt, intent.updatedAt); assert.equal(pruned.derivedMembers, undefined);
+  await assert.rejects(api.replaceProjectedMinutes({ ...await makeRequest(), authoritativeRemoteUpdatedAt: remoteTime + 10_000,
+    expectedDerivedActivityEditIntents: [await api.getActivityEditIntent(siblingId)] }), /another or newer/);
+  assert.equal((await api.getMinuteEntry(day, 1133)).categoryId, 'family');
+});

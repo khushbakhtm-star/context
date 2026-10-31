@@ -140,6 +140,15 @@ function requireVersion(event: RemoteCalendarEvent) {
   }
 }
 
+function requireActiveEvent(event: RemoteCalendarEvent) {
+  if (event.deleted) {
+    throw new CalendarProviderError(
+      'This calendar event has been deleted. Refresh the calendar before creating a new activity.',
+      410, 'EVENT_DELETED',
+    );
+  }
+}
+
 function requireInvitationConsent(account: ConnectedAccount, event: RemoteCalendarEvent) {
   if (event.isInvitation && !account.consent.editInvitations) {
     throw new CalendarProviderError(
@@ -261,24 +270,39 @@ function googleTime(value: JsonObject | undefined, fallback = '1970-01-01T00:00:
   return fallback;
 }
 
+/** Keep missing mutation time unknown. A canceled Google resource may contain only its ID. */
+function providerTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const parts = /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/i.exec(value);
+  if (!parts) return undefined;
+  const date = new Date(`${parts[1]}T00:00:00.000Z`);
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== parts[1] ||
+      !Number.isFinite(timestamp)) return undefined;
+  return new Date(timestamp).toISOString();
+}
+
 export function normalizeGoogleEvent(raw: JsonObject, calendarId: string): RemoteCalendarEvent {
   const properties = raw.extendedProperties?.private ?? {};
+  const deleted = raw.status === 'cancelled';
   const start = googleTime(raw.start, googleTime(raw.originalStartTime));
   return {
     id: String(raw.id),
     calendarId,
     title: typeof raw.summary === 'string' ? raw.summary : 'Untitled event',
     description: typeof raw.description === 'string' ? raw.description : '',
-    descriptionLog: descriptionLogMetadata(properties.contextDescriptionLog),
+    descriptionLog: deleted ? undefined : descriptionLogMetadata(properties.contextDescriptionLog),
     start,
     end: googleTime(raw.end, start),
     timeZone: raw.start?.timeZone || 'UTC',
     allDay: Boolean(raw.start?.date),
     version: typeof raw.etag === 'string' ? raw.etag : '',
+    createdAt: providerTimestamp(raw.created),
+    updatedAt: providerTimestamp(raw.updated),
     seriesId: typeof raw.recurringEventId === 'string' ? raw.recurringEventId : undefined,
     originalStart: raw.originalStartTime ? googleTime(raw.originalStartTime) : undefined,
     isSeriesMaster: Array.isArray(raw.recurrence) && raw.recurrence.length > 0,
-    deleted: raw.status === 'cancelled',
+    deleted,
     isInvitation: Boolean((raw.attendees?.length ?? 0) > 0 || raw.organizer?.self === false),
     organizer: typeof raw.organizer?.email === 'string' ? raw.organizer.email : undefined,
     selfOrganizer: typeof raw.organizer?.self === 'boolean' ? raw.organizer.self : undefined,
@@ -312,8 +336,8 @@ function googleAdapter(account: ConnectedAccount, metadataReads?: CalendarMetada
   const eventsUrl = (calendarId: string) => `${GOOGLE}/calendars/${encoded(calendarId)}/events`;
   const eventUrl = (calendarId: string, id: string) => `${eventsUrl(calendarId)}/${encoded(id)}`;
   const withDisplayColors = async (events: RemoteCalendarEvent[], calendarId: string) => {
-    const needPalette = events.some((event) => event.googleColorId && !event.googleEventLabelId && !event.displayColor);
-    const needLabels = account.consent.categoryRead && events.some((event) => event.googleEventLabelId && !event.displayColor);
+    const needPalette = events.some((event) => !event.deleted && event.googleColorId && !event.googleEventLabelId && !event.displayColor);
+    const needLabels = account.consent.categoryRead && events.some((event) => !event.deleted && event.googleEventLabelId && !event.displayColor);
     const [palette, labels] = await Promise.allSettled([
       needPalette ? readGoogleMetadata(account, `${GOOGLE}/colors`, metadataReads) : Promise.resolve(null),
       needLabels ? readGoogleMetadata(account, query(`${GOOGLE}/calendars/${encoded(calendarId)}`, { eventLabelVersion: '1' }), metadataReads) : Promise.resolve(null),
@@ -371,8 +395,19 @@ function googleAdapter(account: ConnectedAccount, metadataReads?: CalendarMetada
       const response = await accountFetch(account, query(eventUrl(calendarId, id), { eventLabelVersion: '1' }));
       if (response.status === 404 || response.status === 410) return null;
       const event = normalizeGoogleEvent(await expectJson(response), calendarId);
-      if (event.isSeriesMaster) requireOccurrence(event);
+      if (!event.deleted && event.isSeriesMaster) requireOccurrence(event);
       return (await withDisplayColors([event], calendarId))[0]!;
+    },
+    async findProjectedEvent(calendarId, projectionId) {
+      requireRead(account);
+      const id = googleProjectionEventId(projectionId);
+      const event = await adapter.getEvent(calendarId, id);
+      if (!event) return null;
+      if (event.id !== id || event.projectionId !== projectionId) {
+        throw new CalendarProviderError('The calendar event could not be verified as this Context projection. Refresh and review its calendar link.',
+          409, 'PROJECTION_IDENTITY_MISMATCH');
+      }
+      return event;
     },
     async createEvent(calendarId, write) {
       requireWrite(account);
@@ -397,6 +432,7 @@ function googleAdapter(account: ConnectedAccount, metadataReads?: CalendarMetada
     },
     async updateEvent(event, write) {
       requireWrite(account);
+      requireActiveEvent(event);
       requireOccurrence(event);
       requireVersion(event);
       requireInvitationConsent(account, event);
@@ -415,6 +451,7 @@ function googleAdapter(account: ConnectedAccount, metadataReads?: CalendarMetada
     },
     async deleteEvent(event) {
       requireWrite(account);
+      if (event.deleted) return;
       requireOccurrence(event);
       requireVersion(event);
       requireInvitationConsent(account, event);
@@ -430,12 +467,14 @@ function googleAdapter(account: ConnectedAccount, metadataReads?: CalendarMetada
       const response = await accountFetch(account, query(eventUrl(event.calendarId, event.seriesId), { eventLabelVersion: '1' }));
       if (response.status === 404 || response.status === 410) return null;
       const master = normalizeGoogleEvent(await expectJson(response), event.calendarId);
+      if (master.deleted) return null;
       if (!master.isSeriesMaster) throw new CalendarConflictError('The original recurring series is no longer available.');
       return master;
     },
     async updateSeries(event, write) {
       requireSeriesConsent(account);
       requireSourceOperation(write);
+      requireActiveEvent(event);
       requireOccurrence(event);
       requireInvitationConsent(account, event);
       const master = await adapter.getSeries(event);
@@ -513,7 +552,8 @@ function contextHtmlParts(html: string) {
 }
 
 export function normalizeMicrosoftEvent(raw: JsonObject, calendarId: string): RemoteCalendarEvent {
-  const metadata = graphMetadata(raw);
+  const deleted = Boolean(raw.isCancelled || raw['@removed']);
+  const metadata = deleted ? {} : graphMetadata(raw);
   const description = typeof raw.body?.content === 'string' ? raw.body.content : '';
   const isHtml = raw.body?.contentType?.toLowerCase() === 'html';
   const isOnlineMeeting = Boolean(raw.isOnlineMeeting || raw.onlineMeeting || raw.onlineMeetingUrl);
@@ -533,10 +573,12 @@ export function normalizeMicrosoftEvent(raw: JsonObject, calendarId: string): Re
     timeZone: raw.originalStartTimeZone || raw.start?.timeZone || 'UTC',
     allDay: Boolean(raw.isAllDay),
     version: typeof raw['@odata.etag'] === 'string' ? raw['@odata.etag'] : '',
+    createdAt: providerTimestamp(raw.createdDateTime),
+    updatedAt: providerTimestamp(raw.lastModifiedDateTime),
     seriesId: typeof raw.seriesMasterId === 'string' ? raw.seriesMasterId : undefined,
     originalStart: typeof raw.originalStart === 'string' ? new Date(raw.originalStart).toISOString() : undefined,
     isSeriesMaster: raw.type === 'seriesMaster',
-    deleted: Boolean(raw.isCancelled || raw['@removed']),
+    deleted,
     isOnlineMeeting,
     bodyHtml: isHtml ? description : undefined,
     isInvitation: Boolean(isOnlineMeeting || (raw.attendees?.length ?? 0) > 0 || raw.isOrganizer === false),
@@ -632,7 +674,7 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
     headers.set('Prefer', GRAPH_PREFER);
     return accountFetch(account, url, { ...init, headers });
   }
-  async function collect(url: string) {
+  async function collect(url: string, confirmCollection = false) {
     const items: JsonObject[] = [];
     const seen = new Set<string>();
     let next: string | undefined = url;
@@ -640,10 +682,39 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
       if (seen.has(next)) throw new Error('Microsoft returned a repeated calendar page.');
       seen.add(next);
       const page = await expectJson(await request(next));
+      if (confirmCollection && !Array.isArray(page.value)) {
+        throw new CalendarProviderError('Microsoft did not confirm the calendar projection search. Try synchronizing again.', 502, 'INVALID_PROVIDER_RESPONSE');
+      }
       items.push(...(page.value ?? []));
       next = page['@odata.nextLink'];
     }
     return items;
+  }
+  async function findProjection(calendarId: string, projectionId: string) {
+    requireRead(account);
+    if (!/^[\x20-\x7e]{1,200}$/.test(projectionId)) throw new Error('Invalid Context projection identifier.');
+    const needle = JSON.stringify({ projectionId }).slice(0, -1).replaceAll("'", "''");
+    const existing = await collect(query(eventsUrl(calendarId), {
+      '$filter': `singleValueExtendedProperties/Any(ep:ep/id eq '${META_PROPERTY}' and contains(ep/value,'${needle}'))`,
+      '$expand': META_EXPAND,
+    }), true);
+    const matching: RemoteCalendarEvent[] = [];
+    for (const item of existing) {
+      const event = normalizeMicrosoftEvent(item, calendarId);
+      if (event.deleted) continue;
+      if (!Array.isArray(item.singleValueExtendedProperties) || !item.singleValueExtendedProperties.some((property: JsonObject) => property.id === META_PROPERTY)) {
+        throw new CalendarProviderError('Microsoft did not return the private projection identity. Try synchronizing again.', 409, 'PROJECTION_IDENTITY_MISMATCH');
+      }
+      if (event.projectionId !== projectionId) continue;
+      if (typeof item.id !== 'string' || !item.id) {
+        throw new CalendarProviderError('Microsoft did not return the calendar event identity. Try synchronizing again.', 502, 'INVALID_PROVIDER_RESPONSE');
+      }
+      matching.push(event);
+    }
+    if (matching.length > 1) throw new CalendarConflictError('More than one calendar event has this Context projection. Review the duplicate events before continuing.');
+    const event = matching[0] ?? null;
+    if (event) requireOccurrence(event);
+    return event;
   }
   const adapter: AccountCalendarAdapter = {
     async listCalendars() {
@@ -671,21 +742,15 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
       const response = await request(query(eventUrl(calendarId, id), { '$expand': META_EXPAND }));
       if (response.status === 404 || response.status === 410) return null;
       const event = normalizeMicrosoftEvent(await expectJson(response), calendarId);
-      if (event.isSeriesMaster) requireOccurrence(event);
+      if (!event.deleted && event.isSeriesMaster) requireOccurrence(event);
       return event;
     },
+    findProjectedEvent: findProjection,
     async createEvent(calendarId, write) {
       requireWrite(account);
       requireWriteRange(write);
       // Persisted projection IDs remain identical across phones and across transport retries.
-      const needle = JSON.stringify({ projectionId: write.projectionId }).slice(0, -1).replaceAll("'", "''");
-      const existing = await collect(query(eventsUrl(calendarId), {
-        '$filter': `singleValueExtendedProperties/Any(ep:ep/id eq '${META_PROPERTY}' and contains(ep/value,'${needle}'))`,
-        '$expand': META_EXPAND,
-      }));
-      const recovered = existing
-        .map((item) => normalizeMicrosoftEvent(item, calendarId))
-        .find((item) => !item.deleted && item.projectionId === write.projectionId);
+      const recovered = await findProjection(calendarId, write.projectionId);
       if (recovered) return recovered;
       const response = await request(eventsUrl(calendarId), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -697,6 +762,7 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
     },
     async updateEvent(event, write) {
       requireWrite(account);
+      requireActiveEvent(event);
       requireOccurrence(event);
       requireVersion(event);
       requireInvitationConsent(account, event);
@@ -704,6 +770,7 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
       // Also preflight the current server type/version. If-Match closes the subsequent race.
       const current = await adapter.getEvent(event.calendarId, event.id);
       if (!current || current.version !== event.version) throw new CalendarConflictError();
+      requireActiveEvent(current);
       requireInvitationConsent(account, current);
       const payload = graphWrite(write);
       if (current.isOnlineMeeting || event.isOnlineMeeting) {
@@ -720,6 +787,7 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
     },
     async deleteEvent(event) {
       requireWrite(account);
+      if (event.deleted) return;
       requireOccurrence(event);
       requireVersion(event);
       requireInvitationConsent(account, event);
@@ -741,12 +809,14 @@ function microsoftAdapter(account: ConnectedAccount): AccountCalendarAdapter {
       }));
       if (response.status === 404 || response.status === 410) return null;
       const master = normalizeMicrosoftEvent(await expectJson(response), event.calendarId);
+      if (master.deleted) return null;
       if (!master.isSeriesMaster) throw new CalendarConflictError('The original recurring series is no longer available.');
       return master;
     },
     async updateSeries(event, write) {
       requireSeriesConsent(account);
       requireSourceOperation(write);
+      requireActiveEvent(event);
       requireOccurrence(event);
       requireInvitationConsent(account, event);
       const master = await adapter.getSeries(event);

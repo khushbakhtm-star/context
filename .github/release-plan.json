@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.31",
-  "sourceAndroidVersionCode": 32,
-  "sourceIosBuildNumber": "32",
+  "version": "0.1.32",
+  "sourceAndroidVersionCode": 33,
+  "sourceIosBuildNumber": "33",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context phone 0.1.31/code32. Save closes the text bar and keyboard while keeping the cell selected. The held-cell popup contains a circled bold italic underlined A for formatting, centered action rows, the former event-border Group icon, circular Reset and matching Cut/Copy/Paste artwork. The static Sync circuit has lighter strokes aligned with Undo/Redo. Whole minute notes wrap, shrink and fade with vertical zoom rather than showing clipped single lines. Pinch rendering retains fixed day columns and commits the grid geometry on release. Existing inclusive Through minutes, event identity, fresh source-version/conflict checks, consent, atomic Undo and encrypted-ledger protections remain in force. Watch 0.1.12 is a separate unchanged release. Independent native builds and publisher-certificate checks must pass before availability records change. Physical-phone and live-calendar behavior, stores and official F-Droid inclusion require separate confirmation."
+  "notes": "Prepare Context phone 0.1.32/code33. Full Ungroup retires the linked calendar event while keeping detached minute notes private. Exact calendar deletions clear linked rows and formatting without resurrecting removed events or stale cached plans. Genuine provider modification timestamps and durable Context user-edit intents choose the newest competing change, with calendar ties; unknown mutation times retain review protection, and confirmed exact-event absence is authoritative without inventing a deletion time. Partial groups retain their remaining event borders. Browser user edits transport the same durable intents. Permission, identity, conditional-write, draft and transaction guards remain in force. Watch 0.1.15 and the existing emblem are unchanged. Independent native builds and publisher-certificate checks must pass before availability records change; official store/F-Droid inclusion remains separate."
 }

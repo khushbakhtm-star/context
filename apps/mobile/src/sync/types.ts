@@ -64,6 +64,9 @@ export type RemoteCalendarEvent = {
   timeZone: string;
   allDay: boolean;
   version: string;
+  /** Provider mutation times, never event scheduling times or local observation time. */
+  createdAt?: string;
+  updatedAt?: string;
   seriesId?: string;
   originalStart?: string;
   isSeriesMaster: boolean;
@@ -103,6 +106,9 @@ export interface AccountCalendarAdapter {
   listCalendars(): Promise<AccountCalendar[]>;
   listEvents(calendarId: string, start: string, end: string): Promise<RemoteCalendarEvent[]>;
   getEvent(calendarId: string, eventId: string): Promise<RemoteCalendarEvent | null>;
+  /** Read-only recovery after an event creation response was lost. Null means
+   * the provider confirmed no matching live projection in this exact calendar. */
+  findProjectedEvent?(calendarId: string, projectionId: string): Promise<RemoteCalendarEvent | null>;
   createEvent(calendarId: string, write: CalendarEventWrite): Promise<RemoteCalendarEvent>;
   updateEvent(event: RemoteCalendarEvent, write: CalendarEventWrite): Promise<RemoteCalendarEvent>;
   deleteEvent(event: RemoteCalendarEvent): Promise<void>;
@@ -132,7 +138,17 @@ export type Projection = {
   baseLocalHash: string | null;
   baseColorSelection?: { categoryId: string; color: string };
   state: 'pending' | 'synced' | 'conflict' | 'deleted';
+  /** Local observation fence for stale display caches, never a user/provider
+   * mutation timestamp and never used to resolve competing calendar edits. */
+  retiredAt?: string;
+  /** A newer provider event reclaimed this exact derived split. This is
+   * separate from Context's user-edit clock and survives deletion retries. */
+  retirementAuthority?: { projectionId: string; eventId: string; version: string; updatedAt: string };
+  /** The exact last attempted create, retained until its server identity is
+   * acknowledged so a lost response cannot orphan an event after Ungroup. */
+  pendingCreateWrite?: CalendarEventWrite;
   conflict?: string;
+  conflictAuthority?: 'unknown';
   pendingSourceScope?: 'occurrence' | 'series';
   pendingSourceOperationId?: string;
 };

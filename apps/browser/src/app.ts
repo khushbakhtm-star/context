@@ -7,10 +7,13 @@ import { editCells, getMinute, minuteKey, pastedChanges, undoEdit, type CellChan
 import { flushBrowserText } from './editor';
 import { serializeSpreadsheetCells } from '../shared/utils/spreadsheet-paste';
 import { eventSelectionFingerprint, formatCells, groupSelection, ungroupSelection, resetCellsSelection,
+  contiguousMinuteSpan, cellTransferDestination, cellTransferFingerprint, transferCells,
+  clipboardTransferFingerprint, transferClipboardCells,
   GOOGLE_ACTIVITY_COLORS, type BrowserFormatPatch, type BrowserFill } from './formatting';
 import { minuteCellPresentation } from './cell-presentation';
 import { effectiveTextColor } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
+import { bindMouseSelection, type GridPoint } from './mouse-selection';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const main = element('main'), grid = element('grid'), options = element<HTMLDialogElement>('options');
@@ -29,13 +32,19 @@ let entryBarMode: 'entry' | 'format' | null = null;
 let commandBusy = false;
 let cellHoldTimer: ReturnType<typeof setTimeout> | undefined; let cellHeld = false;
 const entryInput = element<HTMLTextAreaElement>('minute-entry');
-const composerViewport = bindComposerViewport(window, main, [element('entry-bar'), element('format-bar')]);
+const composerViewport = bindComposerViewport(window, main, [element('entry-bar')]);
 let liveFillColors: { color: string; providerColorId: string }[] = [];
 let groupSelectionStamp: string | null = null;
 let groupSelectionRevision: string | null = null;
+let groupCoordinates: GridPoint[] = [];
+let groupRangeConfirmed = true;
 let groupFillOptions: BrowserFill[] = [];
 let viewGeneration = 0; let drag: { day: string; minute: number } | null = null; let rangeEnd: { day: string; minute: number } | null = null;
 let firstRendered = -1;
+let moveDraft: { store: BrowserStore; coords: GridPoint[]; grabbed: GridPoint; origin: GridPoint; fingerprint: string; stamp: string } | null = null;
+let movePreview: GridPoint[] = [];
+type CellClipboard = { store: BrowserStore; coords: GridPoint[]; origin: GridPoint; fingerprint: string; text: string; cut: boolean };
+let cellClipboard: CellClipboard | null = null;
 const settings = { appearance: 'system', clock: '12' };
 function report(error: unknown) { status(error instanceof Error ? error.message : 'The action could not finish. Your saved notes remain available.', true); }
 function selectionCells(): { day: string; minute: number }[] {
@@ -50,11 +59,10 @@ function selectionCells(): { day: string; minute: number }[] {
 function selectionStamp() { return `${selected.day}:${selected.minute}:${rangeEnd?.day ?? ''}:${rangeEnd?.minute ?? ''}`; }
 function isInSelection(date: string, minute: number) { const end = rangeEnd ?? selected; return date >= [selected.day, end.day].sort()[0]! && date <= [selected.day, end.day].sort()[1]! && minute >= Math.min(selected.minute, end.minute) && minute <= Math.max(selected.minute, end.minute); }
 function updateBars() {
-  element('entry-bar').hidden = !store || entryBarMode !== 'entry'; element('format-bar').hidden = !store || entryBarMode !== 'format';
+  element('entry-bar').hidden = !store || entryBarMode !== 'entry'; element('cell-format-menu').hidden = !store || entryBarMode !== 'format';
   document.body.classList.toggle('has-entry-bar', Boolean(store && entryBarMode === 'entry'));
-  document.body.classList.toggle('has-format-bar', Boolean(store && entryBarMode === 'format'));
   composerViewport.refresh();
-  for (const id of ['save-text', 'format-bold', 'format-italic', 'format-underline', 'format-text-color', 'format-fill', 'format-border', 'finish-format']) element<HTMLButtonElement>(id).disabled = commandBusy;
+  for (const id of ['save-text', 'format-bold', 'format-italic', 'format-underline', 'format-text-color', 'format-fill', 'finish-format']) element<HTMLButtonElement>(id).disabled = commandBusy;
   if (!store || entryBarMode !== 'format') return;
   const map = new Map(store.state.documents.map((doc) => [doc.key, doc])); let coords;
   try { coords = selectionCells(); } catch { return; }
@@ -76,7 +84,14 @@ function setCellNote(node: HTMLElement, text: string) {
 }
 function openGroup() {
   if (!store) return;
-  groupSelectionStamp = selectionStamp(); groupSelectionRevision = eventSelectionFingerprint(store.state, selectionCells());
+  const coords = selectionCells(); groupSelectionStamp = selectionStamp();
+  groupCoordinates = coords; groupSelectionRevision = eventSelectionFingerprint(store.state, coords);
+  const first = coords[0]!, last = coords.at(-1)!;
+  const time = (minute: number) => `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+  element<HTMLInputElement>('group-from-date').value = first.day; element<HTMLInputElement>('group-from-time').value = time(first.minute);
+  element<HTMLInputElement>('group-through-date').value = last.day; element<HTMLInputElement>('group-through-time').value = time(last.minute);
+  groupRangeConfirmed = first.day === last.day;
+  element('group-range-error').textContent = groupRangeConfirmed ? '' : 'Choose From and Through for one consecutive activity, including overnight. Through includes the whole minute.';
   const entry = getMinute(store.state, selected.day, selected.minute)?.value;
   const format = formatFromDocument(store.state.documents.find((doc) => doc.key === cellFormatKey(selected.day, selected.minute))?.value);
   element<HTMLInputElement>('group-title').value = cellEventLabel(format, String(entry?.blockId ?? ''))?.title ?? String(entry?.text ?? '').slice(0, 200);
@@ -85,10 +100,29 @@ function openGroup() {
   groupFillOptions.forEach((fill, index) => { const option = document.createElement('option'); option.value = String(index);
     option.textContent = fill.name ?? fill.color; colors.append(option); });
   const current = groupFillOptions.findIndex((fill) => fill.categoryId === entry?.categoryId);
-  colors.value = String(current >= 0 ? current : groupFillOptions.findIndex((fill) => fill.color === '#5A6986'));
+  colors.value = String(current >= 0 ? current : Math.max(0, groupFillOptions.findIndex((fill) => fill.color === '#5A6986')));
   element<HTMLDialogElement>('group-dialog').showModal();
 }
+function readGroupRange() {
+  const point = (prefix: string): GridPoint => {
+    const time = element<HTMLInputElement>(`${prefix}-time`).value;
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('Choose a valid time for both endpoints.');
+    return { day: element<HTMLInputElement>(`${prefix}-date`).value, minute: Number(time.slice(0, 2)) * 60 + Number(time.slice(3)) };
+  };
+  return contiguousMinuteSpan(point('group-from'), point('group-through'));
+}
+function changeGroupRange() {
+  if (!store) return;
+  try { groupCoordinates = readGroupRange(); groupRangeConfirmed = true;
+    groupSelectionRevision = eventSelectionFingerprint(store.state, groupCoordinates); element('group-range-error').textContent = ''; }
+  catch (error) { groupRangeConfirmed = false; element('group-range-error').textContent = error instanceof Error ? error.message : 'Choose a valid activity range.'; }
+}
 function closeCellMenu() { element('cell-menu').hidden = true; }
+function showCellFormatting(x: number, y: number) {
+  if (!store) return; entryBarMode = 'format'; updateBars(); const popup = element('cell-format-menu');
+  popup.style.left = `${Math.max(6, Math.min(x, innerWidth - popup.offsetWidth - 6))}px`;
+  popup.style.top = `${Math.max(6, Math.min(y, innerHeight - popup.offsetHeight - 6))}px`;
+}
 async function cellCommand(work: () => Promise<void>) {
   if (commandBusy) return; commandBusy = true; updateBars();
   try { await work(); closeCellMenu(); }
@@ -107,37 +141,49 @@ async function writeSelectedText(changes: CellChange[], source?: { stamp: string
 async function showCellMenu(x: number, y: number) {
   if (!store || commandBusy) return; const stamp = selectionStamp(); await saveEditor(); if (!store || selectionStamp() !== stamp) return;
   entryBarMode = null; updateBars(); const menu = element('cell-menu'); menu.replaceChildren();
-  const coords = selectionCells(); const textValues = coords.map((point) => String(getMinute(store!.state, point.day, point.minute)?.value?.text ?? ''));
-  const source = { stamp, expected: new Map(coords.map((point) => [minuteKey(point.day, point.minute), getMinute(store!.state, point.day, point.minute)?.revision])) };
+  const active = store; const coords = selectionCells(); const documents = new Map(store.state.documents.map((doc) => [doc.key, doc]));
+  const menuRevision = eventSelectionFingerprint(active.state, coords), origin = coords[0]!;
+  const clipboardRevision = cellTransferFingerprint(active.state, coords, origin);
+  const textValues = coords.map((point) => String(documents.get(minuteKey(point.day, point.minute))?.value?.text ?? ''));
+  const source = { stamp, expected: new Map(coords.map((point) => [minuteKey(point.day, point.minute), documents.get(minuteKey(point.day, point.minute))?.revision])) };
   const copiedText = new Map(coords.map((point, index) => [minuteKey(point.day, point.minute), textValues[index]!]));
   const distinct = [...new Set(textValues.filter((text) => text.length))];
-  const add = (label: string, action: () => Promise<void>) => { const button = document.createElement('button'); button.textContent = label; button.setAttribute('role', 'menuitem'); button.onclick = () => { void cellCommand(action); }; menu.append(button); };
-  const copy = async () => { const first = Math.min(...coords.map((point) => point.minute)), last = Math.max(...coords.map((point) => point.minute)); const days = [...new Set(coords.map((point) => point.day))];
+  const add = (label: string, action: () => Promise<void>) => { const button = document.createElement('button'); button.textContent = label; button.setAttribute('role', 'menuitem'); button.onclick = () => { void cellCommand(action); }; menu.append(button); return button; };
+  const copy = async (cut = false) => { const first = Math.min(...coords.map((point) => point.minute)), last = Math.max(...coords.map((point) => point.minute)); const days = [...new Set(coords.map((point) => point.day))];
     const matrix = Array.from({ length: last - first + 1 }, (_, r) => days.map((date) => copiedText.get(minuteKey(date, first + r)) ?? ''));
-    if (!navigator.clipboard?.writeText) throw new Error('Use the browser’s Copy command or keyboard shortcut.'); await navigator.clipboard.writeText(serializeSpreadsheetCells(matrix)); };
-  add('Cut', async () => { await copy(); await writeSelectedText(coords.map((point) => ({ ...point, text: '' })), source); });
-  add('Copy', copy);
+    if (!navigator.clipboard?.writeText) throw new Error('Use the browser’s Copy command or keyboard shortcut.'); const text = serializeSpreadsheetCells(matrix);
+    await navigator.clipboard.writeText(text);
+    if (store !== active || selectionStamp() !== stamp || cellTransferFingerprint(active.state, coords, origin) !== clipboardRevision) throw new Error('The source cells changed. Copy or Cut them again.');
+    cellClipboard = { store: active, coords: coords.map((point) => ({ ...point })), origin: { ...origin }, fingerprint: clipboardRevision, text, cut }; };
+  add('Cut', () => copy(true));
+  add('Copy', () => copy(false));
   add('Paste', async () => { if (!navigator.clipboard?.readText) throw new Error('Select the destination and use Ctrl+V or⌘V.'); const text = await navigator.clipboard.readText(); if (selectionStamp() !== stamp) throw new Error('The selection changed. Paste again.'); await paste(text); });
   if (distinct.length) add('Clear', () => writeSelectedText(coords.map((point) => ({ ...point, text: '' })), source));
   if (coords.length > 1 && distinct.length === 1) add('AutoFill', () => writeSelectedText(coords.map((point) => ({ ...point, text: distinct[0]! })), source));
   const sameDay = coords.every((point) => point.day === coords[0]!.day);
   const hasGroup = coords.some((point) => {
-    const minute = getMinute(store!.state, point.day, point.minute)?.value;
-    return /^activity_[A-Za-z0-9_-]+$/.test(String(minute?.blockId ?? '')) || Boolean(cellEventLabel(formatFromDocument(store!.state.documents.find((doc) => doc.key === cellFormatKey(point.day, point.minute))?.value), String(minute?.blockId ?? '')));
+    const minute = documents.get(minuteKey(point.day, point.minute))?.value;
+    return /^activity_[A-Za-z0-9_-]+$/.test(String(minute?.blockId ?? '')) || Boolean(cellEventLabel(formatFromDocument(documents.get(cellFormatKey(point.day, point.minute))?.value), String(minute?.blockId ?? '')));
   });
-  if (sameDay) add('Group', async () => { openGroup(); });
-  if (sameDay && hasGroup) add('Ungroup', async () => { await mutateSelection((state, points) => ungroupSelection(state, points)); });
+  add('Group', async () => { openGroup(); });
+  const menuMutation = async (make: Parameters<typeof mutateSelection>[0]) => {
+    if (store !== active || selectionStamp() !== stamp || eventSelectionFingerprint(active.state, coords) !== menuRevision) throw new Error('These cells changed. Select them again before changing their event or formatting.');
+    await mutateSelection(make, coords);
+  };
+  if (sameDay && hasGroup) add('Ungroup', () => menuMutation((state, points) => ungroupSelection(state, points)));
   const resettable = coords.some((point) => {
-    const minute = getMinute(store!.state, point.day, point.minute)?.value;
-    const format = formatFromDocument(store!.state.documents.find((doc) => doc.key === cellFormatKey(point.day, point.minute))?.value);
+    const minute = documents.get(minuteKey(point.day, point.minute))?.value;
+    const format = formatFromDocument(documents.get(cellFormatKey(point.day, point.minute))?.value);
     return Boolean(String(minute?.text ?? '').length || minute && !format.noFill ||
       Object.keys(format).some((key) => key !== 'noFill') || !format.noFill && planForMinute(point.day, point.minute));
   });
-  if (sameDay && resettable) add('Reset cells', async () => { await mutateSelection((state, points) => resetCellsSelection(state, points)); });
+  if (sameDay && resettable) add('Reset cells', () => menuMutation((state, points) => resetCellsSelection(state, points)));
+  const formatButton = add('Format cells', async () => { showCellFormatting(x, y); }); formatButton.setAttribute('aria-label', 'Format cells'); formatButton.title = 'Format cells';
+  const mark = document.createElement('span'); mark.className = 'format-trigger'; mark.textContent = 'A'; mark.setAttribute('aria-hidden', 'true'); formatButton.replaceChildren(mark);
   menu.hidden = false; menu.style.left = `${Math.max(6, Math.min(x, innerWidth - menu.offsetWidth - 6))}px`; menu.style.top = `${Math.max(6, Math.min(y, innerHeight - menu.offsetHeight - 6))}px`;
 }
-async function mutateSelection(make: (state: BrowserStore['state'], coords: { day: string; minute: number }[]) => { state: BrowserStore['state']; undo: UndoEdit }) {
-  if (!store) throw new Error('Unlock your ledger first.'); const active = store; const stamp = selectionStamp(); const coords = selectionCells();
+async function mutateSelection(make: (state: BrowserStore['state'], coords: { day: string; minute: number }[]) => { state: BrowserStore['state']; undo: UndoEdit }, coordinates = selectionCells()) {
+  if (!store) throw new Error('Unlock your ledger first.'); const active = store; const stamp = selectionStamp(); const coords = coordinates;
   const eventRevision = eventSelectionFingerprint(active.state, coords);
   const expected = new Map(coords.flatMap((point) => [minuteKey(point.day, point.minute), cellFormatKey(point.day, point.minute)]).map((key) => [key, active.state.documents.find((doc) => doc.key === key)?.revision]));
   let result: ReturnType<typeof make> | undefined;
@@ -206,10 +252,57 @@ function select(target: { day: string; minute: number }, extend = false) {
   paintSelection(); updateBars();
 }
 function paintSelection() {
-  for (const node of grid.querySelectorAll('.selected')) node.classList.remove('selected');
   const end = rangeEnd ?? selected; const startDay = [selected.day, end.day].sort()[0]!; const endDay = [selected.day, end.day].sort()[1]!;
-  for (const node of grid.querySelectorAll<HTMLElement>('.cell')) if (node.dataset.day! >= startDay && node.dataset.day! <= endDay &&
-      Number(node.dataset.minute) >= Math.min(selected.minute, end.minute) && Number(node.dataset.minute) <= Math.max(selected.minute, end.minute)) node.classList.add('selected');
+  const first = Math.min(selected.minute, end.minute), last = Math.max(selected.minute, end.minute);
+  const preview = new Set(movePreview.map((point) => minuteKey(point.day, point.minute)));
+  for (const node of grid.querySelectorAll<HTMLElement>('.cell')) {
+    const active = node.dataset.day! >= startDay && node.dataset.day! <= endDay && Number(node.dataset.minute) >= first && Number(node.dataset.minute) <= last;
+    node.classList.toggle('selected', active); node.setAttribute('aria-selected', String(active));
+    node.classList.toggle('selection-top', active && Number(node.dataset.minute) === first);
+    node.classList.toggle('selection-bottom', active && Number(node.dataset.minute) === last);
+    node.classList.toggle('selection-left', active && node.dataset.day === startDay);
+    node.classList.toggle('selection-right', active && node.dataset.day === endDay);
+    node.classList.toggle('move-target', preview.has(minuteKey(node.dataset.day!, Number(node.dataset.minute))));
+  }
+}
+function selectedBorder(target: EventTarget | null, x: number, y: number) {
+  if (editor || !(target instanceof Element)) return false;
+  const node = target.closest<HTMLElement>('.cell.selected'); if (!node) return false;
+  const rect = node.getBoundingClientRect(), edge = 5;
+  return node.classList.contains('selection-left') && x - rect.left <= edge || node.classList.contains('selection-right') && rect.right - x <= edge ||
+    node.classList.contains('selection-top') && y - rect.top <= edge || node.classList.contains('selection-bottom') && rect.bottom - y <= edge;
+}
+function clearMovePreview() { moveDraft = null; movePreview = []; grid.classList.remove('moving-cells'); paintSelection(); }
+function previewMove(point: GridPoint) {
+  if (!moveDraft) return;
+  try {
+    const destination = cellTransferDestination(moveDraft.coords, moveDraft.grabbed, point);
+    const first = Date.parse(`${moveDraft.origin.day}T00:00:00Z`) / 60_000 + moveDraft.origin.minute;
+    const shift = Date.parse(`${destination.day}T00:00:00Z`) / 60_000 + destination.minute - first;
+    movePreview = moveDraft.coords.map((source) => {
+      const instant = new Date(Date.parse(`${source.day}T00:00:00Z`) + (source.minute + shift) * 60_000);
+      return { day: instant.toISOString().slice(0, 10), minute: instant.getUTCHours() * 60 + instant.getUTCMinutes() };
+    }); grid.classList.add('moving-cells'); paintSelection();
+  } catch { movePreview = []; paintSelection(); }
+}
+async function completeMove(point: GridPoint, copy: boolean) {
+  const draft = moveDraft; clearMovePreview(); if (!draft) return;
+  await cellCommand(async () => { try {
+    if (store !== draft.store || selectionStamp() !== draft.stamp || cellTransferFingerprint(draft.store.state, draft.coords, draft.origin) !== draft.fingerprint) throw new Error('The selected cells changed. Select them again before moving.');
+    const destination = cellTransferDestination(draft.coords, draft.grabbed, point);
+    const fingerprint = cellTransferFingerprint(draft.store.state, draft.coords, destination, { copy });
+    let result: ReturnType<typeof transferCells> | undefined;
+    await draft.store.update((state) => {
+      if (store !== draft.store || selectionStamp() !== draft.stamp) throw new Error('The selection changed. Try moving again.');
+      result = transferCells(state, draft.coords, destination, { copy, expectedFingerprint: fingerprint }); return result.state;
+    });
+    if (result!.undo.after.length) undo = result!.undo;
+    const target = result!.destinationCoords; selected = { ...target[0]! }; rangeEnd = null;
+    const uniqueDays = new Set(target.map((value) => value.day)), uniqueMinutes = new Set(target.map((value) => value.minute));
+    if (target.length > 1 && uniqueDays.size * uniqueMinutes.size === target.length) rangeEnd = { ...target.at(-1)! };
+    entryBarMode = null; render(); void synchronize(false);
+    } catch (error) { info(copy ? 'Copy cells' : 'Move cells', error instanceof Error ? error.message : 'The cells could not be moved.'); throw error; }
+  });
 }
 function render() {
   updateHeader(); updateBars(); if (!store) { grid.hidden = true; element('welcome').hidden = false; return; }
@@ -247,15 +340,15 @@ function render() {
       if (format.bold) node.style.fontWeight = '700'; if (format.italic) node.style.fontStyle = 'italic'; if (format.underline) node.style.textDecoration = 'underline'; if (format.textColor) node.style.color = format.textColor;
       node.setAttribute('aria-label', `${date}, ${minuteLabel(minute, clock12)}${value ? `, ${String(value.text ?? '')}` : plan ? `, planned: ${plan.title}` : ', empty cell'}`);
       node.addEventListener('pointerdown', (event) => {
-        if (commandBusy || event.button !== 0) return;
+        if (commandBusy || event.button !== 0 || event.pointerType !== 'touch') return;
         cellHeld = false; closeCellMenu(); if (cellHoldTimer) clearTimeout(cellHoldTimer);
         const target = { day: date, minute }; const keepRange = isInSelection(date, minute) && Boolean(rangeEnd);
         if (!keepRange) select(target, event.shiftKey); drag = target;
         cellHoldTimer = setTimeout(() => { cellHeld = true; drag = null; void showCellMenu(event.clientX, event.clientY).catch(report); }, 450);
       });
       node.addEventListener('pointerenter', () => { if (drag && !commandBusy && !cellHeld) { if (cellHoldTimer) clearTimeout(cellHoldTimer); select({ day: date, minute }, true); } });
-      node.addEventListener('click', () => { if (cellHeld || commandBusy || rangeEnd) return; beginEdit(date, minute); });
-      node.addEventListener('contextmenu', (event) => { event.preventDefault(); if (!isInSelection(date, minute)) select({ day: date, minute }); void showCellMenu(event.clientX, event.clientY).catch(report); });
+      node.addEventListener('click', () => { if (cellHeld || commandBusy || rangeEnd || mouseSelection.suppressesClick()) return; beginEdit(date, minute); });
+      node.addEventListener('contextmenu', (event) => { event.preventDefault(); mouseSelection.cancel(false); if (!isInSelection(date, minute)) select({ day: date, minute }); void showCellMenu(event.clientX, event.clientY).catch(report); });
       node.addEventListener('dblclick', () => beginEdit(date, minute, undefined, true)); node.addEventListener('keydown', (event) => cellKey(event, date, minute)); row.append(node);
     }
     grid.append(row);
@@ -263,10 +356,10 @@ function render() {
   const after = document.createElement('div'); after.style.height = `${(1440 - through) * 32}px`; after.setAttribute('aria-hidden', 'true'); grid.append(after);
   main.scrollTop = scrollTop; main.scrollLeft = scrollLeft;
   paintSelection();
-  if (restoreFocus) cell(selected.day, selected.minute)?.focus({ preventScroll: true });
+  if (restoreFocus) { const endpoint = rangeEnd ?? selected; cell(endpoint.day, endpoint.minute)?.focus({ preventScroll: true }); }
   updateBars();
 }
-async function saveEditor(showFormat = false) {
+async function saveEditor() {
   if (!editor || !store) return; const current = editor; const activeStore = store;
   if (current.saving) return current.saving;
   current.saving = (async () => {
@@ -278,12 +371,15 @@ async function saveEditor(showFormat = false) {
         result = editCells(state, [{ day: current.day, minute: current.minute, text }]); return result.state;
       });
       if (result!.undo.after.length) {
-        sessionUndo = { before: sessionUndo?.before ?? result!.undo.before, after: result!.undo.after }; undo = sessionUndo;
+        const activityEditGuards = [...new Map([...(sessionUndo?.activityEditGuards ?? []),
+          ...(result!.undo.activityEditGuards ?? [])].map((guard) => [guard.key, guard])).values()];
+        sessionUndo = { before: sessionUndo?.before ?? result!.undo.before, after: result!.undo.after,
+          ...(activityEditGuards.length ? { activityEditGuards } : {}) }; undo = sessionUndo;
       }
       status('Saved on this browser. Synchronization will send this note to your phone.');
       return getMinute(result!.state, current.day, current.minute)?.revision;
     });
-    if (complete && editor === current) { editor = null; entryBarMode = showFormat ? 'format' : null; entryInput.blur(); render(); }
+    if (complete && editor === current) { editor = null; entryBarMode = null; entryInput.blur(); render(); }
   })().catch((error) => { current.saving = null; if (editor === current) current.input.focus(); throw error; });
   return current.saving;
 }
@@ -307,12 +403,33 @@ function cellKey(event: KeyboardEvent, date: string, minute: number) {
 }
 async function paste(text: string) {
   if (!store) throw new Error('Unlock your ledger before pasting.');
+  const clip = cellClipboard;
+  if (clip && clip.store === store && clip.text === text) {
+    try { await pasteInternalCells(clip); } catch (error) { info('Paste cells', error instanceof Error ? error.message : 'The cells could not be pasted.'); throw error; }
+    return;
+  }
+  const active = store, stamp = selectionStamp();
   const changes = pastedChanges(text, selected.day, selected.minute, rangeEnd ?? undefined); const expected = new Map(changes.map((change) => [minuteKey(change.day, change.minute), getMinute(store!.state, change.day, change.minute)?.revision]));
   let result: ReturnType<typeof editCells> | undefined;
-  await store.update((state) => {
+  await active.update((state) => {
+    if (store !== active || selectionStamp() !== stamp) throw new Error('The paste destination changed. Select it again and retry.');
     for (const change of changes) if (getMinute(state, change.day, change.minute)?.revision !== expected.get(minuteKey(change.day, change.minute))) throw new Error('The paste destination changed. Select it again and retry.');
     result = editCells(state, changes); return result.state;
   }); if (result!.undo.after.length) undo = result!.undo; render(); status(`Saved ${result!.undo.after.length.toLocaleString()} changed cells. ${changes[0]!.day} through ${changes.at(-1)!.day}.`); void synchronize(false);
+}
+async function pasteInternalCells(clip: CellClipboard) {
+  const active = store, stamp = selectionStamp(); if (!active || clip.store !== active || cellClipboard !== clip) throw new Error('Copy or Cut the cells again in this unlocked ledger.');
+  if (cellTransferFingerprint(active.state, clip.coords, clip.origin) !== clip.fingerprint) throw new Error('The source cells changed. Copy or Cut them again.');
+  const destinations = selectionCells(), copy = !clip.cut;
+  const fingerprint = clipboardTransferFingerprint(active.state, clip.coords, destinations, { copy });
+  let result: ReturnType<typeof transferClipboardCells> | undefined;
+  await active.update((state) => {
+    if (store !== active || cellClipboard !== clip || selectionStamp() !== stamp) throw new Error('The clipboard or destination changed. Copy or Cut the cells again.');
+    result = transferClipboardCells(state, clip.coords, destinations, { copy, expectedSourceFingerprint: clip.fingerprint, expectedFingerprint: fingerprint }); return result.state;
+  });
+  if (result!.undo.after.length) undo = result!.undo;
+  if (clip.cut) cellClipboard = null;
+  entryBarMode = null; render(); void synchronize(false);
 }
 async function synchronize(manual = true) {
   if (!store || !passphrase || busy || (editor && !manual)) return; busy = true; updateHeader(); if (manual) status('Synchronizing private ledger…');
@@ -331,6 +448,7 @@ async function refreshPlans() {
   } catch (error) { if (generation === viewGeneration) report(error); }
 }
 async function connect(calendarRead = false) {
+  cellClipboard = null;
   try { const identity = await connection.authorize(calendarRead); updateHeader(); status(`Connected ${identity.email}. Unlock the same ledger as your phone.`);
     if (calendarRead) { calendars = await connection.calendars(); selectedCalendars = new Set(calendars.filter((value) => value.primary).map((value) => value.id)); renderCalendarChoices(); await refreshPlans(); }
   } catch (error) { report(error); }
@@ -341,11 +459,11 @@ function renderCalendarChoices() {
     input.addEventListener('change', () => { input.checked ? selectedCalendars.add(calendar.id) : selectedCalendars.delete(calendar.id); void refreshPlans(); }); label.append(input, document.createTextNode(calendar.title)); list.append(label); }
 }
 function scrollMinute(minute: number) { main.scrollTop = Math.max(0, 50 + minute * 32 - main.clientHeight / 2); render(); }
-function goNow() { day = dateKey(new Date()); selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); }
-async function navigation(action: () => void) { if (commandBusy) return; try { await saveEditor(); entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
+function goNow() { day = dateKey(new Date()); selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); }
+async function navigation(action: () => void) { if (commandBusy) return; mouseSelection.cancel(false); try { await saveEditor(); entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
 element('menu').onclick = () => { element<HTMLDialogElement>('menu-dialog').showModal(); };
 element('settings').onclick = () => { element<HTMLDialogElement>('menu-dialog').close(); updateHeader(); options.showModal(); };
-element('editing-info').onclick = () => { info('Editing', 'Select a cell, then click the bottom text box to type. The cell mirrors your text. The first checkmark saves it and opens formatting; the second closes the formatting bar. Hold cells for Cut, Copy, Paste, Clear or AutoFill. Paste a spreadsheet rectangle with Ctrl+V / ⌘V; rows are minutes and columns are dates. Formulas remain text.'); };
+element('editing-info').onclick = () => { info('Editing', 'Click a cell and type in the bottom box, or double-click to focus it. Drag across cells or Shift-click to extend the selection. Release a range to choose Group, Ungroup or other available actions; right-click reopens them. Group names an event without replacing the words inside its minutes. From and Through can include midnight, up to 24 hours. After saving, drag the outside selection border to move the whole cells; Alt-drag copies them to empty cells. Undo restores the previous local edit. Paste spreadsheet text with Ctrl+V / ⌘V; rows are minutes and columns are dates. Formulas remain text.'); };
 element('passphrase-info').onclick = () => { info('Ledger passphrase', 'Use the same passphrase as your phone. Google access and the passphrase stay in memory. Notes are encrypted in this browser’s local cache and in Google’s private app folder. Lock Context when finished on a shared computer. Browser storage may be cleared or evicted; synchronize to keep a cross-device copy.'); };
 element('calendar-info').onclick = () => { info('Calendar access', 'Calendar access here is read-only. Minute notes synchronize through the private ledger; explicitly authorized phone calendar links can update when the phone synchronizes.'); };
 element('start').onclick = () => { options.showModal(); void connect(); };
@@ -367,12 +485,12 @@ element('apply-dates').onclick = () => { if (!dayInput.value) return; void navig
 element('previous').onclick = () => { void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
 element('next').onclick = () => { void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
 element('undo').onclick = () => { void navigation(() => { if (!store || !undo) return; const target = undo; void store.update((state) => undoEdit(state, target)).then(() => { undo = null; render(); status('Edit undone.'); }).catch(report); }); };
-element('lock').onclick = () => { void navigation(() => { unlockRequest++; store?.lock(); store = null; passphrase = ''; passInput.value = ''; connection.lock(); plans = []; liveFillColors = []; undo = null; entryBarMode = null; busy = false; viewGeneration++; render(); status('Context is locked.'); }); };
+element('lock').onclick = () => { void navigation(() => { unlockRequest++; cellClipboard = null; store?.lock(); store = null; passphrase = ''; passInput.value = ''; connection.lock(); plans = []; liveFillColors = []; undo = null; entryBarMode = null; busy = false; viewGeneration++; render(); status('Context is locked.'); }); };
 element<HTMLFormElement>('unlock-form').onsubmit = (event) => { event.preventDefault(); if (busy || !connection.identity) return;
   const request = ++unlockRequest; busy = true; updateHeader();
   const entered = passInput.value; passInput.value = ''; const subject = connection.identity.subject; status('Unlocking the private ledger…');
   void (async () => { const unlocked = await BrowserStore.unlock(subject, entered); if (request !== unlockRequest || connection.identity?.subject !== subject) { unlocked.lock(); return; }
-    store?.lock(); store = unlocked; passphrase = entered;
+    cellClipboard = null; store?.lock(); store = unlocked; passphrase = entered;
     // A new browser must discover and decrypt the phone ledger before enabling new entries.
     if (!unlocked.hasSavedLedger()) { try { await connection.sync(unlocked, entered); } catch (error) { unlocked.lock(); if (store === unlocked) { store = null; passphrase = ''; } throw error; } }
     if (request !== unlockRequest || store !== unlocked) return;
@@ -394,32 +512,64 @@ element('conflicts').onclick = () => {
 };
 entryInput.addEventListener('input', mirrorDraft);
 entryInput.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); editor = null; entryBarMode = null; entryInput.blur(); render(); }
-  else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void saveEditor(true).catch(report); } });
-element('save-text').onclick = () => { void saveEditor(true).catch(report); };
+  else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void saveEditor().catch(report); } });
+element('save-text').onclick = () => { void saveEditor().catch(report); };
 element('finish-format').onclick = () => { if (!commandBusy) { entryBarMode = null; updateBars(); } };
 for (const key of ['bold', 'italic', 'underline'] as const) element(`format-${key}`).onclick = () => toggleFormat(key);
 element('format-text-color').onclick = () => { if (entryBarMode === 'format' && !commandBusy) element<HTMLDialogElement>('text-color-dialog').showModal(); };
 element('apply-text-color').onclick = () => { const value = element<HTMLInputElement>('text-color').value; void cellCommand(async () => { await formatSelection({ textColor: value }); element<HTMLDialogElement>('text-color-dialog').close(); }); };
 element('format-fill').onclick = showFillOptions;
-element('format-border').onclick = () => {
-  if (!store || entryBarMode !== 'format' || commandBusy) return;
-  try { openGroup(); } catch (error) { report(error); }
-};
 element('reset-fill').onclick = () => { void cellCommand(async () => { await formatSelection({ fill: null }); element<HTMLDialogElement>('fill-dialog').close(); }); };
 element('load-fill-colors').onclick = () => { void cellCommand(async () => { if (!connection.canReadCalendars()) await connect(true); liveFillColors = await connection.activityColors(); showFillOptions(); }); };
 element<HTMLFormElement>('group-form').onsubmit = (event) => { event.preventDefault(); const title = element<HTMLInputElement>('group-title').value; const stamp = groupSelectionStamp;
-  void cellCommand(async () => { if (!stamp || selectionStamp() !== stamp) throw new Error('The selection changed. Choose Group again.');
-    if (!store || eventSelectionFingerprint(store.state, selectionCells()) !== groupSelectionRevision) throw new Error('This activity changed. Choose Group again.');
+  void cellCommand(async () => { try { if (!stamp || selectionStamp() !== stamp) throw new Error('The selection changed. Choose Group again.');
+    if (!groupRangeConfirmed) throw new Error('Choose From and Through for one consecutive activity, up to 24 hours.');
+    const coords = readGroupRange(); if (JSON.stringify(coords) !== JSON.stringify(groupCoordinates)) throw new Error('The time range changed. Choose its endpoints again.');
+    if (!store || eventSelectionFingerprint(store.state, coords) !== groupSelectionRevision) throw new Error('This activity changed. Choose Group again.');
     const fill = groupFillOptions[Number(element<HTMLSelectElement>('group-color').value)]; if (!fill) throw new Error('Choose an activity color.');
-    await mutateSelection((state, coords) => groupSelection(state, coords, { title, fill }, groupFillOptions.map((value) => value.color)));
-    element<HTMLDialogElement>('group-dialog').close(); groupSelectionStamp = null; groupSelectionRevision = null; entryBarMode = 'format'; updateBars(); }); };
+    await mutateSelection((state, points) => groupSelection(state, points, { title, fill }, groupFillOptions.map((value) => value.color)), coords);
+    element<HTMLDialogElement>('group-dialog').close(); groupSelectionStamp = null; groupSelectionRevision = null; entryBarMode = null; updateBars();
+    } catch (error) { element('group-range-error').textContent = error instanceof Error ? error.message : 'The event could not be grouped.'; throw error; } }); };
+for (const id of ['group-from-date', 'group-from-time', 'group-through-date', 'group-through-time']) element(id).addEventListener('input', changeGroupRange);
+const mouseSelection = bindMouseSelection(grid, main, {
+  enabled: () => Boolean(store && !commandBusy && !document.querySelector('dialog[open]')),
+  readSelection: () => ({ anchor: selected, end: rangeEnd }),
+  restore: (selection) => { selected = selection.anchor; rangeEnd = selection.end; paintSelection(); updateBars(); },
+  select: (point, extend) => { if (extend && !editor) entryBarMode = null; select(point, extend); cell(point.day, point.minute)?.focus({ preventScroll: true }); },
+  pointFromTarget: (target) => { const node = target instanceof Element ? target.closest<HTMLElement>('.cell') : null;
+    return node ? { day: node.dataset.day!, minute: Number(node.dataset.minute) } : null; },
+  pointAt: (x, y) => {
+    const rect = grid.getBoundingClientRect(), bounds = main.getBoundingClientRect(), visible = dates(), timeWidth = clock12 ? 78 : 51;
+    const width = rect.width - timeWidth; if (width <= 0 || bounds.bottom <= bounds.top + 50) return null;
+    const column = Math.max(0, Math.min(visible.length - 1, Math.floor((x - rect.left - timeWidth) / width * visible.length)));
+    const viewportY = Math.max(bounds.top + 50, Math.min(bounds.bottom - 1, y));
+    const minute = Math.max(0, Math.min(1439, Math.floor((main.scrollTop + viewportY - bounds.top - 50) / 32)));
+    return { day: visible[column]!, minute };
+  },
+  viewport: () => { const bounds = main.getBoundingClientRect(); return { top: bounds.top + 50, bottom: bounds.bottom, left: bounds.left, right: bounds.right }; },
+  onStart: () => { closeCellMenu(); if (entryBarMode === 'format') { entryBarMode = null; updateBars(); } if (cellHoldTimer) clearTimeout(cellHoldTimer); cellHeld = false; drag = null; },
+  onComplete: (x, y) => { void showCellMenu(x, y).catch(report); },
+  moveFromTarget: selectedBorder,
+  onMoveStart: (grabbed) => {
+    if (!store || editor) return false; const coords = selectionCells(), origin = coords[0]!;
+    moveDraft = { store, coords, grabbed, origin, fingerprint: cellTransferFingerprint(store.state, coords, origin), stamp: selectionStamp() }; return true;
+  },
+  onMove: previewMove,
+  onMoveComplete: (point, copy) => { void completeMove(point, copy).catch(report); },
+  onCancel: clearMovePreview,
+  onAutoScroll: () => { const next = Math.max(0, Math.floor((main.scrollTop - 50) / 32) - 12); if (Math.abs(next - firstRendered) > 5) render(); },
+});
 document.addEventListener('pointerup', () => { drag = null; if (cellHoldTimer) clearTimeout(cellHoldTimer); });
 document.addEventListener('pointercancel', () => { drag = null; if (cellHoldTimer) clearTimeout(cellHoldTimer); });
-document.addEventListener('pointerdown', (event) => { if (event.target instanceof Node && !element('cell-menu').contains(event.target)) closeCellMenu(); });
+document.addEventListener('pointerdown', (event) => {
+  if (!(event.target instanceof Node)) return;
+  if (!element('cell-menu').contains(event.target)) closeCellMenu();
+  if (entryBarMode === 'format' && !element('cell-format-menu').contains(event.target) && !element('cell-menu').contains(event.target) && !document.querySelector('dialog[open]')) { entryBarMode = null; updateBars(); }
+});
 main.addEventListener('scroll', () => { const next = Math.max(0, Math.floor((main.scrollTop - 50) / 32) - 12); if (Math.abs(next - firstRendered) > 5) render(); }, { passive: true });
 document.addEventListener('paste', (event) => { if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || document.querySelector('dialog[open]')) return;
   if (commandBusy) { event.preventDefault(); return; }
-  event.preventDefault(); const text = event.clipboardData?.getData('text/plain'); if (text === undefined) return; void paste(text).catch(report); });
+  event.preventDefault(); const text = event.clipboardData?.getData('text/plain'); if (text === undefined) return; void cellCommand(() => paste(text)); });
 document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); element('undo').click(); } });
 window.addEventListener('beforeunload', (event) => { if (editor?.input.value !== editor?.original || (store && Object.keys(store.state.pending).length)) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { updateHeader(); void synchronize(false); } });
