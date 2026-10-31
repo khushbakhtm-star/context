@@ -3,11 +3,12 @@ import { Pressable, ScrollView, StyleSheet, Text, View, type GestureResponderEve
   type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import type { AppColors } from '../theme';
 import { compactMinuteAt, type CompactBand } from '../utils/calendar-compact';
+import { calendarTimeRailLabel, calendarTimeRailLabelTop, calendarTimeRailLayout } from '../utils/calendar-time-labels';
 
 type Touch = { day: string; minute: number; x: number; y: number; long: boolean };
 export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines, rowHeight, railWidth, dayWidth, colors,
   current, selection, disabled, scrolling, timeLabel, onSelect, onHold, onScroll, onBegin, onEnd, onLayout, onContentSizeChange,
-  refreshControl, hidden = false, backgroundColor = colors.calendarCell, gridLineColor = colors.hairline, fontScale = 1,
+  refreshControl, hidden = false, backgroundColor = colors.calendarCell, gridLineColor = colors.hairline, fontScale = 1, clockFormat = '12h',
 }: { scrollRef: RefObject<ComponentRef<typeof ScrollView> | null>; days: readonly string[]; labels: ReadonlyMap<string, string>;
   bands: ReadonlyMap<string, readonly CompactBand[]>; outlines?: ReadonlyMap<string, readonly CompactBand[]>;
   rowHeight: number; railWidth: number; dayWidth: number; colors: AppColors;
@@ -16,14 +17,14 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
   onSelect: (day: string, minute: number) => void; onHold: (day: string, minute: number) => void;
   onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void; onBegin: () => void; onEnd: () => void;
   onLayout: () => void; onContentSizeChange: (width: number, height: number) => void; refreshControl?: ReactElement; hidden?: boolean;
-  backgroundColor?: string; gridLineColor?: string; fontScale?: number;
+  backgroundColor?: string; gridLineColor?: string; fontScale?: number; clockFormat?: '12h' | '24h';
 }) {
   const touch = useRef<Touch | null>(null);
   const previousGeometry = useRef({ days: days.join('|'), rowHeight });
   if (disabled || previousGeometry.current.days !== days.join('|') || previousGeometry.current.rowHeight !== rowHeight) touch.current = null;
   previousGeometry.current = { days: days.join('|'), rowHeight };
   const height = 1440 * rowHeight;
-  const hourStep = Math.max(1, Math.ceil(22 / (60 * rowHeight)));
+  const rail = calendarTimeRailLayout(rowHeight, fontScale);
   function start(day: string, event: GestureResponderEvent) {
     const minute = compactMinuteAt(event.nativeEvent.locationY, rowHeight);
     touch.current = !disabled && event.nativeEvent.touches.length === 1 && minute !== null
@@ -39,9 +40,10 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
     onScrollEndDrag={onEnd} onMomentumScrollEnd={onEnd} onLayout={onLayout} onContentSizeChange={onContentSizeChange}>
     <View style={{ height, width: railWidth + days.length * dayWidth, flexDirection: 'row' }}>
       <View accessible={false} pointerEvents="none" style={{ width: railWidth, height, backgroundColor }}>
-        {Array.from({ length: 25 }, (_, hour) => hour % hourStep === 0 || hour === 24 ? <Text key={hour} numberOfLines={1} maxFontSizeMultiplier={1.4}
-          style={{ position: 'absolute', right: 2, top: Math.max(0, Math.min(height - 20, hour * 60 * rowHeight - 10)),
-            fontSize: 16, lineHeight: 20, color: colors.muted }}>{hour === 24 ? timeLabel(0) : timeLabel(hour * 60)}</Text> : null)}
+        {Array.from({ length: 25 }, (_, hour) => hour % rail.hourStep === 0 || hour === 24 ? <Text key={hour} numberOfLines={1}
+          ellipsizeMode="clip" allowFontScaling={false}
+          style={{ position: 'absolute', right: 2, top: calendarTimeRailLabelTop(hour * 60, rowHeight, fontScale),
+            fontSize: rail.fontSize, lineHeight: rail.lineHeight, color: colors.muted }}>{calendarTimeRailLabel(hour * 60, rowHeight, clockFormat, fontScale)}</Text> : null)}
       </View>
       {days.map((day) => <Pressable key={day} accessibilityRole="adjustable" accessibilityLabel={`${labels.get(day)}, compact minute overview`}
         accessibilityHint="Tap a time to select it, then use the pencil for exact dates and times. Hold for cell actions."
@@ -64,7 +66,7 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
           {(outlines?.get(day) ?? []).map((outline) => {
             const height = (outline.endMinute - outline.startMinute) * rowHeight;
             return height >= 2 ? <View key={`outline:${outline.startMinute}:${outline.groupId}`} style={{ position: 'absolute', left: 0, right: 0,
-              top: outline.startMinute * rowHeight, height, borderWidth: 1, borderColor: outline.textColor ?? colors.ink, overflow: 'hidden' }}>
+              top: outline.startMinute * rowHeight, height, borderWidth: 1, borderColor: outline.color ?? colors.ink, overflow: 'hidden' }}>
             </View> : null;
           })}
           {Array.from({ length: 25 }, (_, hour) => <View key={hour} style={{ position: 'absolute', left: 0, right: 0,

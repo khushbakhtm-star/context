@@ -24,6 +24,50 @@ function header(props = {}) {
 const syncButton = (h) => h.nodes().find((node) => node.type === 'Pressable' &&
   /^(?:Calendar sync needs attention|Sync attached calendars|Synchronizing calendars)/.test(node.props.accessibilityLabel ?? ''));
 
+function inlineWarning(overrides = {}) {
+  const file = path.join(mobile, 'src/screens/TodayScreen.tsx');
+  const text = fs.readFileSync(file, 'utf8');
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const screen = source.statements.find((node) => node.name?.text === 'TodayScreen');
+  const warning = screen.body.statements.flatMap((node) => node.declarationList?.declarations ?? [])
+    .find((node) => node.name?.text === 'calendarSyncWarning');
+  assert.ok(warning);
+  return vm.runInNewContext(warning.initializer.getText(source), { inlineLinkWarning: true, inlineLinkRunning: false,
+    accountWarning: null, projectionWarning: null, calendarReadWarning: null, ...overrides });
+}
+
+test('active inline-link retry stays progress while a settled retry need shows the Sync warning', () => {
+  const pending = inlineWarning({ inlineLinkRunning: true });
+  assert.equal(pending, null);
+  const active = header({ syncing: true, syncError: pending, syncDetails: () => 'Synchronizing calendar activities.' });
+  assert.equal(active.nodes(syncButton(active)).some((node) => node.props.children === '!'), false);
+  syncButton(active).props.onPressIn(); syncButton(active).props.onLongPress();
+  assert.match(active.alerts[0][1], /Synchronizing calendar activities/);
+  const retry = inlineWarning();
+  assert.match(retry, /saved on this phone.*needs a retry/);
+  const settled = header({ syncing: false, syncError: retry });
+  assert.equal(settled.nodes(syncButton(settled)).some((node) => node.props.children === '!'), true);
+});
+
+test('actual read or projection failures remain visible while other inline-link work is running', () => {
+  for (const warning of ['accountWarning', 'projectionWarning', 'calendarReadWarning']) {
+    const message = `${warning} actual failure`;
+    const error = inlineWarning({ inlineLinkRunning: true, [warning]: message });
+    assert.equal(error, message);
+    const active = header({ syncing: true, syncError: error });
+    assert.equal(active.nodes(syncButton(active)).some((node) => node.props.children === '!'), true);
+  }
+  const file = path.join(mobile, 'App.tsx');
+  const text = fs.readFileSync(file, 'utf8');
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const helpers = source.statements.filter((node) => ['accountSyncContinues', 'accountSyncFailure'].includes(node.name?.text));
+  const context = {};
+  vm.runInNewContext(transpile(helpers.map((node) => node.getText(source)).join('\n')), context);
+  assert.equal(context.accountSyncFailure({ running: true, outcome: 'error', conflicts: 0, message: 'Provider rejected the request' }),
+    'Provider rejected the request');
+  assert.match(context.accountSyncFailure({ running: true, outcome: 'running', conflicts: 1 }), /Review calendar conflicts/);
+});
+
 test('the production Sync control shows one quiet exclamation badge and one tap performs a retry', () => {
   const props = { syncError: 'Phone-calendar events could not refresh.' }; const h = header(props);
   const button = syncButton(h); assert.ok(button);

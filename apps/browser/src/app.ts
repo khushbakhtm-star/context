@@ -10,7 +10,7 @@ import { eventSelectionFingerprint, formatCells, groupSelection, ungroupSelectio
   contiguousMinuteSpan, cellTransferDestination, cellTransferFingerprint, transferCells,
   clipboardTransferFingerprint, transferClipboardCells,
   GOOGLE_ACTIVITY_COLORS, type BrowserFormatPatch, type BrowserFill } from './formatting';
-import { minuteCellPresentation } from './cell-presentation';
+import { minuteCellPresentation, MINUTE_NOTE_STYLE, MINUTE_TIME_STYLE } from './cell-presentation';
 import { effectiveTextColor } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
@@ -320,7 +320,8 @@ function render() {
   const before = document.createElement('div'); before.style.height = `${first * 32}px`; before.setAttribute('aria-hidden', 'true'); grid.append(before);
   for (let minute = first; minute < through; minute++) {
     const row = document.createElement('div'); row.className = `minute-row${visible.includes(today) && minute === minuteNow ? ' current' : ''}`; row.setAttribute('role', 'row'); row.dataset.row = String(minute);
-    const time = document.createElement('div'); time.className = 'time'; time.textContent = minuteLabel(minute, clock12); row.append(time);
+    const time = document.createElement('div'); time.className = 'time'; time.textContent = minuteLabel(minute, clock12);
+    Object.assign(time.style, MINUTE_TIME_STYLE); row.append(time);
     for (const date of visible) {
       const node = document.createElement('div'); node.className = 'cell'; node.tabIndex = 0; node.setAttribute('role', 'gridcell'); node.dataset.day = date; node.dataset.minute = String(minute);
       const doc = docs.get(minuteKey(date, minute)); const value = doc?.value; const format = formatFromDocument(docs.get(cellFormatKey(date, minute))?.value);
@@ -328,11 +329,13 @@ function render() {
       const draft = editor?.day === date && editor.minute === minute ? editor.input.value : undefined;
       const presentation = minuteCellPresentation(docs, date, minute, planForMinute);
       if (presentation.borderId) { node.classList.add('event-cell');
+        node.style.borderColor = presentation.eventColor!;
         if (presentation.first) { node.classList.add('event-first'); const title = document.createElement('span'); title.className = 'cell-event-title';
           title.textContent = `▣ ${presentation.title ?? ''}`; title.setAttribute('aria-label', `Activity: ${presentation.title ?? ''}`); node.append(title); }
         if (presentation.last) node.classList.add('event-last');
       }
-      const note = document.createElement('span'); note.className = 'cell-note'; note.textContent = draft ?? presentation.text; node.append(note);
+      const note = document.createElement('span'); note.className = 'cell-note'; note.textContent = draft ?? presentation.text;
+      Object.assign(note.style, MINUTE_NOTE_STYLE); node.append(note);
       if (presentation.planned) node.classList.add('planned');
       const category = value ? docs.get(`category:${value.categoryId}`)?.value : undefined;
       const background = calendarCellColor({ hasActual: Boolean(value), actualColor: typeof category?.color === 'string' ? category.color : undefined, planColor: plan?.color, noFill: format.noFill });

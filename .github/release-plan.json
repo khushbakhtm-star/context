@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.32",
-  "sourceAndroidVersionCode": 33,
-  "sourceIosBuildNumber": "33",
+  "version": "0.1.33",
+  "sourceAndroidVersionCode": 34,
+  "sourceIosBuildNumber": "34",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context phone 0.1.32/code33. Full Ungroup retires the linked calendar event while keeping detached minute notes private. Exact calendar deletions clear linked rows and formatting without resurrecting removed events or stale cached plans. Genuine provider modification timestamps and durable Context user-edit intents choose the newest competing change, with calendar ties; unknown mutation times retain review protection, and confirmed exact-event absence is authoritative without inventing a deletion time. Partial groups retain their remaining event borders. Browser user edits transport the same durable intents. Permission, identity, conditional-write, draft and transaction guards remain in force. Watch 0.1.15 and the existing emblem are unchanged. Independent native builds and publisher-certificate checks must pass before availability records change; official store/F-Droid inclusion remains separate."
+  "notes": "Prepare Context phone 0.1.33/code34. Minute notes use a common zoom font and visibility threshold with native width-based wrapping and complete-line clipping, preserving all stored text. A bounded live label layer reflows while the committed grid and native background geometry remain stable. Fixed-size time labels become hour-only at dense zoom and share midnight-to-end-of-day alignment. Activity borders use their group fill color. Browser notes wrap at their uniform font size without adding browser zoom. Active link retries remain progress while genuine failures stay visible. Fresh exact-ID projection checks replace repeated full local collection reads, and retired links skip synchronization work without removing their history. Fresh provider reads and existing calendar edit, deletion, timestamp, consent, draft and transaction protections remain in force. Watch 0.1.15 and the emblem are unchanged. Both independent Android builds and publisher-signature checks must pass before availability records change; official store/catalog inclusion remains separate."
 }

@@ -1,4 +1,4 @@
-export type CompactMinute = { color?: string; groupId?: string; title?: string; text?: string; textColor?: string };
+export type CompactMinute = { color?: string; borderColor?: string; groupId?: string; title?: string; text?: string; textColor?: string };
 export type CompactBand = CompactMinute & { startMinute: number; endMinute: number; mixed?: boolean };
 
 const key = (cell: CompactMinute) => JSON.stringify([cell.color ?? '', cell.groupId ?? '', cell.title ?? '', cell.groupId ? '' : cell.text ?? '', cell.textColor ?? '']);
@@ -54,7 +54,8 @@ export function compactCalendarOutlines(cells: readonly CompactMinute[], limit =
     const cell = cells[minute]!; if (!cell.groupId || !cell.title) continue;
     const previous = result.at(-1);
     if (previous?.groupId === cell.groupId && previous.title === cell.title && previous.endMinute === minute) previous.endMinute = minute + 1;
-    else result.push({ groupId: cell.groupId, title: cell.title, textColor: cell.textColor, startMinute: minute, endMinute: minute + 1 });
+    else result.push({ groupId: cell.groupId, title: cell.title, color: cell.borderColor ?? cell.color,
+      textColor: cell.textColor, startMinute: minute, endMinute: minute + 1 });
   }
   return result.sort((a, b) => (b.endMinute - b.startMinute) - (a.endMinute - a.startMinute) || a.startMinute - b.startMinute)
     .slice(0, limit).sort((a, b) => a.startMinute - b.startMinute);

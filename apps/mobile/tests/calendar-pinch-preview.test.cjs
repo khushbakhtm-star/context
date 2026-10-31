@@ -219,3 +219,60 @@ test('a no-fill hole inside a source event never invents a resumed title or leav
   }
   await h.flushAnimationFrames(); await h.flushAnimationFrames(); assert.equal(h.pinchPreview(), undefined);
 });
+
+test('group outlines retain their activity fill color independently of contrasting or manually styled note text', async (t) => {
+  const day = '2026-10-25';
+  const plan = { id: 'source', calendarId: 'native', title: 'Source activity', allDay: false, color: '#0B8043',
+    startDate: new Date(2026, 9, 25, 10), endDate: new Date(2026, 9, 25, 10, 30) };
+  for (const appearanceMode of ['light', 'dark']) {
+    const h = screen(t, { appearanceMode, readNative: async () => ({ plans: [plan], failures: [] }),
+      readFormats: async () => new Map([[600, { textColor: '#FFFFFF' }]]) });
+    await h.start();
+    const outline = h.cell(600).props.children.find(node => Array.isArray(node?.props?.style) &&
+      node.props.style[0]?.borderLeftWidth === 2.5);
+    assert.equal(outline.props.style[1].borderColor, '#0B8043');
+    const warmed = h.warmedPinchPreview().outlines.get(day)[0];
+    assert.equal(warmed.color, '#0B8043'); assert.equal(warmed.textColor, '#FFFFFF');
+  }
+});
+
+test('a narrow Week group title cannot consume the note width or block the text handoff', async (t) => {
+  const h = screen(t, { props: { dayCount: 7 }, readGroups: async (date) => date === '2026-10-25' ? [{ dateKey: date, startMinute: 600, endMinute: 610,
+    blockId: 'activity_week', title: 'Event title', categoryId: 'study' }] : [] });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Minute note', categoryId: 'study', blockId: 'activity_week' });
+  await h.start(); h.measureViewport(); await h.settle();
+  assert.equal(h.fittedTexts(600).length, 1, 'narrow columns prioritize minute words over a competing title badge');
+  assert.ok(h.fittedTexts(600)[0].width >= 25);
+  const old = h.list(), base = old.getItemLayout(null, 0).length, scrolls = [];
+  old.ref.current = { scrollToOffset: value => scrolls.push(value), scrollToIndex() {} };
+  old.onScroll({ nativeEvent: { contentOffset: { y: 600 * base - 250 } } });
+  const responder = await begin(h); responder.onPanResponderMove(gesture(220), {}); await h.flushAnimationFrames();
+  responder.onPanResponderRelease({ nativeEvent: {} }, {}); await h.settle();
+  const target = h.list(), rowHeight = target.getItemLayout(null, 0).length;
+  target.onContentSizeChange(390, rowHeight * 1440);
+  const offset = scrolls.at(-1).offset, first = Math.ceil(offset / rowHeight), last = Math.floor((offset + 500) / rowHeight) - 1;
+  target.onViewableItemsChanged({ viewableItems: Array.from({ length: last - first + 1 }, (_, index) => ({ index: first + index })) });
+  h.fittedTexts(600)[0].onReady();
+  await h.flushAnimationFrames(); await h.flushAnimationFrames(); assert.equal(h.pinchPreview(), undefined);
+});
+
+test('dense normal rows paint fixed-size hour labels outside neighboring cell clipping and track the scroll offset', async (t) => {
+  const nodes = node => !node || typeof node !== 'object' ? [] : [node,
+    ...[node.props?.children].flat(Infinity).flatMap(nodes)];
+  for (const clockFormat of ['12h', '24h']) {
+    const h = screen(t, { props: { zoom: 0.5, clockFormat } }); await h.start();
+    const rail = nodes(h.tree).find(node => node.props.testID === 'calendar-hour-rail'); assert.ok(rail);
+    const labels = nodes(rail).filter(node => node.type === 'Text');
+    assert.equal(labels.length, 25); assert.equal(labels[0].props.children, clockFormat === '24h' ? '0' : '12AM');
+    assert.equal(labels[24].props.children, clockFormat === '24h' ? '24' : '12AM');
+    for (const label of labels) {
+      assert.equal(label.props.style[1].fontSize, 16); assert.equal(label.props.style[1].lineHeight, 21);
+      assert.equal(label.props.ellipsizeMode, 'clip'); assert.equal(label.props.adjustsFontSizeToFit, undefined);
+    }
+    assert.equal(labels[10].props.style[1].top, 600 * 17 - 10.5);
+    const canvas = rail.props.children, renders = h.renderCount();
+    h.list().onScroll({ nativeEvent: { contentOffset: { y: 7000 } } });
+    assert.equal(canvas.props.style.transform[0].translateY.value, -7000);
+    assert.equal(h.renderCount(), renders, 'scrolling the rail sends one scalar without relaying out the grid');
+  }
+});

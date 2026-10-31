@@ -83,8 +83,10 @@ test('high-entropy colors have a strict overview node budget and cannot invent e
 
 test('one compact event outline spans different internal colors and notes without duplicating its title', () => {
   const cells: CompactMinute[] = Array.from({ length: 1440 }, (_, minute) => minute >= 500 && minute < 620
-    ? { groupId: 'activity_one', title: 'One event', color: minute % 2 ? '#0B8043' : '#F4511E', text: `Note ${minute}`, textColor: '#111111' } : {});
-  assert.deepEqual(compactCalendarOutlines(cells), [{ groupId: 'activity_one', title: 'One event', textColor: '#111111', startMinute: 500, endMinute: 620 }]);
+    ? { groupId: 'activity_one', title: 'One event', color: minute % 2 ? '#0B8043' : '#F4511E', borderColor: '#3F51B5',
+      text: `Note ${minute}`, textColor: '#111111' } : {});
+  assert.deepEqual(compactCalendarOutlines(cells), [{ groupId: 'activity_one', title: 'One event', color: '#3F51B5',
+    textColor: '#111111', startMinute: 500, endMinute: 620 }]);
   const many = cells.map((_cell, minute) => ({ groupId: `activity_${minute}`, title: 'Small event' }));
   assert.equal(compactCalendarOutlines(many).length, 96);
 });

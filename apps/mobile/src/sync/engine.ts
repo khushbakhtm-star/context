@@ -120,6 +120,17 @@ export async function listProjections(): Promise<Projection[]> {
     return [document.value as unknown as Projection];
   });
 }
+/** Fresh exact-owner checks must not decode every unrelated event description.
+ * The repository lookup is prefix-based, so verify both the key and payload ID. */
+async function getProjection(id: string): Promise<Projection | null> {
+  const key = `projection:${id}`;
+  const document = (await getSyncDocuments(key)).find((item) => item.key === key);
+  if (!document?.value) return null;
+  if (!projectionIsValid(document.value) || document.value.id !== id) {
+    throw new Error('A synchronized calendar link is invalid.');
+  }
+  return document.value as unknown as Projection;
+}
 async function saveProjection(projection: Projection) {
   await putSyncDocument(`projection:${projection.id}`, sanitized(projection));
 }
@@ -1148,7 +1159,7 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
   if (remote && !remote.deleted && segment) {
     const expected = hashValue(projection); const expectedEntries = hashValue(segment.entries);
     const imported = await timed('calendar-local', () => serializeColorReconciliation(async () => {
-      const current = (await listProjections()).find((item) => item.id === projection.id);
+      const current = await getProjection(projection.id);
       const authorized = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.consent.calendarRead);
       if (!current || hashValue(current) !== expected || !authorized) return false;
       const local = await getProjectionSegment(current);
@@ -1157,7 +1168,7 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
     }));
     if (imported) return;
   }
-  const currentProjection = (await listProjections()).find((item) => item.id === projection.id);
+  const currentProjection = await getProjection(projection.id);
   if (!currentProjection || hashValue(currentProjection) !== hashValue(projection)) return;
   segment = await timed('calendar-local', () => getProjectionSegment(projection));
   write = segment ? buildWrite(projection, segment, true) : null;
@@ -1382,6 +1393,7 @@ async function runSync(cycleId?: number, sharedTrace?: AccountSyncTrace): Promis
       }
     }
     const eligibleProjections = (await listProjections()).filter((projection) => {
+      if (projection.state === 'deleted') return false;
       const account = accounts.find((item) => item.id === projection.accountId);
       return account?.consent.calendarRead && !blockedAccounts.has(account.id);
     });
@@ -1402,7 +1414,7 @@ async function runSync(cycleId?: number, sharedTrace?: AccountSyncTrace): Promis
         message: 'Synchronizing calendar activities…', cycleComplete: false });
       try {
         await trace.measure('calendar-activity', async () => {
-          const current = (await trace.measure('calendar-local', () => listProjections())).find((item) => item.id === projection.id);
+          const current = await trace.measure('calendar-local', () => getProjection(projection.id));
           if (current) await reconcileProjection(account, current, reads);
         });
       }

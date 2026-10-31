@@ -423,12 +423,12 @@ test('full-day compact Week keeps seven fixed columns and pencil opens the touch
   assert.equal(h.details().session.span.startDateKey, h.day); assert.equal(h.details().session.span.startMinute, 1375);
 });
 
-test('an existing link warning reports pending during account work and retry only after that work stops', async (t) => {
+test('an active link retry stays out of the error badge and reports retry only after work stops', async (t) => {
   let update; let warning;
   const h = screen(t, { subscribeLinkWarnings(listener) { update = listener; return () => {}; },
     props: { onSyncWarningChange(value) { warning = value; } } });
   await h.start(); update(true, true); await h.settle();
-  assert.match(warning, /saved on this phone.*linking is pending/); assert.equal(warning.includes('needs a retry'), false);
+  assert.equal(warning, null, 'active linking remains in progress details rather than the error badge');
   update(true, false); await h.settle(); assert.match(warning, /needs a retry/);
   update(false, false); await h.settle(); assert.equal(warning, null);
 });

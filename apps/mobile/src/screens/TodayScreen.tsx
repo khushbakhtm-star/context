@@ -43,7 +43,8 @@ import { calendarGridLayout, calendarGridPaint, calendarZoomOffsets, normalizeCa
   CALENDAR_BASE_ROW_HEIGHT, CALENDAR_COMPACT_ROW_HEIGHT, revealCalendarDay,
   type CalendarZoomAnchor } from '../utils/calendar-layout';
 import { compactCalendarBands, compactCalendarOutlines, type CompactMinute } from '../utils/calendar-compact';
-import { calendarAnnotationKey, calendarCellTextOpacity, type CalendarCellAnnotation } from '../utils/calendar-cell-text';
+import { calendarAnnotationKey, type CalendarCellAnnotation } from '../utils/calendar-cell-text';
+import { calendarTimeRailLabel, calendarTimeRailLabelTop, calendarTimeRailLayout } from '../utils/calendar-time-labels';
 import { minuteDetailsCount } from '../utils/minute-details';
 import { createCalendarPeriodSwipe, type CalendarPeriodDirection } from '../utils/calendar-period-swipe';
 import { getAccounts } from '../sync/accounts';
@@ -167,6 +168,7 @@ export function TodayScreen({
   const listRef = useRef<FlatList<number>>(null);
   const horizontalRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const horizontalOffset = useRef(new Animated.Value(0)).current;
+  const hourRailOffset = useRef(new Animated.Value(0, { useNativeDriver: true })).current;
   const horizontalOffsetRef = useRef(0);
   const verticalOffsetRef = useRef(0);
   const manualFocusScroll = useRef(false);
@@ -351,6 +353,7 @@ export function TodayScreen({
   function scrollMinuteOffset(offset: number, animated = false) {
     const layout = gridLayoutRef.current;
     const value = Math.max(0, Math.min(1440 * layout.rowHeight - bodyWindowRef.current.height, offset));
+    hourRailOffset.setValue(-value);
     setPreviewScrollOffset((previous) => Math.abs(previous - value) >= 1 ? value : previous);
     if (compactViewRef.current) compactListRef.current?.scrollTo({ y: value, animated });
     else listRef.current?.scrollToOffset({ offset: value, animated });
@@ -746,6 +749,7 @@ export function TodayScreen({
   useEffect(() => () => cancelGroupDrag(false), []);
 
   const timeLabel = useCallback((minute: number) => minuteLabel(minute, clockFormat === '12h'), [clockFormat]);
+  const timeRail = calendarTimeRailLayout(gridLayout.rowHeight, fontScale);
 
   function recordTimeLabelWidth(width: number, key: string) {
     if (!mountedRef.current || key !== measurementKeyRef.current || !Number.isFinite(width) || width <= 0) return;
@@ -823,7 +827,7 @@ export function TodayScreen({
     for (const [day, cells] of pinchPreviewDataRef.current?.annotations ?? []) for (const cell of cells) {
       if (cell.minute < first || cell.minute > last) continue;
       if (cell.text) keys.add(calendarAnnotationKey(day, cell));
-      if (cell.title) keys.add(calendarAnnotationKey(day, cell, true));
+      if (cell.title && (!cell.text.trim() || gridLayoutRef.current.dayWidth >= 112)) keys.add(calendarAnnotationKey(day, cell, true));
     }
     return keys;
   }
@@ -1688,7 +1692,7 @@ export function TodayScreen({
     ...days.map((day) => dayData[day]?.colorReadError ? dayData[day]?.colorReadCause : null),
   ].filter(Boolean))].join('\n\n') || 'Calendar events could not refresh. Saved minute notes remain available.' : null;
   const calendarSyncWarning = [...new Set([
-    inlineLinkWarning ? inlineLinkRunning ? 'Your minute is saved on this phone. Calendar linking is pending.' :
+    inlineLinkWarning && !inlineLinkRunning ?
       'Your minute is saved on this phone, but account synchronization needs a retry.' : null,
     accountWarning, projectionWarning, calendarReadWarning,
   ].filter(Boolean))].join('\n\n') || null;
@@ -1727,6 +1731,7 @@ export function TodayScreen({
         planColor: plan?.color, noFill: format.noFill, previewColor });
       const boundedPlan = !format.noFill && plan && sourceBounds.get(plan);
       return { color: color ?? undefined, textColor: format.textColor ?? activityTextColor(color, colors.ink),
+        borderColor: group ? categoryById(group.categoryId).color : plan?.color,
         text: draft?.text ?? entry?.text ?? '',
         ...(group ? { groupId: group.blockId, title: group.title } : boundedPlan && plan ? { groupId: `plan:${plan.calendarId}:${plan.id}`, title: plan.title } : {}) };
     });
@@ -2271,12 +2276,12 @@ export function TodayScreen({
         rowHeight={gridLayout.rowHeight} railWidth={gridLayout.railWidth} dayWidth={gridLayout.dayWidth} colors={colors}
         current={{ day: today, minute: currentMinute }} selection={selectedRange ? { day: selectedRange.dateKey, first: selectedRange.startMinute, last: selectedRange.endMinute } : undefined}
         disabled={pinching || toolBusy || menuCommandPending || spreadsheetState.busy} scrolling={!pinching && !rangeDragging && !groupDragging}
-        timeLabel={timeLabel} onSelect={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current)
+        clockFormat={clockFormat} timeLabel={timeLabel} onSelect={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current)
           void openInlineMinute(day, minute, false, undefined, false, true); }}
         onHold={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current) void openLongPressMenu(day, minute); }}
         onBegin={() => { manualFocusScroll.current = true; }} onEnd={() => { manualFocusScroll.current = false; setPreviewScrollOffset(verticalOffsetRef.current); }}
         onScroll={(event) => {
-          verticalOffsetRef.current = event.nativeEvent.contentOffset.y; positionFillHandle();
+          verticalOffsetRef.current = event.nativeEvent.contentOffset.y; hourRailOffset.setValue(-event.nativeEvent.contentOffset.y); positionFillHandle();
           if (manualFocusScroll.current && !inlineEditingRef.current && !rangeSelecting) {
             const day = visibleDaysRef.current.includes(focusedDayRef.current) ? focusedDayRef.current : visibleDaysRef.current[0]!;
             focusCallbackRef.current?.({ dateKey: day, minuteIndex: Math.max(0, Math.min(1439, Math.floor(event.nativeEvent.contentOffset.y / gridLayoutRef.current.rowHeight))) });
@@ -2305,7 +2310,7 @@ export function TodayScreen({
               Math.floor(event.nativeEvent.contentOffset.y / gridLayoutRef.current.rowHeight))) });
           }
           if (Math.abs(event.nativeEvent.contentOffset.y - verticalOffsetRef.current) > 0.5) cellActivationRef.current = null;
-          verticalOffsetRef.current = event.nativeEvent.contentOffset.y; positionFillHandle();
+          verticalOffsetRef.current = event.nativeEvent.contentOffset.y; hourRailOffset.setValue(-event.nativeEvent.contentOffset.y); positionFillHandle();
         }}
         onContentSizeChange={(_width, height) => { pinchContentReady(height, false); if (pendingZoomAnchorRef.current && !pinchSettlingRef.current) restoreZoomAnchor(); }}
         onLayout={() => {
@@ -2321,8 +2326,11 @@ export function TodayScreen({
           <View style={styles.minuteRow}>
             <Animated.View style={[styles.timeRailWrapper, { transform: [{ translateX: horizontalOffset }] }]}>
             <View style={styles.timeRail}>
-              <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.65} maxFontSizeMultiplier={1.4} style={[styles.minuteTime,
-                minute === currentMinute && days.includes(today) && styles.currentMinuteText]}>{timeLabel(minute)}</Text>
+              <Text numberOfLines={1} ellipsizeMode="clip" allowFontScaling={false} style={[styles.minuteTime,
+                { fontSize: timeRail.fontSize, lineHeight: timeRail.lineHeight, position: 'absolute', right: 1,
+                  top: calendarTimeRailLabelTop(minute, gridLayout.rowHeight, fontScale) - minute * gridLayout.rowHeight },
+                minute === currentMinute && days.includes(today) && styles.currentMinuteText]}>
+                {timeRail.hourOnly ? '' : timeLabel(minute)}</Text>
             </View>
             </Animated.View>
             {days.map((day) => {
@@ -2352,9 +2360,10 @@ export function TodayScreen({
               const defaultTextColor = activityTextColor(solidColor, colors.ink);
               const titleTextColor = activityTextColor(solidColor ?? (format.noFill ? undefined : groupColor), colors.ink);
               const cellVisibleWidth = Math.max(1, Math.min(gridLayout.dayWidth, gridLayout.viewportWidth - gridLayout.railWidth));
-              const badgeWidth = groupStarts ? Math.min(cellVisibleWidth * 0.45, Math.max(28, cellVisibleWidth * 0.4)) : 0;
-              const noteWidth = Math.max(1, cellVisibleWidth - badgeWidth - (groupStarts ? 18 : 12));
               const displayedText = draft?.text ?? entry?.text ?? '';
+              const showTitleBadge = groupStarts && (!displayedText.trim() || cellVisibleWidth >= 112);
+              const badgeWidth = showTitleBadge ? Math.min(cellVisibleWidth * 0.45, Math.max(28, cellVisibleWidth * 0.4)) : 0;
+              const noteWidth = Math.max(1, cellVisibleWidth - badgeWidth - (showTitleBadge ? 18 : 12));
               const isCurrent = day === today && minute === currentMinute;
               return (
                 <Pressable key={day} accessibilityRole="button"
@@ -2404,19 +2413,19 @@ export function TodayScreen({
                   <View pointerEvents="none" style={[styles.cellBackground,
                     solidColor ? { backgroundColor: solidColor } : null]} />
                   {outline ? <View pointerEvents="none" style={[styles.activityOutline,
-                    { borderColor: titleTextColor }, minute === outline.startMinute && styles.activityFirstCell,
+                    { borderColor: groupColor ?? plan?.color ?? solidColor ?? colors.ink }, minute === outline.startMinute && styles.activityFirstCell,
                     minute === outline.endMinute && styles.activityLastCell]} /> : null}
                   {spreadsheetState.clipboard?.mode === 'cut' && spreadsheetState.clipboard.range.dateKey === day &&
                     minute >= spreadsheetState.clipboard.range.startMinute && minute <= spreadsheetState.clipboard.range.endMinute
                     ? <View pointerEvents="none" style={styles.cutCellOutline} /> : null}
-                  <CalendarCellText text={displayedText} width={groupStarts ? noteWidth : Math.max(1, cellVisibleWidth - 12)}
+                  <CalendarCellText text={displayedText} width={noteWidth}
                     height={gridLayout.rowHeight} rowHeight={gridLayout.rowHeight}
                     color={format.textColor ?? defaultTextColor} bold={format.bold} italic={format.italic}
                     underline={format.underline} fontScale={fontScale}
                     onReady={() => pinchLabelReady(calendarAnnotationKey(day, { minute, text: displayedText,
                       color: format.textColor ?? defaultTextColor, titleColor: titleTextColor,
                       bold: format.bold, italic: format.italic, underline: format.underline }), gridLayout.rowHeight)} />
-                  {outline && groupStarts ? <View pointerEvents="none"
+                  {outline && showTitleBadge ? <View pointerEvents="none"
                     style={[styles.activityBadge, { left: noteWidth + 9, width: badgeWidth, borderColor: titleTextColor + '80' }]}>
                     <CalendarCellText text={outline.title} width={Math.max(1, badgeWidth - 5)} height={gridLayout.rowHeight} inset={3}
                       rowHeight={gridLayout.rowHeight} color={titleTextColor} bold fontSize={11} lineHeight={14} fontScale={fontScale}
@@ -2432,8 +2441,23 @@ export function TodayScreen({
           </View>
         )}
       />}
+      {!compactView && timeRail.hourOnly ? <View testID="calendar-hour-rail" pointerEvents="none" accessible={false}
+        accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+        style={[StyleSheet.absoluteFill, { width: gridLayout.railWidth, right: undefined, overflow: 'hidden',
+          opacity: pinchPreview ? 0 : 1 }]}>
+        <Animated.View style={{ position: 'absolute', top: 0, left: 0, width: gridLayout.railWidth,
+          height: 1440 * gridLayout.rowHeight, transform: [{ translateY: hourRailOffset }] }}>
+          {Array.from({ length: 25 }, (_, hour) => {
+            const label = calendarTimeRailLabel(hour * 60, gridLayout.rowHeight, clockFormat, fontScale);
+            return label ? <Text key={hour} numberOfLines={1} ellipsizeMode="clip" allowFontScaling={false}
+              style={[styles.minuteTime, { position: 'absolute', right: 1,
+                top: calendarTimeRailLabelTop(hour * 60, gridLayout.rowHeight, fontScale),
+                fontSize: timeRail.fontSize, lineHeight: timeRail.lineHeight }]}>{label}</Text> : null;
+          })}
+        </Animated.View>
+      </View> : null}
       <CalendarPinchPreview {...(pinchPreview ?? pinchPreviewDataRef.current!)} active={Boolean(pinchPreview)}
-        scaleY={pinchPreviewScale} timeLabel={timeLabel} />
+        scaleY={pinchPreviewScale} timeLabel={timeLabel} clockFormat={clockFormat} />
       {groupDragging && groupDragPreview ? (() => {
         const target = groupDragPreview.target;
         const top = Math.max(0, target.startMinute * gridLayout.rowHeight - verticalOffsetRef.current);
@@ -2643,8 +2667,8 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
       borderRightWidth: 1, borderBottomWidth: 1, borderColor: gridLine },
     timeMeasurement: { position: 'absolute', left: 0, top: 0, width: 4096, opacity: 0 },
     timeMeasurementText: { alignSelf: 'flex-start', fontWeight: '600', fontSize: 16, lineHeight: 21, opacity: 1 },
-    minuteTime: { color: colors.ink, fontSize: 16 * Math.min(1, rowHeight / 34), lineHeight: 21 * Math.min(1, rowHeight / 34),
-      opacity: calendarCellTextOpacity(Math.min(1, rowHeight / 34)), fontWeight: '400', fontVariant: ['tabular-nums'], includeFontPadding: false },
+    minuteTime: { color: colors.ink, fontSize: 16, lineHeight: 21,
+      fontWeight: '400', fontVariant: ['tabular-nums'], includeFontPadding: false },
     currentMinuteText: { color: colors.ink, fontWeight: '600' },
     selectionPrompt: { flexDirection: 'row', alignItems: 'center', paddingLeft: 12, paddingRight: 4,
       borderBottomWidth: 1, borderBottomColor: colors.hairline, backgroundColor: colors.panel },
