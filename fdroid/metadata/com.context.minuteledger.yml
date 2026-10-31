@@ -1,4 +1,4 @@
-# Context 0.1.31/code32 source candidate; new independent verification is pending.
+# Context 0.1.32/code33 source candidate; new independent verification is pending.
 # Optional Google-dependent Wear sources remain excluded from this FOSS build.
 AntiFeatures:
   NonFreeNet:
@@ -31,10 +31,10 @@ RepoType: git
 Repo: "https://github.com/khushbakhtm-star/context"
 
 Builds:
-  - versionName: 0.1.31
-    versionCode: 32
+  - versionName: 0.1.32
+    versionCode: 33
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: af6352ce02a813547d817500c5045f87417aa8da
+    commit: ce89e973a1c4fedc92f914c6ddefaf385a71b708
     subdir: apps/mobile
     sudo:
       - apt-get update
@@ -71,7 +71,7 @@ MaintainerNotes: |-
   The source-input inventory reviews 28 packages, 109 exact removable inputs and
   five source patches, including eight unused Print/Sharing/Clipboard publications or archives.
   All Expo Android modules and core compile from source. Optional Google Wear
-  inputs (39 reviewed files) are removed by exact hashes, including Tile sources,
+  inputs (44 reviewed files) are removed by exact hashes, including Tile sources,
   resources and watch version metadata; Android calendar-color source is retained.
   Only the documented official Linux Hermes compiler scanner exception remains.
   The recipe pins Node 24.19.0, Corepack 0.36.0, pnpm 11.25.0, Gradle 9.4.1,
@@ -82,5 +82,5 @@ MaintainerNotes: |-
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.1.31
-CurrentVersionCode: 32
+CurrentVersion: 0.1.32
+CurrentVersionCode: 33
