@@ -1078,6 +1078,7 @@ function AppController() {
                 </CalendarPeriodSwipe>
               </> : null}
               {tab === 'reports' ? <ReportsScreen dataVersion={dataVersion} initialDate={activeDate}
+                initialSelectedDates={selectedDateKeys}
                 metric={dashboardMetric} onMetricChange={setDashboardMetric} /> : null}
               {tab === 'search' ? (
                 <SearchScreen dataVersion={dataVersion} onOpenResult={openSearchResult} />

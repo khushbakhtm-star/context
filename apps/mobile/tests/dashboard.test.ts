@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ActivityCategory } from '../src/theme';
 import { buildDashboardSummary, dashboardDates, dashboardPercent, dashboardPeriodDates, dashboardTimeBuckets,
-  formatDashboardPercent } from '../src/utils/dashboard';
+  dashboardPieItems, dashboardPieGeometry, dashboardLineGeometry, formatDashboardPercent } from '../src/utils/dashboard';
 
 const monday = '2026-10-19';
 const categories: ActivityCategory[] = [{ id: 'work', name: 'Work', color: '#AB8B00' },
@@ -109,4 +109,62 @@ test('date lists are bounded, normalized and immutable; invalid selections fail'
   assert.throws(() => dashboardDates([]), /valid dates/);
   assert.throws(() => dashboardDates(['2026-02-29']), /valid dates/);
   assert.throws(() => dashboardDates(Array.from({ length: 367 }, () => monday)), /valid dates/);
+});
+
+const chartItems = [
+  { key: 'work', label: 'Work', color: '#AB8B00', minutes: 90, percent: 75 },
+  { key: 'family', label: 'People', color: '#BE6D00', minutes: 30, percent: 25 },
+];
+
+test('pie geometry gives exact whole-percent shares and keeps filtered or unrecorded remainders explicit', () => {
+  const pie = dashboardPieGeometry(chartItems);
+  assert.equal(pie.length, 360);
+  assert.equal(pie.filter((stroke) => stroke.itemKey === 'work').length, 270);
+  assert.equal(pie.filter((stroke) => stroke.itemKey === 'family').length, 90);
+  const filtered = dashboardPieItems([chartItems[0]!], 120);
+  assert.deepEqual(filtered.map((item) => [item.label, item.minutes, item.percent]), [['Work', 90, 75], ['Other recorded activities', 30, 25]]);
+  const unrecorded = dashboardPieItems([{ ...chartItems[0]!, label: 'Unrecorded minutes', minutes: 1000 }], 1440, 'Recorded minutes');
+  assert.equal(unrecorded[1]!.minutes, 440);
+  assert.equal(unrecorded.reduce((sum, item) => sum + item.percent, 0), 100);
+  assert.deepEqual(dashboardPieGeometry([]), []);
+  assert.deepEqual(dashboardPieGeometry([{ ...chartItems[0]!, minutes: 0 }]), []);
+  assert.throws(() => dashboardPieItems(chartItems, 100), /Invalid/);
+  assert.throws(() => dashboardPieGeometry([{ ...chartItems[0]!, minutes: -1 }]), /Invalid/);
+});
+
+test('each radial stroke joins the pie center and its edge with finite, clipped-circle geometry', () => {
+  for (const stroke of dashboardPieGeometry(chartItems)) {
+    const radians = stroke.angle * Math.PI / 180;
+    const midpoint = { x: stroke.left + stroke.width / 2, y: stroke.top + stroke.height / 2 };
+    const inner = { x: midpoint.x - Math.sin(radians) * stroke.height / 2, y: midpoint.y + Math.cos(radians) * stroke.height / 2 };
+    const outer = { x: midpoint.x + Math.sin(radians) * stroke.height / 2, y: midpoint.y - Math.cos(radians) * stroke.height / 2 };
+    assert.ok(Math.hypot(inner.x - 90, inner.y - 90) < 1e-10);
+    assert.ok(Math.abs(Math.hypot(outer.x - 90, outer.y - 90) - 90) < 1e-10);
+    assert.ok(Object.values(stroke).filter((value) => typeof value === 'number').every(Number.isFinite));
+  }
+});
+
+test('line geometry preserves real minute values, date gaps and a valid single-day point without invented hours', () => {
+  const items = [0, 30, 60].map((minutes, index) => ({ ...chartItems[0]!, key: String(index), minutes,
+    dateKey: ['2026-10-19', '2026-10-20', '2026-10-29'][index]! }));
+  const line = dashboardLineGeometry(items);
+  assert.equal(line.maximum, 60); assert.equal(line.points.length, 3); assert.equal(line.segments.length, 2);
+  assert.deepEqual(line.points.map((point) => point.x), [10, 34, 250]);
+  assert.deepEqual(line.points.map((point) => point.y), [140, 75, 10]);
+  const single = dashboardLineGeometry([items[1]!]);
+  assert.deepEqual(single.points.map((point) => [point.x, point.y]), [[130, 10]]); assert.deepEqual(single.segments, []);
+  assert.deepEqual(dashboardLineGeometry(items.map((item) => ({ ...item, minutes: 0 }))).points.map((point) => point.y), [140, 140, 140]);
+  assert.deepEqual(dashboardLineGeometry([]).points, []);
+  assert.throws(() => dashboardLineGeometry([{ ...items[0]!, minutes: Number.NaN }]), /Invalid/);
+});
+
+test('selected-date line buckets contain only requested civil dates and keep each activity denominator', () => {
+  const summary = buildDashboardSummary(['2026-10-19', '2026-10-29'], [
+    { dateKey: '2026-10-19', categoryId: 'work', minutes: 30 },
+    { dateKey: '2026-10-19', categoryId: 'family', minutes: 30 },
+    { dateKey: '2026-10-29', categoryId: 'work', minutes: 120 },
+  ], categories);
+  assert.deepEqual(dashboardTimeBuckets(summary, 'selected', 'recorded', 'work').map((bucket) => [bucket.key, bucket.minutes, bucket.percent]),
+    [['2026-10-19', 30, 50], ['2026-10-29', 120, 100]]);
+  assert.equal(dashboardTimeBuckets(summary, 'selected', 'unrecorded').length, 2);
 });

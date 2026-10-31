@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTextColor } from '../src/text-color';
+import { effectiveTextColor, noteColorOnFill } from '../src/text-color';
+
+test('automatic browser note contrast keeps dark custom hex colors readable and uses black on light fills', () => {
+  for (const color of ['#123456', '#000000', '#333333']) assert.equal(noteColorOnFill(color), '#FFFFFF');
+  for (const color of ['#FFFFFF', '#E6E6E6', '#FFFF00']) assert.equal(noteColorOnFill(color), '#000000');
+});
 
 test('formatting glyph follows the selected cell computed default in dark, light and solid fill contexts', () => {
   assert.equal(effectiveTextColor(undefined, 'rgb(238, 238, 238)'), '#EEEEEE');

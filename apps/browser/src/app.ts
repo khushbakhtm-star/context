@@ -11,7 +11,7 @@ import { eventSelectionFingerprint, formatCells, groupSelection, ungroupSelectio
   clipboardTransferFingerprint, transferClipboardCells,
   GOOGLE_ACTIVITY_COLORS, type BrowserFormatPatch, type BrowserFill } from './formatting';
 import { minuteCellPresentation, MINUTE_NOTE_STYLE, MINUTE_TIME_STYLE } from './cell-presentation';
-import { effectiveTextColor } from './text-color';
+import { effectiveTextColor, noteColorOnFill } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
 import { applySyncGlyphState } from './sync-glyph';
@@ -77,7 +77,8 @@ function updateBars() {
 }
 function mirrorDraft() {
   if (!editor) return; const node = cell(editor.day, editor.minute);
-  if (node) { setCellNote(node, editor.input.value); node.classList.remove('planned'); node.setAttribute('aria-label', `${editor.day}, ${minuteLabel(editor.minute, clock12)}, ${editor.input.value}`); }
+  if (node) { setCellNote(node, editor.input.value); node.dataset.defaultFill = String(node.dataset.defaultFillEligible === 'true' && Boolean(editor.input.value.trim()));
+    node.classList.remove('planned'); node.setAttribute('aria-label', `${editor.day}, ${minuteLabel(editor.minute, clock12)}, ${editor.input.value}`); }
 }
 function setCellNote(node: HTMLElement, text: string) {
   const note = node.querySelector<HTMLElement>('.cell-note');
@@ -341,8 +342,14 @@ function render() {
       Object.assign(note.style, MINUTE_NOTE_STYLE); node.append(note);
       if (presentation.planned) node.classList.add('planned');
       const category = value ? docs.get(`category:${value.categoryId}`)?.value : undefined;
+      const neutralEligible = Boolean(format.noFill || ((!value || value.categoryId === 'unaccounted') &&
+        !category?.customColor && !presentation.borderId && !plan));
+      node.dataset.defaultFillEligible = String(neutralEligible);
+      node.dataset.defaultFill = String(neutralEligible && Boolean((draft ?? presentation.text).trim()));
       const background = calendarCellColor({ hasActual: Boolean(value), actualColor: typeof category?.color === 'string' ? category.color : undefined, planColor: plan?.color, noFill: format.noFill });
-      if (background) { node.style.backgroundColor = background; node.classList.add('recorded'); }
+      if (background && !neutralEligible) {
+        node.style.backgroundColor = background; node.style.color = noteColorOnFill(background); node.classList.add('recorded');
+      }
       if (format.bold) node.style.fontWeight = '700'; if (format.italic) node.style.fontStyle = 'italic'; if (format.underline) node.style.textDecoration = 'underline'; if (format.textColor) node.style.color = format.textColor;
       node.setAttribute('aria-label', `${date}, ${minuteLabel(minute, clock12)}${value ? `, ${String(value.text ?? '')}` : plan ? `, planned: ${plan.title}` : ', empty cell'}`);
       node.addEventListener('pointerdown', (event) => {

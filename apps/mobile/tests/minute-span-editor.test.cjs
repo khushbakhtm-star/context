@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-function component(t, file, name, initial) {
+function component(t, file, name, initial, overrides = {}) {
   let hook = 0, dirty = true, tree, props = initial;
   const slots = [], effects = [], modules = new Map();
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
@@ -21,6 +21,7 @@ function component(t, file, name, initial) {
       effects.push(() => { previous?.cleanup?.(); slots[i].cleanup = work(); }); } },
   };
   const jsx = (type, props) => ({ type, props: props ?? {} });
+  react.useCallback = (work, deps) => react.useMemo(() => work, deps);
   const colors = new Proxy({}, { get: () => '#777777' });
   const native = Object.fromEntries(['View', 'Text', 'TextInput', 'Pressable', 'ScrollView', 'Modal', 'KeyboardAvoidingView', 'Switch'].map((name) => [name, name]));
   Object.assign(native, { Platform: { OS: 'android' }, StyleSheet: { create: (value) => value, hairlineWidth: 0.5, absoluteFill: {} },
@@ -37,7 +38,9 @@ function component(t, file, name, initial) {
         if (request === 'react-native') return native;
         if (request === 'react-native-safe-area-context') return { useSafeAreaInsets: () => ({ top: 24, bottom: 24 }) };
         if (request === '../appearance') return { useAppTheme: () => ({ colors }) };
-        for (const stub of ['InfoButton', 'DateSelectionPopup', 'CellColorPalette', 'CellActionIcon']) if (request === './' + stub) return { [stub]: stub };
+        if (request === '../services/categories' && overrides.categories) return overrides.categories;
+        if (request === '../sync/accounts' && overrides.categories) return { getAccounts: async () => [] };
+        for (const stub of ['InfoButton', 'DateSelectionPopup', 'CellColorPalette', 'CellActionIcon', 'ActivityCategoryPicker']) if (request.endsWith('/' + stub)) return { [stub]: stub };
         if (!request.startsWith('.')) throw Error('Unexpected component dependency: ' + request);
         const resolved = path.resolve(path.dirname(filename), request);
         return load(fs.existsSync(resolved + '.ts') ? resolved + '.ts' : resolved + '.tsx');
@@ -63,6 +66,47 @@ function component(t, file, name, initial) {
 
 const session = (id = 1) => ({ id, span: { startDateKey: '2026-10-28', startMinute: 1350, endDateKey: '2026-10-28', endMinute: 1351 },
   text: '', categoryId: 'rest' });
+
+test('Settings explicitly creates a custom hex category and renames or recolors the same identity without replacing minute references', async (t) => {
+  const values = [], calls = [];
+  const services = { listCategories: async () => values.map((value) => ({ ...value })), listGoogleActivityColors: async () => ['#0B8043'],
+    createCategory: async (input) => { calls.push({ action: 'create', ...input }); const value = { id: 'custom_focus', ...input }; values.push(value); return value; },
+    updateCategory: async (id, changes) => { calls.push({ action: 'update', id, ...changes }); Object.assign(values.find((value) => value.id === id), changes); },
+  };
+  const h = component(t, '../screens/CategoriesScreen.tsx', 'CategoriesScreen', { onDataChanged() {} }, { categories: services });
+  await h.start(); h.action('Category label in Settings').onChangeText('Focus');
+  h.action('Custom category color in Settings').onPress(); await h.settle();
+  h.action('Custom category hex in Settings').onChangeText('#123456'); await h.settle();
+  h.action('Save category in Settings').onPress(); h.action('Save category in Settings').onPress(); await h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ action: 'create', name: 'Focus', color: '#123456', customColor: true }]);
+  h.action('Edit category Focus').onPress(); await h.settle();
+  h.action('Category label in Settings').onChangeText('Deep focus'); await h.settle();
+  h.action('Save category in Settings').onPress(); await h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { action: 'update', id: 'custom_focus', name: 'Deep focus' });
+  h.action('Edit category Deep focus').onPress(); await h.settle();
+  h.action('Custom category hex in Settings').onChangeText('#12'); await h.settle();
+  assert.equal(h.action('Save category in Settings').disabled, true);
+  h.action('Custom category hex in Settings').onChangeText('#ABCDEF'); await h.settle();
+  h.action('Save category in Settings').onPress(); await h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { action: 'update', id: 'custom_focus', name: 'Deep focus', color: '#ABCDEF', customColor: true });
+});
+
+test('the pencil category box chooses a category for the pending range without writing until Save or changing mixed notes', async (t) => {
+  const calls = []; let refreshed = 0;
+  const h = component(t, 'MinuteSpanEditor.tsx', 'MinuteSpanEditor', { session: { ...session(), text: undefined },
+    clockFormat: '24h', colorChoices: [{ id: 'rest', name: 'Rest', color: '#0B8043' }], onClose() {},
+    onCategoriesChanged: async () => { refreshed++; }, onSave: async (span, input) => { calls.push(input); return true; } });
+  await h.start(); h.action('Categorize minute range').onPress(); await h.settle();
+  const picker = h.find('ActivityCategoryPicker'); assert.equal(picker.visible, true);
+  assert.equal(h.action('Save minute range').disabled, true);
+  await picker.onCategoriesChanged(); await picker.onSelect('custom_chosen'); await h.settle();
+  assert.equal(refreshed, 1); assert.deepEqual(calls, []);
+  assert.equal(h.find('ActivityCategoryPicker').visible, false);
+  h.action('Save minute range').onPress(); await h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ categoryId: 'custom_chosen' }]);
+  await h.update({ session: session(2) });
+  assert.throws(() => picker.onSelect('old_choice'), /Open these minute details again/);
+});
 
 test('pencil form explicitly fills overnight text and optionally creates one separately titled event', async (t) => {
   const calls = []; let closes = 0;

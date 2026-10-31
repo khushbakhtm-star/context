@@ -18,6 +18,7 @@ export type CellActionMenuProps = {
   onUngroup?: () => void;
   onEvent?: () => void;
   onEdit?: () => void;
+  onCategorize?: () => void;
   onPaste?: () => void;
   canPaste?: boolean;
   onClose: () => void;
@@ -41,7 +42,7 @@ export type CellActionMenuProps = {
   onTouchActiveChange?: (active: boolean) => void;
 };
 
-export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onReset, onGroup, onUngroup, onEvent, onEdit, onPaste,
+export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onReset, onGroup, onUngroup, onEvent, onEdit, onCategorize, onPaste,
   canPaste = Boolean(onPaste), onClose, error, maxHeight, maxWidth, width, onWidthChange, onHeightChange, onTouchActiveChange,
   format = {}, textColor, fillColor, colorChoices = [], selectedColorId,
   onToggleBold, onToggleItalic, onToggleUnderline, onTextColor, onCellColor, onResetCellColor,
@@ -73,6 +74,7 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onReset, onGro
     ...(onUngroup ? [{ id: 'ungroup' as const, label: 'Ungroup selected minute cells', run: onUngroup }] : []),
     ...(onReset ? [{ id: 'reset' as const, label: 'Reset selected minute cells', run: onReset }] : []),
     ...(onEdit ? [{ id: 'edit' as const, label: 'Edit selected minutes and time range', run: onEdit }] : []),
+    ...(onCategorize ? [{ id: 'categorize' as const, label: 'Categorize selected minute cells', run: onCategorize }] : []),
     ...(onEvent ? [{ id: 'event' as const, label: 'Open source calendar event details', run: onEvent }] : []),
     ...(canFormat ? [{ id: 'format' as const, label: 'Format selected minute cells', run: () => {
       setPalette(null); setFormatOpen((open) => !open);

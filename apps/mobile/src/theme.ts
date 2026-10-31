@@ -82,6 +82,12 @@ export type ActivityCategory = {
   providerOriginalColor?: string;
   /** Google returned this exact color; absent on legacy calendar fallback records. */
   googleColorVerified?: boolean;
+  /** An explicit Context color override; never proof of a provider palette. */
+  customColor?: true;
+  /** Genuine Context color intent; provider import timestamps never advance it. */
+  colorUpdatedAt?: string;
+  /** Internal exact provider provenance, hidden from ordinary category lists. */
+  paletteOnly?: true;
   updatedAt?: string;
 };
 

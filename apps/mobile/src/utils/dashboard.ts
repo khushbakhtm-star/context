@@ -5,6 +5,9 @@ import { parseDateKey } from './time';
 
 export type DashboardPercentageBasis = 'recorded' | 'period';
 export type DashboardMetric = 'recorded' | 'unrecorded';
+export type DashboardViewPeriod = ReportPeriod | 'selected';
+export type DashboardChartType = 'pie' | 'bar' | 'line';
+export type DashboardChartItem = { key: string; label: string; minutes: number; percent: number; color: string; dateKey?: string };
 export type DashboardCategoryMetric = {
   categoryId: string;
   name: string;
@@ -100,7 +103,7 @@ export function formatDashboardPercent(value: number) {
   return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
 }
 
-export function dashboardTimeBuckets(summary: DashboardSummary, period: ReportPeriod, metric: DashboardMetric,
+export function dashboardTimeBuckets(summary: DashboardSummary, period: DashboardViewPeriod, metric: DashboardMetric,
   categoryId: string | null = null) {
   const selectedCategory = new Map(summary.rows.filter((row) => row.categoryId === categoryId)
     .map((row) => [row.dateKey, row.minutes]));
@@ -120,4 +123,54 @@ export function dashboardTimeBuckets(summary: DashboardSummary, period: ReportPe
   return [...buckets.values()].map((bucket) => ({ ...bucket,
     percent: metric === 'unrecorded' ? bucket.minutes * 100 / bucket.periodMinutes :
       bucket.recordedMinutes ? bucket.minutes * 100 / bucket.recordedMinutes : 0 }));
+}
+
+export function dashboardPieItems(items: readonly DashboardChartItem[], totalMinutes: number,
+  remainderLabel = 'Other recorded activities', remainderColor = '#96938C'): DashboardChartItem[] {
+  const sum = items.reduce((total, item) => total + item.minutes, 0);
+  if (!Number.isFinite(totalMinutes) || totalMinutes < 0 || !Number.isFinite(sum) || sum > totalMinutes ||
+      items.some((item) => !Number.isFinite(item.minutes) || item.minutes < 0)) throw new Error('Invalid chart minute totals.');
+  const remainder = totalMinutes - sum;
+  return [...items.map((item) => ({ ...item, percent: totalMinutes ? item.minutes * 100 / totalMinutes : 0 })),
+    ...(remainder ? [{ key: 'dashboard:remainder', label: remainderLabel, minutes: remainder,
+      percent: remainder * 100 / totalMinutes, color: remainderColor }] : [])];
+}
+
+/** Static radial strokes fill a clipped circle without a native drawing dependency. */
+export function dashboardPieGeometry(items: readonly DashboardChartItem[], size = 180, steps = 360) {
+  if (!Number.isFinite(size) || size <= 0 || !Number.isInteger(steps) || steps < 4 || steps > 720 ||
+      items.some((item) => !Number.isFinite(item.minutes) || item.minutes < 0)) throw new Error('Invalid pie geometry.');
+  const total = items.reduce((sum, item) => sum + item.minutes, 0);
+  if (!total) return [];
+  const radius = size / 2, width = Math.PI * size / steps + .6;
+  let boundary = 0;
+  const portions = items.filter((item) => item.minutes > 0).map((item) => ({ item, end: boundary += item.minutes }));
+  let portion = 0;
+  return Array.from({ length: steps }, (_, index) => {
+    const target = (index + .5) * total / steps;
+    while (portion < portions.length - 1 && target >= portions[portion]!.end) portion++;
+    const angle = index * 360 / steps, radians = angle * Math.PI / 180;
+    return { key: `pie:${index}`, color: portions[portion]!.item.color, itemKey: portions[portion]!.item.key, angle,
+      left: radius + Math.sin(radians) * radius / 2 - width / 2,
+      top: radius - Math.cos(radians) * radius / 2 - radius / 2, width, height: radius };
+  });
+}
+
+export function dashboardLineGeometry(items: readonly DashboardChartItem[], width = 260, height = 150, padding = 10) {
+  if (![width, height, padding].every(Number.isFinite) || padding < 0 || width <= padding * 2 || height <= padding * 2 ||
+      items.some((item) => !Number.isFinite(item.minutes) || item.minutes < 0)) throw new Error('Invalid line geometry.');
+  const maximum = Math.max(0, ...items.map((item) => item.minutes));
+  const times = items.map((item) => item.dateKey && isDateKey(item.dateKey) ? Date.parse(`${item.dateKey}T00:00:00Z`) : undefined);
+  const temporal = times.length > 1 && times.every((time, index) => time !== undefined && (index === 0 || time > times[index - 1]!));
+  const span = temporal ? times.at(-1)! - times[0]! : 0;
+  const points = items.map((item, index) => ({ key: item.key,
+    x: items.length === 1 ? width / 2 : padding + (temporal ? (times[index]! - times[0]!) / span : index / (items.length - 1)) * (width - padding * 2),
+    y: height - padding - (maximum ? item.minutes / maximum * (height - padding * 2) : 0) }));
+  const segments = points.slice(1).map((end, index) => {
+    const start = points[index]!, length = Math.hypot(end.x - start.x, end.y - start.y);
+    return { key: `${start.key}:${end.key}`, left: (start.x + end.x) / 2 - length / 2,
+      top: (start.y + end.y) / 2 - .75, width: length, height: 1.5,
+      angle: Math.atan2(end.y - start.y, end.x - start.x) * 180 / Math.PI };
+  });
+  return { maximum, points, segments };
 }

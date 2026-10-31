@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 const jsx = (type, props) => ({ type, props: props ?? {} });
-function render(mode, busy = false) {
+function render(mode, busy = false, colorChoices = [{ id: 'green', name: 'Green', color: '#0D7813' }]) {
   const file = path.join(__dirname, '../src/components/CellColorPalette.tsx');
   const calls = []; const module = { exports: {} };
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: {
@@ -17,12 +17,18 @@ function render(mode, busy = false) {
       if (name === 'react-native') return { View: 'View', Text: 'Text', TextInput: 'TextInput', Pressable: 'Pressable',
         StyleSheet: { create: (value) => value, hairlineWidth: 0.5 } };
       if (name === '../appearance') return { useAppTheme: () => ({ colors: {} }) };
-      if (name === '../utils/google-activity-colors') return { isAllowedGoogleActivityColor: () => true };
+      if (name === '../utils/google-activity-colors') {
+        const utility = { exports: {} };
+        vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, '../src/utils/google-activity-colors.ts'), 'utf8'), {
+          compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+        }).outputText, { module: utility, exports: utility.exports, Date });
+        return utility.exports;
+      }
       throw Error(`Unexpected palette import ${name}`);
     },
   });
   const tree = module.exports.CellColorPalette({ mode, busy, textColor: '#111111', explicitTextColor: '#123456',
-    colorChoices: [{ id: 'green', name: 'Green', color: '#00AA00' }], onClose() {},
+    colorChoices, onClose() {},
     onTextColor: (color) => calls.push(['text', color]), onCellColor: (id) => calls.push(['fill', id]),
     onResetCellColor: () => calls.push(['reset-fill']) });
   function nodes(value, into = []) { if (!value || typeof value !== 'object') return into; into.push(value);
@@ -44,4 +50,15 @@ test('palette Reset remains disabled while a cell command is pending', () => {
     const h = render(mode, true); const reset = h.list.find((node) => /^Reset /.test(node.props.accessibilityLabel ?? ''));
     assert.equal(reset.props.disabled, true); assert.equal(reset.props.accessibilityState.disabled, true);
   }
+});
+
+test('cell fill offers explicit custom categories while excluding unapproved colors and hidden palette proofs', () => {
+  const h = render('cell', false, [
+    { id: 'custom_focus', name: 'Focus', color: '#123456', customColor: true },
+    { id: 'unapproved', name: 'Unapproved', color: '#123457' },
+    { id: 'proof', name: 'Internal proof', color: '#0D7813', paletteOnly: true },
+  ]);
+  const choices = h.list.filter((node) => node.type === 'Pressable' && node.props.accessibilityRole === 'radio');
+  assert.deepEqual(choices.map((node) => node.props.accessibilityLabel), ['Focus, #123456']);
+  choices[0].props.onPress(); assert.deepEqual(h.calls, [['fill', 'custom_focus']]);
 });

@@ -61,6 +61,10 @@ function runtime(t, overrides = {}) {
             if (!events.has(id)) throw Object.assign(new Error('Missing'), { code: 'E_EVENT_NOT_FOUND' });
             return Object.create(events.get(id)); } } } : {};
         if (name === '../../modules/context-calendar-colors') return {
+          getEventPaletteAsync: async (ids) => {
+            await overrides.beforePaletteRead?.();
+            return ids.flatMap((calendarId) => (overrides.palette ?? []).map((color, index) => ({ calendarId, key: String(index), color })));
+          },
           getEventColorsAsync: async () => {
             await overrides.beforeColorRead?.();
             return overrides.noColorRead ? {} : Object.fromEntries([...events.values()].map((event) => [event.id, event.displayColor ?? '#2952A3']));
@@ -145,6 +149,110 @@ async function nativeColorPlans(r, color) {
   for (const event of r.events.values()) event.displayColor = color;
   return { calendar, plans: (await r.calendar.loadPlannedEventsResult(['personal'], day, [calendar])).plans };
 }
+
+test('native Google approximations preserve the exact custom category during source moves and import a genuinely changed color', async (t) => {
+  const r = runtime(t, { palette: ['#2952A3', '#28754E'] }); const segment = await oneMinute(r, 'Exact native note');
+  await r.db.putSyncDocument('category:custom_native', { id: 'custom_native', name: 'Exact native blue', color: '#2952A2', customColor: true });
+  await r.categories.listCategories();
+  await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'custom_native');
+  await r.calendar.syncActualDay(day, 'personal');
+  const event = ordered(r)[0]; assert.equal(event.displayColor, '#2952A3');
+  assert.equal(r.colorCalls.at(-1).color, '#2952A3');
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, 'custom_native');
+  Object.assign(event, { title: 'Source moved custom activity', startDate: new Date(2026, 9, 25, 1, 50).toISOString(),
+    endDate: new Date(2026, 9, 25, 1, 51).toISOString() });
+  const read = await nativeColorPlans(r, '#2952A3'); r.calls.length = 0;
+  await r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar]);
+  assert.equal(await r.db.getMinuteEntry(day, 100), null);
+  assert.equal((await r.db.getMinuteEntry(day, 110)).categoryId, 'custom_native');
+  assert.equal((await r.db.getMinuteEntry(day, 110)).text, 'Exact native note');
+  assert.equal((await r.categories.listCategories()).find((item) => item.id === 'custom_native').name, 'Exact native blue');
+  assert.equal(r.calls.length, 0, 'a source content import never writes the source');
+  const changed = await nativeColorPlans(r, '#28754E');
+  await r.calendar.reconcileLinkedNativeColors(day, changed.plans, [changed.calendar]);
+  const after = await r.db.getMinuteEntry(day, 110); assert.notEqual(after.categoryId, 'custom_native');
+  assert.equal((await r.categories.listCategories()).find((item) => item.id === after.categoryId).color.toUpperCase(), '#28754E');
+  assert.equal((await r.db.getEntriesForBlock(segment.blockId)).length, 1);
+});
+
+test('a custom native color without a verified Google palette never requests an Apple or Outlook approximation', async (t) => {
+  const r = runtime(t); await oneMinute(r, 'Keep local custom fill');
+  await r.db.putSyncDocument('category:custom_unsupported', { id: 'custom_unsupported', name: 'Exact unsupported color', color: '#102030', customColor: true });
+  await r.categories.listCategories();
+  await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'custom_unsupported');
+  await r.calendar.syncActualDay(day, 'personal');
+  assert.equal(r.colorCalls.length, 0); assert.equal(ordered(r).length, 1);
+  assert.match(ordered(r)[0].notes, /Keep local custom fill/); assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, 'custom_unsupported');
+});
+
+test('an existing native color CAS with an interrupted receipt preserves its exact custom color and retries safely', async (t) => {
+  const options = { palette: ['#2952A3', '#28754E'], beforeColorWrite(input) {
+    const event = r.events.get(input.eventId); event.lastModifiedDate = new Date(Date.now() + 1000).toISOString();
+  } };
+  const r = runtime(t, options); await oneMinute(r, 'Native color retry note');
+  await r.db.putSyncDocument('category:custom_native', { id: 'custom_native', name: 'Exact native blue', color: '#2952A2', customColor: true });
+  await r.categories.listCategories(); await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'custom_native');
+  await r.calendar.syncActualDay(day, 'personal'); const event = ordered(r)[0];
+  await r.categories.updateCategory('custom_native', { color: '#28754D', customColor: true });
+  r.sqlite.exec(`CREATE TRIGGER interrupt_color_receipt BEFORE INSERT ON settings
+    WHEN NEW.key LIKE 'calendar.color-receipt.device.%' BEGIN SELECT RAISE(ABORT, 'receipt write interrupted'); END;`);
+  await assert.rejects(r.calendar.syncActualDay(day, 'personal'), /receipt write interrupted/);
+  assert.equal(ordered(r)[0].displayColor, '#28754E');
+  assert.ok(await r.db.getSetting(`calendar.color-intent.device.personal.${event.id}`, null));
+  r.sqlite.exec('DROP TRIGGER interrupt_color_receipt');
+  const uncertainIntent = plain(await r.db.getSetting(`calendar.color-intent.device.personal.${event.id}`, null));
+  const read = await nativeColorPlans(r, '#28754E'); await r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar]);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, 'custom_native');
+  assert.equal((await r.categories.listCategories()).find((item) => item.id === 'custom_native').color, '#28754D');
+  await r.calendar.syncActualDay(day, 'personal');
+  assert.equal(await r.db.getSetting(`calendar.color-intent.device.personal.${event.id}`, null), null);
+  assert.equal((await r.db.getSetting(`calendar.color-receipt.device.personal.${event.id}`, null)).remoteColor, '#28754E');
+  const external = await nativeColorPlans(r, '#2952A3'); await r.calendar.reconcileLinkedNativeColors(day, external.plans, [external.calendar]);
+  assert.notEqual((await r.db.getMinuteEntry(day, 100)).categoryId, 'custom_native', 'an actually different external color remains importable');
+  await r.db.setSetting(`calendar.color-intent.device.personal.${event.id}`, uncertainIntent);
+  const later = await nativeColorPlans(r, '#28754E'); await r.calendar.reconcileLinkedNativeColors(day, later.plans, [later.calendar]);
+  const after = await r.db.getMinuteEntry(day, 100);
+  assert.equal((await r.categories.listCategories()).find((item) => item.id === after.categoryId).color.toUpperCase(), '#28754E',
+    'an old uncertain intent cannot hide a later genuine external color after a different import');
+});
+
+test('a custom override of the native unaccounted category is an explicit color command', async (t) => {
+  const r = runtime(t, { palette: ['#28754E'] }); await oneMinute(r, 'Explicit default color');
+  await r.categories.updateCategory('unaccounted', { color: '#28754D', customColor: true });
+  await r.calendar.syncActualDay(day, 'personal'); const event = ordered(r)[0];
+  assert.equal(event.displayColor, '#28754E'); assert.equal(r.colorCalls.at(-1).color, '#28754E');
+  event.title = 'Changed in source'; const read = await nativeColorPlans(r, '#28754E');
+  await r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar]);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, 'unaccounted');
+  assert.equal((await r.categories.listCategories()).find((item) => item.id === 'unaccounted').color, '#28754D');
+});
+
+test('a newer custom recolor survives an own native echo followed by a failed second color write', async (t) => {
+  const options = { palette: ['#2952A3', '#28754E', '#D4E157'] };
+  const r = runtime(t, options); await oneMinute(r, 'Chained native acknowledgement');
+  await r.db.putSyncDocument('category:custom_chain', { id: 'custom_chain', name: 'Exact changing color', color: '#2952A2', customColor: true });
+  await r.categories.listCategories(); await r.sheet.colorMinuteRange({ dateKey: day, startMinute: 100, endMinute: 100 }, 'custom_chain');
+  await r.calendar.syncActualDay(day, 'personal'); const id = ordered(r)[0].id;
+  await r.categories.updateCategory('custom_chain', { color: '#28754D', customColor: true });
+  let raced = false;
+  options.beforeColorWrite = async () => {
+    if (raced) return; raced = true;
+    await r.categories.updateCategory('custom_chain', { color: '#D4E158', customColor: true });
+    r.events.get(id).lastModifiedDate = new Date(Date.now() + 1000).toISOString();
+  };
+  await assert.rejects(r.calendar.syncActualDay(day, 'personal'), /activity changed/);
+  assert.equal(r.events.get(id).displayColor, '#28754E');
+  options.beforeColorWrite = undefined; options.failColorWrite = true;
+  await assert.rejects(r.calendar.syncActualDay(day, 'personal'), /selected event color is unavailable/);
+  const receipt = await r.db.getSetting(`calendar.color-receipt.device.personal.${id}`, null);
+  assert.equal(receipt.remoteColor, '#28754E', 'the earlier own acknowledgement is sealed before the newer uncertain intent');
+  const read = await nativeColorPlans(r, '#28754E'); await r.calendar.reconcileLinkedNativeColors(day, read.plans, [read.calendar]);
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, 'custom_chain');
+  assert.equal((await r.categories.listCategories()).find((item) => item.id === 'custom_chain').color, '#D4E158');
+  options.failColorWrite = false; await r.calendar.syncActualDay(day, 'personal');
+  assert.equal(r.events.get(id).displayColor, '#D4E157');
+  assert.equal((await r.db.getMinuteEntry(day, 100)).categoryId, 'custom_chain');
+});
 
 test('confirmed exact native deletion clears its owned minute text and formatting and retires the link without resurrection', async (t) => {
   for (const modernBoundReads of [false, true]) {

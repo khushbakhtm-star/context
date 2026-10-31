@@ -96,6 +96,26 @@ test('Group retains the former bottom-bar event border and central minute divide
   assert.equal(border.justifyContent, 'center'); assert.equal(divider.height, 0.5); assert.equal(divider.backgroundColor, '#777777');
 });
 
+test('Categorize is a monochrome paper-filled box with the shared two-pixel outline and theme-matched foregrounds', () => {
+  for (const [color, backgroundColor] of [['#171817', '#F5F2EC'], ['#F0EDF2', '#29292E']]) {
+    const tree = icon('categorize', color, { backgroundColor }), drawing = nodes(tree);
+    assert.equal(tree.props.accessible, false); assert.equal(tree.props.pointerEvents, 'none');
+    const back = styleOf(drawing.find((node) => node.props.testID === 'category-back-paper'));
+    const front = styleOf(drawing.find((node) => node.props.testID === 'category-front-paper'));
+    const box = styleOf(drawing.find((node) => node.props.testID === 'category-box'));
+    const label = styleOf(drawing.find((node) => node.props.testID === 'category-box-label'));
+    for (const outline of [back, front, box]) {
+      assert.equal(outline.borderWidth, 2); assert.equal(outline.borderColor, color);
+      assert.ok(outline.left >= 0 && outline.top >= 0 && outline.left + outline.width <= 26 && outline.top + outline.height <= 26);
+    }
+    assert.ok(back.top < front.top && front.top < box.top, 'two paper tops remain visible above the box');
+    assert.equal(front.backgroundColor, backgroundColor); assert.equal(box.backgroundColor, backgroundColor);
+    assert.equal(label.height, 2); assert.equal(label.backgroundColor, color);
+    assert.ok(label.left > box.left && label.left + label.width < box.left + box.width);
+    assert.equal(drawing.some((node) => node.type === 'Text'), false, 'the icon contains no caption or category initials');
+  }
+});
+
 test('Format is a centered circled bold italic underlined A with the same two-pixel outline', () => {
   const drawing = nodes(icon('format', '#EEEEEE'));
   const circle = styleOf(drawing.find((node) => node.props.testID === 'format-circle'));

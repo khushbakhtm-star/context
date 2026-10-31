@@ -1,24 +1,33 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { useAppTheme } from '../appearance';
 import { InfoButton } from '../components/InfoButton';
+import { DashboardChart } from '../components/DashboardChart';
+import { DateSelectionPopup } from '../components/DateSelectionPopup';
+import { getSetting, setSetting } from '../data/database';
 import { getDashboardSummary, type DashboardMetric, type DashboardSummary } from '../services/dashboard';
 import { formatRecordedDuration, moveReportPeriod, type ReportPeriod } from '../services/reports';
 import type { AppColors } from '../theme';
-import { dashboardPeriodDates, dashboardTimeBuckets, formatDashboardPercent } from '../utils/dashboard';
-import { isDateKey } from '../utils/date-selection';
+import { dashboardPeriodDates, dashboardTimeBuckets, formatDashboardPercent,
+  type DashboardChartItem, type DashboardChartType, type DashboardViewPeriod } from '../utils/dashboard';
+import { isDateKey, normalizeSelectedDates } from '../utils/date-selection';
 import { dateKey, formatCompactDate, parseDateKey } from '../utils/time';
 
-type Props = { dataVersion: number; initialDate?: string; metric?: DashboardMetric; onMetricChange?: (metric: DashboardMetric) => void };
+type Props = { dataVersion: number; initialDate?: string; initialSelectedDates?: readonly string[] | null;
+  metric?: DashboardMetric; onMetricChange?: (metric: DashboardMetric) => void };
 const PERIODS: ReportPeriod[] = ['day', 'week', 'month', 'year'];
 
-export function ReportsScreen({ dataVersion, initialDate, metric: controlledMetric, onMetricChange }: Props) {
+export function ReportsScreen({ dataVersion, initialDate, initialSelectedDates, metric: controlledMetric, onMetricChange }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [anchor, setAnchor] = useState(() => isDateKey(initialDate) ? initialDate : dateKey(new Date()));
   const [dateInput, setDateInput] = useState(anchor);
-  const [period, setPeriod] = useState<ReportPeriod>('day');
+  const [period, setPeriod] = useState<DashboardViewPeriod>(() => normalizeSelectedDates(initialSelectedDates).length ? 'selected' : 'day');
+  const [selectedDates, setSelectedDates] = useState(() => normalizeSelectedDates(initialSelectedDates).slice(0, 28));
+  const [datePopup, setDatePopup] = useState(false);
+  const [chartType, setChartType] = useState<DashboardChartType>('bar');
+  const chartChanged = useRef(false);
   const [localMetric, setLocalMetric] = useState<DashboardMetric>('recorded');
   const metric = controlledMetric ?? localMetric;
   const [categoryId, setCategoryId] = useState<string | null>(null);
@@ -27,10 +36,19 @@ export function ReportsScreen({ dataVersion, initialDate, metric: controlledMetr
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  const dates = useMemo(() => dashboardPeriodDates(anchor, period), [anchor, period]);
+  const dates = useMemo(() => period === 'selected' ? selectedDates.length ? selectedDates : [anchor] :
+    dashboardPeriodDates(anchor, period), [anchor, period, selectedDates]);
   const datesKey = dates.join('|');
-  const previous = moveReportPeriod(anchor, period, -1);
-  const next = moveReportPeriod(anchor, period, 1);
+  const previous = period === 'selected' ? '' : moveReportPeriod(anchor, period, -1);
+  const next = period === 'selected' ? '' : moveReportPeriod(anchor, period, 1);
+
+  useEffect(() => {
+    let active = true;
+    void getSetting<string>('dashboard.chartType', 'bar').then((value) => {
+      if (active && !chartChanged.current && (value === 'pie' || value === 'bar' || value === 'line')) setChartType(value);
+    }).catch(() => { /* Chart preferences do not prevent reading the ledger. */ });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -68,6 +86,16 @@ export function ReportsScreen({ dataVersion, initialDate, metric: controlledMetr
   const rangeDate = (day: string) => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(parseDateKey(day));
   const bucketLabel = (day: string) => period === 'year'
     ? new Intl.DateTimeFormat(undefined, { month: 'long' }).format(parseDateKey(day)) : formatCompactDate(day);
+  const activityItems: DashboardChartItem[] = metric === 'unrecorded' ? [{ key: 'unrecorded', label: 'Unrecorded minutes',
+    minutes: summary?.unrecordedMinutes ?? 0, percent: summary?.periodMinutes ? summary.unrecordedMinutes * 100 / summary.periodMinutes : 0, color: colors.muted }] :
+    breakdown.map((category) => ({ key: category.categoryId, label: category.name, minutes: category.minutes,
+      percent: category.recordedPercent, color: category.color }));
+  const lineItems: DashboardChartItem[] = buckets.map((bucket) => ({ key: bucket.key, label: bucketLabel(bucket.startDate),
+    dateKey: bucket.startDate, minutes: bucket.minutes, percent: bucket.percent, color: selectedCategory?.color ?? colors.muted }));
+  function changeChart(value: DashboardChartType) {
+    chartChanged.current = true; setChartType(value);
+    void setSetting('dashboard.chartType', value).catch(() => { /* Keep the chosen chart for this open Dashboard. */ });
+  }
 
   return <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
     <View style={styles.heading}><Text accessibilityRole="header" style={styles.title}>Activity time</Text>
@@ -81,19 +109,35 @@ export function ReportsScreen({ dataVersion, initialDate, metric: controlledMetr
     <View style={styles.periods}>{PERIODS.map((value) => <Pressable key={value} accessibilityRole="button"
       accessibilityState={{ selected: period === value }} onPress={() => setPeriod(value)} style={[styles.period, period === value && styles.periodSelected]}>
       <Text style={[styles.periodText, period === value && styles.periodTextSelected]}>{value[0]!.toUpperCase() + value.slice(1)}</Text>
-    </Pressable>)}</View>
+    </Pressable>)}<Pressable accessibilityRole="button" accessibilityLabel="Choose Dashboard selected dates"
+      accessibilityState={{ selected: period === 'selected' }} onPress={() => { setPeriod('selected'); setDatePopup(true); }}
+      style={[styles.period, period === 'selected' && styles.periodSelected]}>
+      <Text style={[styles.periodText, period === 'selected' && styles.periodTextSelected]}>Selected dates</Text>
+    </Pressable></View>
     <View style={styles.rangeRow}>
-      <Pressable accessibilityRole="button" accessibilityLabel={`Previous ${period}`} disabled={!isDateKey(previous)}
+      {period !== 'selected' ? <Pressable accessibilityRole="button" accessibilityLabel={`Previous ${period}`} disabled={!isDateKey(previous)}
         onPress={() => move(previous)} style={[styles.arrow, !isDateKey(previous) && styles.disabled]}><Text allowFontScaling={false} style={styles.arrowText}>‹</Text></Pressable>
+        : null}
       <View style={styles.rangeCopy}><Text style={styles.rangeTitle}>{rangeDate(dates[0]!)}</Text>
-        {dates.length > 1 ? <Text style={styles.rangeEnd}>– {rangeDate(dates.at(-1)!)}</Text> : null}</View>
-      <Pressable accessibilityRole="button" accessibilityLabel={`Next ${period}`} disabled={!isDateKey(next)}
+        {dates.length > 1 ? <Text style={styles.rangeEnd}>– {rangeDate(dates.at(-1)!)}</Text> : null}
+        {period === 'selected' ? <Text style={styles.rangeEnd}>{dates.length} selected {dates.length === 1 ? 'date' : 'dates'}</Text> : null}</View>
+      {period !== 'selected' ? <Pressable accessibilityRole="button" accessibilityLabel={`Next ${period}`} disabled={!isDateKey(next)}
         onPress={() => move(next)} style={[styles.arrow, !isDateKey(next) && styles.disabled]}><Text allowFontScaling={false} style={styles.arrowText}>›</Text></Pressable>
+        : null}
     </View>
+    {period === 'selected' ? <Pressable accessibilityRole="button" accessibilityLabel="Edit Dashboard selected dates"
+      onPress={() => setDatePopup(true)} style={styles.dateButton}><Text style={styles.dateButtonText}>Choose dates</Text></Pressable> :
     <View style={styles.dateRow}><TextInput keyboardAppearance={resolvedMode} value={dateInput} onChangeText={setDateInput} maxLength={10}
       accessibilityLabel="Dashboard date YYYY-MM-DD" placeholder="YYYY-MM-DD" autoCapitalize="none" autoCorrect={false}
       placeholderTextColor={colors.muted} style={[styles.input, styles.dateInput]} returnKeyType="go" onSubmitEditing={useDate} />
       <Pressable accessibilityRole="button" onPress={useDate} style={styles.dateButton}><Text style={styles.dateButtonText}>Go to date</Text></Pressable>
+    </View>}
+    <View accessibilityRole="radiogroup" accessibilityLabel="Chart type" style={styles.periods}>
+      {(['pie', 'bar', 'line'] as const).map((value) => <Pressable key={value} accessibilityRole="radio"
+        accessibilityLabel={`${value[0]!.toUpperCase() + value.slice(1)} chart`} accessibilityState={{ checked: chartType === value }}
+        onPress={() => changeChart(value)} style={[styles.period, chartType === value && styles.periodSelected]}>
+        <Text style={[styles.periodText, chartType === value && styles.periodTextSelected]}>{value[0]!.toUpperCase() + value.slice(1)}</Text>
+      </Pressable>)}
     </View>
     {metric === 'recorded' ? <>
       <TextInput keyboardAppearance={resolvedMode} accessibilityLabel="Find an activity" value={search} onChangeText={setSearch}
@@ -121,23 +165,15 @@ export function ReportsScreen({ dataVersion, initialDate, metric: controlledMetr
       <Pressable accessibilityRole="button" onPress={() => setRetry((value) => value + 1)} style={styles.retry}><Text style={styles.retryText}>Retry</Text></Pressable>
     </View> : null}
     {!busy && summary ? <View style={styles.card}>
-      <Text accessibilityRole="header" style={styles.cardTitle}>{metric === 'unrecorded' ? 'Unrecorded time' : 'Activities'}</Text>
+      <Text accessibilityRole="header" style={styles.cardTitle}>{chartType === 'line' ? period === 'year' ? 'By month' : 'By day' :
+        metric === 'unrecorded' ? 'Unrecorded time' : 'Activities'}</Text>
       {metric === 'recorded' && !breakdown.length ? <Text style={styles.empty}>No recorded minutes</Text> : null}
-      {metric === 'recorded' ? breakdown.map((category) => <View key={category.categoryId} style={styles.chartRow}
-        accessible accessibilityLabel={`${category.name}, ${category.minutes} minutes, ${formatRecordedDuration(category.minutes)}, ${formatDashboardPercent(category.recordedPercent)} of recorded time`}>
-        <View style={styles.chartHeading}><Text style={styles.rowLabel}>{category.name}</Text>
-          <Text style={styles.rowValue}>{formatRecordedDuration(category.minutes)} · {formatDashboardPercent(category.recordedPercent)}</Text></View>
-        <View style={styles.barTrack}><View style={[styles.barFill, { width: `${Math.min(100, category.recordedPercent)}%`, backgroundColor: category.color }]} /></View>
-        <Text style={styles.minuteValue}>{category.minutes.toLocaleString()} minutes</Text>
-      </View>) : buckets.map((bucket) => <View key={bucket.key} style={styles.chartRow} accessible
-        accessibilityLabel={`${bucketLabel(bucket.startDate)}, ${bucket.minutes} unrecorded minutes, ${formatDashboardPercent(bucket.percent)} of period`}>
-        <View style={styles.chartHeading}><Text style={styles.rowLabel}>{bucketLabel(bucket.startDate)}</Text>
-          <Text style={styles.rowValue}>{formatRecordedDuration(bucket.minutes)} · {formatDashboardPercent(bucket.percent)}</Text></View>
-        <View style={styles.barTrack}><View style={[styles.barFill, { width: `${Math.min(100, bucket.percent)}%`, backgroundColor: colors.muted }]} /></View>
-        <Text style={styles.minuteValue}>{bucket.minutes.toLocaleString()} minutes</Text>
-      </View>)}
+      <DashboardChart type={chartType} items={chartType === 'line' ? lineItems : activityItems}
+        totalMinutes={metric === 'unrecorded' ? summary.periodMinutes : summary.recordedMinutes}
+        remainderLabel={metric === 'unrecorded' ? 'Recorded minutes' : 'Other recorded activities'}
+        label={chartType === 'line' ? period === 'year' ? 'Minutes by month' : 'Minutes by date' : 'Activity minutes'} />
     </View> : null}
-    {!busy && summary && metric === 'recorded' && categoryId && period !== 'day' ? <View style={styles.card}>
+    {!busy && summary && metric === 'recorded' && categoryId && period !== 'day' && chartType !== 'line' ? <View style={styles.card}>
       <Text accessibilityRole="header" style={styles.cardTitle}>{period === 'year' ? 'By month' : 'By day'}</Text>
       {buckets.map((bucket) => <View key={bucket.key} style={styles.chartRow}>
         <View style={styles.chartHeading}><Text style={styles.rowLabel}>{bucketLabel(bucket.startDate)}</Text>
@@ -146,6 +182,12 @@ export function ReportsScreen({ dataVersion, initialDate, metric: controlledMetr
         <Text style={styles.minuteValue}>{bucket.minutes.toLocaleString()} minutes · {formatDashboardPercent(bucket.percent)} of recorded time</Text>
       </View>)}
     </View> : null}
+    <DateSelectionPopup visible={datePopup} selectedDates={selectedDates.length ? selectedDates : [anchor]} anchorDate={anchor}
+      onClose={() => setDatePopup(false)} onApply={(values) => {
+        const selected = normalizeSelectedDates(values).slice(0, 28);
+        if (selected.length) { setSelectedDates(selected); setPeriod('selected'); setAnchor(selected[0]!); setDateInput(selected[0]!); }
+        setDatePopup(false);
+      }} />
   </ScrollView>;
 }
 

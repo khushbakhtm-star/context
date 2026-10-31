@@ -1,7 +1,7 @@
 import { Platform } from 'react-native';
 import * as Calendar from 'expo-calendar/legacy';
 import * as CalendarRead from 'expo-calendar';
-import { getEventColorsAsync, setEventColorAsync } from '../../modules/context-calendar-colors';
+import { getEventColorsAsync, getEventPaletteAsync, setEventColorAsync } from '../../modules/context-calendar-colors';
 
 import {
   getDayCalendarSegments,
@@ -23,6 +23,7 @@ import {
   recolorExpectedMinuteEntries,
   replaceProjectedMinutes,
   setSetting,
+  snapshotActivityCategories,
 } from '../data/database';
 import { categoryById } from '../theme';
 import type { ActivitySegment, CalendarPreferences, DeviceCalendar, MinuteEntry, PlannedEvent, SyncBinding } from '../types';
@@ -32,6 +33,7 @@ import { activityIntervalAbsoluteEnd, activityIntervalContains, activityInterval
   coalesceNativeActivitySpan, matchActivityTranslation } from '../utils/activity-translation';
 import { planNativeBoundRetime, type NativeBoundRetimePlan } from '../utils/native-bound-retime';
 import { calendarColor, nativeEventColor } from '../utils/calendar-cell-color';
+import { isExplicitCustomActivityCategory, nearestVerifiedGoogleColor } from '../utils/google-activity-colors';
 import { formatCalendarMinuteLog, parseCalendarMinuteLog, parseCompactCalendarMinuteLog } from '../utils/calendar-minute-log';
 import { makeCompactCalendarDescription, isDescriptionLog, type DescriptionLog } from '../utils/calendar-description';
 import { getAccounts } from '../sync/accounts';
@@ -377,19 +379,38 @@ async function bindingReviewFailure(binding: SyncBinding, error: unknown): Promi
 }
 const nativeColorReceiptKey = (calendarId: string, eventId: string) =>
   `calendar.color-receipt.device.${encodeURIComponent(calendarId)}.${encodeURIComponent(eventId)}`;
-type NativeColorIntent = { version: 1; calendarId: string; eventId: string; color: string; expectedColor: string; localColorHash: string };
+type NativeColorIntent = { version: 1; calendarId: string; eventId: string; color: string; expectedColor: string; localColorHash: string;
+  baselineReceiptHash?: string | null };
 const nativeColorIntentKey = (calendarId: string, eventId: string) =>
   `calendar.color-intent.device.${encodeURIComponent(calendarId)}.${encodeURIComponent(eventId)}`;
+function requireValidNativeColorIntent(intent: NativeColorIntent | null, calendarId: string, eventId: string) {
+  if (intent && (intent.version !== 1 || intent.calendarId !== calendarId || intent.eventId !== eventId ||
+      !calendarColor(intent.color) || !calendarColor(intent.expectedColor) || !/^[a-f0-9]{64}$/.test(intent.localColorHash) ||
+      intent.baselineReceiptHash !== undefined && intent.baselineReceiptHash !== null && !/^[a-f0-9]{64}$/.test(intent.baselineReceiptHash))) {
+    throw new Error('The pending calendar color intent needs review before retrying.');
+  }
+}
+function currentNativeColorIntent(intent: NativeColorIntent | null, receipt: NativeColorReceipt | null) {
+  if (!intent) return false;
+  // A subsequently imported external color retires an old uncertain write. Its
+  // receipt must not let a later return to that old shade masquerade as our echo.
+  if (receipt?.remoteColor.toUpperCase() === intent.color.toUpperCase() && receipt.localColorHash === intent.localColorHash) return true;
+  return intent.baselineReceiptHash !== undefined
+    ? intent.baselineReceiptHash === (receipt ? hashValue(receipt) : null)
+    : !receipt || receipt.remoteColor.toUpperCase() === intent.expectedColor.toUpperCase();
+}
 
 async function applyDesiredNativeColor(calendarId: string, eventId: string, segment: ActivitySegment,
   canContinue: () => boolean, created = false) {
   requireNativeSegmentShape(segment);
   // Reset/no-fill and unclassified notes do not request a source event color.
-  if (segment.categoryId === 'unaccounted') return;
-  const color = calendarColor(categoryById(segment.categoryId).color)?.toUpperCase();
-  if (!color) throw new Error('The selected activity color is unavailable. Choose a calendar event color.');
+  const selectedCategory = categoryById(segment.categoryId);
+  if (segment.categoryId === 'unaccounted' && !isExplicitCustomActivityCategory(selectedCategory)) return;
+  const selectedColor = calendarColor(selectedCategory.color)?.toUpperCase();
+  if (!selectedColor) throw new Error('The selected activity color is unavailable. Choose a calendar event color.');
+  let color = selectedColor;
   const key = nativeColorReceiptKey(calendarId, eventId);
-  const receipt = await getSetting<NativeColorReceipt | null>(key, null);
+  let receipt = await getSetting<NativeColorReceipt | null>(key, null);
   if (receipt && (receipt.version !== 1 || receipt.calendarId !== calendarId || receipt.eventId !== eventId ||
       !calendarColor(receipt.remoteColor) || !/^[a-f0-9]{64}$/.test(receipt.localColorHash))) {
     throw new Error('The linked event color receipt needs review before color writeback.');
@@ -398,10 +419,7 @@ async function applyDesiredNativeColor(calendarId: string, eventId: string, segm
   if (receipt?.localColorHash === localHash) return; // Note edits must not reset a provider's color.
   const intentKey = nativeColorIntentKey(calendarId, eventId);
   const intent = await getSetting<NativeColorIntent | null>(intentKey, null);
-  if (intent && (intent.version !== 1 || intent.calendarId !== calendarId || intent.eventId !== eventId ||
-      !calendarColor(intent.color) || !calendarColor(intent.expectedColor) || !/^[a-f0-9]{64}$/.test(intent.localColorHash))) {
-    throw new Error('The pending calendar color intent needs review before retrying.');
-  }
+  requireValidNativeColorIntent(intent, calendarId, eventId);
   const requireCurrent = async () => {
     if (!canContinue()) throw new ProjectionCancelledError();
     requireCalendarColorImportCurrent(segment.entries);
@@ -409,41 +427,61 @@ async function applyDesiredNativeColor(calendarId: string, eventId: string, segm
       item.segmentKey === segment.segmentKey && item.eventId === eventId && item.calendarId === calendarId);
     if (!binding) throw new Error('The activity calendar link changed before its color could be updated.');
     const current = (await getNativeCalendarSegments(segment.dateKey)).find((item) => item.segmentKey === segment.segmentKey);
-    if (!current || nativeLocalHash(current) !== nativeLocalHash(segment)) {
+    if (!current || nativeLocalHash(current) !== nativeLocalHash(segment) || localActivityColorHash(current.entries) !== localHash) {
       throw new Error('The activity changed before its calendar color could be updated. Retry synchronization.');
     }
     await requireNativeWriteAuthority(segment.blockId, canContinue, binding);
     return binding;
   };
   await requireCurrent();
+  if (isExplicitCustomActivityCategory(selectedCategory)) {
+    // This bridge returns only actual writable Google event palettes. Empty or
+    // unsupported palettes never authorize approximating an Apple/Outlook color.
+    const palette = await getEventPaletteAsync([calendarId]);
+    await requireCurrent();
+    const closest = nearestVerifiedGoogleColor(selectedColor, palette.filter((item) => item.calendarId === calendarId));
+    if (!closest) return; // Text/time may still sync; keep Context's exact color.
+    color = closest.color.toUpperCase();
+  }
   const startMs = localDateAtMinute(segment.dateKey, segment.startMinute).getTime();
   const endMs = localDateAtMinute(segment.dateKey, segment.endMinute + 1).getTime();
   const colors = await getEventColorsAsync([calendarId], startMs, endMs);
   const expectedColor = (calendarColor(colors[`${eventId}@${startMs}`]) ?? calendarColor(colors[eventId]))?.toUpperCase();
   if (!expectedColor) throw new Error('The original event color could not be checked. Its color update remains pending.');
-  const provenIntent = intent && intent.color === color && intent.localColorHash === localHash &&
-    (intent.expectedColor === expectedColor || intent.color === expectedColor);
+  const provenIntent = currentNativeColorIntent(intent, receipt) && intent!.color === color && intent!.localColorHash === localHash &&
+    (intent!.expectedColor === expectedColor || intent!.color === expectedColor);
   if (!receipt && !created && !provenIntent && expectedColor !== color) {
     throw new Error('This linked color has no verified baseline. Review its original calendar color before changing it.');
   }
   const binding = await requireCurrent();
   const source = await requireUnchangedNativeEvent(binding);
   if (!source) throw new Error('The original event is unavailable. Its color update remains pending.');
-  if (receipt && receipt.remoteColor.toUpperCase() !== expectedColor && color !== expectedColor &&
+  const ownPendingEcho = currentNativeColorIntent(intent, receipt) && intent!.color.toUpperCase() === expectedColor;
+  if (receipt && receipt.remoteColor.toUpperCase() !== expectedColor && color !== expectedColor && !ownPendingEcho &&
       await nativeChangedStateAuthority(binding, source) !== 'context') {
     throw new Error('The activity color changed in Context and the calendar. Review both colors before synchronizing.');
   }
   await requireCurrent();
-  if (!receipt && created && !intent) await setSetting(intentKey, { version: 1, calendarId, eventId, color,
-    expectedColor, localColorHash: localHash } satisfies NativeColorIntent);
+  if (ownPendingEcho && intent && (receipt?.remoteColor.toUpperCase() !== expectedColor || receipt.localColorHash !== intent.localColorHash)) {
+    // Seal the previously proven write with ITS original local hash before
+    // replacing its intent. If a newer color write then fails, the earlier own
+    // echo cannot become a falsely newer external choice over the user's edit.
+    const acknowledged: NativeColorReceipt = { version: 1, calendarId, eventId, remoteColor: expectedColor,
+      localColorHash: intent.localColorHash };
+    await setSetting(key, acknowledged);
+    receipt = acknowledged;
+    await requireCurrent();
+  }
+  await setSetting(intentKey, { version: 1, calendarId, eventId, color,
+    expectedColor, localColorHash: localHash, baselineReceiptHash: receipt ? hashValue(receipt) : null } satisfies NativeColorIntent);
   const result = await nativeSyncDiagnostics.observe('color', () => setEventColorAsync({ calendarId, eventId, color, expectedColor,
     startMs, endMs, title: typeof source.title === 'string' ? source.title : '',
     notes: typeof source.notes === 'string' ? source.notes : '' }));
-  if (!canContinue()) throw new ProjectionCancelledError();
+  await requireCurrent();
   // Only the exact native CAS acknowledgement advances the source-color receipt.
   await setSetting(key, { version: 1, calendarId, eventId, remoteColor: result.color,
     localColorHash: localHash } satisfies NativeColorReceipt);
-  if (intent || !receipt && created) await setSetting(intentKey, null);
+  await setSetting(intentKey, null);
 }
 let nativeColorChain: Promise<void> = Promise.resolve();
 
@@ -472,11 +510,14 @@ export function reconcileLinkedNativeColorsResult(value: string, plans: readonly
         const sourceEvent = await requireUnchangedNativeEvent(binding);
         const entries = (await getEntriesForBlock(binding.blockId)).filter((entry) => activityIntervalContains(interval, entry));
         if (!entries.length) continue;
+        const expectedCategories = await snapshotActivityCategories(entries);
         const key = nativeColorReceiptKey(binding.calendarId, binding.eventId);
         const receipt = await getSetting<NativeColorReceipt | null>(key, null);
+        const pendingColor = await getSetting<NativeColorIntent | null>(nativeColorIntentKey(binding.calendarId, binding.eventId), null);
+        requireValidNativeColorIntent(pendingColor, binding.calendarId, binding.eventId);
         // A new event's failed color request retains its original source-color
         // proof separately; a display read must not falsely acknowledge it.
-        if (!receipt && await getSetting<NativeColorIntent | null>(nativeColorIntentKey(binding.calendarId, binding.eventId), null)) continue;
+        if (currentNativeColorIntent(pendingColor, receipt) && (!receipt || pendingColor!.color.toUpperCase() === color)) continue;
         if (receipt && (receipt.version !== 1 || receipt.calendarId !== binding.calendarId || receipt.eventId !== binding.eventId ||
             !calendarColor(receipt.remoteColor) || !/^[a-f0-9]{64}$/.test(receipt.localColorHash))) {
           throw new Error('A linked calendar color receipt needs review before synchronization.');
@@ -497,6 +538,9 @@ export function reconcileLinkedNativeColorsResult(value: string, plans: readonly
         }
         const category = await ensureSourceColorCategory({ color, name: plan.title, provider: 'device', calendarId: binding.calendarId,
           preferredCategoryId: sameColor ? entries[0]!.categoryId : undefined });
+        const targets = await snapshotActivityCategories([], [category.id]);
+        if (categoryById(category.id).color.toUpperCase() !== color) throw new Error('The activity color changed before its calendar color could be imported. Retry synchronization.');
+        expectedCategories.push(...targets.filter((item) => !expectedCategories.some((existing) => existing.key === item.key)));
         const next = entries.map((entry) => ({ ...entry, categoryId: category.id }));
         const guard = () => requireCalendarColorImportCurrent(entries);
         guard();
@@ -507,7 +551,7 @@ export function reconcileLinkedNativeColorsResult(value: string, plans: readonly
         if ((await accountOwnedCalendarBlocks()).has(binding.blockId)) continue;
         const affected = await recolorExpectedMinuteEntries(entries, category.id, { key, value: {
           version: 1, calendarId: binding.calendarId, eventId: binding.eventId, remoteColor: color,
-          localColorHash: localActivityColorHash(next) } satisfies NativeColorReceipt }, guard);
+          localColorHash: localActivityColorHash(next) } satisfies NativeColorReceipt }, guard, expectedCategories);
         const writeKey = nativeWriteReceiptKey(binding.calendarId, binding.eventId);
         const writeReceipt = await getSetting<NativeWriteReceipt | null>(writeKey, null);
         if (writeReceipt?.version === 2) {
@@ -798,10 +842,26 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
       const current: ActivitySegment = { segmentKey: binding.segmentKey, blockId: binding.blockId, dateKey: interval.dateKey,
         startMinute: interval.startMinute, endMinute: activityIntervalAbsoluteEnd(interval), categoryId: entries[0]?.categoryId ?? 'unaccounted', entries,
         ...(activityTitle ? { activityTitle } : {}) };
+      const expectedCategories = await snapshotActivityCategories(entries);
+      const colorReceipt = await getSetting<NativeColorReceipt | null>(nativeColorReceiptKey(binding.calendarId, binding.eventId), null);
+      if (colorReceipt && (colorReceipt.version !== 1 || colorReceipt.calendarId !== binding.calendarId ||
+          colorReceipt.eventId !== binding.eventId || !calendarColor(colorReceipt.remoteColor) || !/^[a-f0-9]{64}$/.test(colorReceipt.localColorHash))) {
+        throw new Error('The linked event color receipt needs review before importing its edits.');
+      }
+      const pendingColor = await getSetting<NativeColorIntent | null>(nativeColorIntentKey(binding.calendarId, binding.eventId), null);
+      requireValidNativeColorIntent(pendingColor, binding.calendarId, binding.eventId);
+      const remoteStart = readEventDate(remote.startDate), remoteEnd = readEventDate(remote.endDate);
+      const colorValues = await getEventColorsAsync([binding.calendarId], remoteStart.getTime(), remoteEnd.getTime());
+      const exactColor = calendarColor(colorValues[`${binding.eventId}@${remoteStart.getTime()}`]) ?? calendarColor(colorValues[binding.eventId]) ??
+        calendarColor(remote.displayColor) ?? calendarColor(remote.eventColor) ?? calendarColor(remote.color);
+      const ownPendingColor = Boolean(exactColor && currentNativeColorIntent(pendingColor, colorReceipt) &&
+        pendingColor!.color.toUpperCase() === exactColor.toUpperCase());
+      const localColorChanged = !ownPendingColor && (colorReceipt ? colorReceipt.localColorHash !== localActivityColorHash(entries)
+        : isExplicitCustomActivityCategory(categoryById(current.categoryId)));
       // V1 recorded only the exact provider write hash. Reconstruct that original
       // format from CURRENT local rows; equality proves no local note/time/title edit.
-      const unchanged = receipt.version === 2 ? nativeLocalHash(current) === receipt.localHash :
-        entries.length > 0 && nativeEventContentHash({ ...eventDetails(current), notes: formatCalendarMinuteLog(current.entries) }) === receipt.contentHash;
+      const unchanged = !localColorChanged && (receipt.version === 2 ? nativeLocalHash(current) === receipt.localHash :
+        entries.length > 0 && nativeEventContentHash({ ...eventDetails(current), notes: formatCalendarMinuteLog(current.entries) }) === receipt.contentHash);
       if (!unchanged) {
         const authority = await nativeChangedStateAuthority(binding, remote);
         if (authority === 'context') { locallyNewer.add(binding.blockId); continue; }
@@ -852,11 +912,19 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
       }
       const title = typeof remote.title === 'string' && remote.title.trim() ? remote.title : 'Untitled event';
       const labelTitle = title.trim().slice(0, 200);
-      const colorValues = await getEventColorsAsync([binding.calendarId], start.getTime(), end.getTime());
-      const exactColor = calendarColor(colorValues[`${binding.eventId}@${start.getTime()}`]) ?? calendarColor(colorValues[binding.eventId]) ??
-        calendarColor(remote.displayColor) ?? calendarColor(remote.eventColor) ?? calendarColor(remote.color);
-      const categoryId = exactColor ? (await ensureSourceColorCategory({ color: exactColor, name: title,
+      const retainedCategory = Boolean(exactColor) && (current.categoryId !== 'unaccounted' ||
+        isExplicitCustomActivityCategory(categoryById(current.categoryId))) && current.entries.length > 0 &&
+        current.entries.every((entry) => entry.categoryId === current.categoryId) && (ownPendingColor || colorReceipt?.version === 1 &&
+        colorReceipt.calendarId === binding.calendarId && colorReceipt.eventId === binding.eventId &&
+        calendarColor(colorReceipt.remoteColor)?.toUpperCase() === exactColor?.toUpperCase() &&
+        colorReceipt.localColorHash === localActivityColorHash(current.entries));
+      const categoryId = retainedCategory ? current.categoryId : exactColor ? (await ensureSourceColorCategory({ color: exactColor, name: title,
         provider: 'device', calendarId: binding.calendarId })).id : current.categoryId;
+      const targets = await snapshotActivityCategories([], [categoryId]);
+      if (!retainedCategory && exactColor && categoryById(categoryId).color.toUpperCase() !== exactColor.toUpperCase()) {
+        throw new Error('The activity color changed before its calendar edits could be imported. Retry synchronization.');
+      }
+      expectedCategories.push(...targets.filter((item) => !expectedCategories.some((existing) => existing.key === item.key)));
       const imported = activityIntervalRanges(nextInterval).flatMap((range) => Array.from({ length: range.endMinute - range.startMinute + 1 }, (_, offset) => ({
         dateKey: range.dateKey, minuteIndex: range.startMinute + offset,
         text: noteMap.get((Date.parse(`${range.dateKey}T00:00:00Z`) - Date.parse(`${nextDay}T00:00:00Z`)) / 60_000 + range.startMinute + offset) ?? '', categoryId })));
@@ -886,6 +954,7 @@ async function importLinkedNativeEdits(value: string, calendars: readonly Device
       await replaceProjectedMinutes({ blockId: binding.blockId, previousDate: interval.dateKey, previousStart: interval.startMinute,
         previousEndDate: interval.endDateKey, previousEnd: interval.endMinute, expectedEntries: entries, expectedActivityTitle: activityTitle, activityTitle: labelTitle,
         entries: imported, expectedFormats, beforeCommitGuard, expectedBinding: binding, expectedActivityEditIntent, nextBinding, clearPreviousFormats: true, rejectAccountOwned: true,
+        expectedCategoryDocuments: expectedCategories,
         authoritativeRemoteUpdatedAt: calendarMutationTime(nativeModificationTimestamp(remote)) ?? undefined,
         localReceipt: { key: receiptKey, value: { version: 2, calendarId: binding.calendarId, eventId: binding.eventId,
           contentHash: nativeEventContentHash(remote), localHash: nativeLocalHash(nextSegment), sourceTitle: labelTitle,

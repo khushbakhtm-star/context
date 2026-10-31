@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { getAccounts } from '../sync/accounts';
@@ -7,6 +7,7 @@ import {
   createCategory, importAccountCategories, importDeviceCategories, listCategories, listGoogleActivityColors, updateCategory,
 } from '../services/categories';
 import { useAppTheme } from '../appearance';
+import { InfoButton } from '../components/InfoButton';
 import type { ActivityCategory, AppColors } from '../theme';
 import type { DeviceCalendar } from '../types';
 
@@ -20,10 +21,12 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [color, setColor] = useState('');
+  const [customColor, setCustomColor] = useState(false);
   const [palette, setPalette] = useState<string[]>([]);
   const [search, setSearch] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,67 +46,69 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
   const editingCategory = categories.find((category) => category.id === editing);
   const unchangedColor = Boolean(editingCategory && editingCategory.color.toUpperCase() === color.toUpperCase());
   const googleColorSelected = palette.includes(color.toUpperCase());
-  const canSaveColor = googleColorSelected || unchangedColor;
+  const canSaveColor = googleColorSelected || unchangedColor || customColor && /^#[0-9a-f]{6}$/i.test(color);
 
   async function perform(action: () => Promise<string | void>) {
-    if (busy) return;
-    setBusy(true); setError(null); setMessage(null);
+    if (busyRef.current) return;
+    busyRef.current = true; setBusy(true); setError(null); setMessage(null);
     try {
       const result = await action();
       await refresh();
       onDataChanged();
       if (result) setMessage(result);
     } catch (failure) { setError(failure instanceof Error ? failure.message : 'Category changes could not be saved.'); }
-    finally { setBusy(false); }
+    finally { busyRef.current = false; setBusy(false); }
   }
 
   function edit(category: ActivityCategory) {
-    setEditing(category.id); setName(category.name); setColor(category.color); setMessage(null); setError(null);
+    setEditing(category.id); setName(category.name); setColor(category.color); setCustomColor(Boolean(category.customColor)); setMessage(null); setError(null);
   }
 
   function save() {
+    if (busyRef.current || !name.trim() || !canSaveColor) return;
     void perform(async () => {
-      if (editing) await updateCategory(editing, { name, ...(unchangedColor ? {} : { color }) });
-      else await createCategory({ name, color });
-      setEditing(null); setName(''); setColor(palette[0] ?? '');
+      if (editing) await updateCategory(editing, { name, ...(unchangedColor ? {} : { color, customColor: true }) });
+      else await createCategory({ name, color, ...(customColor ? { customColor: true } : {}) });
+      setEditing(null); setName(''); setColor(palette[0] ?? ''); setCustomColor(false);
       return 'Category saved';
     });
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-      <Text style={styles.eyebrow}>ACTIVITY CATEGORIES</Text>
-      <Text style={styles.title}>Your own language for time</Text>
-      <Text style={styles.intro}>
-        Add as many activity categories as you need using Google Calendar colors. Import additional
-        Google calendar colors and labels to use them throughout your minute ledger.
-      </Text>
-
+    <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="always">
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>{editing ? 'Edit category' : 'Create a category'}</Text>
-        <TextInput keyboardAppearance={resolvedMode} value={name} onChangeText={setName} placeholder="Category name" editable={!busy}
+        <View style={styles.formHeading}><Text style={[styles.cardTitle, { flex: 1 }]}>{editing ? 'Edit category' : 'Create a category'}</Text>
+          <InfoButton title="Activity colors" message="A category name and color apply to every minute using that category. Renaming or recoloring it updates those minutes together. Context keeps custom hex colors; Google Calendar uses the nearest supported event color. Archived categories stay in your history." /></View>
+        <TextInput accessibilityLabel="Category label in Settings" keyboardAppearance={resolvedMode} value={name} onChangeText={setName} placeholder="Category name" editable={!busy}
           placeholderTextColor={colors.muted} style={styles.input} maxLength={200} />
         <View style={styles.colorInputRow}>
           <View style={[styles.largeDot, { backgroundColor: /^#[0-9a-f]{6}$/i.test(color) ? color : colors.silver }]} />
           <Text selectable accessibilityLabel={'Activity color ' + color.toUpperCase()} style={styles.selectedColorHex}>
-            {color.toUpperCase() || 'Choose a Google Calendar color'}
+            {color.toUpperCase() || 'Choose a color'}
           </Text>
         </View>
-        {editing && !googleColorSelected ? <Text style={styles.help}>Existing recorded color. Choose a Google Calendar color to change it.</Text> : null}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.palette}>
-          {palette.map((value) => <Pressable key={value} onPress={() => setColor(value)} disabled={busy}
+          {palette.map((value) => <Pressable key={value} onPress={() => { setColor(value); setCustomColor(false); }} disabled={busy}
             accessibilityRole="radio" accessibilityState={{ checked: value === color.toUpperCase() }}
             accessibilityLabel={`Use Google Calendar color ${value}`} style={[styles.swatchChoice,
               value === color.toUpperCase() && styles.selectedSwatch]}>
             <View style={[styles.swatch, { backgroundColor: value }]} />
             <Text maxFontSizeMultiplier={1.4} style={styles.swatchHex}>{value}</Text>
           </Pressable>)}
+          <Pressable accessibilityRole="button" accessibilityLabel="Custom category color in Settings" disabled={busy}
+            onPress={() => setCustomColor(true)} style={[styles.swatchChoice, customColor && styles.selectedSwatch]}>
+            <View style={styles.rainbow}>{['#E53935', '#FB8C00', '#FDD835', '#43A047', '#1E88E5', '#8E24AA'].map((shade) =>
+              <View key={shade} style={{ flex: 1, height: '100%', backgroundColor: shade }} />)}</View>
+          </Pressable>
         </ScrollView>
+        {customColor ? <TextInput accessibilityLabel="Custom category hex in Settings" keyboardAppearance={resolvedMode}
+          value={color} onChangeText={setColor} placeholder="#RRGGBB" autoCapitalize="characters" autoCorrect={false}
+          editable={!busy} maxLength={7} placeholderTextColor={colors.muted} style={styles.input} /> : null}
         <View style={styles.actions}>
-          {editing ? <Pressable disabled={busy} onPress={() => { setEditing(null); setName(''); setColor(palette[0] ?? ''); }}>
+          {editing ? <Pressable disabled={busy} onPress={() => { setEditing(null); setName(''); setColor(palette[0] ?? ''); setCustomColor(false); }}>
             <Text style={styles.link}>Cancel edit</Text>
           </Pressable> : <View />}
-          <Pressable disabled={busy || !name.trim() || !canSaveColor} onPress={save}
+          <Pressable accessibilityRole="button" accessibilityLabel="Save category in Settings" disabled={busy || !name.trim() || !canSaveColor} onPress={save}
             style={[styles.button, (busy || !name.trim() || !canSaveColor) && styles.disabled]}>
             <Text style={styles.buttonText}>{busy ? 'Saving…' : 'Save category'}</Text>
           </Pressable>
@@ -111,11 +116,8 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Import calendar colors & categories</Text>
-        <Text style={styles.help}>
-          Imported labels have no nine-category limit. Activity color choices use Google Calendar
-          hex values; several activity categories may share one color. Other provider mappings remain available.
-        </Text>
+        <View style={styles.formHeading}><Text style={[styles.cardTitle, { flex: 1 }]}>Import calendar colors & categories</Text>
+          <InfoButton title="Import colors" message="Import labels and colors from a connected calendar. Several categories may share one color, and existing category identities stay linked to their recorded minutes." /></View>
         {accounts.map((account) => <Pressable key={account.id} disabled={busy}
           onPress={() => void perform(async () => {
             const result = await importAccountCategories(account);
@@ -145,7 +147,7 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
       <View style={styles.card}>
         {visible.map((category) => <View key={category.id} style={styles.categoryRow}>
           <View style={[styles.dot, { backgroundColor: category.color }]} />
-          <Pressable onPress={() => edit(category)} disabled={busy} style={styles.categoryCopy}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Edit category ${category.name}`} onPress={() => edit(category)} disabled={busy} style={styles.categoryCopy}>
             <Text style={styles.categoryName}>{category.name}</Text>
             <Text style={styles.categorySource}>{category.provider ? `${category.provider} · ` : ''}{category.color}{category.archived ? ' · archived' : ''}</Text>
           </Pressable>
@@ -157,10 +159,6 @@ export function CategoriesScreen({ onDataChanged, calendars = [] }: Props) {
         </View>)}
         {!visible.length ? <Text style={styles.help}>No matching categories.</Text> : null}
       </View>
-      <Text style={styles.help}>
-        Archiving hides a category from new entry choices and keeps its history and reports. Local
-        display edits keep an imported category's original provider mapping.
-      </Text>
     </ScrollView>
   );
 }
@@ -173,6 +171,8 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   card: { marginTop: 18, padding: 16, borderRadius: 15, borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.hairline, backgroundColor: colors.surface },
   cardTitle: { color: colors.ink, fontSize: 16, fontWeight: '700' },
+  formHeading: { flexDirection: 'row', alignItems: 'center' },
+  rainbow: { width: 28, height: 28, borderRadius: 14, overflow: 'hidden', flexDirection: 'row' },
   help: { marginTop: 6, color: colors.muted, fontSize: 12, lineHeight: 18 },
   input: { marginTop: 12, padding: 12, borderWidth: 1, borderColor: colors.hairline, borderRadius: 10,
     color: colors.ink, fontSize: 14, backgroundColor: colors.surface },

@@ -8,14 +8,17 @@ import { minuteDetailsCount, minuteDetailsDate, minuteDetailsLastCell, minuteDet
 import { minuteLabel } from '../utils/time';
 import { DateSelectionPopup } from './DateSelectionPopup';
 import { CellColorPalette } from './CellColorPalette';
+import { CellActionIcon } from './CellActionIcon';
+import { ActivityCategoryPicker } from './ActivityCategoryPicker';
 import { InfoButton } from './InfoButton';
 
 export type MinuteSpanEditorSession = { id: number; span: MinuteSpan; text?: string; categoryId: string;
   event?: { title: string; categoryId: string; blockId?: string } };
 
-export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, onSave }: {
+export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, onSave, onCategoriesChanged }: {
   session: MinuteSpanEditorSession | null; clockFormat: '12h' | '24h'; colorChoices: readonly ActivityCategory[];
   onClose: () => void; onSave: (span: MinuteSpan, input: MinuteSpanFillInput) => Promise<boolean>;
+  onCategoriesChanged?: () => void | Promise<void>;
 }) {
   const { colors } = useAppTheme(); const styles = useMemo(() => createStyles(colors), [colors]);
   const insets = useSafeAreaInsets(); const mounted = useRef(true); const sequence = useRef(0); const busyRef = useRef(false);
@@ -25,11 +28,14 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
   const [endDateExplicit, setEndDateExplicit] = useState(false), [group, setGroup] = useState(false);
   const [title, setTitle] = useState(''), [titleEdited, setTitleEdited] = useState(false), [categoryId, setCategoryId] = useState('unaccounted');
   const [colorEdited, setColorEdited] = useState(false);
+  const [categoryOpen, setCategoryOpen] = useState(false);
+  const sessionIdRef = useRef(session?.id);
+  sessionIdRef.current = session?.id;
   const [palette, setPalette] = useState(false), [dateField, setDateField] = useState<'start' | 'end' | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; }; }, []);
   useEffect(() => {
-    sequence.current++; busyRef.current = false; setBusy(false); setError(null); setPalette(false); setDateField(null);
+    sequence.current++; busyRef.current = false; setBusy(false); setError(null); setPalette(false); setDateField(null); setCategoryOpen(false);
     if (!session) return;
     const last = minuteDetailsLastCell(session.span);
     setText(session.text ?? ''); setTextEdited(false); setStartDate(session.span.startDateKey); setEndDate(last.dateKey);
@@ -48,7 +54,7 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
   }, [startDate, startTime, endDate, endTime, endDateExplicit]);
   const throughDate = parsed.span ? minuteDetailsLastCell(parsed.span).dateKey : endDate;
   const selectedColor = colorChoices.find((value) => value.id === categoryId);
-  const canSave = Boolean(parsed.span && (!group || title.trim()) && !busy && !dateField);
+  const canSave = Boolean(parsed.span && (!group || title.trim()) && !busy && !dateField && !categoryOpen);
   const close = () => { if (!busyRef.current) onClose(); };
   async function save() {
     if (!session || busyRef.current || !canSave || !parsed.span) return;
@@ -84,12 +90,16 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
             <TextInput accessibilityLabel="End time" editable={!busy} value={endTime} onChangeText={setEndTime}
               autoCapitalize="characters" maxLength={12} style={styles.time} />
           </View>
-          <Pressable accessibilityRole="button" accessibilityLabel={group ? 'Choose event color' : 'Choose cell fill color'}
+          <View style={styles.row}><Pressable accessibilityRole="button" accessibilityLabel={group ? 'Choose event color' : 'Choose cell fill color'}
             accessibilityState={{ expanded: palette, disabled: busy }} disabled={busy}
-            onPress={() => { Keyboard.dismiss(); setPalette((value) => !value); }} style={styles.colorButton}>
+            onPress={() => { Keyboard.dismiss(); setPalette((value) => !value); }} style={[styles.colorButton, { flex: 1 }]}>
             <View style={[styles.swatch, { backgroundColor: selectedColor?.color ?? '#96938C' }]} />
             <Text style={styles.value}>Fill color</Text><Text allowFontScaling={false} style={styles.dropdown}>▾</Text>
           </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Categorize minute range" disabled={busy}
+            onPress={() => { Keyboard.dismiss(); setPalette(false); setCategoryOpen(true); }} style={styles.categoryButton}>
+            <CellActionIcon name="categorize" color={colors.ink} />
+          </Pressable></View>
           {palette ? <CellColorPalette mode="cell" busy={busy} colorChoices={colorChoices} selectedColorId={categoryId} textColor={colors.ink}
             onTextColor={() => {}} onCellColor={(id) => { setCategoryId(id); setColorEdited(true); setPalette(false); }} onClose={() => setPalette(false)} /> : null}
           <View style={styles.row}><Text style={[styles.label, { flex: 1 }]}>Group as event</Text>
@@ -109,6 +119,12 @@ export function MinuteSpanEditor({ session, clockFormat, colorChoices, onClose, 
         anchorDate={dateField === 'start' ? startDate : throughDate} onClose={() => setDateField(null)}
         onApply={(values) => { if (values[0] && dateField === 'start') setStartDate(values[0]);
           if (values[0] && dateField === 'end') { setEndDate(values[0]); setEndDateExplicit(true); } setDateField(null); }} />
+      <ActivityCategoryPicker visible={Boolean(session && categoryOpen)} selectedId={categoryId} colorChoices={colorChoices}
+        busy={busy} onClose={() => setCategoryOpen(false)} onCategoriesChanged={onCategoriesChanged}
+        onSelect={(id) => {
+          if (!session || sessionIdRef.current !== session.id) throw new Error('Open these minute details again before choosing a category.');
+          setCategoryId(id); setColorEdited(true); setCategoryOpen(false);
+        }} />
     </KeyboardAvoidingView>
   </Modal>;
 }
@@ -126,6 +142,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   field: { minHeight: 44, padding: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 8, color: colors.ink },
   colorButton: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 10 }, swatch: { width: 24, height: 24, borderRadius: 12, borderWidth: 1, borderColor: colors.swatchBorder },
   dropdown: { color: colors.muted, fontSize: 14, marginLeft: 'auto' },
+  categoryButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   count: { color: colors.muted, fontSize: 12 }, error: { color: colors.danger, fontSize: 13 },
   footer: { flexDirection: 'row', justifyContent: 'flex-end', padding: 8, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
   action: { minHeight: 44, paddingHorizontal: 16, justifyContent: 'center', alignItems: 'center' }, disabled: { opacity: 0.4 },

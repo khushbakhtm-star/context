@@ -12,7 +12,7 @@ function fixture() {
   const nodes = parsed.statements.filter((node: any) => functions.includes(node.name?.text) ||
     ts.isExpressionStatement(node) && /element\('finish-format'\)\.onclick/.test(node.getText(parsed)));
   const input = { value: '', focusCount: 0, blurCount: 0, focus() { this.focusCount++; }, blur() { this.blurCount++; }, setAttribute() {}, setSelectionRange() {} };
-  const node = { textContent: '', classList: { remove() {} }, setAttribute() {}, querySelector: () => null }; const buttons: Record<string, any> = {};
+  const node = { textContent: '', dataset: { defaultFillEligible: 'true', defaultFill: 'false' }, classList: { remove() {} }, setAttribute() {}, querySelector: () => null }; const buttons: Record<string, any> = {};
   let gate: Promise<void> | null = null; let writes = 0;
   const store = { state: emptyLedger('browser_fixture'), async update(change: any) { writes++; if (gate) { const wait = gate; gate = null; await wait; } this.state = change(this.state); return this.state; } };
   const module = { exports: {} as any }; const context: any = { module, exports: module.exports, store, editor: null, undo: null,
@@ -51,6 +51,16 @@ test('raw typing updates only the note span and preserves the independently rend
   h.api.beginEdit('2026-10-27', 800); h.input.value = 'A separate minute thought'; h.api.mirrorDraft();
   assert.equal(note.textContent, 'A separate minute thought'); assert.equal(h.node.textContent, '▣ Calendar activity');
   assert.equal(h.writes, 0);
+});
+
+test('live unclassified notes gain neutral fill immediately and blank drafts clear it without a ledger write', () => {
+  const h = fixture(); h.api.beginEdit('2026-10-27', 800);
+  assert.equal(h.node.dataset.defaultFill, 'false');
+  h.input.value = 'A new thought'; h.api.mirrorDraft(); assert.equal(h.node.dataset.defaultFill, 'true');
+  h.input.value = ' \n\t'; h.api.mirrorDraft(); assert.equal(h.node.dataset.defaultFill, 'false');
+  h.node.dataset.defaultFillEligible = 'false'; h.input.value = 'Explicit activity or source color'; h.api.mirrorDraft();
+  assert.equal(h.node.dataset.defaultFill, 'false', 'live text cannot replace explicit activity/calendar fill');
+  assert.equal(h.writes, 0); assert.deepEqual(h.store.state.documents, []);
 });
 test('actual bottom check waits for typing appended during a pending write and preserves all text before closing', async () => {
   const h = fixture(); let release!: () => void; h.block(new Promise<void>((resolve) => { release = resolve; }));

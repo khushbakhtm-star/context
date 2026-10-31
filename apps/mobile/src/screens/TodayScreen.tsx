@@ -11,6 +11,7 @@ import { MinuteEditor } from '../components/MinuteEditor';
 import { CellColorPalette } from '../components/CellColorPalette';
 import { CellActionMenu } from '../components/CellActionMenu';
 import { CellActionIcon } from '../components/CellActionIcon';
+import { ActivityCategoryPicker } from '../components/ActivityCategoryPicker';
 import { CompactMinuteOverview } from '../components/CompactMinuteOverview';
 import { CalendarPinchPreview } from '../components/CalendarPinchPreview';
 import { CalendarCellText } from '../components/CalendarCellText';
@@ -37,6 +38,7 @@ import { finishCellActivation, type CellActivationTap } from '../utils/cell-acti
 import { minuteAtDragPosition, minuteDragGripOffset, minuteDragScrollOffset } from '../utils/minute-range-drag';
 import { analyzeCellSelection } from '../utils/cell-action-policy';
 import { calendarCellColor, calendarColor } from '../utils/calendar-cell-color';
+import { defaultTextCellColor } from '../utils/default-text-cell-color';
 import { activityGroupDragGrip, activityGroupDropTarget, activityGroupDragScrollOffsets,
   type ActivityGroupDragGrip, type ActivityGroupDropTarget } from '../utils/activity-group-drag';
 import { calendarGridLayout, calendarGridPaint, calendarZoomOffsets, normalizeCalendarZoom, calendarFitDayZoom, calendarPinchZoom, calendarPinchPreviewGeometry,
@@ -235,6 +237,9 @@ export function TodayScreen({
   const spanEditorScopeRef = useRef<{ selection: CalendarMinuteSelection; token: number; generation: number; id: number } | null>(null);
   const spanEditorIdRef = useRef(0);
   const spanEditorEpochRef = useRef(0);
+  const [categoryPicker, setCategoryPicker] = useState<(CellCommandSelection & { token: number }) | null>(null);
+  const categoryPickerRef = useRef(categoryPicker);
+  categoryPickerRef.current = categoryPicker;
   const [groupComposerOpen, setGroupComposerOpen] = useState(false);
   const groupComposerOpenRef = useRef(groupComposerOpen);
   groupComposerOpenRef.current = groupComposerOpen;
@@ -1155,6 +1160,7 @@ export function TodayScreen({
     setInlineSelection(null);
     setInlineEditing(false);
     setCellMenuOpen(false);
+    categoryPickerRef.current = null; setCategoryPicker(null);
 
     setGroupComposerOpen(false);
     setRangeSelecting(false);
@@ -1188,7 +1194,7 @@ export function TodayScreen({
     refresh();
     const unsubscribe = subscribeWritablePaletteChanges(refresh);
     return () => { current = false; request++; unsubscribe(); };
-  }, [dataVersion, cellMenuOpen, groupComposerOpen, inlineSelection?.dateKey, inlineSelection?.minuteIndex]);
+  }, [dataVersion, cellMenuOpen, groupComposerOpen, categoryPicker, inlineSelection?.dateKey, inlineSelection?.minuteIndex]);
 
   const inlineDrafts = useMemo(() => inlineMinuteDrafts.snapshot(), [inlineVersion]);
   const draftsByKey = useMemo(() => new Map(inlineDrafts.map((draft) => [draft.key, draft])), [inlineDrafts]);
@@ -1227,6 +1233,7 @@ export function TodayScreen({
         cancelRangeDrag();
         cancelGroupDrag();
         setCellMenuOpen(false);
+        categoryPickerRef.current = null; setCategoryPicker(null);
         spanEditorEpochRef.current++;
         const selected = inlineSelectionRef.current;
         if (!spanEditorScopeRef.current) {
@@ -1724,11 +1731,14 @@ export function TodayScreen({
       const cellKey = inlineMinuteKey(day, minute);
       const sourcePending = sourceColorJobs.current.has(cellKey) &&
         sourceColorJobEpochs.current.get(cellKey) === (explicitColorEpochs.current.get(cellKey) ?? 0);
-      const actualColor = sourcePending && plan ? plan.color : hasActual ? categoryById(draft?.categoryId ?? entry?.categoryId ?? 'unaccounted').color : undefined;
+      const category = categoryById(draft?.categoryId ?? entry?.categoryId ?? 'unaccounted');
+      const neutralFill = defaultTextCellColor({ text: draft?.text ?? entry?.text ?? '', categoryId: category.id,
+        customColor: category.customColor, mode: resolvedMode, noFill: format.noFill, hasSourceColor: Boolean(group || plan) });
+      const actualColor = sourcePending && plan ? plan.color : hasActual ? neutralFill ?? category.color : undefined;
       const previewColor = rangeSelecting && rangeColorChosen && groupHasGoogleColor && selectedRange?.dateKey === day &&
         minute >= selectedRange.startMinute && minute <= selectedRange.endMinute ? categoryById(rangeColorId).color : undefined;
       const color = calendarCellColor({ actualColor, hasActual, groupColor: group ? categoryById(group.categoryId).color : undefined,
-        planColor: plan?.color, noFill: format.noFill, previewColor });
+        planColor: plan?.color, noFill: format.noFill, previewColor }) ?? neutralFill;
       const boundedPlan = !format.noFill && plan && sourceBounds.get(plan);
       return { color: color ?? undefined, textColor: format.textColor ?? activityTextColor(color, colors.ink),
         borderColor: group ? categoryById(group.categoryId).color : plan?.color,
@@ -1749,7 +1759,7 @@ export function TodayScreen({
   }); return { bands: new Map(values.map(([day, value]) => [day, value.bands])),
     outlines: new Map(values.map(([day, value]) => [day, value.outlines])),
     annotations: new Map(values.map(([day, value]) => [day, value.annotations])) }; }, [days, indexedDays, indexedGroups, draftsByKey, dayData, availableColors, colors.ink,
-    rangeSelecting, rangeColorChosen, groupHasGoogleColor, rangeColorId, selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute]);
+    resolvedMode, rangeSelecting, rangeColorChosen, groupHasGoogleColor, rangeColorId, selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute]);
   pinchPreviewDataRef.current = useMemo(() => ({ days, bands: compactData.bands, outlines: compactData.outlines, annotations: compactData.annotations,
     rowHeight: gridLayout.rowHeight, railWidth: gridLayout.railWidth, dayWidth: gridLayout.dayWidth, colors,
     fontScale, viewportHeight: minuteViewportHeight,
@@ -1781,10 +1791,14 @@ export function TodayScreen({
     }), inlineSelection?.minuteIndex);
   }, [selectedRange?.dateKey, selectedRange?.startMinute, selectedRange?.endMinute, indexedDays, indexedGroups, draftsByKey, inlineSelection?.minuteIndex]);
   const menuGroup = inlineSelection ? indexedGroups.get(inlineSelection.dateKey)?.get(inlineSelection.minuteIndex) : undefined;
+  const menuCategory = categoryById(selectedDraft?.categoryId ?? inlineSelection?.entry?.categoryId ?? 'unaccounted');
+  const menuNeutralFill = defaultTextCellColor({ text: selectedDraft?.text ?? inlineSelection?.entry?.text ?? '',
+    categoryId: menuCategory.id, customColor: menuCategory.customColor, mode: resolvedMode,
+    noFill: selectedFormat.noFill, hasSourceColor: Boolean(menuGroup || inlineSelection?.plan) });
   const menuFillColor = calendarCellColor({ hasActual: Boolean(inlineSelection?.entry || (selectedDraft && selectedDraft.revision > 0)),
-    actualColor: categoryById(selectedDraft?.categoryId ?? inlineSelection?.entry?.categoryId ?? 'unaccounted').color,
+    actualColor: menuNeutralFill ?? menuCategory.color,
     groupColor: menuGroup ? categoryById(menuGroup.categoryId).color : undefined,
-    planColor: inlineSelection?.plan?.color, noFill: selectedFormat.noFill }) ?? colors.calendarCell;
+    planColor: inlineSelection?.plan?.color, noFill: selectedFormat.noFill }) ?? menuNeutralFill ?? colors.calendarCell;
   const menuTextColor = selectedFormat.textColor ?? activityTextColor(menuFillColor, colors.ink);
 
   async function runSpreadsheetTool(work: () => Promise<unknown>) {
@@ -1840,7 +1854,69 @@ export function TodayScreen({
     }
   }
 
-  useEffect(() => { spanEditorScopeRef.current = null; setSpanEditor(null); }, [navigationKey, dateSelectionOpen]);
+  function closeCategoryPicker() {
+    categoryPickerRef.current = null; setCategoryPicker(null);
+  }
+
+  async function openCategories(command: CellCommandSelection) {
+    if (!await prepareOptions(command.selection)) return;
+    const scope = { ...command, token: selectionTokenRef.current };
+    if (!selectionStillCurrent(scope.selection, scope.token, scope.generation)) return;
+    categoryPickerRef.current = scope; setCategoryPicker(scope);
+    setCellMenuOpen(false); setEntryBarMode(null); setInlineEditing(false); Keyboard.dismiss();
+  }
+
+  async function refreshCategoryChoices() {
+    const scope = categoryPickerRef.current;
+    if (!scope || !selectionStillCurrent(scope.selection, scope.token, scope.generation)) return;
+    const values = await listSelectableActivityCategories({ scope: {
+      dateKey: scope.selection.dateKey, minuteIndex: scope.selection.minuteIndex,
+    } });
+    if (categoryPickerRef.current === scope && selectionStillCurrent(scope.selection, scope.token, scope.generation)) setAvailableColors(values);
+  }
+
+  async function refreshSpanCategoryChoices() {
+    const scope = spanEditorScopeRef.current;
+    if (!scope || !selectionStillCurrent(scope.selection, scope.token, scope.generation)) return;
+    const values = await listSelectableActivityCategories({ scope: {
+      dateKey: scope.selection.dateKey, minuteIndex: scope.selection.minuteIndex,
+    } });
+    if (spanEditorScopeRef.current === scope && selectionStillCurrent(scope.selection, scope.token, scope.generation)) setAvailableColors(values);
+  }
+
+  async function chooseCategory(categoryId: string) {
+    const scope = categoryPickerRef.current;
+    const current = () => Boolean(scope && categoryPickerRef.current === scope && selectionStillCurrent(scope.selection, scope.token, scope.generation));
+    if (!scope || !current()) throw new Error('Select the minutes again before choosing a category.');
+    if (menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy) throw new Error('Finish the current edit first.');
+    menuCommandPendingRef.current = true; setMenuCommandPending(true);
+    try {
+      const choices = await listSelectableActivityCategories({ scope: {
+        dateKey: scope.selection.dateKey, minuteIndex: scope.selection.minuteIndex,
+      } });
+      if (!current()) return;
+      if (!choices.some((category) => category.id === categoryId)) throw new Error('This category is no longer available for these minutes. Choose another color.');
+      if (!await flushDraftsForOptions()) throw new Error('Save the pending minute before choosing a category.');
+      if (!current()) return;
+      recordExplicitColor(scope.range.dateKey, scope.range.startMinute, scope.range.endMinute);
+      markLocalChange([scope.range.dateKey]);
+      const applied = await runSpreadsheetTool(async () => {
+        if (!current()) return;
+        await colorMinuteRange(scope.range, categoryId); await refreshLocalEntries(scope.range.dateKey);
+      });
+      if (!current()) return;
+      if (!applied) throw new Error('This category could not be applied. Your minute text has been kept.');
+      setRangeColorId(categoryId); setRangeColorChosen(false); closeCategoryPicker();
+    } finally {
+      menuCommandPendingRef.current = false;
+      if (mountedRef.current) setMenuCommandPending(false);
+    }
+  }
+
+  useEffect(() => {
+    spanEditorScopeRef.current = null; setSpanEditor(null);
+    categoryPickerRef.current = null; setCategoryPicker(null);
+  }, [navigationKey, dateSelectionOpen]);
 
   async function openSpanDetails(command?: CellCommandSelection) {
     const selection = command?.selection ?? inlineSelectionRef.current;
@@ -2355,9 +2431,12 @@ export function TodayScreen({
                 startMinute: planBounds.startMinute, endMinute: planBounds.endMinuteExclusive - 1 } : undefined);
               const groupStarts = outline?.startMinute === minute;
               const groupColor = group ? categoryById(group.categoryId).color : undefined;
+              const neutralCategory = categoryById(draft?.categoryId ?? entry?.categoryId ?? 'unaccounted');
+              const neutralFill = defaultTextCellColor({ text: draft?.text ?? entry?.text ?? '', categoryId: neutralCategory.id,
+                customColor: neutralCategory.customColor, mode: resolvedMode, noFill: format.noFill, hasSourceColor: Boolean(group || plan) });
               const previewColor = rangeSelected && rangeColorChosen && groupHasGoogleColor ? categoryById(rangeColorId).color : undefined;
-              const solidColor = calendarCellColor({ previewColor, actualColor: color,
-                hasActual: Boolean(hasDraftValue || entry), groupColor, planColor: plan?.color, noFill: format.noFill });
+              const solidColor = calendarCellColor({ previewColor, actualColor: neutralFill ?? color,
+                hasActual: Boolean(hasDraftValue || entry), groupColor, planColor: plan?.color, noFill: format.noFill }) ?? neutralFill;
               const defaultTextColor = activityTextColor(solidColor, colors.ink);
               const titleTextColor = activityTextColor(solidColor ?? (format.noFill ? undefined : groupColor), colors.ink);
               const cellVisibleWidth = Math.max(1, Math.min(gridLayout.dayWidth, gridLayout.viewportWidth - gridLayout.railWidth));
@@ -2508,6 +2587,7 @@ export function TodayScreen({
           transform: [{ translateX: cellMenuOriginX }, { translateY: Animated.add(cellMenuOriginY, cellMenuTop) }],
         }]}>
           <CellActionMenu busy={menuCommandPending || toolBusy || spreadsheetState.busy}
+            onCategorize={() => void dispatchCellCommand(openCategories)}
             onEdit={() => void dispatchCellCommand(openSpanDetails)}
             onEvent={inlineSelection.plan ? () => void dispatchCellCommand((scope) => showMinuteDetails(scope.selection.dateKey, scope.selection.minuteIndex)) : undefined}
             onCut={() => void dispatchCellCommand((scope) => captureSelectedCells('cut', scope))}
@@ -2538,7 +2618,7 @@ export function TodayScreen({
         </View>
       ) : null}
 
-      {inlineSelection && entryBarMode === 'entry' && !cellMenuOpen && !groupDragging && !rangeDragging && !groupComposerOpen && !editor ? (
+      {inlineSelection && entryBarMode === 'entry' && !categoryPicker && !cellMenuOpen && !groupDragging && !rangeDragging && !groupComposerOpen && !editor ? (
         <View accessibilityLabel="Minute text entry bar" style={styles.bottomBar}>
           <View style={styles.entryBarRow}>
             <TextInput ref={inlineInputRef} value={selectedDraft?.text ?? inlineSelection.entry?.text ?? ''}
@@ -2573,6 +2653,11 @@ export function TodayScreen({
               disabled={entrySaving || toolBusy || spreadsheetState.busy} onPress={() => void dispatchCellCommand(openSpanDetails)} style={styles.bottomTool}>
               <CellActionIcon name="edit" color={colors.ink} />
             </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Categorize minute"
+              disabled={entrySaving || toolBusy || spreadsheetState.busy}
+              onPress={() => void dispatchCellCommand(openCategories)} style={styles.bottomTool}>
+              <CellActionIcon name="categorize" color={colors.ink} />
+            </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Save minute text and close keyboard"
               disabled={entrySaving || toolBusy || spreadsheetState.busy}
               onPress={() => void finishInlineEditing()} style={styles.bottomTool}>
@@ -2591,7 +2676,12 @@ export function TodayScreen({
       ) : null}
 
 
+      <ActivityCategoryPicker visible={Boolean(categoryPicker)} colorChoices={pickerColors}
+        selectedId={selectedDraft?.categoryId ?? inlineSelection?.entry?.categoryId}
+        busy={menuCommandPending || toolBusy || spreadsheetState.busy}
+        onClose={closeCategoryPicker} onSelect={chooseCategory} onCategoriesChanged={refreshCategoryChoices} />
       <MinuteSpanEditor session={spanEditor} clockFormat={clockFormat} colorChoices={pickerColors}
+        onCategoriesChanged={refreshSpanCategoryChoices}
         onClose={() => { spanEditorScopeRef.current = null; setSpanEditor(null); }} onSave={saveSpanDetails} />
       <MinuteEditor visible={editor != null} dateKey={editor?.dateKey ?? activeDate}
         clockFormat={clockFormat}

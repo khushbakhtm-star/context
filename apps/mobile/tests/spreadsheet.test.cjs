@@ -1209,6 +1209,35 @@ test('drag Auto fill copies the current 17:19 anchor downward and upward without
   }
 });
 
+test('explicit custom colors pass cell, fill, group and span validation while label edits preserve every minute reference', async (t) => {
+  const device = harness(t); const { api, sheet } = device; await api.initializeDatabase();
+  const categories = device.load(device.source('services/categories.ts'));
+  const custom = await categories.createCategory({ name: 'My own category', color: '#123456', customColor: true });
+  await save(api, 220, 'Independent first note', 'work'); await save(api, 221, 'Independent second note', 'study');
+  await sheet.colorMinuteRange(range(220, 222), custom.id);
+  assert.deepEqual((await api.getDayEntries(day)).map(entry => entry.text), ['Independent first note', 'Independent second note', '']);
+  await sheet.groupMinuteRange(range(220, 222), { title: 'User activity', categoryId: custom.id });
+  await sheet.fillMinuteRange(range(230, 231), 230, custom.id);
+  const next = '2026-10-26'; const span = { startDateKey: day, startMinute: 1439, endDateKey: next, endMinute: 1 };
+  const input = { categoryId: custom.id }; const preview = await sheet.prepareMinuteSpanFill(span, input);
+  await sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  const before = plain([...await api.getDayEntries(day), ...await api.getDayEntries(next)]);
+  assert.ok(before.every(entry => entry.categoryId === custom.id));
+  await categories.updateCategory(custom.id, { name: 'Renamed category', color: '#FEDCBA', customColor: true });
+  const theme = device.load(device.source('theme.ts'));
+  for (const entry of [...await api.getDayEntries(day), ...await api.getDayEntries(next)]) {
+    assert.equal(entry.categoryId, custom.id); assert.equal(theme.categoryById(entry.categoryId).name, 'Renamed category');
+    assert.equal(theme.categoryById(entry.categoryId).color, '#FEDCBA');
+  }
+  assert.deepEqual(plain([...await api.getDayEntries(day), ...await api.getDayEntries(next)]), before, 'metadata edits do not rewrite per-minute history');
+  await api.putSyncDocument('category:provider_one', { id: 'provider_one', name: 'Google event color 1', color: '#112233',
+    provider: 'google', accountId: 'google:writer', providerColorId: '1', googleColorVerified: true, providerOriginalColor: '#112233' });
+  await categories.updateCategory('provider_one', { name: 'Stable source override', color: '#ABCDEF', customColor: true });
+  const documents = plain(await api.getSyncDocuments(''));
+  assert.ok(documents.some(document => document.key.startsWith('category:minuteFormat:providerPalette:')));
+  device.load(device.source('sync/codec.ts')).validateBatch({ version: 1, id: 'explicit_custom', documents });
+});
+
 test('an explicit Google color fills source notes and formats, preserving legacy two-argument behavior and Undo', async (t) => {
   const device = harness(t); const { api, sheet } = device;
   await api.initializeDatabase();

@@ -20,6 +20,7 @@ const HEX = /^#[0-9a-f]{6}$/i;
 export function googleActivityColorValues(categories: readonly ActivityCategory[]): string[] {
   const colors = new Set<string>(GOOGLE_ACTIVITY_COLORS);
   for (const category of categories) {
+    if (category.customColor === true) continue;
     const nativeEventColor = category.provider === 'device' && category.calendarId && category.providerColorId && category.googleColorVerified === true;
     if (!nativeEventColor && (category.provider !== 'google' || !category.accountId)) continue;
     // Released event/label imports already used exact API backgrounds. Legacy
@@ -36,4 +37,33 @@ export function googleActivityColorValues(categories: readonly ActivityCategory[
 export function isAllowedGoogleActivityColor(color: unknown, categories: readonly ActivityCategory[]): color is string {
   return typeof color === 'string' && HEX.test(color) &&
     googleActivityColorValues(categories).includes(color.toUpperCase());
+}
+
+/** This marker is written only by an explicit user color command. Source imports
+ * do not set it, and an override never expands the verified Google palette. */
+export function isExplicitCustomActivityCategory(category: ActivityCategory): boolean {
+  return category.customColor === true && typeof category.id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(category.id) && HEX.test(category.color);
+}
+
+export function isSelectableActivityCategory(category: ActivityCategory, categories: readonly ActivityCategory[]): boolean {
+  return !category.archived && !category.paletteOnly && HEX.test(category.color) && (isExplicitCustomActivityCategory(category) ||
+    (!(category.provider === 'google' && category.providerOriginalColor &&
+      category.color.toUpperCase() !== category.providerOriginalColor.toUpperCase()) && isAllowedGoogleActivityColor(category.color, categories)));
+}
+
+/** Callers supply actual verified event/target-label or native bridge colors.
+ * A stable key breaks equal RGB distances independently of input ordering. */
+export function nearestVerifiedGoogleColor<T extends { key: string; color: string }>(hex: string, candidates: readonly T[]): T | undefined {
+  if (!HEX.test(hex)) return undefined;
+  const rgb = (value: string) => [1, 3, 5].map((index) => Number.parseInt(value.slice(index, index + 2), 16));
+  const wanted = rgb(hex);
+  let best: T | undefined; let distance = Infinity;
+  for (const candidate of candidates) {
+    if (typeof candidate.key !== 'string' || !candidate.key || !HEX.test(candidate.color)) continue;
+    const value = rgb(candidate.color);
+    const next = value.reduce((sum, channel, index) => sum + (channel - wanted[index]!) ** 2, 0);
+    if (next < distance || next === distance && (!best || candidate.key < best.key ||
+        candidate.key === best.key && candidate.color.toUpperCase() < best.color.toUpperCase())) { best = candidate; distance = next; }
+  }
+  return best;
 }

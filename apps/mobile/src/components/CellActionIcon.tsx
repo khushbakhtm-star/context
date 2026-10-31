@@ -1,6 +1,6 @@
 import { Text, View } from 'react-native';
 
-export type CellActionIconName = 'cut' | 'copy' | 'paste' | 'fill' | 'group' | 'ungroup' | 'reset' | 'edit' | 'event' | 'format';
+export type CellActionIconName = 'cut' | 'copy' | 'paste' | 'fill' | 'group' | 'ungroup' | 'reset' | 'edit' | 'categorize' | 'event' | 'format';
 
 /** Code-native monochrome artwork; the containing button supplies its name. */
 export function CellActionIcon({ name, color, backgroundColor = 'transparent', secondaryColor = color }: {
@@ -40,6 +40,15 @@ export function CellActionIcon({ name, color, backgroundColor = 'transparent', s
       borderWidth: 2.5, justifyContent: 'center' }]}>
       <View testID="group-minute-divider" style={{ height: 0.5, backgroundColor: secondaryColor }} />
     </View>
+    : name === 'categorize' ? <>
+      <View testID="category-back-paper" style={[line, { left: 8, top: 2, width: 12, height: 15, borderRadius: 1 }]} />
+      <View testID="category-front-paper" style={[line, { left: 4, top: 5, width: 13, height: 14,
+        borderRadius: 1, backgroundColor }]} />
+      <View testID="category-box" style={[line, { left: 2, top: 12, width: 22, height: 12,
+        borderRadius: 2, backgroundColor }]} />
+      <View testID="category-box-label" style={{ position: 'absolute', left: 10, top: 16, width: 6, height: 2,
+        borderRadius: 1, backgroundColor: color }} />
+    </>
     : name === 'event' ? <View style={[line, { left: 3, top: 4, width: 21, height: 19 }]} />
     : name === 'ungroup' ? <>{[0, 1, 2, 3].map((corner) => <View key={corner} style={[line, { left: corner % 2 ? 16 : 3,
         top: corner > 1 ? 16 : 4, width: 8, height: 8, borderRightWidth: corner % 2 ? 2 : 0,

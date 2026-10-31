@@ -9,11 +9,13 @@ import { CATEGORIES, DEFAULT_CATEGORIES, setCategoryCache } from '../theme';
 import type { ActivityCategory } from '../theme';
 import type { DeviceCalendar } from '../types';
 import { CELL_FORMAT_PREFIX } from '../utils/cell-format';
-import { GOOGLE_ACTIVITY_COLORS, googleActivityColorValues, isAllowedGoogleActivityColor } from '../utils/google-activity-colors';
+import { GOOGLE_ACTIVITY_COLORS, googleActivityColorValues, isAllowedGoogleActivityColor, isExplicitCustomActivityCategory,
+  isSelectableActivityCategory, nearestVerifiedGoogleColor } from '../utils/google-activity-colors';
 import type { CalendarPreferences } from '../types';
 
 const SETTING = 'activity.categories.v2';
 const COLOR = /^#[0-9a-f]{6}$/i;
+const PROVIDER_PALETTE_PREFIX = `${CELL_FORMAT_PREFIX}providerPalette:`;
 let mutations: Promise<unknown> = Promise.resolve();
 const paletteRefreshJobs = new Map<string, Promise<void>>();
 const paletteRefreshTimes = new Map<string, number>();
@@ -109,7 +111,7 @@ async function writeCategory(category: ActivityCategory) {
 
 /** Historical categories remain intact. Stable palette categories make the documented
  * Google fallback available offline without changing an existing activity or its reports. */
-export async function listCategories(includeArchived = true): Promise<ActivityCategory[]> {
+export async function listCategories(includeArchived = true, includePaletteProofs = false): Promise<ActivityCategory[]> {
   let documents = await getSyncDocuments('category:', CELL_FORMAT_PREFIX);
   if (!documents.length) {
     const previous = await getSetting<ActivityCategory[] | null>(SETTING, null);
@@ -127,10 +129,14 @@ export async function listCategories(includeArchived = true): Promise<ActivityCa
     await writeCategory(category);
     values.push(category);
   }
+  const proofs = (await getSyncDocuments(PROVIDER_PALETTE_PREFIX)).flatMap((document) =>
+    document.value?.kind === 'providerPaletteProof' && validCategory(document.value) && document.value.paletteOnly &&
+    document.value.provider === 'google' && document.value.googleColorVerified && !document.value.customColor ? [document.value] : []);
   values.sort((left, right) => left.name.localeCompare(right.name));
-  setCategoryCache(values);
+  setCategoryCache([...values, ...proofs]);
   await setSetting(SETTING, values);
-  return includeArchived ? values : values.filter((category) => !category.archived);
+  return [...values.filter((category) => !category.paletteOnly), ...(includePaletteProofs ? proofs : [])]
+    .filter((category) => includeArchived || !category.archived);
 }
 
 export function activeCategories() { return listCategories(false); }
@@ -167,14 +173,12 @@ export function ensureSourceColorCategory(input: { color: string; name: string; 
   });
 }
 
-/** New activity choices use only Google-provided hex values. Old records are still
- * available through listCategories for history, reports, rename and archive. */
+/** Provider choices keep their exact palette limits; explicit Context custom
+ * colors remain selectable locally without claiming a provider color identity. */
 export type ActivityColorOptions = { writableOnly?: boolean; scope?: { dateKey: string; minuteIndex: number } };
 export async function listSelectableActivityCategories(options: ActivityColorOptions = {}): Promise<ActivityCategory[]> {
-  const categories = await listCategories();
-  const historical = () => categories.filter((category) => !category.archived &&
-    !(category.provider === 'google' && category.providerOriginalColor && category.color.toUpperCase() !== category.providerOriginalColor.toUpperCase()) &&
-    isAllowedGoogleActivityColor(category.color, categories));
+  const categories = await listCategories(true, true);
+  const historical = () => categories.filter((category) => isSelectableActivityCategory(category, categories));
   if (options.writableOnly === false) return historical();
   const allWriters = await connectedGoogleWriters();
   for (const writer of allWriters) refreshPaletteInBackground(hashValue(['google-event-palette', writer.identity]),
@@ -203,7 +207,7 @@ export async function listSelectableActivityCategories(options: ActivityColorOpt
       }
     }
   }
-  const writable = categories.filter((category) => category.googleColorVerified && (
+  const writable = categories.filter((category) => !category.customColor && category.googleColorVerified && (
     writers.some((writer) => category.provider === 'google' && category.accountId === writer.account.id &&
       (category.providerColorId || category.providerLabelId && writer.labelCalendars.includes(category.calendarId ?? ''))) ||
     category.provider === 'device' && category.providerColorId && nativeIds.includes(category.calendarId ?? '')) &&
@@ -211,45 +215,65 @@ export async function listSelectableActivityCategories(options: ActivityColorOpt
   const writableColors = new Set(writable.map((category) => category.color.toUpperCase()));
   const restricted = writers.length > 0 || categories.some((category) => category.provider === 'device' &&
     category.googleColorVerified && category.providerColorId && nativeIds.includes(category.calendarId ?? ''));
-  return historical().filter((category) => (!restricted || writableColors.has(category.color.toUpperCase())) &&
+  return historical().filter((category) => isExplicitCustomActivityCategory(category) || ((!restricted || writableColors.has(category.color.toUpperCase())) &&
     // A local display override must not offer a color that its provider ID would
     // render differently. Keep the category readable for existing entries.
     !(category.provider === 'google' && category.providerOriginalColor &&
       (typeof category.providerOriginalColor !== 'string' ||
         category.color.toUpperCase() !== category.providerOriginalColor.toUpperCase())) &&
-    isAllowedGoogleActivityColor(category.color, categories));
+    isAllowedGoogleActivityColor(category.color, categories)));
 }
 
 export async function listGoogleActivityColors(): Promise<string[]> {
-  return googleActivityColorValues(await listCategories());
+  return googleActivityColorValues(await listCategories(true, true));
 }
 
-export function createCategory(input: { name: string; color: string }): Promise<ActivityCategory> {
+export function categoryUserColorUpdatedAt(categoryId: string): number | null {
+  const value = CATEGORIES.find((category) => category.id === categoryId)?.colorUpdatedAt;
+  if (typeof value !== 'string') return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value ? timestamp : null;
+}
+
+export function createCategory(input: { name: string; color: string; customColor?: true }): Promise<ActivityCategory> {
   return serialized(async () => {
-    const categories = await listCategories();
-    if (!isAllowedGoogleActivityColor(input.color, categories)) {
-      throw new Error('Choose a color from the Google Calendar palette.');
-    }
+    if (typeof input.name !== 'string' || !input.name.trim() || input.name.trim().length > 200) throw new Error('Enter a category label of up to 200 characters.');
+    if (input.customColor !== undefined && input.customColor !== true) throw new Error('Confirm the custom category color.');
+    const categories = await listCategories(true, true);
+    if (input.customColor === true && (typeof input.color !== 'string' || !COLOR.test(input.color))) throw new Error('Use a six-digit hexadecimal color, such as #123456.');
+    if (!input.customColor && !isAllowedGoogleActivityColor(input.color, categories)) throw new Error('Choose a color from the Google Calendar palette.');
     const category: ActivityCategory = { id: `custom_${Crypto.randomUUID().replaceAll('-', '')}`,
-      name: input.name.trim(), color: input.color.toUpperCase(), updatedAt: new Date().toISOString() };
+      name: input.name.trim(), color: input.color.toUpperCase(), ...(input.customColor ? { customColor: true as const } : {}),
+      colorUpdatedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     await writeCategory(category);
     await listCategories();
     return category;
   });
 }
 
-export function updateCategory(id: string, changes: Partial<Pick<ActivityCategory, 'name' | 'color' | 'archived'>>): Promise<ActivityCategory> {
+export function updateCategory(id: string, changes: Partial<Pick<ActivityCategory, 'name' | 'color' | 'archived' | 'customColor'>>): Promise<ActivityCategory> {
   return serialized(async () => {
-    const categories = await listCategories();
-    const existing = categories.find((category) => category.id === id);
+    const categories = await listCategories(true, true);
+    const existing = categories.find((category) => category.id === id && !category.paletteOnly);
     if (!existing) throw new Error('This category is no longer available.');
+    if (changes.customColor !== undefined && changes.customColor !== true) throw new Error('Confirm the custom category color.');
+    if (changes.name !== undefined && (typeof changes.name !== 'string' || !changes.name.trim() || changes.name.trim().length > 200)) {
+      throw new Error('Enter a category label of up to 200 characters.');
+    }
+    const customColor = changes.customColor === true || existing.customColor === true;
     if (changes.color !== undefined && (typeof changes.color !== 'string' ||
-        (changes.color.toUpperCase() !== existing.color.toUpperCase() &&
+        !COLOR.test(changes.color) || (changes.color.toUpperCase() !== existing.color.toUpperCase() && !customColor &&
           !isAllowedGoogleActivityColor(changes.color, categories)))) {
       throw new Error('Choose a color from the Google Calendar palette.');
     }
-    const next = { ...existing, ...changes, name: (changes.name ?? existing.name).trim(),
-      color: (changes.color ?? existing.color).toUpperCase(), updatedAt: new Date().toISOString() };
+    if (changes.customColor && !existing.customColor) await writeProviderPaletteProof(existing);
+    const color = (changes.color ?? existing.color).toUpperCase();
+    const colorChanged = color !== existing.color.toUpperCase() || customColor !== (existing.customColor === true);
+    const previousColorTime = Date.parse(existing.colorUpdatedAt ?? '');
+    const next: ActivityCategory = { ...existing, ...(changes.archived !== undefined ? { archived: changes.archived } : {}),
+      ...(customColor ? { customColor: true as const } : {}), name: (changes.name ?? existing.name).trim(), color,
+      ...(colorChanged ? { colorUpdatedAt: new Date(Math.max(Date.now(), Number.isFinite(previousColorTime) ? previousColorTime + 1 : 0)).toISOString() } : {}),
+      updatedAt: new Date().toISOString() };
     await writeCategory(next);
     await listCategories();
     return next;
@@ -260,6 +284,22 @@ function stableId(...parts: string[]) {
   return `import_${hashValue(parts).slice(0, 48)}`;
 }
 
+async function writeProviderPaletteProof(category: ActivityCategory) {
+  if (category.provider !== 'google' || !category.accountId || !category.googleColorVerified || category.customColor ||
+      (!category.providerColorId && !category.providerLabelId)) return;
+  const color = category.providerOriginalColor ?? category.color;
+  if (!COLOR.test(color)) return;
+  const name = category.providerOriginalName ?? category.name;
+  const id = stableId('provider-palette-proof', category.accountId, category.calendarId ?? '', category.providerColorId ?? '', category.providerLabelId ?? '');
+  const proof = { kind: 'providerPaletteProof', id, name, color: color.toUpperCase(), provider: 'google', accountId: category.accountId,
+    ...(category.calendarId ? { calendarId: category.calendarId } : {}),
+    ...(category.providerColorId ? { providerColorId: category.providerColorId } : {}),
+    ...(category.providerLabelId ? { providerLabelId: category.providerLabelId } : {}),
+    providerOriginalName: name, providerOriginalColor: color.toUpperCase(), googleColorVerified: true, paletteOnly: true,
+    updatedAt: new Date().toISOString() };
+  await putSyncDocument(`${PROVIDER_PALETTE_PREFIX}${id}`, proof);
+}
+
 async function importCategories(values: ActivityCategory[]) {
   const existing = await listCategories();
   const byId = new Map(existing.map((category) => [category.id, category]));
@@ -267,10 +307,11 @@ async function importCategories(values: ActivityCategory[]) {
   for (const category of values) {
     const current = byId.get(category.id);
     if (current) {
+      if (current.customColor) await writeProviderPaletteProof(category);
       // Refresh provider changes only where the user has not customized the local display.
       const next = { ...current, ...category, archived: current.archived,
-        name: current.providerOriginalName && current.name === current.providerOriginalName ? category.name : current.name,
-        color: current.providerOriginalColor && current.color === current.providerOriginalColor ? category.color : current.color,
+        name: !current.customColor && current.providerOriginalName && current.name === current.providerOriginalName ? category.name : current.name,
+        color: !current.customColor && current.providerOriginalColor && current.color === current.providerOriginalColor ? category.color : current.color,
         providerOriginalName: category.name, providerOriginalColor: category.color };
       const plain = (value: ActivityCategory) => JSON.parse(JSON.stringify(value));
       if (hashValue(plain(current)) !== hashValue(plain(next))) {
@@ -392,12 +433,36 @@ export type ProviderCategoryColor = {
   categoryName?: string;
 };
 
+function customGoogleChoice(category: ActivityCategory, accountId: string, calendarId?: string) {
+  const candidates = new Map<string, { key: string; color: string; mapping: ProviderCategoryColor }>();
+  for (const item of CATEGORIES) {
+    if (item.provider !== 'google' || item.accountId !== accountId || item.googleColorVerified !== true || item.customColor ||
+        !COLOR.test(item.color) || item.providerOriginalColor && item.providerOriginalColor.toUpperCase() !== item.color.toUpperCase()) continue;
+    const targetLabel = item.providerLabelId && item.calendarId === calendarId;
+    const key = targetLabel ? `label:${calendarId}:${item.providerLabelId}` : item.providerColorId ? `event:${item.providerColorId}` : null;
+    if (!key || candidates.has(key)) continue;
+    candidates.set(key, { key, color: item.color.toUpperCase(), mapping: targetLabel ? { eventLabelId: item.providerLabelId } : { colorId: item.providerColorId } });
+  }
+  return nearestVerifiedGoogleColor(category.color, [...candidates.values()]);
+}
+
+/** The exact provider shade chosen for an explicit Context custom color. This is
+ * separate from the saved Context hex so an acknowledged nearest-color echo
+ * never silently recolors the private ledger. Undefined means no proven mapping. */
+export function categoryProviderDisplayColor(categoryId: string, provider: AccountProvider,
+  accountId: string, calendarId?: string): string | undefined {
+  const category = CATEGORIES.find((item) => item.id === categoryId);
+  return provider === 'google' && category && isExplicitCustomActivityCategory(category)
+    ? customGoogleChoice(category, accountId, calendarId)?.color : undefined;
+}
+
 /** A provider mapping is used only in the account/calendar where that mapping exists. */
 export function categoryProviderColor(categoryId: string, provider: AccountProvider,
   accountId: string, calendarId?: string): ProviderCategoryColor {
   const category = CATEGORIES.find((item) => item.id === categoryId);
   if (!category) return {};
   if (provider === 'google') {
+    if (isExplicitCustomActivityCategory(category)) return customGoogleChoice(category, accountId, calendarId)?.mapping ?? {};
     const direct = category.provider === 'google' && category.accountId === accountId &&
       (!category.providerOriginalColor || category.providerOriginalColor.toUpperCase() === category.color.toUpperCase());
     if (direct && category.providerLabelId && calendarId === category.calendarId) return { eventLabelId: category.providerLabelId };
@@ -407,6 +472,7 @@ export function categoryProviderColor(categoryId: string, provider: AccountProvi
     const matching = CATEGORIES.find((item) => {
       const original = item.providerOriginalColor ?? item.color;
       return item.provider === 'google' && item.accountId === accountId && typeof original === 'string' &&
+        !item.customColor &&
         original.toUpperCase() === category.color.toUpperCase() &&
         (item.providerColorId || (item.providerLabelId && item.calendarId === calendarId));
     });
@@ -421,7 +487,7 @@ export function categoryProviderColor(categoryId: string, provider: AccountProvi
 
 export function categoryForProviderColor(provider: AccountProvider, accountId: string, calendarId: string,
   value: { colorId?: string; eventLabelId?: string; categoryNames?: string[] }) {
-  return CATEGORIES.find((category) => category.provider === provider && category.accountId === accountId &&
+  return CATEGORIES.find((category) => !category.customColor && !category.paletteOnly && category.provider === provider && category.accountId === accountId &&
     ((provider === 'google' && Boolean(
       (value.eventLabelId && category.calendarId === calendarId && category.providerLabelId === value.eventLabelId) ||
       (!value.eventLabelId && value.colorId && category.providerColorId === value.colorId))) ||

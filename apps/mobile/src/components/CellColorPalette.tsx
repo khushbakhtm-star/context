@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { useAppTheme } from '../appearance';
 import type { ActivityCategory, AppColors } from '../theme';
-import { isAllowedGoogleActivityColor } from '../utils/google-activity-colors';
+import { isSelectableActivityCategory } from '../utils/google-activity-colors';
 
 type Props = {
   mode: 'text' | 'cell';
@@ -27,10 +27,7 @@ export function CellColorPalette({ mode, busy, textColor, explicitTextColor, sel
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [hex, setHex] = useState(explicitTextColor ?? textColor);
-  const allowedColors = useMemo(() => colorChoices.filter((item) => !item.archived &&
-    !(item.provider === 'google' && item.providerOriginalColor &&
-      item.color.toUpperCase() !== item.providerOriginalColor.toUpperCase()) &&
-    isAllowedGoogleActivityColor(item.color, colorChoices)), [colorChoices]);
+  const allowedColors = useMemo(() => colorChoices.filter((item) => isSelectableActivityCategory(item, colorChoices)), [colorChoices]);
   const selectedColor = allowedColors.find((item) => item.id === selectedColorId);
 
   return <View style={styles.palette}>

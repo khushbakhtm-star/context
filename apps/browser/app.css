@@ -28,3 +28,9 @@ header #sync{display:inline-flex;align-items:center;justify-content:center;color
 .sync-loop-open,.sync-issue{display:none}
 #sync[data-sync-state=idle] .sync-loop-closed{display:none}
 #sync[data-sync-state=idle] .sync-loop-open,#sync[data-sync-state=issue] .sync-issue{display:block}
+
+/* Neutral note fill is presentation only and follows the current appearance. */
+:root{--default-text-fill:#E6E6E6}
+body[data-theme=dark]{--default-text-fill:#333333}
+@media(prefers-color-scheme:dark){body:not([data-theme=light]){--default-text-fill:#333333}}
+.cell[data-default-fill=true]{background-color:var(--default-text-fill);color:var(--ink)}

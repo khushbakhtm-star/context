@@ -6,6 +6,7 @@ import { addDays, dateKey } from '../utils/time';
 import type { SyncDocument } from '../sync/types';
 import { CELL_FORMAT_PREFIX, cellFormatDocument, cellFormatKey, cellEventLabel, formatFromDocument, isActivityGroupId, isCalendarEventId, normalizeCellFormat, validateMinuteCellRange, type CellFormat } from '../utils/cell-format';
 import { serializeSQLiteWrites } from './sqlite-write-gate';
+import { calendarMutationTime } from '../utils/calendar-change-authority';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -257,7 +258,9 @@ export async function getMinuteEntry(value: string, minuteIndex: number) {
 /** Import only a source color into the reviewed existing minutes. The ordinary
  * minute trigger journals private-ledger updates; no calendar/link outbox is queued. */
 export async function recolorExpectedMinuteEntries(expected: readonly MinuteEntry[], nextCategoryId: string,
-  localReceipt?: { key: string; value: unknown }, requireCurrent?: () => void): Promise<string[]> {
+  localReceipt?: { key: string; value: unknown }, requireCurrent?: () => void,
+  categorySnapshots?: readonly ActivityCategorySnapshot[]): Promise<string[]> {
+  const expectedCategories = copyCategorySnapshots(categorySnapshots);
   if (!Array.isArray(expected) || !expected.length || expected.length > 1440 ||
       typeof nextCategoryId !== 'string' || !/^[A-Za-z0-9_.:-]{1,200}$/.test(nextCategoryId)) {
     throw new Error('Choose a valid existing activity before importing its color.');
@@ -290,6 +293,7 @@ export async function recolorExpectedMinuteEntries(expected: readonly MinuteEntr
   const affectedDates = new Set<string>();
   await db.withExclusiveTransactionAsync(async (txn) => {
     requireCurrent?.();
+    await requireCategorySnapshotsInside(txn, expectedCategories);
     for (const before of members) {
       const row = await txn.getFirstAsync<MinuteRow>(`SELECT * FROM minute_entries WHERE date_key = ? AND minute_index = ?`,
         before.dateKey, before.minuteIndex);
@@ -1073,8 +1077,67 @@ export async function getSyncDocuments(prefix: string, excludedPrefix?: string) 
 export async function putSyncDocument(key: string, value: Record<string, unknown> | null) {
   const db = await database();
   await db.withExclusiveTransactionAsync(async (txn) => {
+    const before = /^category:[A-Za-z0-9_-]{1,160}$/.test(key)
+      ? await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key) : null;
     await putSyncDocumentInside(txn, key, value);
+    await queueCategoryColorReferencesInside(txn, key, before?.value_json ? JSON.parse(before.value_json) : null, value);
   });
+}
+
+function categoryUserColorTime(value: Record<string, unknown> | null): number | null {
+  if (!value || value.paletteOnly === true || typeof value.color !== 'string' || !/^#[a-f0-9]{6}$/i.test(value.color)) return null;
+  const time = calendarMutationTime(value.colorUpdatedAt);
+  return time !== null && time >= 0 && new Date(time).toISOString() === value.colorUpdatedAt ? time : null;
+}
+
+/** Queue exact existing native bindings only. A category rename/provider refresh
+ * is not a color command, and a peer's category cannot create a native event. */
+async function queueCategoryColorReferencesInside(txn: Pick<SQLite.SQLiteDatabase, 'getAllAsync' | 'runAsync'>,
+  key: string, before: Record<string, unknown> | null, after: Record<string, unknown> | null) {
+  const match = /^category:([A-Za-z0-9_-]{1,160})$/.exec(key);
+  const time = categoryUserColorTime(after), priorTime = categoryUserColorTime(before);
+  if (!match || !after || after.id !== match[1] || time === null || (priorTime !== null && time <= priorTime) ||
+      canonicalValue([before?.color, before?.customColor]) === canonicalValue([after.color, after.customColor])) return;
+  const dates = await txn.getAllAsync<{ date_key: string; queued_at: string | null }>(
+    `SELECT DISTINCT m.date_key, o.updated_at AS queued_at FROM minute_entries m
+     JOIN sync_bindings b ON b.block_id = m.block_id LEFT JOIN sync_outbox o ON o.date_key = m.date_key
+     WHERE m.category_id = ?`, match[1]!);
+  for (const row of dates) {
+    const queued = Date.parse(row.queued_at ?? '');
+    const now = new Date(Math.max(Date.now(), time, Number.isFinite(queued) ? queued + 1 : 0)).toISOString();
+    await txn.runAsync(`INSERT INTO sync_outbox (date_key, attempts, last_error, updated_at) VALUES (?, 0, NULL, ?)
+      ON CONFLICT(date_key) DO UPDATE SET attempts = 0, last_error = NULL, updated_at = excluded.updated_at`, row.date_key, now);
+  }
+}
+
+export type ActivityCategorySnapshot = { key: string; document: SyncDocument | null };
+function copyCategorySnapshots(values: readonly ActivityCategorySnapshot[] = []): ActivityCategorySnapshot[] {
+  if (!Array.isArray(values) || values.length > 2000 || new Set(values.map((value) => value.key)).size !== values.length ||
+      values.some((value) => !/^category:[A-Za-z0-9_-]{1,160}$/.test(value.key) ||
+        value.document && (value.document.key !== value.key || typeof value.document.revision !== 'string'))) {
+    throw new Error('Review the exact activity categories before importing this event.');
+  }
+  return JSON.parse(JSON.stringify(values));
+}
+export async function snapshotActivityCategories(entries: readonly Pick<MinuteEntry, 'categoryId'>[], additionalIds: readonly string[] = []): Promise<ActivityCategorySnapshot[]> {
+  const keys = [...new Set([...entries.map((entry) => entry.categoryId), ...additionalIds])].map((id) => `category:${id}`).sort();
+  copyCategorySnapshots(keys.map((key) => ({ key, document: null })));
+  const db = await database(), found = new Map<string, SyncDocument>();
+  for (let start = 0; start < keys.length; start += 500) {
+    const batch = keys.slice(start, start + 500);
+    for (const row of await db.getAllAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key IN (${batch.map(() => '?').join(',')})`, ...batch))
+      found.set(row.key, mapDocument(row));
+  }
+  return keys.map((key) => ({ key, document: found.get(key) ?? null }));
+}
+async function requireCategorySnapshotsInside(txn: Pick<SQLite.SQLiteDatabase, 'getAllAsync'>, expected: readonly ActivityCategorySnapshot[]) {
+  for (let start = 0; start < expected.length; start += 500) {
+    const batch = expected.slice(start, start + 500);
+    const current = new Map((await txn.getAllAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key IN (${batch.map(() => '?').join(',')})`,
+      ...batch.map((item) => item.key))).map((row) => [row.key, mapDocument(row)]));
+    if (batch.some((item) => canonicalValue(current.get(item.key) ?? null) !== canonicalValue(item.document)))
+      throw new Error('The activity category changed before its calendar edit could be imported. Retry synchronization.');
+  }
 }
 
 async function putSyncDocumentInside(txn: Pick<SQLite.SQLiteDatabase, 'runAsync'>,
@@ -1163,10 +1226,29 @@ export async function getActivityLocalUpdatedAt(blockId: string,
       if (document) documents.push(document);
     }
   }
+  const referencedCategories = new Set<string>();
   for (const document of documents) {
     const value = document.value_json ? JSON.parse(document.value_json) as Record<string, unknown> : null;
     const timestamp = value?.source === 'manual' && typeof value.updatedAt === 'string' ? Date.parse(value.updatedAt) : NaN;
     if (Number.isFinite(timestamp)) latest = latest === null ? timestamp : Math.max(latest, timestamp);
+    if (typeof value?.categoryId === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(value.categoryId)) referencedCategories.add(value.categoryId);
+  }
+  // A deliberate color edit to a stable category ID also changes its referenced
+  // cells. Ordinary category updatedAt/import/rename clocks are not user color
+  // authority; only the dedicated canonical user-color clock participates.
+  const keys = [...referencedCategories].map((id) => `category:${id}`);
+  for (let start = 0; start < keys.length; start += 500) {
+    const batch = keys.slice(start, start + 500);
+    const categories = await db.getAllAsync<Pick<DocumentRow, 'key' | 'value_json'>>(
+      `SELECT key, value_json FROM ledger_documents WHERE key IN (${batch.map(() => '?').join(',')})`, ...batch);
+    for (const document of categories) {
+      const value = document.value_json ? JSON.parse(document.value_json) as Record<string, unknown> : null;
+      if (!value || value.paletteOnly === true || document.key !== `category:${value.id}` ||
+          typeof value.color !== 'string' || !/^#[a-f0-9]{6}$/i.test(value.color)) continue;
+      const timestamp = categoryUserColorTime(value);
+      if (timestamp !== null)
+        latest = latest === null ? timestamp : Math.max(latest, timestamp);
+    }
   }
   return latest;
 }
@@ -1609,6 +1691,7 @@ export async function mergeSyncDocuments(documents: SyncDocument[]) {
         VALUES (?, ?, ?, 0) ON CONFLICT(key) DO UPDATE SET revision = excluded.revision,
           value_json = excluded.value_json, local_pending = 0`, incoming.key,
           incoming.revision, incomingJson);
+      await queueCategoryColorReferencesInside(txn, incoming.key, existing?.value_json ? JSON.parse(existing.value_json) : null, incoming.value);
       changed += 1;
     }
     await txn.runAsync(`UPDATE ledger_clock SET importing = 0 WHERE id = 1`);
@@ -1661,6 +1744,7 @@ export async function replaceProjectedMinutes(input: {
   expectedActivityEditIntent?: ActivityEditIntent | null;
   /** Fence a source conflict choice or ownership update during network reads. */
   expectedProjectionDocument?: SyncDocument;
+  expectedCategoryDocuments?: readonly ActivityCategorySnapshot[];
   /** Exact fresh sibling intents reviewed before reclaiming a partial Ungroup. */
   expectedDerivedActivityEditIntents?: ActivityEditIntent[];
   /** Durable provider cleanup is committed with the exact reclaimed cells. */
@@ -1671,6 +1755,7 @@ export async function replaceProjectedMinutes(input: {
   activityTitle?: string;
   entries: { dateKey: string; minuteIndex: number; text: string; categoryId: string }[];
 }) {
+  const expectedCategories = copyCategorySnapshots(input.expectedCategoryDocuments);
   const endDate = input.previousEndDate ?? input.previousDate;
   const coordinate = (day: string, minute: number) => `${day}:${minute}`;
   if (!isCalendarEventId(input.blockId) || input.entries.length > 1440) throw new Error('Invalid imported event.');
@@ -1713,6 +1798,7 @@ export async function replaceProjectedMinutes(input: {
   const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async (txn) => {
     input.beforeCommitGuard?.();
+    await requireCategorySnapshotsInside(txn, expectedCategories);
     if (input.rejectAccountOwned) {
       const projections = await txn.getAllAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key LIKE 'projection:%' AND value_json IS NOT NULL`);
       if (projections.some((document) => {

@@ -8,6 +8,7 @@ import { calendarCellColor } from '../shared/utils/calendar-cell-color';
 import { cellFormatKey, formatFromDocument } from '../shared/utils/cell-format';
 import { dateKey, minuteLabel } from '../shared/utils/time';
 import { minuteKey } from '../src/ledger';
+import { noteColorOnFill } from '../src/text-color';
 
 const day = '2026-10-31';
 class Node {
@@ -20,7 +21,7 @@ class Node {
   setAttribute(name:string,value:string) { this.attributes[name] = value; }
   addEventListener() {}
 }
-function renderFixture(texts: string[], clock12 = true, minute = 0, planned = false, visibleDays = [day]) {
+function renderFixture(texts: string[], clock12 = true, minute = 0, planned = false, visibleDays = [day], providedDocuments?: any[]) {
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url),'utf8');
   const parsed = ts.createSourceFile('app.ts',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
   const declaration = parsed.statements.find((node:any) => node.name?.text === 'render')!;
@@ -29,16 +30,17 @@ function renderFixture(texts: string[], clock12 = true, minute = 0, planned = fa
   documents.push({key:'category:group',value:{color:'#2952A3'}} as any);
   const grid = new Node(), welcome = new Node();
   const main = {scrollTop:minute*32+50,scrollLeft:0,clientHeight:64};
-  const context:any = {store:{state:{documents:planned?[]:documents}},grid,main,clock12,firstRendered:-1,editor:null,
+  const sourceDocuments = providedDocuments ?? (planned ? [] : documents);
+  const context:any = {store:{state:{documents:sourceDocuments}},grid,main,clock12,firstRendered:-1,editor:null,
     document:{activeElement:null,createElement:()=>new Node(),createTextNode:(text:string)=>Object.assign(new Node(),{textContent:text})},
     HTMLElement:Node,element:()=>welcome,dates:()=>visibleDays,updateHeader(){},updateBars(){},paintSelection(){},dateKey,
-    minuteKey,cellFormatKey,formatFromDocument,minuteLabel,minuteCellPresentation,calendarCellColor,
+    minuteKey,cellFormatKey,formatFromDocument,minuteLabel,minuteCellPresentation,calendarCellColor,noteColorOnFill,
     MINUTE_NOTE_STYLE,MINUTE_TIME_STYLE,
     planForMinute:()=>planned?{id:'plan',title:'Planned activity',color:'#8D6F47'}:undefined};
   vm.runInNewContext(ts.transpileModule(declaration.getText(parsed),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
   context.render();
   const row = (index:number) => grid.children.find((child)=>child.dataset.row===String(index))!;
-  return {grid,heading:grid.children[0]!,row,cell:(index:number)=>row(index).children[1]!,note:(index:number)=>row(index).children[1]!.children.find((child)=>child.className==='cell-note')!};
+  return {grid,documents:sourceDocuments,heading:grid.children[0]!,row,cell:(index:number)=>row(index).children[1]!,note:(index:number)=>row(index).children[1]!.children.find((child)=>child.className==='cell-note')!};
 }
 
 test('Day view left-aligns its weekday and day number while multi-day headings retain their centered layout', () => {
@@ -97,4 +99,38 @@ test('fixed-scale browser time labels keep their base font and complete hour/min
     assert.equal(label.style.textOverflow,'clip');assert.doesNotMatch(label.textContent,/…|\.\.\./);
     assert.equal(h.grid.style['--time-width'],clock12?'78px':'51px');
   }
+});
+
+test('committed unclassified notes use theme-neutral display fill while explicit activities, groups and sources retain their fill', () => {
+  const entry = (minute: number, text: string, categoryId = 'unaccounted') => ({ key: minuteKey(day, minute), value: { text, categoryId, blockId: `block_${minute}` } });
+  const documents = [entry(0, 'Unclassified thought'), entry(1, ' \n\t'), entry(2, ''), entry(3, 'Explicit category', 'work'),
+    entry(4, 'Bordered activity'), entry(5, 'Reset fill note', 'work'), entry(6, ' \n', 'work'),
+    { key: 'category:unaccounted', value: { color: '#5A6986' } }, { key: 'category:work', value: { color: '#2952A3' } },
+    { key: cellFormatKey(day, 4), value: { kind: 'minuteFormat', format: { calendarEvent: { id: 'block_4', title: 'Explicit event' } } } },
+    ...[5, 6].map((minute) => ({ key: cellFormatKey(day, minute), value: { kind: 'minuteFormat', format: { noFill: true } } }))];
+  const before = JSON.stringify(documents), h = renderFixture([], true, 0, false, [day], documents);
+  for (const index of [0, 5]) {
+    assert.equal(h.cell(index).dataset.defaultFill, 'true'); assert.equal(h.cell(index).style.backgroundColor, undefined);
+  }
+  for (const index of [1, 2, 6]) {
+    assert.equal(h.cell(index).dataset.defaultFill, 'false'); assert.equal(h.cell(index).style.backgroundColor, undefined, 'whitespace/default cells keep the ordinary surface');
+  }
+  assert.equal(h.cell(3).dataset.defaultFillEligible, 'false'); assert.equal(h.cell(3).style.backgroundColor, '#2952A3');
+  assert.equal(h.cell(4).dataset.defaultFillEligible, 'false'); assert.equal(h.cell(4).style.backgroundColor, '#5A6986');
+  const source = renderFixture([], true, 0, true, [day], [entry(0, 'A source minute')]);
+  assert.equal(source.cell(0).dataset.defaultFillEligible, 'false'); assert.equal(source.cell(0).dataset.defaultFill, 'false');
+  const custom = renderFixture([], true, 0, false, [day], [entry(0, 'Deliberate custom color'),
+    { key: 'category:unaccounted', value: { color: '#123456', customColor: true } }]);
+  assert.equal(custom.cell(0).dataset.defaultFillEligible, 'false'); assert.equal(custom.cell(0).style.backgroundColor, '#123456');
+  assert.equal(custom.cell(0).style.color, '#FFFFFF', 'dark custom fills use readable automatic text contrast');
+  const explicitText = renderFixture([], true, 0, false, [day], [entry(0, 'Chosen text color', 'custom_focus'),
+    { key: 'category:custom_focus', value: { color: '#123456', customColor: true } },
+    { key: cellFormatKey(day, 0), value: { kind: 'minuteFormat', format: { textColor: '#FFAABB' } } }]);
+  assert.equal(explicitText.cell(0).style.color, '#FFAABB', 'explicit text formatting keeps precedence over automatic contrast');
+  assert.equal(JSON.stringify(documents), before, 'rendering cannot update ledger, category or sync payloads');
+  const css = fs.readFileSync(new URL('../app.css', import.meta.url), 'utf8');
+  assert.match(css, /:root\{--default-text-fill:#E6E6E6\}/);
+  assert.match(css, /body\[data-theme=dark\]\{--default-text-fill:#333333\}/);
+  assert.match(css, /@media\(prefers-color-scheme:dark\)\{body:not\(\[data-theme=light\]\)\{--default-text-fill:#333333\}\}/);
+  assert.match(css, /\.cell\[data-default-fill=true\]\{background-color:var\(--default-text-fill\);color:var\(--ink\)\}/);
 });

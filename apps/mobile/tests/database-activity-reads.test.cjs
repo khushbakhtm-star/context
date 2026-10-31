@@ -48,6 +48,77 @@ const day = '2026-10-25';
 const entry = (minuteIndex, blockId = 'legacy_block', dateKey = day) => ({ dateKey, minuteIndex, blockId });
 const formatKey = (point) => `category:minuteFormat:${point.dateKey}:${point.minuteIndex}`;
 const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test('activity authority includes only a referenced category canonical user-color clock, never rename or provider metadata time', async (t) => {
+  const { db } = repository(t); await db.initializeDatabase();
+  await db.replaceProjectedMinutes({ blockId: 'source_block', previousDate: day, previousStart: 600, previousEnd: 600,
+    entries: [{ dateKey: day, minuteIndex: 600, text: 'Imported note', categoryId: 'custom_clock' }] });
+  const userColor = '2026-10-27T12:34:56.000Z';
+  await db.putSyncDocument('category:custom_clock', { id: 'custom_clock', name: 'Renamed label', color: '#123456',
+    colorUpdatedAt: userColor, updatedAt: '2099-01-01T00:00:00.000Z' });
+  await db.putSyncDocument('category:unrelated', { id: 'unrelated', name: 'Other activity', color: '#654321', colorUpdatedAt: '2098-01-01T00:00:00.000Z' });
+  assert.equal(await db.getActivityLocalUpdatedAt('source_block'), Date.parse(userColor));
+  await db.putSyncDocument('category:custom_clock', { id: 'custom_clock', name: 'Provider-refreshed name', color: '#123456', updatedAt: '2099-02-01T00:00:00.000Z' });
+  assert.equal(await db.getActivityLocalUpdatedAt('source_block'), null);
+});
+
+test('invalid, noncanonical and hidden-palette category color clocks cannot advance activity authority', async (t) => {
+  const { db } = repository(t); await db.initializeDatabase();
+  await db.replaceProjectedMinutes({ blockId: 'source_block', previousDate: day, previousStart: 600, previousEnd: 600,
+    entries: [{ dateKey: day, minuteIndex: 600, text: 'Imported note', categoryId: 'custom_clock' }] });
+  for (const value of [
+    { colorUpdatedAt: 'not a date' }, { colorUpdatedAt: '2026-02-30T00:00:00.000Z' },
+    { colorUpdatedAt: '2026-10-27T12:34:56Z' }, { colorUpdatedAt: '2026-10-27T12:34:56.000Z', paletteOnly: true },
+    { colorUpdatedAt: '2026-10-27T12:34:56.000Z', id: 'another_id' },
+  ]) {
+    await db.putSyncDocument('category:custom_clock', { id: 'custom_clock', name: 'Label', color: '#123456', ...value });
+    assert.equal(await db.getActivityLocalUpdatedAt('source_block'), null);
+  }
+});
+
+test('calendar imports atomically reject changed category revisions and newly created previously absent categories', async (t) => {
+  const { db } = repository(t); await db.initializeDatabase();
+  await db.putSyncDocument('category:custom_clock', { id: 'custom_clock', name: 'Exact color', color: '#123457', customColor: true });
+  await db.replaceProjectedMinutes({ blockId: 'category_guard', previousDate: day, previousStart: 600, previousEnd: 600,
+    entries: [{ dateKey: day, minuteIndex: 600, text: 'Keep note', categoryId: 'custom_clock' }] });
+  const entries = plain(await db.getEntriesForBlock('category_guard'));
+  const snapshot = await db.snapshotActivityCategories(entries, ['new_source']);
+  const category = (await db.getSyncDocuments('category:custom_clock'))[0];
+  await db.putSyncDocument(category.key, plain(category.value));
+  await assert.rejects(db.recolorExpectedMinuteEntries(entries, 'new_source', undefined, undefined, snapshot), /category changed/);
+  assert.equal((await db.getMinuteEntry(day, 600)).categoryId, 'custom_clock');
+  const fresh = await db.snapshotActivityCategories(entries, ['new_source']);
+  await db.putSyncDocument('category:new_source', { id: 'new_source', color: '#ABCDEF', name: 'Concurrent choice' });
+  await assert.rejects(db.replaceProjectedMinutes({ blockId: 'category_guard', previousDate: day, previousStart: 600, previousEnd: 600,
+    expectedEntries: entries, expectedCategoryDocuments: fresh,
+    entries: [{ dateKey: day, minuteIndex: 700, text: 'Remote note', categoryId: 'new_source' }] }), /category changed/);
+  assert.equal(await db.getMinuteEntry(day, 700), null); assert.deepEqual(plain(await db.getEntriesForBlock('category_guard')), entries);
+});
+
+test('genuine global category recolors queue every existing native binding date without creating unbound events or promoting imports', async (t) => {
+  const { db, sqlite } = repository(t); await db.initializeDatabase();
+  for (const [dateKey, minuteIndex, blockId] of [[day, 1439, 'overnight_bound'], ['2026-10-26', 0, 'overnight_bound'], ['2026-10-27', 600, 'unbound']]) {
+    await db.replaceProjectedMinutes({ blockId, previousDate: dateKey, previousStart: minuteIndex, previousEnd: minuteIndex,
+      entries: [{ dateKey, minuteIndex, text: 'Unchanged note', categoryId: 'custom_clock' }] });
+  }
+  await db.saveSyncBinding({ segmentKey: `${day}:overnight_bound:1439-1440`, blockId: 'overnight_bound', dateKey: day, calendarId: 'personal', eventId: 'event-exact' });
+  const base = { id: 'custom_clock', color: '#123456', name: 'Label', customColor: true, colorUpdatedAt: '2026-10-30T12:00:00.000Z' };
+  await db.putSyncDocument('category:custom_clock', base); sqlite.exec('DELETE FROM sync_outbox');
+  const before = plain(await db.getEntriesForBlock('overnight_bound'));
+  await db.putSyncDocument('category:custom_clock', { ...base, name: 'Renamed only', updatedAt: '2099-01-01T00:00:00.000Z' });
+  assert.equal((await db.getPendingSyncDates()).length, 0);
+  await db.putSyncDocument('category:custom_clock', { ...base, color: '#123457', colorUpdatedAt: '2026-10-30T12:00:01.000Z' });
+  const first = await db.getPendingSyncDates(); assert.deepEqual(first.map((item) => item.dateKey).sort(), [day, '2026-10-26']);
+  await db.putSyncDocument('category:custom_clock', { ...base, color: '#123458', colorUpdatedAt: '2026-10-30T12:00:02.000Z' });
+  for (const item of first) await db.markSyncDateComplete(item.dateKey, item.updatedAt);
+  assert.equal((await db.getPendingSyncDates()).length, 2, 'an old in-flight acknowledgement cannot erase a newer recolor');
+  assert.deepEqual(plain(await db.getEntriesForBlock('overnight_bound')), before, 'recolor scheduling does not fabricate minute edits');
+  sqlite.exec('DELETE FROM sync_outbox');
+  const doc = (await db.getSyncDocuments('category:custom_clock'))[0];
+  await db.mergeSyncDocuments([{ ...plain(doc), revision: `9999999999999999:00000000:peer_actor`,
+    value: { ...base, color: '#123459', colorUpdatedAt: '2026-10-30T12:00:03.000Z' } }]);
+  assert.deepEqual((await db.getPendingSyncDates()).map((item) => item.dateKey).sort(), [day, '2026-10-26']);
+});
 function putFormat(sqlite, point, format) {
   sqlite.prepare('INSERT OR REPLACE INTO ledger_documents(key,revision,value_json,local_pending) VALUES (?,?,?,0)')
     .run(formatKey(point), '0000000000000001:00000000:fixture_actor', JSON.stringify({ kind: 'minuteFormat', format }));

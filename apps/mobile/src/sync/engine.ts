@@ -4,7 +4,7 @@ import * as SecureStore from 'expo-secure-store';
 import {
   acknowledgeInlineMinuteLink, acknowledgeUploaded, deferInlineMinuteLink, getActivityTitleForEntries, getActivityEditIntent, getActivityLocalUpdatedAt, getDayEntries, getDaySegments, getDocumentsForUpload,
   getEntriesForBlock, getPendingInlineMinuteLinks, getSetting, getSpreadsheetCells, getSyncBindingsForBlock, getSyncDocuments, hasSeenSyncFile,
-  markSyncFileSeen, mergeSyncDocuments, promoteInlineMinuteLinkForAccountReview, putSyncDocument, remapActivityProjections, replaceProjectedMinutes, recolorExpectedMinuteEntries, setSetting,
+  markSyncFileSeen, mergeSyncDocuments, promoteInlineMinuteLinkForAccountReview, putSyncDocument, remapActivityProjections, replaceProjectedMinutes, recolorExpectedMinuteEntries, setSetting, snapshotActivityCategories,
   type PendingInlineMinuteLink,
 } from '../data/database';
 import { categoryById } from '../theme';
@@ -27,6 +27,7 @@ import { createAccountSyncTrace, type AccountSyncTrace } from './diagnostics';
 import { zonedMinuteToInstant } from './time';
 import { canCreateAccountProjection } from '../utils/calendar-projection-authority';
 import { calendarMutationTime, latestCalendarChange } from '../utils/calendar-change-authority';
+import { isExplicitCustomActivityCategory } from '../utils/google-activity-colors';
 import type {
   AccountSyncStatus, CalendarEventWrite, ConnectedAccount, Projection,
   RemoteCalendarEvent, SyncBatch, SyncDocument,
@@ -363,7 +364,7 @@ export async function loadAccountPlans(value: string): Promise<PlannedEvent[]> {
 }
 
 function categoryForEvent(accountId: string, event: RemoteCalendarEvent) {
-  return CATEGORIES.find((category) => category.accountId === accountId &&
+  return CATEGORIES.find((category) => !category.paletteOnly && !category.customColor && category.accountId === accountId &&
     ((event.googleEventLabelId && category.providerLabelId === event.googleEventLabelId && category.calendarId === event.calendarId) ||
       (event.googleColorId && category.providerColorId === event.googleColorId) ||
       (category.providerCategoryName && event.microsoftCategories?.includes(category.providerCategoryName))));
@@ -376,7 +377,14 @@ type CalendarSyncReads = {
 };
 
 async function remoteActivityColor(account: ConnectedAccount, event: RemoteCalendarEvent, reads?: CalendarSyncReads) {
-  const direct = calendarColor(event.displayColor) ?? calendarColor(categoryForEvent(account.id, event)?.providerOriginalColor);
+  // Hidden provider proofs and customized aliases can retain a genuine source
+  // shade, but must never become the category assigned to an imported minute.
+  const original = CATEGORIES.find((category) => category.accountId === account.id &&
+    ((event.googleEventLabelId && category.providerLabelId === event.googleEventLabelId && category.calendarId === event.calendarId) ||
+      (!event.googleEventLabelId && event.googleColorId && category.providerColorId === event.googleColorId) ||
+      (category.providerCategoryName && event.microsoftCategories?.includes(category.providerCategoryName))));
+  const direct = calendarColor(event.displayColor) ?? calendarColor(original?.providerOriginalColor ??
+    (!original?.customColor && original?.googleColorVerified === true ? original.color : undefined));
   if (direct) return direct.toUpperCase();
   // An unresolved explicit label must never be mistaken for the calendar default.
   if (event.googleColorId || event.googleEventLabelId || event.microsoftCategories?.length) return undefined;
@@ -416,11 +424,57 @@ function eventContentHash(event: RemoteCalendarEvent) {
 }
 const accountColorReceiptKey = (projection: Projection) => `calendar.color-receipt.account.${encodeURIComponent(projection.id)}`;
 type ColorReceipt = { version: 1; calendarId: string; eventId: string; remoteColor: string; localColorHash: string };
+const accountColorWriteIntentKey = (projection: Projection) => `calendar.color-write.account.${encodeURIComponent(projection.id)}`;
+type AccountColorWriteIntent = { version: 1; projectionId: string; accountId: string; calendarId: string; eventId: string;
+  baselineProjectionHash: string; priorEventHash: string; write: CalendarEventWrite; localHash: string;
+  colorSelection: { categoryId: string; color: string }; localColorHash: string; series: boolean };
+async function accountColorWriteIntent(projection: Projection): Promise<AccountColorWriteIntent | null> {
+  const value = await getSetting<AccountColorWriteIntent | null>(accountColorWriteIntentKey(projection), null);
+  if (!value) return null;
+  if (value.version !== 1 || value.projectionId !== projection.id || value.accountId !== projection.accountId ||
+      value.calendarId !== projection.calendarId || value.eventId !== projection.eventId || !value.eventId ||
+      !/^[a-f0-9]{64}$/.test(value.baselineProjectionHash) || !/^[a-f0-9]{64}$/.test(value.priorEventHash) ||
+      !/^[a-f0-9]{64}$/.test(value.localColorHash) || !value.write || typeof value.write !== 'object' ||
+      typeof value.series !== 'boolean' || !value.colorSelection || typeof value.colorSelection.categoryId !== 'string' ||
+      value.write.projectionId !== projection.id || value.write.categoryId !== value.colorSelection.categoryId ||
+      !calendarColor(value.colorSelection.color) || value.localHash !== localWriteHash(value.write)) {
+    throw new Error('The unfinished calendar color update needs review before synchronization can continue.');
+  }
+  return value;
+}
+
+/** A provider's acknowledged approximation is not a new category choice. A
+ * title/time/note import may retain the exact local category only while both
+ * its acknowledged local color and the source color identity remain unchanged. */
+async function acknowledgedAccountCategory(projection: Projection, event: RemoteCalendarEvent,
+  segment: ActivitySegment | null, color: string | undefined): Promise<string | undefined> {
+  const selected = projection.baseColorSelection;
+  const category = CATEGORIES.find((item) => item.id === selected?.categoryId);
+  if (!projection.accountId.startsWith('google:') || !projection.baseEvent || !selected || !segment ||
+      !category || category.archived ||
+      (selected.categoryId === 'unaccounted' && !isExplicitCustomActivityCategory(category)) || segment.categoryId !== selected.categoryId ||
+      segment.entries.some((entry) => entry.categoryId !== selected.categoryId) ||
+      selected.color.toUpperCase() !== calendarColor(category.color)?.toUpperCase() ||
+      !color || !projection.eventId || event.id !== projection.eventId || event.calendarId !== projection.calendarId ||
+      event.googleColorId !== projection.baseEvent.googleColorId || event.googleEventLabelId !== projection.baseEvent.googleEventLabelId) return;
+  const receipt = await getSetting<ColorReceipt | null>(accountColorReceiptKey(projection), null);
+  if (receipt && (receipt.version !== 1 || receipt.calendarId !== event.calendarId || receipt.eventId !== event.id ||
+      !calendarColor(receipt.remoteColor) || !/^[a-f0-9]{64}$/.test(receipt.localColorHash)))
+    throw new Error('The linked calendar color receipt needs review before importing its event.');
+  const acknowledged = receipt ? calendarColor(receipt.remoteColor)?.toUpperCase()
+    : projection.baseLocalHash !== null ? calendarColor(projection.baseEvent.displayColor)?.toUpperCase() : undefined;
+  if (acknowledged !== color.toUpperCase() || receipt && receipt.localColorHash !== localActivityColorHash(segment.entries)) return;
+  return selected.categoryId;
+}
 
 async function importAccountColorOnly(account: ConnectedAccount, projection: Projection, event: RemoteCalendarEvent,
   segment: ActivitySegment, resolved?: { color: string | undefined; skipDisplayBootstrap?: boolean }): Promise<boolean> {
   if (!projection.baseEvent || !projection.eventId || event.id !== projection.eventId || event.calendarId !== projection.calendarId ||
       event.deleted || event.allDay || eventContentHash(event) !== eventContentHash(projection.baseEvent)) return false;
+  // An uncertain outgoing write is reconciled against its exact attempted
+  // payload by the core writer before any display-color import may consume it.
+  if (await getSetting(accountColorWriteIntentKey(projection), null)) return false;
+  const expectedCategories = await snapshotActivityCategories(segment.entries);
   const color = resolved ? calendarColor(resolved.color)?.toUpperCase() : await remoteActivityColor(account, event);
   if (!color) return false;
   const receiptKey = accountColorReceiptKey(projection);
@@ -462,6 +516,10 @@ async function importAccountColorOnly(account: ConnectedAccount, projection: Pro
   }
   const category = await ensureSourceColorCategory({ color, name: event.title, provider: account.provider === 'google' ? 'google' : 'microsoft',
     accountId: account.id, calendarId: event.calendarId, preferredCategoryId: categoryForEvent(account.id, event)?.id });
+  const targets = await snapshotActivityCategories([], [category.id]);
+  if (targets.some((item) => calendarColor(item.document?.value?.color)?.toUpperCase() !== color))
+    throw new Error('The imported calendar category changed. Retry with the current color.');
+  expectedCategories.push(...targets.filter((item) => !expectedCategories.some((existing) => existing.key === item.key)));
   const nextEntries = segment.entries.map((entry) => ({ ...entry, categoryId: category.id }));
   const latestAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject);
   if (!latestAccount?.consent.calendarRead || !latestAccount.consent.importCalendarEdits) {
@@ -471,7 +529,7 @@ async function importAccountColorOnly(account: ConnectedAccount, projection: Pro
   guard();
   await recolorExpectedMinuteEntries(segment.entries, category.id, { key: receiptKey, value: {
     version: 1, calendarId: event.calendarId, eventId: event.id, remoteColor: color,
-    localColorHash: localActivityColorHash(nextEntries) } satisfies ColorReceipt }, guard);
+    localColorHash: localActivityColorHash(nextEntries) } satisfies ColorReceipt }, guard, expectedCategories);
   const localContentPending = !localProjectionUnchanged(projection, segment);
   const next = { ...projection, baseEvent: { ...event, displayColor: color },
     state: localContentPending ? 'pending' as const : 'synced' as const, conflict: undefined, conflictAuthority: undefined,
@@ -723,6 +781,14 @@ function providerWriteColors(projection: Projection, categoryId: string, compari
     microsoftCategories: mapping.categoryName ? [mapping.categoryName] : undefined,
   };
   const category = CATEGORIES.find((item) => item.id === categoryId);
+  // Unsupported custom colors still permit note/time synchronization. Preserve
+  // the known source color, or let a new event inherit its calendar default;
+  // never synthesize a Google color ID from an unverified display match.
+  if (provider === 'google' && category && isExplicitCustomActivityCategory(category)) return {
+    googleColorId: projection.baseEvent?.googleColorId,
+    googleEventLabelId: projection.baseEvent?.googleEventLabelId,
+    microsoftCategories: undefined,
+  };
   const selectedColor = calendarColor(category?.color)?.toUpperCase();
   const acknowledged = projection.baseColorSelection;
   const legacySourceColor = !acknowledged && category?.provider === 'google' && category.accountId === projection.accountId &&
@@ -919,6 +985,16 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
     ? await getActivityEditIntent(projection.blockId) : expectedActivityEditIntent;
   const importAccount = (await getAccounts()).find((item) => item.id === projection.accountId);
   const expectedSegment = await getProjectionSegment(projection);
+  const expectedCategories = await snapshotActivityCategories(expectedSegment?.entries ?? [],
+    projection.baseColorSelection ? [projection.baseColorSelection.categoryId] : []);
+  // A category is a stable ID: its user color can change without touching any
+  // minute row. Recheck normal LWW after capturing that category snapshot; an
+  // explicit user "keep calendar" resolution intentionally bypasses this test.
+  if (event && !event.deleted && expectedActivityEditIntent !== undefined &&
+      (expectedSegment ? !localProjectionUnchanged(projection, expectedSegment) : projection.baseLocalHash !== null) &&
+      latestCalendarChange({ localUpdatedAt: await getActivityLocalUpdatedAt(projection.blockId), remoteUpdatedAt: event.updatedAt }) !== 'calendar') {
+    throw new Error('Context changed again before this calendar import. Its current activity and color were kept. Retry synchronization.');
+  }
   const entries: { dateKey: string; minuteIndex: number; text: string; categoryId: string }[] = [];
   if (event && !event.deleted) {
     if (event.id !== projection.eventId || event.calendarId !== projection.calendarId) {
@@ -934,10 +1010,15 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
     const importedCategory = categoryForEvent(projection.accountId, event);
     const account = importAccount;
     const color = account ? await remoteActivityColor(account, event) : calendarColor(event.displayColor);
-    const sourceCategory = color ? await ensureSourceColorCategory({ color, name: event.title,
+    const retainedCategory = await acknowledgedAccountCategory(projection, event, expectedSegment, color);
+    const sourceCategory = color && !retainedCategory ? await ensureSourceColorCategory({ color, name: event.title,
       provider: account?.provider === 'google' ? 'google' : 'microsoft', accountId: projection.accountId,
       calendarId: event.calendarId, preferredCategoryId: importedCategory?.id }) : null;
-    const category = sourceCategory?.id ?? importedCategory?.id ?? event.categoryId ?? projection.baseEvent?.categoryId ?? 'unaccounted';
+    const category = retainedCategory ?? sourceCategory?.id ?? importedCategory?.id ?? event.categoryId ?? projection.baseEvent?.categoryId ?? 'unaccounted';
+    const targets = await snapshotActivityCategories([], [category]);
+    if (sourceCategory && color && targets.some((item) => calendarColor(item.document?.value?.color)?.toUpperCase() !== color.toUpperCase()))
+      throw new Error('The imported calendar category changed. Retry with the current color.');
+    expectedCategories.push(...targets.filter((item) => !expectedCategories.some((existing) => existing.key === item.key)));
     const parts = readCalendarDescription(event, projection.id);
     const baseParts = projection.baseEvent ? readCalendarDescription(projection.baseEvent, projection.id) : null;
     if (baseParts?.format === 'clean' && parts.format === 'original') {
@@ -1057,6 +1138,7 @@ async function importCalendarEvent(projection: Projection, event: RemoteCalendar
     authoritativeRemoteUpdatedAt: calendarMutationTime(event?.updatedAt) ?? undefined,
     expectedDerivedActivityEditIntents: derivedIntents, derivedProjectionRetirements,
     expectedProjectionDocument,
+    expectedCategoryDocuments: expectedCategories,
     activityTitle: event?.title, entries });
   const importedEntries: MinuteEntry[] = [];
   for (const [day, minutes] of coordinates) {
@@ -1153,6 +1235,34 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
   const resolvedColor = remote && !remote.deleted ? await timed('calendar-color', () => remoteActivityColor(currentAccount!, remote, reads)) : undefined;
   currentAccount = (await getAccounts()).find((item) => item.id === account.id && item.subject === account.subject && item.provider === account.provider);
   if (!currentAccount?.consent.calendarRead) return;
+  const pendingColorWrite = await accountColorWriteIntent(projection);
+  if (pendingColorWrite) {
+    const alreadyAcknowledged = projection.baseLocalHash === pendingColorWrite.localHash &&
+      hashValue(projection.baseColorSelection ?? null) === hashValue(pendingColorWrite.colorSelection);
+    if (alreadyAcknowledged) await setSetting(accountColorWriteIntentKey(projection), null);
+    else if (!remote || remote.deleted) await setSetting(accountColorWriteIntentKey(projection), null);
+    else if (hashValue(projection) === pendingColorWrite.baselineProjectionHash && !pendingColorWrite.series && !remote.allDay && !remote.isSeriesMaster &&
+        remote.projectionId === pendingColorWrite.write.projectionId &&
+        eventHash(remote) === eventHash({ ...remote, ...pendingColorWrite.write, deleted: false, updatedAt: undefined })) {
+      // A lost response has exactly the attempted content and color IDs. The
+      // server ACK clock is not a second user edit, including when the category
+      // changed again while that outgoing request was in flight.
+      projection = { ...projection, baseEvent: resolvedColor ? { ...remote, displayColor: resolvedColor } : remote,
+        baseLocalHash: pendingColorWrite.localHash, baseColorSelection: pendingColorWrite.colorSelection,
+        state: 'synced', conflict: undefined, conflictAuthority: undefined, pendingSourceScope: undefined,
+        pendingSourceOperationId: undefined };
+      await saveProjection(projection);
+      if (resolvedColor) await setSetting(accountColorReceiptKey(projection), { version: 1, calendarId: remote.calendarId,
+        eventId: remote.id, remoteColor: resolvedColor, localColorHash: pendingColorWrite.localColorHash } satisfies ColorReceipt);
+      await setSetting(accountColorWriteIntentKey(projection), null);
+    } else if (!pendingColorWrite.series && hashValue(projection) === pendingColorWrite.baselineProjectionHash &&
+        eventHash(remote) === pendingColorWrite.priorEventHash) await setSetting(accountColorWriteIntentKey(projection), null);
+    else {
+      await saveProjection({ ...projection, state: 'conflict', conflictAuthority: 'unknown',
+        conflict: 'A prior calendar color update has an uncertain response and the event changed. Choose the version to keep.' });
+      return;
+    }
+  }
   segment = await timed('calendar-local', () => getProjectionSegment(projection));
   write = segment ? buildWrite(projection, segment, true) : null;
   localHash = write ? localWriteHash(write) : null;
@@ -1251,6 +1361,14 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
   // requires that mapping; never send the comparison fallback to a provider.
   write = buildWrite(projection, segment!);
   localHash = localWriteHash(write);
+  const writtenColorSelection = { categoryId: segment!.categoryId, color: categoryById(segment!.categoryId).color.toUpperCase() };
+  const writtenColorHash = localActivityColorHash(segment!.entries);
+  const guardedCustomUpdate = remote && currentAccount.provider === 'google' && isExplicitCustomActivityCategory(categoryById(segment!.categoryId));
+  if (guardedCustomUpdate) await setSetting(accountColorWriteIntentKey(projection), {
+    version: 1, projectionId: projection.id, accountId: projection.accountId, calendarId: projection.calendarId, eventId: remote!.id,
+    baselineProjectionHash: hashValue(projection), priorEventHash: eventHash(remote!), write, localHash,
+    colorSelection: writtenColorSelection, localColorHash: writtenColorHash, series: projection.pendingSourceScope === 'series',
+  } satisfies AccountColorWriteIntent);
   try {
     let saved: RemoteCalendarEvent;
     if (remote && projection.pendingSourceScope === 'series') {
@@ -1272,18 +1390,21 @@ async function reconcileCurrentProjection(account: ConnectedAccount, projection:
         return;
       }
     }
-    await saveProjection({ ...projection, eventId: saved.id, baseEvent: saved,
-      baseColorSelection: { categoryId: segment!.categoryId, color: categoryById(segment!.categoryId).color.toUpperCase() },
+    const savedColor = await timed('calendar-color', () => remoteActivityColor(currentAccount!, saved, reads));
+    await saveProjection({ ...projection, eventId: saved.id,
+      baseEvent: savedColor ? { ...saved, displayColor: savedColor } : saved,
+      baseColorSelection: writtenColorSelection,
       baseLocalHash: localHash, startMinute: segment!.startMinute, endMinute: segment!.endMinute,
       dateKey: segment!.entries[0]!.dateKey, endDateKey: segment!.entries.at(-1)!.dateKey,
       state: 'synced', conflict: undefined, conflictAuthority: undefined, pendingSourceScope: undefined,
       pendingSourceOperationId: undefined, retirementAuthority: undefined, pendingCreateWrite: undefined });
-    const savedColor = await timed('calendar-color', () => remoteActivityColor(currentAccount!, saved, reads));
     if (savedColor && segment) await setSetting(accountColorReceiptKey(projection), { version: 1,
       calendarId: saved.calendarId, eventId: saved.id, remoteColor: savedColor,
-      localColorHash: localActivityColorHash(segment.entries) } satisfies ColorReceipt);
+      localColorHash: writtenColorHash } satisfies ColorReceipt);
+    if (guardedCustomUpdate) await setSetting(accountColorWriteIntentKey(projection), null);
   } catch (error) {
     if (typeof error === 'object' && error !== null && 'status' in error && error.status === 412) {
+      if (guardedCustomUpdate) await setSetting(accountColorWriteIntentKey(projection), null);
       await saveProjection({ ...projection, state: 'conflict',
         conflict: 'The calendar changed during synchronization. Choose which version to keep.' });
       return;
@@ -1302,9 +1423,11 @@ export async function resolveProjectionConflict(id: string, choice: 'context' | 
   if (choice === 'calendar') {
     if (!account.consent.importCalendarEdits) throw new Error('Allow calendar edit import first.');
     await importCalendarEvent(projection, event);
+    await setSetting(accountColorWriteIntentKey(projection), null);
   } else {
     if (!account.consent.calendarWrite) throw new Error('Allow calendar updates first.');
     await saveProjection({ ...projection, baseEvent: event, state: 'pending', conflict: undefined, conflictAuthority: undefined });
+    await setSetting(accountColorWriteIntentKey(projection), null);
   }
 }
 

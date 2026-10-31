@@ -198,6 +198,233 @@ async function prepare(phone, storage = false) {
   if (storage) await phone.engine.setLedgerPassphrase('Context shared private ledger passphrase');
 }
 
+test('custom Context colors survive their acknowledged Google approximation through content imports, but an external new source color imports', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  for (const [id, color, colorId] of [['approx_blue', '#123456', '5'], ['source_green', '#28754E', '6']]) {
+    await device.db.putSyncDocument(`category:${id}`, { id, name: id, color, providerOriginalColor: color,
+      provider: 'google', accountId: 'google:person', providerColorId: colorId, googleColorVerified: true });
+  }
+  await device.db.putSyncDocument('category:custom_soft', { id: 'custom_soft', name: 'My exact blue',
+    color: '#123457', customColor: true, colorUpdatedAt: '2026-10-24T00:00:00.000Z' });
+  await device.categories.listCategories();
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 2, text: 'Independent note', categoryId: 'custom_soft' });
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 601 }, { title: 'Exact custom activity', categoryId: 'custom_soft' });
+  await device.engine.linkActualsToAccounts([day]);
+  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  const original = [...remote.events.values()][0]; assert.equal(original.googleColorId, '5');
+  assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'custom_soft');
+  const projection = (await device.engine.listProjections()).find((item) => item.state === 'synced');
+  assert.equal(projection.baseEvent.displayColor, '#123456', 'the provider approximation is durable with its projection acknowledgement');
+  await device.db.setSetting(`calendar.color-receipt.account.${encodeURIComponent(projection.id)}`, null);
+  remote.calls.length = 0;
+  remote.edit('personal', original.id, { title: 'New source title', start: iso(610), end: iso(612),
+    displayColor: '#123456', updatedAt: new Date(Date.now() + 1000).toISOString() });
+  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  const moved = await device.db.getEntriesForBlock((await device.engine.listProjections()).find((item) => item.state !== 'deleted').blockId);
+  assert.deepEqual(plain(moved.map((entry) => entry.minuteIndex)), [610, 611]);
+  assert.ok(moved.every((entry) => entry.categoryId === 'custom_soft' && entry.text === 'Independent note'));
+  assert.equal((await device.categories.listCategories()).find((item) => item.id === 'custom_soft').name, 'My exact blue');
+  assert.equal(remote.calls.filter((call) => ['create','update','delete'].includes(call.type)).length, 0);
+  remote.edit('personal', original.id, { googleColorId: '6', displayColor: '#28754E', updatedAt: new Date(Date.now() + 2000).toISOString() });
+  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  const changed = await device.db.getMinuteEntry(day, 610);
+  assert.notEqual(changed.categoryId, 'custom_soft');
+  assert.equal((await device.categories.listCategories()).find((item) => item.id === changed.categoryId).color.toUpperCase(), '#28754E');
+  assert.equal((await device.categories.listCategories()).find((item) => item.id === 'custom_soft').color, '#123457');
+});
+
+test('a deliberately customized unaccounted stable category exports and survives its own Google approximation', async (t) => {
+  const remote = cloud(), device = phone(t, remote); await prepare(device);
+  await device.db.putSyncDocument('category:proof_blue', { id: 'proof_blue', name: 'Verified blue', color: '#123456',
+    providerOriginalColor: '#123456', provider: 'google', accountId: 'google:person', providerColorId: '5', googleColorVerified: true });
+  await device.db.putSyncDocument('category:unaccounted', { id: 'unaccounted', name: 'My custom default', color: '#123457', customColor: true });
+  await device.categories.listCategories();
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1, text: 'Deliberate custom default', categoryId: 'unaccounted' });
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 600 }, { title: 'Named event', categoryId: 'unaccounted' });
+  await device.engine.linkActualsToAccounts([day]); assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  const event = [...remote.events.values()][0]; assert.equal(event.googleColorId, '5');
+  remote.edit('personal', event.id, { title: 'Source title change', displayColor: '#123456', updatedAt: new Date(Date.now() + 1000).toISOString() });
+  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'unaccounted');
+  assert.equal((await device.categories.listCategories()).find((item) => item.id === 'unaccounted').color, '#123457');
+});
+
+test('custom colors with no verified Google palette sync notes without fabricating a source color ID', async (t) => {
+  const remote = cloud(); const device = phone(t, remote); await prepare(device);
+  await device.db.putSyncDocument('category:custom_unmapped', { id: 'custom_unmapped', name: 'Private custom color', color: '#121314', customColor: true });
+  // A stale, unverified ID must not become an exact-match fallback.
+  await device.db.putSyncDocument('category:unverified', { id: 'unverified', name: 'Unverified display', color: '#121314',
+    provider: 'google', accountId: 'google:person', providerColorId: 'not-a-verified-palette', customColor: true });
+  await device.categories.listCategories();
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1, text: 'Kept private color', categoryId: 'custom_unmapped' });
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 600 }, { title: 'Unmapped activity', categoryId: 'custom_unmapped' });
+  await device.engine.linkActualsToAccounts([day]);
+  const result = await device.engine.synchronizeAccounts(); assert.equal(result.outcome, 'success');
+  const event = [...remote.events.values()][0]; assert.ok(event); assert.equal(event.googleColorId, undefined); assert.equal(event.googleEventLabelId, undefined);
+  assert.match(event.description, /Kept private color/); assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'custom_unmapped');
+});
+
+test('a concurrent stable-category recolor before or after the full-import snapshot cannot be overwritten by older Google color', async (t) => {
+  for (const stage of ['before snapshot', 'after source category']) {
+    const remote = cloud(), device = phone(t, remote); await prepare(device);
+    for (const [id, color, providerColorId] of [['provider_blue', '#123456', '5'], ['provider_green', '#28754E', '6']])
+      await device.db.putSyncDocument(`category:${id}`, { id, name: id, color, providerOriginalColor: color, provider: 'google', accountId: 'google:person', providerColorId, googleColorVerified: true });
+    await device.db.putSyncDocument('category:custom_race', { id: 'custom_race', name: 'Exact race color', color: '#123457', customColor: true });
+    await device.categories.listCategories();
+    await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1, text: 'Keep my minute', categoryId: 'custom_race' });
+    await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 600 }, { title: 'Original', categoryId: 'custom_race' });
+    await device.engine.linkActualsToAccounts([day]); assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+    const event = [...remote.events.values()][0];
+    remote.edit('personal', event.id, { title: 'Older external title', googleColorId: '6', displayColor: '#28754E', updatedAt: new Date().toISOString() });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    let changed = false;
+    const recolor = async () => { if (changed) return; changed = true; await device.categories.updateCategory('custom_race', { color: '#12FFAB', customColor: true }); };
+    if (stage === 'before snapshot') {
+      const original = device.db.snapshotActivityCategories;
+      device.db.snapshotActivityCategories = async (...args) => { await recolor(); return original(...args); };
+    } else {
+      const original = device.categories.ensureSourceColorCategory;
+      device.categories.ensureSourceColorCategory = async (...args) => { const value = await original(...args); await recolor(); return value; };
+    }
+    const result = await device.engine.synchronizeAccounts();
+    assert.ok(changed, stage); assert.notEqual(result.outcome, 'success', 'the stale import must be retried against the new category authority');
+    assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'custom_race', stage);
+    assert.equal((await device.categories.listCategories()).find((item) => item.id === 'custom_race').color, '#12FFAB');
+  }
+});
+
+test('an outgoing color acknowledgement cannot acknowledge a newer global recolor or import its own older shade back over it', async (t) => {
+  const remote = cloud(), device = phone(t, remote); await prepare(device);
+  for (const [id, color, providerColorId] of [['provider_blue', '#123456', '5'], ['provider_green', '#28754E', '6'], ['provider_yellow', '#D4E157', '7']])
+    await device.db.putSyncDocument(`category:${id}`, { id, name: id, color, providerOriginalColor: color,
+      provider: 'google', accountId: 'google:person', providerColorId, googleColorVerified: true });
+  await device.db.putSyncDocument('category:custom_ack', { id: 'custom_ack', name: 'Exact local activity', color: '#123457', customColor: true });
+  await device.categories.listCategories();
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1, text: 'ACK race note', categoryId: 'custom_ack' });
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 600 }, { title: 'Exact activity', categoryId: 'custom_ack' });
+  await device.engine.linkActualsToAccounts([day]); assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  await device.categories.updateCategory('custom_ack', { color: '#28754D', customColor: true });
+  const update = remote.adapter.updateEvent; let recolored = false;
+  remote.adapter.updateEvent = async (...args) => {
+    const saved = await update(...args);
+    if (!recolored) {
+      recolored = true; await device.categories.updateCategory('custom_ack', { color: '#D4E158', customColor: true });
+      remote.edit(saved.calendarId, saved.id, { updatedAt: new Date(Date.now() + 1000).toISOString() });
+      return plain([...remote.events.values()][0]);
+    }
+    return saved;
+  };
+  await device.engine.synchronizeAccounts(); assert.ok(recolored);
+  const afterFirst = (await device.engine.listProjections()).find((item) => item.state !== 'deleted');
+  assert.equal(afterFirst.baseColorSelection.color, '#28754D', 'the acknowledgement belongs to the color actually sent');
+  assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'custom_ack');
+  assert.equal((await device.categories.listCategories()).find((item) => item.id === 'custom_ack').color, '#D4E158');
+  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  assert.equal([...remote.events.values()][0].googleColorId, '7', 'the newer local category is sent on the next reconciliation');
+  assert.equal((await device.categories.listCategories()).find((item) => item.id === 'custom_ack').color, '#D4E158');
+});
+
+test('a lost known-event Google update response cannot import its own approximation over the exact custom color', async (t) => {
+  const remote = cloud(), device = phone(t, remote); await prepare(device);
+  for (const [id, color, providerColorId] of [['provider_blue', '#123456', '5'], ['provider_green', '#28754E', '6']])
+    await device.db.putSyncDocument(`category:${id}`, { id, name: id, color, providerOriginalColor: color,
+      provider: 'google', accountId: 'google:person', providerColorId, googleColorVerified: true });
+  await device.db.putSyncDocument('category:custom_response', { id: 'custom_response', name: 'Exact response color', color: '#123457', customColor: true });
+  await device.categories.listCategories();
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1, text: 'Lost response note', categoryId: 'custom_response' });
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 600 }, { title: 'Original activity', categoryId: 'custom_response' });
+  await device.engine.linkActualsToAccounts([day]); assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  const id = [...remote.events.values()][0].id;
+  await device.categories.updateCategory('custom_response', { color: '#28754D', customColor: true });
+  const update = remote.adapter.updateEvent; let lost = false;
+  remote.adapter.updateEvent = async (...args) => {
+    const saved = await update(...args);
+    if (!lost) { lost = true; remote.edit(saved.calendarId, saved.id, { updatedAt: new Date(Date.now() + 1000).toISOString() });
+      throw Error('Update response was lost'); }
+    return saved;
+  };
+  assert.notEqual((await device.engine.synchronizeAccounts()).outcome, 'success');
+  assert.equal([...remote.events.values()][0].googleColorId, '6');
+  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'custom_response');
+  assert.equal((await device.categories.listCategories()).find((item) => item.id === 'custom_response').color, '#28754D');
+  assert.equal([...remote.events.values()][0].id, id); assert.equal(remote.calls.filter((call) => call.type === 'update').length, 1);
+});
+
+test('uncertain custom account updates preserve a newer local color and never mistake a subsequent different source color for their own write', async (t) => {
+  for (const later of ['local color', 'external color', 'recurring master']) {
+    const remote = cloud(), device = phone(t, remote); await prepare(device);
+    for (const [id, color, providerColorId] of [['provider_blue', '#123456', '5'], ['provider_green', '#28754E', '6'], ['provider_yellow', '#D4E157', '7']])
+      await device.db.putSyncDocument(`category:${id}`, { id, name: id, color, providerOriginalColor: color,
+        provider: 'google', accountId: 'google:person', providerColorId, googleColorVerified: true });
+    await device.db.putSyncDocument('category:custom_uncertain', { id: 'custom_uncertain', name: 'Private exact shade', color: '#123457', customColor: true });
+    await device.categories.listCategories();
+    await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1, text: 'Private note', categoryId: 'custom_uncertain' });
+    await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 600 }, { title: 'Activity', categoryId: 'custom_uncertain' });
+    await device.engine.linkActualsToAccounts([day]); await device.engine.synchronizeAccounts();
+    await device.categories.updateCategory('custom_uncertain', { color: '#28754D', customColor: true });
+    const update = remote.adapter.updateEvent; let lost = false;
+    remote.adapter.updateEvent = async (...args) => { const saved = await update(...args);
+      if (!lost) { lost = true;
+        if (later === 'local color') await device.categories.updateCategory('custom_uncertain', { color: '#123458', customColor: true });
+        remote.edit(saved.calendarId, saved.id, { updatedAt: new Date(Date.now() + 1000).toISOString() });
+        throw Error('Response lost before acknowledgement'); }
+      return saved;
+    };
+    assert.notEqual((await device.engine.synchronizeAccounts()).outcome, 'success');
+    const id = [...remote.events.values()][0].id;
+    if (later === 'external color') remote.edit('personal', id, { googleColorId: '7', displayColor: '#D4E157',
+      updatedAt: new Date(Date.now() + 2000).toISOString() });
+    if (later === 'recurring master') remote.edit('personal', id, { isSeriesMaster: true, updatedAt: new Date(Date.now() + 2000).toISOString() });
+    const result = await device.engine.synchronizeAccounts();
+    if (later === 'local color') {
+      assert.equal(result.outcome, 'success'); assert.equal([...remote.events.values()][0].googleColorId, '5');
+      assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'custom_uncertain');
+      assert.equal((await device.categories.listCategories()).find((item) => item.id === 'custom_uncertain').color, '#123458');
+    } else {
+      const projection = (await device.engine.listProjections()).find((item) => item.state !== 'deleted');
+      assert.equal(projection.state, 'conflict'); assert.equal(projection.conflictAuthority, 'unknown');
+      assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'custom_uncertain');
+      assert.equal([...remote.events.values()][0].googleColorId, later === 'external color' ? '7' : '6', 'uncertainty never authorizes a source overwrite');
+      if (later === 'recurring master') {
+        assert.equal(remote.calls.filter((call) => call.type === 'update').length, 1, 'recovery never adopts a new recurring master');
+        continue;
+      }
+      await device.engine.resolveProjectionConflict(projection.id, 'calendar');
+      assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'provider_yellow');
+      remote.edit('personal', id, { googleColorId: '6', displayColor: '#28754E', updatedAt: new Date(Date.now() + 3000).toISOString() });
+      assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+      assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'provider_green', 'a later return to the old shade is an ordinary external choice');
+    }
+    assert.equal(remote.events.size, 1); assert.equal([...remote.events.values()][0].id, id);
+  }
+});
+
+test('legacy omitted color-selection baselines recover an equal-hash custom update without hashing undefined', async (t) => {
+  const remote = cloud(), device = phone(t, remote); await prepare(device);
+  await device.db.putSyncDocument('category:provider_blue', { id: 'provider_blue', name: 'Verified blue', color: '#123456', providerOriginalColor: '#123456',
+    provider: 'google', accountId: 'google:person', providerColorId: '5', googleColorVerified: true });
+  await device.db.putSyncDocument('category:custom_legacy', { id: 'custom_legacy', name: 'Legacy exact color', color: '#123457', customColor: true });
+  await device.categories.listCategories();
+  await device.db.saveMinuteRange({ dateKey: day, startMinute: 600, durationMinutes: 1, text: 'Legacy note', categoryId: 'custom_legacy' });
+  await device.sheet.groupMinuteRange({ dateKey: day, startMinute: 600, endMinute: 600 }, { title: 'Legacy activity', categoryId: 'custom_legacy' });
+  await device.engine.linkActualsToAccounts([day]); await device.engine.synchronizeAccounts();
+  const projection = plain((await device.engine.listProjections()).find((item) => item.state === 'synced'));
+  delete projection.baseColorSelection; projection.state = 'pending';
+  await device.db.putSyncDocument(`projection:${projection.id}`, projection);
+  await device.categories.updateCategory('custom_legacy', { color: '#123458', customColor: true });
+  const update = remote.adapter.updateEvent; let lost = false;
+  remote.adapter.updateEvent = async (...args) => { const saved = await update(...args);
+    if (!lost) { lost = true; throw Error('Legacy update response lost'); } return saved; };
+  assert.notEqual((await device.engine.synchronizeAccounts()).outcome, 'success');
+  assert.equal((await device.engine.synchronizeAccounts()).outcome, 'success');
+  const recovered = (await device.engine.listProjections()).find((item) => item.id === projection.id);
+  assert.equal(recovered.baseLocalHash, projection.baseLocalHash, 'the provider payload hash intentionally remains equal');
+  assert.equal(recovered.baseColorSelection.color, '#123458');
+  assert.equal((await device.db.getMinuteEntry(day, 600)).categoryId, 'custom_legacy');
+  assert.equal(remote.calls.filter((call) => call.type === 'update').length, 1);
+});
+
 test('account plan display uses raw provider colors, then provider-original category colors, then calendar fallback', async (t) => {
   const remote = cloud(); const device = phone(t, remote); await prepare(device);
   await device.db.putSyncDocument('category:source_color', { id: 'source_color', name: 'Google color', color: '#AB8B00',

@@ -60,7 +60,10 @@ function screen(t, options = {}) {
       rows.delete(`${range.dateKey}:${minute}`); drafts.rebaseCommitted([{ dateKey: range.dateKey, minuteIndex: minute,
         text: '', categoryId: 'unaccounted', keepColor: false }]); } },
     applyCellFormat: async (range, patch) => command('format', { ...range, patch }),
-    colorMinuteRange: async (range, categoryId) => command('color', { ...range, categoryId }),
+    colorMinuteRange: async (range, categoryId) => {
+      command('color', { ...range, categoryId });
+      if (options.applyColor) await options.applyColor(range, categoryId, { rows, drafts });
+    },
     ungroupMinuteRange: async (range) => command('ungroup', range),
     groupMinuteRange: async (range, group) => command('group', { ...range, ...group }),
     prepareMinuteSpanFill: async (span, input) => {
@@ -131,7 +134,7 @@ function screen(t, options = {}) {
         if (name === 'react-native-safe-area-context') return { useSafeAreaInsets: () => ({ top: 24, bottom: 24 }) };
         const resolved = path.resolve(path.dirname(filename), name);
         if (resolved === source('appearance')) return { useAppTheme: () => ({ colors: load(source('theme.ts'))[options.appearanceMode === 'light' ? 'lightColors' : 'darkColors'], resolvedMode: options.appearanceMode ?? 'dark' }) };
-        for (const name of ['CellActionIcon', 'CompactMinuteOverview', 'CalendarPinchPreview', 'CalendarCellText', 'MinuteSpanEditor']) {
+        for (const name of ['CellActionIcon', 'CompactMinuteOverview', 'CalendarPinchPreview', 'CalendarCellText', 'MinuteSpanEditor', 'ActivityCategoryPicker']) {
           if (resolved.endsWith('/components/' + name) || resolved.endsWith('\\components\\' + name)) return { [name]: name };
         }
         if (resolved.endsWith('/components/CellActionMenu') || resolved.endsWith('\\components\\CellActionMenu')) return { CellActionMenu: 'CellActionMenu' };
@@ -228,6 +231,7 @@ function screen(t, options = {}) {
       handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
     },
     details: () => find(tree, 'MinuteSpanEditor')?.props, overview: () => find(tree, 'CompactMinuteOverview')?.props,
+    categoryPicker: () => { const props = find(tree, 'ActivityCategoryPicker')?.props; return props?.visible ? props : undefined; },
     pinchPreview: () => { const props = find(tree, 'CalendarPinchPreview')?.props; return props?.active ? props : undefined; },
     warmedPinchPreview: () => find(tree, 'CalendarPinchPreview')?.props, list: () => find(tree, 'FlatList')?.props,
     fittedTexts: (minute, date = day) => {
@@ -279,6 +283,30 @@ function plan(id, minute, account = false) {
     ...(account ? { accountEvent: { accountId: 'account', event: {} } } : {}) };
 }
 
+test('uncategorized text gets the same neutral fill in normal and compact light and dark views without a stored color edit', async (t) => {
+  const flatten = (style) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
+  for (const appearanceMode of ['light', 'dark']) for (const compact of [false, true]) {
+    const h = screen(t, { appearanceMode, props: compact ? { zoom: 500 / (1440 * 34) } : {} });
+    const entry = { dateKey: h.day, minuteIndex: 600, text: 'A thought to remember', categoryId: 'unaccounted', blockId: 'private_note' };
+    h.rows.set(`${h.day}:600`, { ...entry }); await h.start();
+    const expected = appearanceMode === 'light' ? '#E6E6E6' : '#333333';
+    if (compact) assert.equal(h.overview().bands.get(h.day).find((band) => band.startMinute <= 600 && band.endMinute > 600).color, expected);
+    else assert.equal(flatten(h.cell(600).props.children[0].props.style).backgroundColor, expected);
+    assert.deepEqual(h.rows.get(`${h.day}:600`), entry); assert.deepEqual(h.calls, []);
+  }
+});
+
+test('the entry-bar category box sits next to Save and opens the same guarded picker after preserving typed text', async (t) => {
+  const h = screen(t); await h.start(); await h.tap(600);
+  h.input().onChangeText('A live note'); await h.settle();
+  const children = h.bar().children.props.children;
+  const labels = children.map((node) => node.props.accessibilityLabel);
+  assert.equal(labels.indexOf('Categorize minute') + 1, labels.indexOf('Save minute text and close keyboard'));
+  h.action('Categorize minute').onPress(); await h.settle();
+  assert.ok(h.categoryPicker()); assert.equal(h.bar(), undefined);
+  assert.equal(h.rows.get(`${h.day}:600`).text, 'A live note');
+});
+
 test('only the single-day Day header aligns its weekday and date circle to the left inside the date column', async (t) => {
   const flatten = (style) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
   function headers(node, into = []) {
@@ -310,6 +338,79 @@ test('only the single-day Day header aligns its weekday and date circle to the l
       }
     }
   }
+});
+
+test('one Categorize tap waits for saving, applies the captured range once and preserves independent minute text', async (t) => {
+  const colors = [{ id: 'family', name: 'Family time', color: '#BE6D00' }];
+  let releaseColor; const colorGate = new Promise((resolve) => { releaseColor = resolve; });
+  const h = screen(t, { colors, applyColor: async (range, categoryId, { rows }) => {
+    await colorGate;
+    for (let minute = range.startMinute; minute <= range.endMinute; minute++) {
+      const key = `${range.dateKey}:${minute}`, current = rows.get(key);
+      rows.set(key, { ...current, dateKey: range.dateKey, minuteIndex: minute, text: current?.text ?? '',
+        blockId: current?.blockId ?? `sheet_${minute}`, categoryId });
+    }
+  } });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'First note', categoryId: 'work', blockId: 'first' });
+  h.rows.set(`${h.day}:601`, { dateKey: h.day, minuteIndex: 601, text: 'Independent second note', categoryId: 'study', blockId: 'second' });
+  h.rows.set(`${h.day}:603`, { dateKey: h.day, minuteIndex: 603, text: 'Outside selection', categoryId: 'study', blockId: 'outside' });
+  await h.start(); await h.tap(600); await h.selectThrough(602);
+  h.drafts.edit(h.day, 600, { text: 'Latest full minute note' });
+  let releaseSave; h.writeGate = new Promise((resolve) => { releaseSave = resolve; });
+  const categorize = h.menu().onCategorize; assert.equal(typeof categorize, 'function');
+  categorize(); categorize(); await h.settle();
+  assert.equal(h.categoryPicker(), undefined); assert.equal(h.menu().busy, true);
+  assert.equal(h.calls.length, 0, 'opening the picker performs no color write');
+  releaseSave(); h.writeGate = null; await h.settle();
+  const picker = h.categoryPicker(); assert.ok(picker); assert.equal(h.menu(), undefined);
+  assert.equal(h.rows.get(`${h.day}:600`).text, 'Latest full minute note');
+  assert.equal(picker.colorChoices.find((category) => category.id === 'family').name, 'Family time');
+  const applying = picker.onSelect('family'); await h.settle();
+  assert.equal(h.categoryPicker().busy, true);
+  await assert.rejects(h.categoryPicker().onSelect('family'), /Finish the current edit/);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), [{ action: 'color', dateKey: h.day, startMinute: 600, endMinute: 602, categoryId: 'family' }]);
+  releaseColor(); await applying; await h.settle();
+  assert.equal(h.categoryPicker(), undefined);
+  assert.deepEqual([600, 601, 602, 603].map((minute) => h.rows.get(`${h.day}:${minute}`).text),
+    ['Latest full minute note', 'Independent second note', '', 'Outside selection']);
+  assert.deepEqual([600, 601, 602, 603].map((minute) => h.rows.get(`${h.day}:${minute}`).categoryId), ['family', 'family', 'family', 'study']);
+  assert.equal(h.rows.get(`${h.day}:600`).blockId, 'first'); assert.equal(h.rows.get(`${h.day}:601`).blockId, 'second');
+  assert.equal(h.calls.filter((call) => call.action === 'color').length, 1);
+});
+
+test('navigation and backgrounding cancel a pending category choice before a cell assignment begins', async (t) => {
+  for (const action of ['navigate', 'background']) {
+    let blocked = false, release; const gate = new Promise((resolve) => { release = resolve; });
+    const h = screen(t, { readColors: async () => { if (blocked) await gate;
+      return [{ id: 'family', name: 'Family time', color: '#BE6D00' }]; } });
+    h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Keep selected note', categoryId: 'work', blockId: 'original' });
+    await h.start(); await h.hold(600); h.menu().onCategorize(); await h.settle();
+    assert.ok(h.categoryPicker()); blocked = true;
+    const choose = h.categoryPicker().onSelect('family'); await h.settle(); assert.equal(h.categoryPicker().busy, true);
+    if (action === 'navigate') await h.navigate('2026-10-26'); else await h.background();
+    assert.equal(h.categoryPicker(), undefined);
+    release(); await choose; await h.settle();
+    assert.equal(h.calls.some((call) => call.action === 'color'), false, action);
+    assert.equal(h.rows.get(`${h.day}:600`).text, 'Keep selected note');
+    assert.equal(h.rows.get(`${h.day}:600`).categoryId, 'work');
+  }
+});
+
+test('an unavailable scoped category keeps the same picker and selected range retryable without changing notes', async (t) => {
+  let choices = [{ id: 'family', name: 'Family time', color: '#BE6D00' }]; const scopes = [];
+  const h = screen(t, { readColors: async (options) => { scopes.push(options?.scope); return choices; } });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Keep original', categoryId: 'work', blockId: 'original' });
+  await h.start(); await h.tap(600); await h.selectThrough(602); h.menu().onCategorize(); await h.settle();
+  assert.ok(h.categoryPicker()); choices = [];
+  await assert.rejects(h.categoryPicker().onSelect('family'), /no longer available for these minutes/); await h.settle();
+  assert.ok(h.categoryPicker()); assert.equal(h.categoryPicker().busy, false); assert.equal(h.menu(), undefined);
+  assert.equal(h.calls.length, 0); assert.equal(h.rows.get(`${h.day}:600`).text, 'Keep original');
+  choices = [{ id: 'family', name: 'Family time', color: '#BE6D00' }];
+  await h.categoryPicker().onCategoriesChanged(); await h.settle();
+  await h.categoryPicker().onSelect('family'); await h.settle();
+  assert.equal(h.categoryPicker(), undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), [{ action: 'color', dateKey: h.day, startMinute: 600, endMinute: 602, categoryId: 'family' }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(scopes.at(-1))), { dateKey: h.day, minuteIndex: 600 });
 });
 
 test('pencil opens a dated mixed-note range and submits one guarded overnight fill', async (t) => {

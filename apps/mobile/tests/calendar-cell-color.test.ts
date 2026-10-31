@@ -4,6 +4,16 @@ import { calendarCellColor, nativeEventColor, sourceEventColor } from '../src/ut
 import { indexCalendarDay } from '../src/utils/calendar-grid';
 import { localDateAtMinute } from '../src/utils/time';
 import type { PlannedEvent } from '../src/types';
+import { defaultTextCellColor } from '../src/utils/default-text-cell-color';
+
+test('unclassified note cells use neutral values nine and two without changing explicit colors or assigning a category', () => {
+  const input = { text: 'A saved thought', categoryId: 'unaccounted', mode: 'light' as const };
+  assert.equal(defaultTextCellColor(input), '#E6E6E6');
+  assert.equal(defaultTextCellColor({ ...input, mode: 'dark' }), '#333333');
+  for (const change of [{ text: '' }, { text: '   ' }, { categoryId: 'custom_food' }, { customColor: true }, { hasSourceColor: true }])
+    assert.equal(defaultTextCellColor({ ...input, ...change }), undefined);
+  assert.equal(defaultTextCellColor({ ...input, categoryId: 'custom_food', hasSourceColor: true, noFill: true }), '#E6E6E6');
+});
 
 test('source event colors are exact opaque display values, independent of the manual Google palette', () => {
   assert.equal(sourceEventColor('#Ab12fF', '#445566'), '#Ab12fF');
