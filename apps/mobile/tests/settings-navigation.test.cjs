@@ -26,7 +26,7 @@ const hooks = { useMemo: (work) => work(), useEffect: () => {}, useRef: (value) 
   useState: (value) => [value, () => {}] };
 const style = { create: (value) => value, hairlineWidth: 0.5 };
 
-function renderFrame(tab, onReturnToCalendar = () => {}) {
+function renderFrame(tab, onReturnToCalendar = () => {}, returnView = 'today') {
   const file = path.join(mobile, 'App.tsx'); const text = fs.readFileSync(file, 'utf8');
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const declarations = ['SCREEN_TITLES', 'createStyles', 'ApplicationFrame'].map((name) => {
@@ -40,7 +40,7 @@ function renderFrame(tab, onReturnToCalendar = () => {}) {
     useAppTheme: () => ({ colors, resolvedMode: 'light' }),
     require: (name) => { assert.equal(name, 'react/jsx-runtime'); return { jsx, jsxs: jsx, Fragment: 'Fragment' }; },
   });
-  return module.exports.ApplicationFrame({ ready: true, tab, onReturnToCalendar, children: 'Screen content' });
+  return module.exports.ApplicationFrame({ ready: true, tab, onReturnToCalendar, returnView, children: 'Screen content' });
 }
 
 function renderSettings(permissionStatus = 'granted') {
@@ -91,6 +91,26 @@ test('every secondary frame uses a left back icon without Calendar text and the 
     assert.equal(list.some((node) => node.type === 'Text' && textOf(node) === 'Calendar'), false);
   }
   assert.equal(nodes(renderFrame('today')).some((node) => node.props.accessibilityLabel === 'Back to calendar'), false);
+  assert.equal(nodes(renderFrame('checklist')).some((node) => node.props.accessibilityRole === 'header'), false, 'Priority has the shared toolbar without a second title/back row');
+});
+
+test('Settings and Search back arrows return to the Priority list they came from without moving calendar focus', async () => {
+  const file = path.join(mobile, 'App.tsx'); const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const controller = source.statements.find((node) => node.name?.text === 'AppController');
+  const handler = controller.body.statements.find((node) => node.name?.text === 'returnToCalendar'); assert.ok(handler);
+  for (const tab of ['settings', 'search']) {
+    let destination; let focusChanges = 0; const module = { exports: {} };
+    vm.runInNewContext(transpile(handler.getText(source) + '\nexport { returnToCalendar };'), {
+      module, exports: module.exports, tab, primaryTabRef: { current: 'checklist' },
+      transitionFromCalendar: async (change) => change(), setTab: (value) => destination = value,
+      calendarFocusRef: { current: { dateKey: '2026-11-01', minuteIndex: 777 } }, focusSequence: { current: 0 }, setFocusRequest: () => focusChanges++,
+    });
+    const tree = renderFrame(tab, module.exports.returnToCalendar, 'checklist');
+    const back = nodes(tree).find((node) => node.props.accessibilityLabel === 'Back to Priority');
+    assert.ok(back); assert.equal(back.props.children.props.name, 'back'); await back.props.onPress();
+    assert.equal(destination, 'checklist'); assert.equal(focusChanges, 0);
+    assert.equal(nodes(tree).some((node) => node.type === 'Text' && textOf(node) === 'Calendar'), false);
+  }
 });
 
 test('Settings merges duplicate Privacy info while preserving native and account actions and distinct diagnostics', async () => {

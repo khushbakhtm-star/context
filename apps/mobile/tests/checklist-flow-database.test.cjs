@@ -11,6 +11,7 @@ const ts = require('typescript');
 // SQLite. Expo's platform transports alone are replaced.
 function repository(t) {
   const sqlite = new DatabaseSync(':memory:'); t.after(() => sqlite.close());
+  const hooks = { afterCommit: null };
   const native = {
     async execAsync(sql) { sqlite.exec(sql); },
     async runAsync(sql, ...values) { const result = sqlite.prepare(sql).run(...values); return { changes: result.changes, lastInsertRowId: result.lastInsertRowid }; },
@@ -19,6 +20,8 @@ function repository(t) {
     async withExclusiveTransactionAsync(operation) {
       sqlite.exec('BEGIN IMMEDIATE');
       try { await operation(native); sqlite.exec('COMMIT'); } catch (error) { sqlite.exec('ROLLBACK'); throw error; }
+      const afterCommit = hooks.afterCommit; hooks.afterCommit = null;
+      if (afterCommit) await afterCommit();
     },
   };
   const cache = new Map();
@@ -36,7 +39,7 @@ function repository(t) {
     }, { filename: file });
     cache.set(file, module.exports); return module.exports;
   }
-  return { sqlite, database: load(path.join(__dirname, '../src/data/database.ts')),
+  return { sqlite, hooks, database: load(path.join(__dirname, '../src/data/database.ts')),
     tasks: load(path.join(__dirname, '../src/data/checklist-flow.ts')),
     model: load(path.join(__dirname, '../src/utils/checklist-flow.ts')) };
 }
@@ -120,4 +123,94 @@ test('malformed remote checklist cannot become an editable empty list or be rest
   assert.equal(versions.length, 1);
   const restored = await r.tasks.restoreChecklistFlowConflict(versions[0], rev(2));
   assert.equal(restored.flow.items[0].id, 'a');
+});
+
+test('V1 reads and no-op actions do not migrate persistence; the first real edit atomically preserves tasks in V2', async (t) => {
+  const r = repository(t); await r.database.initializeDatabase();
+  const original = flow({ ...task('a'), checked: false, format: { italic: true },
+    source: { ranges: [{ dateKey: '2026-11-02', startMinute: 500, endMinute: 500 }] } });
+  await r.database.putSyncDocument(key, original, { expectedRevision: null });
+  const before = state(r.sqlite); const read = await r.tasks.getChecklistFlow();
+  assert.equal(read.collection.version, 2); assert.equal(read.lists[0].name, 'Priority');
+  assert.deepEqual(state(r.sqlite), before);
+  const noOp = await r.tasks.changeChecklistFlow({ type: 'reset' }, read.revision);
+  assert.equal(noOp.revision, read.revision); assert.deepEqual(state(r.sqlite), before);
+  const edited = await r.tasks.changeChecklistFlow({ type: 'check', id: 'a', checked: true }, read.revision);
+  const stored = (await r.database.getSyncDocuments(key))[0];
+  assert.equal(stored.value.version, 2); assert.equal(stored.value.lists.length, 1);
+  assert.deepEqual(plain(edited.flow.items[0].source), original.items[0].source);
+  assert.deepEqual(plain(edited.flow.items[0].format), original.items[0].format);
+  assert.deepEqual((await r.database.getSyncDocuments(key)).map((doc) => doc.key), [key]);
+});
+
+test('selected-list writes and history preserve every other checklist and stale global revisions reject all writes', async (t) => {
+  const r = repository(t); await r.database.initializeDatabase();
+  const first = await r.tasks.addChecklistTask('First priority');
+  const created = await r.tasks.createChecklistList('Work', first.revision); const workId = created.listId;
+  const second = await r.tasks.addChecklistTask('Proposal', undefined, { bold: true }, workId);
+  assert.equal(second.flow.items[0].text, 'Proposal');
+  assert.equal((await r.tasks.getChecklistFlow()).flow.items[0].text, 'First priority');
+  const originalMain = plain(second.collection.lists.find((list) => list.id === 'main'));
+  const oldWork = plain(second.flow);
+  const renamed = await r.tasks.renameChecklistList(workId, 'Projects', second.revision);
+  const edited = await r.tasks.changeChecklistFlow({ type: 'check', id: second.taskId, checked: true }, renamed.revision, workId);
+  assert.deepEqual(plain(edited.collection.lists.find((list) => list.id === 'main')), originalMain);
+  const undo = await r.tasks.replaceChecklistList(workId, oldWork, edited.revision);
+  assert.equal(undo.flow.items[0].checked, false); assert.equal(undo.lists.find((list) => list.id === workId).name, 'Projects');
+  assert.deepEqual(plain(undo.collection.lists.find((list) => list.id === 'main')), originalMain);
+  const before = state(r.sqlite);
+  await assert.rejects(r.tasks.changeChecklistFlow({ type: 'reset' }, first.revision, workId), /changed/);
+  await assert.rejects(r.tasks.renameChecklistList(workId, 'Stale', second.revision), /changed/);
+  await assert.rejects(r.tasks.replaceChecklistList(workId, oldWork, edited.revision), /changed/);
+  await assert.rejects(r.tasks.addChecklistTask('Wrong list', undefined, {}, 'missing'), /no longer available/);
+  await assert.rejects(r.tasks.changeChecklistFlow({ type: 'delete', id: first.taskId }, undo.revision, workId), /changed or was deleted/);
+  assert.deepEqual(state(r.sqlite), before);
+  assert.equal(before.native.length, 0); assert.equal(before.inline.length, 0);
+});
+
+test('whole-collection conflict restore recovers all list names and rows and only explicitly falls back when selection is absent', async (t) => {
+  const r = repository(t); await r.database.initializeDatabase();
+  const older = r.model.createChecklistListInCollection(r.model.readChecklistCollection(flow(task('a'))), 'work', 'Work');
+  older.lists[1].items.push(task('b'));
+  const newer = r.model.renameChecklistListInCollection(older, 'work', 'Projects');
+  newer.lists[0].items[0].text = 'Newer priority';
+  await r.database.mergeSyncDocuments([{ key, revision: rev(1), value: older }]);
+  await r.database.mergeSyncDocuments([{ key, revision: rev(2), value: newer }]);
+  const versions = await r.tasks.getChecklistFlowConflicts(); assert.equal(versions.length, 1);
+  assert.deepEqual(plain(versions[0].value), plain(older));
+  const restored = await r.tasks.restoreChecklistFlowConflict(versions[0], rev(2), 'work');
+  assert.equal(restored.listId, 'work'); assert.deepEqual(plain(restored.collection), plain(older));
+  assert.equal(restored.flow.items[0].id, 'b');
+  await r.database.mergeSyncDocuments([{ key, revision: rev(Date.now() + 1000), value: flow(task('only_main')) }]);
+  const all = await r.tasks.getChecklistFlowConflicts();
+  const previousCollection = all.find((version) => version.value.version === 2);
+  assert.ok(previousCollection);
+  // A missing selection is an explicit recovery result, not a mutation fallback.
+  const v1 = all.find((version) => version.value.version === 1);
+  if (v1) assert.equal(v1.value.kind, 'checklistFlow');
+  const current = await r.tasks.getChecklistFlow();
+  const kept = await r.tasks.restoreChecklistFlowConflict(previousCollection, current.revision, 'no_longer_selected');
+  assert.equal(kept.listId, 'main'); assert.equal(kept.collection.lists.length, 2);
+});
+
+test('the returned commit receipt cannot adopt a peer write that lands immediately after the transaction', async (t) => {
+  const r = repository(t); await r.database.initializeDatabase();
+  const first = await r.tasks.addChecklistTask('My task');
+  let peerRevision;
+  r.hooks.afterCommit = async () => {
+    peerRevision = rev(Date.now() + 10000);
+    const peer = r.model.applyChecklistListChange(first.collection, 'main', { type: 'edit', id: first.taskId, text: 'Peer words' });
+    // A second SQLite connection can commit once COMMIT releases the lock,
+    // before this caller's promise resumes. Inject that external row directly;
+    // invoking the same app's serialized write queue here would deadlock it.
+    r.sqlite.prepare('UPDATE ledger_documents SET revision = ?, value_json = ?, local_pending = 0 WHERE key = ?')
+      .run(peerRevision, JSON.stringify(peer), key);
+  };
+  const own = await r.tasks.changeChecklistFlow({ type: 'edit', id: first.taskId, text: 'My words' }, first.revision);
+  assert.equal(own.flow.items[0].text, 'My words'); assert.notEqual(own.revision, peerRevision);
+  const actual = await r.tasks.getChecklistFlow();
+  assert.equal(actual.revision, peerRevision); assert.equal(actual.flow.items[0].text, 'Peer words');
+  const before = state(r.sqlite);
+  await assert.rejects(r.tasks.replaceChecklistList('main', first.flow, own.revision), /changed/);
+  assert.deepEqual(state(r.sqlite), before);
 });

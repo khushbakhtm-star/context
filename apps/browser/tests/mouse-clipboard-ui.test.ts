@@ -98,6 +98,9 @@ test('account connection and Lock clear in-memory whole-cell metadata before ano
   const nodes = parsed.statements.filter((node: any) => node.name?.text === 'connect' || ts.isExpressionStatement(node) && /element\('lock'\)\.onclick/.test(node.getText(parsed)));
   h.context.connection = { async authorize() { throw new Error('Synthetic authorization canceled'); }, lock() {} };
   h.context.navigation = (action: () => void) => action(); h.context.passInput = { value: '' }; h.context.unlockRequest = 0;
+  h.context.priorityNavigation = 0; h.context.priorityScope = {}; h.context.priorityUndos = new Map();
+  h.context.bindPriorityList = () => {}; h.context.checklistUI = { async flush() {}, clear() {} };
+  h.context.prioritySettingsSession = null; h.context.searchSession = null;
   h.context.store.lock = () => {}; h.context.viewGeneration = 0; h.context.passphrase = ''; h.context.plans = []; h.context.liveFillColors = []; h.context.busy = false;
   vm.runInNewContext(ts.transpileModule(nodes.map((node) => node.getText(parsed)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, h.context);
   await h.context.connect(); assert.equal(h.context.cellClipboard, null);

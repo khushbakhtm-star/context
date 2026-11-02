@@ -686,14 +686,19 @@ async function activityTitleInside(db: Pick<SQLite.SQLiteDatabase, 'getAllAsync'
   return undefined;
 }
 
-export async function searchEntries(query: string, limit = 100): Promise<SearchResult[]> {
+export async function searchEntries(query: string, limit = 100, dates?: readonly string[]): Promise<SearchResult[]> {
+  if (dates !== undefined && (!Array.isArray(dates) || dates.length > 366)) throw new Error('Choose at most one year of dates to search.');
+  const scopedDates = dates === undefined ? undefined : [...new Set(dates)].sort();
+  scopedDates?.forEach((dateKey) => validateMinuteCellRange({ dateKey, startMinute: 0, endMinute: 0 }));
+  if (scopedDates?.length === 0) return [];
   const db = await database();
   const rows = await db.getAllAsync<MinuteRow>(
     `SELECT * FROM minute_entries
-     WHERE text LIKE ? ESCAPE '\\'
+     WHERE text LIKE ? ESCAPE '\\'${scopedDates ? ` AND date_key IN (${scopedDates.map(() => '?').join(',')})` : ''}
      ORDER BY date_key DESC, minute_index DESC
      LIMIT ?`,
     `%${query.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')}%`,
+    ...(scopedDates ?? []),
     limit,
   );
   return rows.map((row) => {
@@ -1075,8 +1080,9 @@ export async function getSyncDocuments(prefix: string, excludedPrefix?: string) 
 }
 
 export async function putSyncDocument(key: string, value: Record<string, unknown> | null,
-  options?: { expectedRevision: string | null }) {
+  options?: { expectedRevision: string | null }): Promise<SyncDocument> {
   const db = await database();
+  const committed: { document: SyncDocument | null } = { document: null };
   await db.withExclusiveTransactionAsync(async (txn) => {
     if (options) {
       const current = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
@@ -1088,7 +1094,14 @@ export async function putSyncDocument(key: string, value: Record<string, unknown
       ? await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key) : null;
     await putSyncDocumentInside(txn, key, value);
     await queueCategoryColorReferencesInside(txn, key, before?.value_json ? JSON.parse(before.value_json) : null, value);
+    const own = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
+    if (!own) throw new Error('Could not confirm the saved document.');
+    // Capture this write's exact revision while the exclusive transaction still
+    // owns it. A subsequent peer merge must never become this caller's own ACK.
+    committed.document = mapDocument(own);
   });
+  if (!committed.document) throw new Error('Could not confirm the saved document.');
+  return committed.document;
 }
 
 function categoryUserColorTime(value: Record<string, unknown> | null): number | null {

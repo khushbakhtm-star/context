@@ -51,7 +51,7 @@
     },
     {
       "path": "wear-support/README.md",
-      "sha256": "06b61edafdf5835c2e78332ecbdb3422ae96bb95aa602da767469a514b32af18"
+      "sha256": "50aa96feedc307dcbd37a27e9d220a5d450dfd10a52d43a03d62228a0635c713"
     },
     {
       "path": "wear-support/watch/build.gradle",
@@ -87,15 +87,19 @@
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/MinuteActivity.kt",
-      "sha256": "d3005bb7c74d274f863b4f88d9a2e569c05a9aa871aa98a45c6052f8e2994c1b"
+      "sha256": "b144fb2f96d336104034c74494c9d3430201d0244ba0d9b07b5e606094d2539f"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/SpeechSessionGuard.kt",
       "sha256": "8d72b50083ed940e3f4d187709af42c86cdbc2bbed840e7d423fba4590408675"
     },
     {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchCardLayout.kt",
+      "sha256": "ce0384f99797b71246977c403c3cccf8ece00ed1242fec9dcb7a1a0504c7d4d0"
+    },
+    {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchDictationDialog.kt",
-      "sha256": "fd9fc5379a9929e5338b86024c757370db09f30b866d17e7483d80b92fd24619"
+      "sha256": "aa49af77ae7ff667187f80e52b6c622342edcc16aae97bdf507c1937165ef483"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchDictationPolicy.kt",
@@ -106,16 +110,52 @@
       "sha256": "3d25aad609a4d8b28ee4f547aa2219b2cad0228546331ef6352efd37472f6434"
     },
     {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchMinuteCardView.kt",
+      "sha256": "d6675b63d23a714eab00d4771d1f130c8cbaa4a1646a3e44df681ca3e1f0bd34"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchRangeEditorDialog.kt",
+      "sha256": "a20a99f4b15641a4a82593a52f82ae6e73b4a96c3e2e09dc118b7add2d638915"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchRangePolicy.kt",
+      "sha256": "0932d111933cb6e6d9fac3f1f7823caf590e1ce2ec005d64b51ed8e2227e2daf"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchRoundActionButton.kt",
+      "sha256": "c3a64184c3321b5a8ffcccf1ace812319aa9874699beaa235fd3bfa369b5e5d9"
+    },
+    {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchScrollIndicator.kt",
+      "sha256": "65f99f29e490d513924fab747d5ce47d5a82476ab5cfbc66123a1c9d8fb11d4b"
+    },
+    {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchSilencePolicy.kt",
       "sha256": "20c99e562b679216e4181daa165b7266de7dda1aaf3bbee233f2e5d75cd437c0"
     },
     {
+      "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchSpeechAvailabilityCache.kt",
+      "sha256": "8efa3f398a8789050b005bc003f316d25715156c9bd66e17644aca75bc7fd541"
+    },
+    {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchStore.kt",
-      "sha256": "3359cec3f5ed08e6c708524c6bbb60222bd0df803d7702ba281a3582ac2857ba"
+      "sha256": "1ec91afbe6d7563bfb1f13864d18cd5eccf04b860752a5928f2e420e682c46fa"
     },
     {
       "path": "wear-support/watch/src/main/java/com/context/minuteledger/wear/WatchTransport.kt",
       "sha256": "779841a7f0804e2aca400ffcf8b439915e08a8ebf2a4de9b9f9cc9e5e2ccecad"
+    },
+    {
+      "path": "wear-support/watch/src/main/res/drawable/context_add.xml",
+      "sha256": "158694122f1d7d19a7916ee4f2d530985b0916a55146614994bf3b9c459e566f"
+    },
+    {
+      "path": "wear-support/watch/src/main/res/drawable/context_edit.xml",
+      "sha256": "eecef304cc722446166453d54570d340f3a8b4f83eb0371a2523700f556b44c2"
+    },
+    {
+      "path": "wear-support/watch/src/main/res/drawable/context_now_dot.xml",
+      "sha256": "fd8b8f40456407a8e858db6a7454913a6cd40d0325efcafa7abaf27a2862e460"
     },
     {
       "path": "wear-support/watch/src/main/res/drawable/context_settings.xml",
@@ -154,6 +194,10 @@
       "sha256": "67c7482a16aff993a0e7fb3d27f35e312b99b2118b129cac8d40fb1462e10fa8"
     },
     {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMWatchCardLayoutTest.kt",
+      "sha256": "e2168007a996ef7f66f36999ee8ddde81ff6c1ed915923692249c7ee255e2fff"
+    },
+    {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMWatchCustomSilencePolicyTest.kt",
       "sha256": "32231aeba38b66e5f2150fe832b6712e3e0bf9617a90a1831fe1cef3fa9753d5"
     },
@@ -162,8 +206,16 @@
       "sha256": "fb83757d0d49cd4d8c04db2a1ad36da66d0fa746d7074f37e098e5fe7377f8c8"
     },
     {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMWatchRangePolicyTest.kt",
+      "sha256": "94a355f0654aeaacf69ef6636cf3a0a7f56d878018a0758e99a7c2f5af9bba70"
+    },
+    {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMWatchSilencePolicyTest.kt",
       "sha256": "7ace93ceaecf020f3413a918a5454d3a5917147a28b25a1f7e594a9a8ee8dc4c"
+    },
+    {
+      "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/JVMWatchSpeechAvailabilityCacheTest.kt",
+      "sha256": "c1dccdaa3d4eeddad832f603c40f54922175d1ca7c3c778ddf7a81e137bbf321"
     },
     {
       "path": "wear-support/watch/src/test/java/com/context/minuteledger/wear/LedgerRulesTest.kt",
@@ -175,7 +227,7 @@
     },
     {
       "path": "wear-support/watch/version.json",
-      "sha256": "442d600a40397715b0c8dcf6435b8e785acb8d5dc59dfbbb11bc567c5e91e96d"
+      "sha256": "955cd187a266631894bcc89df0a62d1bff307621cd17f42f1847c4a2d70a8398"
     }
   ]
 }

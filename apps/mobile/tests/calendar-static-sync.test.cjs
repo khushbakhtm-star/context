@@ -72,8 +72,15 @@ test('active, idle and issue sync use static circular loops, muted quiet states 
       const leftTip = arrowTip(left), rightTip = arrowTip(right);
       assert.ok(left.every((style) => leftTip.y > style.top + style.height / 2), 'left chevron points down');
       assert.ok(right.every((style) => rightTip.y < style.top + style.height / 2), 'right chevron points up');
-      assert.ok(Math.abs(leftTip.x - 3) < 0.5 && Math.abs(leftTip.y - 14) < 0.5, 'left arrow follows the circular side');
-      assert.ok(Math.abs(rightTip.x - 21) < 0.5 && Math.abs(rightTip.y - 9) < 0.5, 'right arrow follows the opposite circular side');
+      const radius = closedStyle.width / 2 - closedStyle.borderWidth / 2;
+      for (const tip of [leftTip, rightTip]) assert.ok(Math.abs(Math.hypot(tip.x - 12, tip.y - 12) - radius) < 1e-9,
+        'both arrow tips lie on the actual circle stroke, not inside it');
+      assert.ok(Math.abs(leftTip.x + rightTip.x - 24) < 1e-9 && Math.abs(leftTip.y + rightTip.y - 24) < 1e-9,
+        'the arrow tips are exactly opposite one another');
+      const centers = (arms) => arms.map((arm) => [arm.left + arm.width / 2, arm.top + arm.height / 2]);
+      for (const center of centers(left)) assert.ok(centers(right).some((other) =>
+        Math.abs(center[0] + other[0] - 24) < 1e-9 && Math.abs(center[1] + other[1] - 24) < 1e-9),
+      'arrow arms keep identical clearance and are congruent under a half turn');
     }
   }
 });

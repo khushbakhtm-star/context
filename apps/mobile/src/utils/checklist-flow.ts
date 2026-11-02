@@ -4,6 +4,10 @@ export const CHECKLIST_FLOW_KEY = 'category:checklistFlow:main';
 export const MAX_CHECKLIST_TASKS = 1000;
 export const MAX_CHECKLIST_DEPTH = 8;
 export const MAX_CHECKLIST_TEXT = 50_000;
+export const DEFAULT_CHECKLIST_LIST_ID = 'main';
+export const DEFAULT_CHECKLIST_LIST_NAME = 'Priority';
+export const MAX_CHECKLIST_LISTS = 100;
+export const MAX_CHECKLIST_LIST_NAME = 80;
 const MAX_TOTAL_TEXT = 250_000;
 
 export type ChecklistTaskFormat = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string };
@@ -12,6 +16,9 @@ export type ChecklistTaskSource = { ranges: { dateKey: string; startMinute: numb
 export type ChecklistTask = { id: string; text: string; checked: boolean; parentId: string | null;
   format: ChecklistTaskFormat; source?: ChecklistTaskSource };
 export type ChecklistFlow = { kind: 'checklistFlow'; version: 1; items: ChecklistTask[] };
+export type ChecklistList = { id: string; name: string; items: ChecklistTask[] };
+export type ChecklistCollection = { kind: 'checklistFlow'; version: 2; lists: ChecklistList[] };
+export type ChecklistListSummary = { id: string; name: string; taskCount: number };
 export type ChecklistChange =
   | { type: 'add'; item: ChecklistTask; afterId?: string }
   | { type: 'edit'; id: string; text?: string; format?: ChecklistTaskFormat }
@@ -224,4 +231,98 @@ export function applyChecklistChange(value: ChecklistFlow, change: ChecklistChan
     } else throw invalid();
   }
   return readChecklistFlow(flow);
+}
+
+function listName(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > MAX_CHECKLIST_LIST_NAME ||
+      /[\u0000-\u001F\u007F]/.test(value)) throw new Error(`Give the checklist a name of 1–${MAX_CHECKLIST_LIST_NAME} characters.`);
+  return value.trim();
+}
+
+export function emptyChecklistCollection(): ChecklistCollection {
+  return { kind: 'checklistFlow', version: 2, lists: [{
+    id: DEFAULT_CHECKLIST_LIST_ID, name: DEFAULT_CHECKLIST_LIST_NAME, items: [],
+  }] };
+}
+
+/** V1 is migrated in memory only. Readers never publish an empty replacement,
+ * and the V1 decoder deliberately continues rejecting V2 collection values. */
+export function readChecklistCollection(value: unknown): ChecklistCollection {
+  if (value === null || value === undefined) return emptyChecklistCollection();
+  if (!object(value)) throw invalid();
+  if (value.kind === 'checklistFlow' && value.version === 1) {
+    const flow = readChecklistFlow(value);
+    return readChecklistCollection({ kind: 'checklistFlow', version: 2, lists: [{
+      id: DEFAULT_CHECKLIST_LIST_ID, name: DEFAULT_CHECKLIST_LIST_NAME, items: flow.items,
+    }] });
+  }
+  keys(value, ['kind', 'version', 'lists']);
+  if (value.kind !== 'checklistFlow' || value.version !== 2 || !Array.isArray(value.lists) ||
+      !value.lists.length || value.lists.length > MAX_CHECKLIST_LISTS) throw invalid();
+  const seenLists = new Set<string>(); const seenTasks = new Set<string>();
+  let taskCount = 0; let totalText = 0;
+  const lists: ChecklistList[] = value.lists.map((list) => {
+    if (!object(list)) throw invalid();
+    keys(list, ['id', 'name', 'items']);
+    if (!id(list.id) || seenLists.has(list.id)) throw invalid();
+    const flow = readChecklistFlow({ kind: 'checklistFlow', version: 1, items: list.items });
+    for (const task of flow.items) {
+      if (seenTasks.has(task.id)) throw invalid();
+      seenTasks.add(task.id); totalText += task.text.length;
+    }
+    taskCount += flow.items.length;
+    if (taskCount > MAX_CHECKLIST_TASKS) throw new Error(`All checklists together can contain up to ${MAX_CHECKLIST_TASKS} tasks.`);
+    if (totalText > MAX_TOTAL_TEXT) throw new Error('The checklists contain too much text. Shorten a task before saving.');
+    seenLists.add(list.id);
+    return { id: list.id, name: listName(list.name), items: flow.items };
+  });
+  if (!seenLists.has(DEFAULT_CHECKLIST_LIST_ID)) throw invalid();
+  const collection: ChecklistCollection = { kind: 'checklistFlow', version: 2, lists };
+  if (serializedUtf8Bytes(collection) > 1024 * 1024)
+    throw new Error('The checklists are too large to synchronize. Shorten a task or remove unused rows.');
+  return collection;
+}
+
+function collectionList(collection: ChecklistCollection, listId: string): ChecklistList {
+  const list = collection.lists.find((candidate) => candidate.id === listId);
+  if (!list) throw new Error('This checklist changed or is no longer available. Choose a checklist before editing.');
+  return list;
+}
+
+/** The view stays V1 so existing task, subtree and drag helpers remain scoped to one list. */
+export function checklistListFlow(value: ChecklistCollection, listId = DEFAULT_CHECKLIST_LIST_ID): ChecklistFlow {
+  const collection = readChecklistCollection(value);
+  return { kind: 'checklistFlow', version: 1, items: collectionList(collection, listId).items };
+}
+
+export function checklistListSummaries(value: ChecklistCollection): ChecklistListSummary[] {
+  return readChecklistCollection(value).lists.map((list) => ({ id: list.id, name: list.name, taskCount: list.items.length }));
+}
+
+export function applyChecklistListChange(value: ChecklistCollection, listId: string, change: ChecklistChange): ChecklistCollection {
+  const collection = readChecklistCollection(value); const list = collectionList(collection, listId);
+  list.items = applyChecklistChange({ kind: 'checklistFlow', version: 1, items: list.items }, change).items;
+  return readChecklistCollection(collection);
+}
+
+/** Undo/Redo can replace only the list captured by its history entry. The data
+ * adapter must additionally fence the entire collection's observed revision. */
+export function replaceChecklistListInCollection(value: ChecklistCollection, listId: string, flow: ChecklistFlow): ChecklistCollection {
+  const collection = readChecklistCollection(value); const list = collectionList(collection, listId);
+  list.items = readChecklistFlow(flow).items;
+  return readChecklistCollection(collection);
+}
+
+export function createChecklistListInCollection(value: ChecklistCollection, listId: string, name: string): ChecklistCollection {
+  const collection = readChecklistCollection(value);
+  if (!id(listId) || collection.lists.some((list) => list.id === listId)) throw new Error('This checklist already exists or has an invalid identity.');
+  if (collection.lists.length >= MAX_CHECKLIST_LISTS) throw new Error(`You can keep up to ${MAX_CHECKLIST_LISTS} checklists.`);
+  collection.lists.push({ id: listId, name: listName(name), items: [] });
+  return readChecklistCollection(collection);
+}
+
+export function renameChecklistListInCollection(value: ChecklistCollection, listId: string, name: string): ChecklistCollection {
+  const collection = readChecklistCollection(value);
+  collectionList(collection, listId).name = listName(name);
+  return readChecklistCollection(collection);
 }

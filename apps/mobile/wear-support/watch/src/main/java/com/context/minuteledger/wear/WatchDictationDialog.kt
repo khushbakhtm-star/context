@@ -46,10 +46,6 @@ class WatchDictationDialog(
     private var recognizer: SpeechRecognizer? = null
     private var backend = WatchSpeechBackend.UNAVAILABLE
     private var systemAttempted = false
-    private val onDevice = Build.VERSION.SDK_INT >= 31 && runCatching {
-        SpeechRecognizer.isOnDeviceRecognitionAvailable(activity)
-    }.getOrDefault(false)
-    private val system = runCatching { SpeechRecognizer.isRecognitionAvailable(activity) }.getOrDefault(false)
     private val clock = label("", 10f).apply { setTypeface(Typeface.MONOSPACE, Typeface.NORMAL); gravity = Gravity.CENTER }
     private val message = label("", 11f).apply { gravity = Gravity.CENTER; setTextColor(MUTED) }
     private val words = label("", 14f)
@@ -124,7 +120,10 @@ class WatchDictationDialog(
         if (!silence.canListen) return
         handler.removeCallbacks(nextPhrase)
         stopRecognizer()
-        backend = WatchDictationPolicy.backend(Build.VERSION.SDK_INT, onDevice, system, preferSystem)
+        // An available on-watch recognizer does not need a second system-provider
+        // query. Probe the system only when it is selected or actually needed.
+        backend = availability.selectBackend(Build.VERSION.SDK_INT, SystemClock.elapsedRealtime(), preferSystem,
+            ::probeOnDevice, ::probeSystem)
         if (backend == WatchSpeechBackend.UNAVAILABLE) { failed(WatchSpeechFailure.UNAVAILABLE); return }
         if (backend == WatchSpeechBackend.SYSTEM) systemAttempted = true
         val token = guard.begin()
@@ -206,7 +205,11 @@ class WatchDictationDialog(
         handler.removeCallbacks(nextPhrase)
         stopRecognizer()
         silence.providerFinished(SystemClock.elapsedRealtime())
-        if (allowFallback && isCurrent() && WatchDictationPolicy.retryWithSystem(backend, reason, system, systemAttempted)) {
+        if (reason == WatchSpeechFailure.MODEL || reason == WatchSpeechFailure.UNAVAILABLE) availability.invalidate(backend)
+        if (allowFallback && isCurrent() && backend == WatchSpeechBackend.ON_DEVICE &&
+            (reason == WatchSpeechFailure.MODEL || reason == WatchSpeechFailure.UNAVAILABLE) &&
+            WatchDictationPolicy.retryWithSystem(backend, reason,
+                availability.system(SystemClock.elapsedRealtime(), ::probeSystem), systemAttempted)) {
             start(true)
             return
         }
@@ -267,6 +270,12 @@ class WatchDictationDialog(
         val previous = recognizer; recognizer = null
         runCatching { previous?.cancel() }; runCatching { previous?.destroy() }
     }
+    // Probes are functions so construction never crosses the service/package manager.
+    // The short-lived shared cache retains booleans, never this Activity or permission.
+    private fun probeOnDevice() = Build.VERSION.SDK_INT >= 31 && runCatching {
+        SpeechRecognizer.isOnDeviceRecognitionAvailable(activity)
+    }.getOrDefault(false)
+    private fun probeSystem() = runCatching { SpeechRecognizer.isRecognitionAvailable(activity) }.getOrDefault(false)
     private fun updateScreenAwake() {
         val window = dialog.window ?: return
         if (WatchDictationPolicy.keepScreenAwake(active && isCurrent() && dialog.isShowing, silence.isArmed)) {
@@ -293,6 +302,7 @@ class WatchDictationDialog(
     }
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
     companion object {
+        private val availability = WatchSpeechAvailabilityCache()
         private val BACKGROUND = Color.parseColor("#08090B")
         private val FOREGROUND = Color.parseColor("#F3EFF7")
         private val MUTED = Color.parseColor("#A8A3AF")

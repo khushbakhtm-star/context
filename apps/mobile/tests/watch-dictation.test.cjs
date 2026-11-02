@@ -8,6 +8,7 @@ const read = (name) => fs.readFileSync(path.join(directory, name), 'utf8');
 const activity = read('MinuteActivity.kt');
 const dialog = read('WatchDictationDialog.kt');
 const policy = read('WatchDictationPolicy.kt');
+const availability = read('WatchSpeechAvailabilityCache.kt');
 
 test('watch dictation owns its visible clock while retaining a separate immutable note minute and clock preference', () => {
   assert.match(dialog, /private val clock = label\("", 10f\)\.apply \{ setTypeface\(Typeface\.MONOSPACE, Typeface\.NORMAL\)/);
@@ -29,10 +30,24 @@ test('Dictate begins available speech directly, preferring on-device recognition
   assert.match(policy, /!preferSystem && api >= 31 && onDeviceAvailable -> WatchSpeechBackend\.ON_DEVICE\s*systemAvailable -> WatchSpeechBackend\.SYSTEM/);
   assert.match(dialog, /if \(backend == WatchSpeechBackend\.SYSTEM\) systemAttempted = true/);
   const failure = dialog.slice(dialog.indexOf('private fun failed('), dialog.indexOf('private fun stopRecognizer'));
-  assert.match(failure, /isCurrent\(\) && WatchDictationPolicy\.retryWithSystem\(backend, reason, system, systemAttempted\)/);
+  assert.match(failure, /isCurrent\(\) && backend == WatchSpeechBackend\.ON_DEVICE &&[\s\S]*WatchDictationPolicy\.retryWithSystem\(backend, reason,[\s\S]*availability\.system\(SystemClock\.elapsedRealtime\(\), ::probeSystem\), systemAttempted\)/);
   assert.match(failure, /start\(true\)\s*return/);
   assert.match(dialog, /EXTRA_PREFER_OFFLINE, true/);
   assert.match(dialog, /setRecognitionListener[\s\S]*speech\.startListening/);
+});
+
+test('watch capture defers capability queries until visible start and avoids unnecessary repeat system probes', () => {
+  const beforeInit = dialog.slice(0, dialog.indexOf('    init {'));
+  assert.doesNotMatch(beforeInit, /SpeechRecognizer\.is(?:OnDeviceRecognitionAvailable|RecognitionAvailable)\(activity\)/);
+  const start = dialog.slice(dialog.indexOf('private fun start('), dialog.indexOf('private fun failed('));
+  assert.ok(start.indexOf('if (!active || !isCurrent())') < start.indexOf('availability.selectBackend('));
+  assert.match(start, /availability\.selectBackend\(Build\.VERSION\.SDK_INT, SystemClock\.elapsedRealtime\(\), preferSystem,\s*::probeOnDevice, ::probeSystem\)/);
+  assert.match(availability, /if \(useOnDevice\) false else system\(elapsedMillis, systemProbe\)/);
+  assert.match(availability, /elapsedMillis >= entry\.checkedAt/);
+  assert.match(availability, /elapsedMillis - entry\.checkedAt < lifetimeMillis/);
+  assert.doesNotMatch(availability, /import android\.|:\s*Activity\b|SharedPreferences|RECORD_AUDIO|RecognizerIntent|WatchStore|WatchTransport/);
+  assert.match(dialog, /private val availability = WatchSpeechAvailabilityCache\(\)/);
+  assert.match(dialog, /WatchSpeechFailure\.MODEL \|\| reason == WatchSpeechFailure\.UNAVAILABLE\) availability\.invalidate\(backend\)/);
 });
 
 test('watch lifecycle stops speech before snapshots and invalidates permission capture on intentional user departure', () => {
@@ -98,9 +113,14 @@ test('silence uses monotonic speech signals and a bounded final flush, never RMS
 test('fresh launcher and Tile requests begin capture once, while blank timeout closes without a ledger write', () => {
   assert.match(activity, /freshEntryPending = LaunchPolicy\.freshEntry\(savedInstanceState != null, requestsRecordNow\(intent\)\)/);
   assert.match(activity, /if \(freshEntryPending\) \{\s*freshEntryPending = false\s*applyLaunch\(LaunchTrigger\.LAUNCHER_OR_TILE\)/);
-  assert.match(activity, /openEditor\(selected, autoNow = true\)\s*if \(decision\.startDictation\)/);
-  assert.match(activity, /button\("Now", "Return to the current minute"\) \{\s*cancelPendingLaunch\(\)\s*applyLaunch\(LaunchTrigger\.ON_START\)/);
-  const empty = activity.slice(activity.indexOf('onEmpty = {'), activity.indexOf('onClosed = {'));
+  assert.match(activity, /if \(decision\.startDictation\) \{[\s\S]*prepareAutomaticDictation\(selected\)[\s\S]*beginWatchDictation\(it\)/);
+  assert.match(activity, /WatchRoundActionButton\(this, R\.drawable\.context_now_dot, "Go to the current minute"\) \{\s*returnToNow\(\)/);
+  const goNow = activity.slice(activity.indexOf('private fun returnToNow()'), activity.indexOf('private fun showRangeEditor('));
+  assert.match(goNow, /if \(editing != null \|\| rangeEditor != null \|\| pickers\.isNotEmpty\(\)\) return/);
+  assert.match(goNow, /cancelPendingLaunch\(\); selected = now\(\); followingNow = true/);
+  assert.doesNotMatch(goNow, /beginWatchDictation|openEditor|prepareAutomaticDictation/);
+  const begin = activity.slice(activity.indexOf('private fun beginWatchDictation('), activity.indexOf('@Deprecated("Activity runtime permission'));
+  const empty = begin.slice(begin.indexOf('onEmpty = {'), begin.indexOf('onClosed = {'));
   assert.match(empty, /SpeechSessionGuard\.accepts/);
   assert.match(empty, /WatchDictationPolicy\.mayCloseEmptyCapture\(editorInitialText, editor\?\.text\?\.toString\(\),\s*editorSession\?\.chosenCategory != null, retryDictation != null\)/);
   assert.match(empty, /finishEditor\(session, fromDictation = true, saved = false\)/);
@@ -112,6 +132,60 @@ test('fresh launcher and Tile requests begin capture once, while blank timeout c
   const completion = dialog.slice(dialog.indexOf('private fun close('));
   assert.ok(completion.indexOf('silence.close()') < completion.indexOf('onConfirmed(confirmed)'));
   assert.ok(completion.indexOf('guard.close()') < completion.indexOf('onEmpty()'));
+});
+
+test('automatic capture owns one exact cached baseline before microphone entry without inflating a hidden editor', () => {
+  const baseline = activity.slice(activity.indexOf('private fun editorBaseline('), activity.indexOf('private fun prepareAutomaticDictation('));
+  assert.match(baseline, /val snapshot = if \(restoredSession == null\) store\.editorSnapshot\(target\)\s*else runCatching \{ store\.editorSnapshot\(target\) \}\.getOrElse \{ WatchEditorSnapshot\(null, null, null\) \}/,
+    'mutually exclusive branches read once; a restored draft retains its original session when the cache is unavailable');
+  assert.doesNotMatch(baseline, /store\.(?:day|cachedEntry|latest|pendingRecords)\(/);
+  assert.match(baseline, /val session = restoredSession \?: if \(pendingOperation != null\)/);
+  assert.match(baseline, /pendingText = pendingOperation\.getString\("text"\), pendingCategory = category/);
+  assert.match(baseline, /else EditorSession\(target, known, if \(known\) version else null\)/);
+  const prepare = activity.slice(activity.indexOf('private fun prepareAutomaticDictation('), activity.indexOf('private fun expandPreparedEditor('));
+  assert.equal((prepare.match(/editorBaseline\(target\)/g) ?? []).length, 1);
+  assert.ok(prepare.indexOf('reviewConflict(it); return') < prepare.indexOf('editorSession = session'));
+  assert.match(prepare, /editorSession = session; editing = target; editorInitialText = initial; editorAutoNow = true/);
+  assert.match(prepare, /editor = EditText\(this\)\.apply \{ setText\(initial\) \}/);
+  assert.match(prepare, /automaticCapturePrepared = true/);
+  assert.doesNotMatch(prepare, /openEditor\(|fullDialog\(|dialog\.show\(|render\(|centerMinute\(|WatchTransport/);
+});
+
+test('fresh capture reaches speech before ledger repaint and phone refreshes cannot repaint its owned draft', () => {
+  const launch = activity.slice(activity.indexOf('private fun applyLaunch('), activity.indexOf('private fun returnToNow()'));
+  const capture = launch.slice(launch.indexOf('if (decision.startDictation) {'), launch.indexOf('} else { render(); centerMinute() }'));
+  assert.ok(capture.indexOf('prepareAutomaticDictation(selected)') < capture.indexOf('beginWatchDictation(it)'));
+  assert.doesNotMatch(capture, /render\(|centerMinute\(|openEditor\(|WatchTransport/);
+  assert.ok(launch.indexOf('beginWatchDictation(it)') < launch.indexOf('WatchTransport.requestDay('));
+  assert.match(launch, /generation != launchGeneration/);
+  const create = activity.slice(activity.indexOf('override fun onCreate('), activity.indexOf('override fun onStart()'));
+  assert.match(create, /if \(!freshEntryPending\) \{\s*runCatching \{ render\(\) \}\.onFailure \{[\s\S]*?list\.post \{ centerMinute\(\) \}\s*\}/);
+  assert.ok(create.indexOf('runCatching { render() }') < create.indexOf('savedInstanceState?.getString("editorText")'),
+    'a failed initial cache repaint must not prevent restoration of the protected editor draft');
+  const start = activity.slice(activity.indexOf('override fun onStart()'), activity.indexOf('override fun onStop()'));
+  assert.match(start, /if \(!freshEntryPending\) \{\s*WatchTransport\.synchronize/);
+  const receiver = activity.slice(activity.indexOf('private val receiver ='), activity.indexOf('override fun onCreate('));
+  assert.match(receiver, /if \(editing == null && rangeEditor == null && pickers\.isEmpty\(\) && !deferredNow\) render\(\)/);
+});
+
+test('prepared speech drafts expand into the exact manual editor on Type, interruption, denial or a failed durable save', () => {
+  const expand = activity.slice(activity.indexOf('private fun expandPreparedEditor('), activity.indexOf('private fun openEditor('));
+  assert.match(expand, /!automaticCapturePrepared \|\| editorSession\?\.sessionId != session\.sessionId/);
+  assert.match(expand, /RestoredEditor\(session, text, editorInitialText, editorAutoNow, focus\)/);
+  assert.match(expand, /openEditor\(session\.coordinate, text, session, draft\.autoNow, draft\.initialText, focus\)/);
+  assert.match(expand, /pendingRestore = draft/);
+  const begin = activity.slice(activity.indexOf('private fun beginWatchDictation('), activity.indexOf('@Deprecated("Activity runtime permission'));
+  const closed = begin.slice(begin.indexOf('onClosed = {'));
+  assert.match(closed, /if \(pendingSpeech == speech\)/);
+  assert.match(closed, /WatchDictationPolicy\.preservedDraft/);
+  assert.match(closed, /if \(automaticCapturePrepared\) expandPreparedEditor\(session, focus = type\)/);
+  const permission = activity.slice(activity.indexOf('override fun onRequestPermissionsResult'), activity.indexOf('@Deprecated("Retained only'));
+  assert.match(permission, /else \{[\s\S]*expandPreparedEditor\(session\)/);
+  assert.match(permission, /editorDialog\?\.isShowing == true \|\| automaticCapturePrepared/);
+  const accept = activity.slice(activity.indexOf('private fun acceptDictationResult'), activity.indexOf('private fun saveEditor'));
+  assert.match(accept, /catch \(_: Exception\) \{[\s\S]*expandPreparedEditor\(plan\.editor\)/);
+  assert.match(accept, /pendingRestore = pendingRestore\?\.copy\(text = plan\.text\)/);
+  assert.match(accept, /editor\?\.setText\(plan\.text\)/);
 });
 
 test('a granted microphone handoff is consumed once and denied/background sessions cannot reopen it', () => {

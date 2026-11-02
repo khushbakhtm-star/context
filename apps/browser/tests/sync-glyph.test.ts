@@ -49,13 +49,28 @@ test('the browser glyph is a static circular side-arrow emblem with a centered i
   const css=fs.readFileSync(new URL('../app.css',import.meta.url),'utf8');
   const button=/<button id="sync"[\s\S]*?<\/button>/.exec(html)![0];
   assert.match(button,/aria-hidden="true" focusable="false"/);assert.match(button,/viewBox="0 0 24 24"/);
-  assert.match(button,/stroke-width="1\.5"/);assert.match(button,/class="sync-loop-closed" cx="12" cy="12" r="11"/);
+  assert.match(button,/stroke-width="1\.5"/);assert.match(button,/class="sync-loop-closed" cx="12" cy="12" r="10\.25"/);
   assert.match(button,/class="sync-loop-open"/);assert.match(button,/class="sync-side-arrows"/);
   assert.match(button,/class="sync-issue"><path d="M12 7\.25V12\.75"/);
   assert.doesNotMatch(button,/⇄|sync-warning|animate|ellipse/i);
   assert.match(css,/#sync\[data-sync-state=active\]\{color:var\(--ink\)\}/);
   assert.match(css,/header #sync\{[^}]*color:var\(--muted\)/);
   assert.doesNotMatch(css,/animation|@keyframes|transition:/);
+});
+
+test('sync arrowheads sit on opposite points of the loop with congruent arms',()=>{
+  const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
+  const shape=/class="sync-side-arrows" d="([^"]+)"/.exec(html)![1];
+  const points=[...shape.matchAll(/[-\d.]+/g)].map((match)=>Number(match[0]));
+  assert.equal(points.length,12);
+  const left=[[points[0]!,points[1]!],[points[2]!,points[3]!],[points[4]!,points[5]!]];
+  const right=[[points[6]!,points[7]!],[points[8]!,points[9]!],[points[10]!,points[11]!]];
+  for(const tip of [left[1]!,right[1]!]) assert.ok(Math.abs(Math.hypot(tip[0]!-12,tip[1]!-12)-10.25)<1e-8);
+  for(let i=0;i<3;i++) {
+    assert.ok(Math.abs(left[i]![0]!+right[2-i]![0]!-24)<1e-6);
+    assert.ok(Math.abs(left[i]![1]!+right[2-i]![1]!-24)<1e-6);
+  }
+  assert.match(html,/<svg class="sync-glyph" style="overflow:visible"/,'arrow wings remain visible');
 });
 
 test('glyph updates preserve the existing button action and accessible status',()=>{

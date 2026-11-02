@@ -8,6 +8,9 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 
+data class WatchLedgerSnapshot(val day: JSONObject?, val pending: List<JSONObject>)
+data class WatchEditorSnapshot(val day: JSONObject?, val cached: JSONObject?, val pending: JSONObject?)
+
 /** One atomic journal shared by the activity and the background Data Layer listener. */
 class WatchStore(context: Context) {
     private val file = AtomicFile(File(context.filesDir, "context-watch-v1.json"))
@@ -26,6 +29,127 @@ class WatchStore(context: Context) {
         try { output.write(state.toString().toByteArray(Charsets.UTF_8)); file.finishWrite(output) }
         catch (error: Throwable) { file.failWrite(output); throw error }
     }
+    /** read() already owns fresh objects: return one coherent view without reparsing the file. */
+    fun snapshot(dateKey: String): WatchLedgerSnapshot = synchronized(lock) {
+        Coordinate(dateKey, 0)
+        val state = read()
+        val pending = state.getJSONArray("pending")
+        WatchLedgerSnapshot(state.getJSONObject("days").optJSONObject(dateKey),
+            (0 until pending.length()).map { pending.getJSONObject(it) })
+    }
+    /** Editor metadata and its exact cached/pending minute come from the same file read. */
+    fun editorSnapshot(coordinate: Coordinate): WatchEditorSnapshot = synchronized(lock) {
+        editorSnapshot(read(), coordinate)
+    }
+    private fun editorSnapshot(state: JSONObject, coordinate: Coordinate): WatchEditorSnapshot {
+        val day = state.getJSONObject("days").optJSONObject(coordinate.dateKey)
+        val metadata = day?.let { source -> JSONObject().apply {
+            for (name in listOf("dateKey", "generatedAt", "categories", "partial", "clockFormat"))
+                if (source.has(name)) put(name, source.get(name))
+        } }
+        val entries = day?.optJSONArray("entries") ?: JSONArray()
+        val matches = (0 until entries.length()).map { entries.getJSONObject(it) }
+            .filter { it.getInt("minuteIndex") == coordinate.minuteIndex }
+        require(matches.size <= 1) { "The cached minute needs review on the phone." }
+        val cached = matches.singleOrNull()
+        val pending = matchingPending(state, coordinate).lastOrNull()
+        return WatchEditorSnapshot(metadata, cached, pending)
+    }
+    /** Preparing is read-only. Confirmation later must retain these exact local observations. */
+    fun prepareRange(start: Coordinate, end: Coordinate, text: String): WatchRangePlan = synchronized(lock) {
+        WatchRangePolicy.validateText(text)
+        val coordinates = WatchRangePolicy.coordinates(start, end)
+        val state = read()
+        val index = rangeIndex(state, coordinates)
+        val baselines = ArrayList<WatchRangeCellBaseline>(coordinates.size)
+        val operations = ArrayList<String>()
+        for (coordinate in coordinates) {
+            val observation = rangeObservation(index, coordinate, text)
+            baselines.add(observation.first)
+            if (!observation.second) {
+                val baseline = observation.first
+                val operation = JSONObject().put("version", 1).put("operationId", UUID.randomUUID().toString())
+                    .put("dateKey", coordinate.dateKey).put("minuteIndex", coordinate.minuteIndex).put("text", text)
+                    .put("baseKnown", baseline.baseKnown).put("expectedVersion", baseline.expectedVersion ?: JSONObject.NULL)
+                if (baseline.pendingCategory != null) operation.put("categoryId", baseline.pendingCategory)
+                operations.add(operation.toString())
+            }
+        }
+        WatchRangePolicy.validatePayload(operations.map { it.toByteArray(Charsets.UTF_8).size })
+        WatchRangePlan(start, end, text, baselines, operations)
+    }
+    /** All baselines are checked before the first mutation and one AtomicFile commit. */
+    fun saveRange(plan: WatchRangePlan): Unit = synchronized(lock) {
+        WatchRangePolicy.validateText(plan.text)
+        val coordinates = WatchRangePolicy.coordinates(plan.start, plan.end)
+        require(plan.count == coordinates.size && plan.baselines().map { it.coordinate } == coordinates) {
+            "Invalid watch range."
+        }
+        WatchRangePolicy.validatePayload(plan.payloads().map { it.toByteArray(Charsets.UTF_8).size })
+        val state = read()
+        val index = rangeIndex(state, coordinates)
+        val current = coordinates.map { rangeObservation(index, it, plan.text).first }
+        WatchRangePolicy.requireUnchanged(plan.baselines(), current)
+        if (plan.payloads().isEmpty()) return@synchronized
+        val pending = state.getJSONArray("pending")
+        // Operations were serialized once at preparation; identities and old expected
+        // versions cannot be refreshed by an ACK while a confirmation screen is open.
+        for (payload in plan.payloads()) pending.put(JSONObject().put("operation", JSONObject(payload)).put("status", "pending"))
+        write(state)
+    }
+    private fun matchingPending(state: JSONObject, coordinate: Coordinate): List<JSONObject> {
+        val pending = state.getJSONArray("pending")
+        return (0 until pending.length()).map { pending.getJSONObject(it) }.filter {
+            val operation = it.getJSONObject("operation")
+            operation.getString("dateKey") == coordinate.dateKey && operation.getInt("minuteIndex") == coordinate.minuteIndex
+        }
+    }
+    private data class RangeIndex(val days: Map<String, JSONObject?>, val entries: Map<Coordinate, JSONObject>,
+        val pending: Map<Coordinate, List<JSONObject>>)
+    /** Index each selected day and the pending journal once, including overnight fills. */
+    private fun rangeIndex(state: JSONObject, coordinates: List<Coordinate>): RangeIndex {
+        val selected = coordinates.toSet()
+        val days = coordinates.map { it.dateKey }.distinct().associateWith { state.getJSONObject("days").optJSONObject(it) }
+        val entries = mutableMapOf<Coordinate, JSONObject>()
+        for ((date, day) in days) {
+            val list = day?.optJSONArray("entries") ?: JSONArray()
+            for (position in 0 until list.length()) {
+                val entry = list.getJSONObject(position)
+                val coordinate = Coordinate(date, entry.getInt("minuteIndex"))
+                if (coordinate !in selected) continue
+                require(entries.put(coordinate, entry) == null) { "The cached minute needs review on the phone." }
+            }
+        }
+        val pending = mutableMapOf<Coordinate, MutableList<JSONObject>>()
+        val list = state.getJSONArray("pending")
+        for (position in 0 until list.length()) {
+            val record = list.getJSONObject(position)
+            val operation = record.getJSONObject("operation")
+            val date = operation.getString("dateKey")
+            if (date !in days) continue
+            val coordinate = Coordinate(date, operation.getInt("minuteIndex"))
+            if (coordinate in selected) pending.getOrPut(coordinate) { mutableListOf() }.add(record)
+        }
+        return RangeIndex(days, entries, pending)
+    }
+    private fun rangeObservation(index: RangeIndex, coordinate: Coordinate, text: String): Pair<WatchRangeCellBaseline, Boolean> {
+        val day = index.days[coordinate.dateKey]
+        val cached = index.entries[coordinate]
+        val records = index.pending[coordinate] ?: emptyList()
+        require(records.all { it.getString("status") == "pending" }) { "Resolve this minute on the phone before filling it." }
+        val operation = records.lastOrNull()?.getJSONObject("operation")
+        val originalText = (operation ?: cached)?.getString("text") ?: ""
+        val known = if (operation != null) operation.getBoolean("baseKnown")
+            else cached != null || (day != null && !day.optBoolean("partial", false))
+        val version = if (operation != null) operation.optString("expectedVersion").takeUnless { it.isEmpty() || it == "null" }
+            else if (known) cached?.optString("version")?.takeUnless { it.isEmpty() || it == "null" } ?: "[null,null]" else null
+        val category = operation?.optString("categoryId")?.takeUnless { it.isEmpty() || it == "null" }
+        val pendingProof = JSONArray().apply { records.forEach { put(it) } }.toString()
+        return WatchRangeCellBaseline(coordinate, cached?.let { digest(it.toString()) }, digest(pendingProof),
+            known, version, category, originalText.isNotBlank() && originalText != text) to (originalText == text)
+    }
+    private fun digest(text: String): String = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+        .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
     fun day(dateKey: String): JSONObject? = synchronized(lock) {
         read().getJSONObject("days").optJSONObject(dateKey)?.let { JSONObject(it.toString()) }
     }

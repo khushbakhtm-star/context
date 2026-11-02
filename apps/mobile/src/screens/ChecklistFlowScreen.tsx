@@ -1,35 +1,46 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ComponentRef, type MutableRefObject } from 'react';
-import { ActivityIndicator, Alert, Animated, Keyboard, KeyboardAvoidingView, Modal, PanResponder, Pressable, ScrollView, StyleSheet,
-  Switch, Text, TextInput, View, type LayoutChangeEvent } from 'react-native';
+import { ActivityIndicator, Alert, Animated, AppState, Keyboard, KeyboardAvoidingView, Modal, PanResponder, Pressable, ScrollView, StyleSheet,
+  Text, TextInput, View, type LayoutChangeEvent } from 'react-native';
 import * as Crypto from 'expo-crypto';
 
 import { useAppTheme } from '../appearance';
-import { InfoButton } from '../components/InfoButton';
 import { changeChecklistFlow, dismissChecklistFlowConflict, getChecklistFlow, getChecklistFlowConflicts, getChecklistFlowRevision,
-  restoreChecklistFlowConflict } from '../data/checklist-flow';
+  replaceChecklistList, restoreChecklistFlowConflict } from '../data/checklist-flow';
 import type { SyncDocument } from '../sync/types';
 import type { AppColors } from '../theme';
 import { applyChecklistChange, checklistRows, checklistSubtreeIds, emptyChecklistFlow,
-  type ChecklistFlow, type ChecklistTask } from '../utils/checklist-flow';
+  readChecklistCollection, type ChecklistFlow, type ChecklistTask, type ChecklistListSummary } from '../utils/checklist-flow';
 import { checklistDragDestination, type ChecklistRowLayout } from '../utils/checklist-drag';
+import { acknowledgeChecklistHistory, checklistHistoryTarget, emptyChecklistHistory, observeChecklistHistory,
+  recordChecklistHistory, type ChecklistHistoryAction } from '../utils/checklist-history';
 
 type Props = { dataVersion: number; onDataChanged: () => void;
+  listId?: string; hideCompleted?: boolean; focusTaskId?: string | null; onFocusConsumed?: () => void;
+  onListResolved?: (listId: string) => void; onHistoryChange?: (state: PriorityHistoryState) => void;
+  controlsRef?: MutableRefObject<PriorityScreenControls | null>;
   beforeLeaveRef?: MutableRefObject<(() => Promise<boolean>) | null> };
-type Snapshot = { flow: ChecklistFlow; revision: string | null };
+
+export type PriorityHistoryState = { canUndo: boolean; canRedo: boolean; busy: boolean };
+export type PriorityScreenControls = { addTask: () => void; jumpToTop: () => void;
+  undo: () => Promise<boolean>; redo: () => Promise<boolean> };
+type Snapshot = { flow: ChecklistFlow; revision: string | null; listId?: string; lists?: ChecklistListSummary[] };
 type Command = Parameters<typeof applyChecklistChange>[1];
 type Draft = { id: string; text: string; format: ChecklistTask['format']; revision: string | null; isNew: boolean;
   parentId: string | null; afterId?: string };
 type Drag = { id: string; parentId: string | null; origin: number; originScroll: number; offset: number;
   beforeId: string | null; revision: string | null };
 
-export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef }: Props) {
+export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef, listId = 'main', hideCompleted = false,
+  controlsRef, onHistoryChange, focusTaskId, onFocusConsumed, onListResolved }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [snapshot, setSnapshot] = useState<Snapshot>(() => ({ flow: emptyChecklistFlow(), revision: null }));
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hideCompleted, setHideCompleted] = useState(false);
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const history = useRef(emptyChecklistHistory(listId, null));
+  const [revealedTaskId, setRevealedTaskId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<SyncDocument[]>([]);
@@ -39,6 +50,7 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   const latest = useRef({ snapshot, busy, draft }); latest.current = { snapshot, busy, draft };
   const saveDraftRef = useRef<() => Promise<boolean>>(async () => true);
   const mounted = useRef(true);
+  const lifecycleEpoch = useRef(0);
   const requestId = useRef(0);
   const recoveryRevision = useRef<string | null>(null);
   const layouts = useRef(new Map<string, ChecklistRowLayout>());
@@ -46,13 +58,22 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const viewportRef = useRef<ComponentRef<typeof View>>(null);
   const editorRef = useRef<ComponentRef<typeof View>>(null);
+  const pendingFocus = useRef<string | null>(null);
   const avoidingLayoutY = useRef(0);
   const scrollOffset = useRef(0);
   const scrollBounds = useRef({ top: 0, height: 0, contentHeight: 0 });
   const dragPointer = useRef({ dy: 0, pageY: 0 });
   const dragMoveRef = useRef<(dy: number) => void>(() => undefined);
   const translate = useRef(new Animated.Value(0)).current;
-  const rows = useMemo(() => checklistRows(snapshot.flow, hideCompleted), [snapshot.flow, hideCompleted]);
+  const rows = useMemo(() => {
+    const visible = checklistRows(snapshot.flow, hideCompleted);
+    if (!hideCompleted || !revealedTaskId) return visible;
+    const forced = new Set<string>(); let task = snapshot.flow.items.find((item) => item.id === revealedTaskId);
+    while (task) { forced.add(task.id); const parentId = task.parentId;
+      task = parentId ? snapshot.flow.items.find((item) => item.id === parentId) : undefined; }
+    const ids = new Set(visible.map((row) => row.task.id));
+    return checklistRows(snapshot.flow).filter((row) => ids.has(row.task.id) || forced.has(row.task.id));
+  }, [snapshot.flow, hideCompleted, revealedTaskId]);
   const draftAnchor = useMemo(() => {
     if (!draft?.isNew || !draft.parentId || !snapshot.flow.items.some((task) => task.id === draft.parentId)) return null;
     const ids = new Set(checklistSubtreeIds(snapshot.flow, draft.parentId));
@@ -63,8 +84,19 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   const dragIds = useMemo(() => drag && snapshot.flow.items.some((task) => task.id === drag.id)
     ? new Set(checklistSubtreeIds(snapshot.flow, drag.id)) : new Set<string>(), [snapshot.flow, drag?.id]);
   const checkedCount = snapshot.flow.items.filter((task) => task.checked).length;
+  const listName = snapshot.lists?.find((list) => list.id === listId)?.name ?? 'Priority';
+  function publishHistory(next = history.current) { history.current = next; setHistoryVersion((value) => value + 1); }
+  useEffect(() => { onHistoryChange?.({ canUndo: ready && !draft && history.current.revision === snapshot.revision && history.current.undo.length > 0,
+    canRedo: ready && !draft && history.current.revision === snapshot.revision && history.current.redo.length > 0, busy: busy || Boolean(drag) }); },
+  [historyVersion, ready, busy, Boolean(draft), Boolean(drag), snapshot.revision, onHistoryChange]);
 
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; requestId.current++; }; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') { lifecycleEpoch.current++; if (dragRef.current) finishDrag(true); }
+    });
+    return () => { mounted.current = false; lifecycleEpoch.current++; requestId.current++; subscription.remove(); };
+  }, []);
   function measureKeyboardOffset() {
     viewportRef.current?.measureInWindow((_x, y) => {
       if (mounted.current && Number.isFinite(y)) setKeyboardOffset(y - avoidingLayoutY.current);
@@ -92,13 +124,14 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
       const [revision, versions] = await Promise.all([getChecklistFlowRevision(), getChecklistFlowConflicts()]);
       if (!mounted.current || request !== requestId.current) return;
       recoveryRevision.current = revision; setConflicts(versions);
-      const next = await getChecklistFlow();
+      const next = await getChecklistFlow(listId);
       if (!mounted.current || request !== requestId.current) return;
       recoveryRevision.current = next.revision; setSnapshot(next); setReady(true); setError(null);
+      publishHistory(observeChecklistHistory(history.current, listId, next.revision));
     } catch (failure) {
       if (mounted.current && request === requestId.current) { setReady(false); setError(failure instanceof Error ? failure.message : 'The checklist could not load.'); }
     }
-  }, []);
+  }, [listId]);
   useEffect(() => { if (!latest.current.busy) void load(); }, [dataVersion, load]);
   useEffect(() => {
     if (!draft?.isNew) return;
@@ -110,11 +143,14 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   }, [draft?.id]);
 
   async function perform(command: Command, expected = latest.current.snapshot.revision) {
-    if (latest.current.busy) return false;
+    if (!mounted.current || AppState.currentState !== 'active' || latest.current.busy) return false;
+    const before = latest.current.snapshot;
+    if (before.revision !== expected) { setError('This Priority list changed on another device. Reload it before applying the edit.'); return false; }
     latest.current.busy = true; setBusy(true); setError(null); requestId.current++;
     try {
-      const next = await changeChecklistFlow(command, expected);
-      if (mounted.current) { recoveryRevision.current = next.revision; setSnapshot(next); setReady(true); }
+      const next = await changeChecklistFlow(command, expected, listId);
+      if (mounted.current) { recoveryRevision.current = next.revision; setSnapshot(next); setReady(true);
+        publishHistory(recordChecklistHistory(history.current, listId, before, next)); }
       onDataChanged(); return true;
     } catch (failure) {
       if (mounted.current) setError(failure instanceof Error ? failure.message : 'The checklist change could not be saved.');
@@ -122,14 +158,30 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
     } finally { latest.current.busy = false; if (mounted.current) setBusy(false); }
   }
 
+  async function changeHistory(action: ChecklistHistoryAction): Promise<boolean> {
+    if (!mounted.current || AppState.currentState !== 'active' || latest.current.busy || latest.current.draft || dragRef.current || !ready) return false;
+    const expected = latest.current.snapshot.revision; const previous = history.current;
+    let target: ChecklistFlow;
+    try { target = checklistHistoryTarget(previous, action, listId, expected); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : 'The Priority history changed.'); return false; }
+    latest.current.busy = true; setBusy(true); setError(null); requestId.current++;
+    try {
+      const next = await replaceChecklistList(listId, target, expected);
+      if (mounted.current) { recoveryRevision.current = next.revision; setSnapshot(next); setReady(true); setSelectedId(null);
+        publishHistory(acknowledgeChecklistHistory(previous, action, expected, next.revision)); }
+      onDataChanged(); return true;
+    } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'The Priority edit could not be restored.'); return false; }
+    finally { latest.current.busy = false; if (mounted.current) setBusy(false); }
+  }
+
   function startNew(parentId: string | null = null, afterId?: string) {
-    if (!ready || busy || draft) return;
+    if (!mounted.current || AppState.currentState !== 'active' || !ready || busy || draft) return;
     setSelectedId(null);
     setDraft({ id: `task_${Crypto.randomUUID().replaceAll('-', '')}`, text: '', format: {}, revision: snapshot.revision,
       isNew: true, parentId, afterId });
   }
   function edit(task: ChecklistTask) {
-    if (!ready || busy || draft) return;
+    if (!mounted.current || AppState.currentState !== 'active' || !ready || busy || draft) return;
     setSelectedId(task.id);
     setDraft({ id: task.id, text: task.text, format: { ...task.format }, revision: snapshot.revision,
       isNew: false, parentId: task.parentId });
@@ -146,10 +198,34 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
     return false;
   }
   saveDraftRef.current = saveDraft;
+  const commands = useRef({ addTask: () => startNew(), undo: () => changeHistory('undo'), redo: () => changeHistory('redo') });
+  commands.current = { addTask: () => startNew(), undo: () => changeHistory('undo'), redo: () => changeHistory('redo') };
+  useEffect(() => {
+    if (!controlsRef) return;
+    const controls: PriorityScreenControls = { addTask: () => commands.current.addTask(),
+      jumpToTop: () => scrollRef.current?.scrollTo({ y: 0, animated: true }),
+      undo: () => commands.current.undo(), redo: () => commands.current.redo() };
+    controlsRef.current = controls;
+    return () => { if (controlsRef.current === controls) controlsRef.current = null; };
+  }, [controlsRef]);
+  useEffect(() => {
+    if (!focusTaskId || !ready || busy || draft || !snapshot.flow.items.some((task) => task.id === focusTaskId)) return;
+    pendingFocus.current = focusTaskId;
+    setRevealedTaskId(focusTaskId); setSelectedId(focusTaskId);
+    const frame = requestAnimationFrame(() => {
+      const layout = layouts.current.get(focusTaskId);
+      if (layout && pendingFocus.current === focusTaskId) {
+        scrollRef.current?.scrollTo({ y: Math.max(0, layout.y - 8), animated: true });
+        pendingFocus.current = null; onFocusConsumed?.();
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusTaskId, ready, busy, Boolean(draft), snapshot.flow, onFocusConsumed]);
   useEffect(() => {
     if (!beforeLeaveRef) return;
     const beforeLeave = async () => {
       if (latest.current.busy) { setError('Finish the current checklist change before leaving.'); return false; }
+      if (dragRef.current) finishDrag(true);
       const current = latest.current.draft;
       if (!current) return true;
       if (!current.text.trim()) { setDraft(null); setError(null); Keyboard.dismiss(); return true; }
@@ -161,7 +237,11 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   function remove(task: ChecklistTask) {
     const count = checklistSubtreeIds(snapshot.flow, task.id).length;
     const displayedRevision = snapshot.revision;
-    const erase = () => { void perform({ type: 'delete', id: task.id }, displayedRevision).then((saved) => { if (saved) setSelectedId(null); }); };
+    const epoch = lifecycleEpoch.current;
+    const erase = () => {
+      if (!mounted.current || epoch !== lifecycleEpoch.current || AppState.currentState !== 'active') return;
+      void perform({ type: 'delete', id: task.id }, displayedRevision).then((saved) => { if (saved && mounted.current) setSelectedId(null); });
+    };
     if (count > 1) Alert.alert('Delete this task and its subtasks?', `${count - 1} ${count === 2 ? 'subtask will' : 'subtasks will'} also be deleted.`,
       [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: erase }]);
     else erase();
@@ -170,7 +250,7 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
     try { return JSON.stringify(applyChecklistChange(snapshot.flow, command)) !== JSON.stringify(snapshot.flow); } catch { return false; }
   }
   function beginDrag(id: string, pageY: number) {
-    if (latest.current.busy || latest.current.draft) return;
+    if (!mounted.current || AppState.currentState !== 'active' || latest.current.busy || latest.current.draft) return;
     const current = latest.current.snapshot.flow.items.find((task) => task.id === id); const layout = layouts.current.get(id);
     if (!current || !layout) return;
     const siblings = latest.current.snapshot.flow.items.filter((task) => task.parentId === current.parentId);
@@ -211,21 +291,28 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
     if (!value || cancelled || Math.abs(value.offset) < 8) return;
     void perform({ type: 'move', id: value.id, parentId: value.parentId, beforeId: value.beforeId }, value.revision);
   }
-  function measure(id: string, event: LayoutChangeEvent) { layouts.current.set(id, event.nativeEvent.layout); }
+  function measure(id: string, event: LayoutChangeEvent) {
+    const layout = event.nativeEvent.layout; layouts.current.set(id, layout);
+    if (pendingFocus.current === id) {
+      pendingFocus.current = null;
+      requestAnimationFrame(() => { if (mounted.current) { scrollRef.current?.scrollTo({ y: Math.max(0, layout.y - 8), animated: true }); onFocusConsumed?.(); } });
+    }
+  }
 
   async function restoreVersion(document: SyncDocument) {
-    if (latest.current.busy || latest.current.draft) return;
+    if (!mounted.current || AppState.currentState !== 'active' || latest.current.busy || latest.current.draft) return;
     latest.current.busy = true; setBusy(true); setError(null); requestId.current++;
     try {
-      const next = await restoreChecklistFlowConflict(document, recoveryRevision.current);
+      const next = await restoreChecklistFlowConflict(document, recoveryRevision.current, listId);
       const versions = await getChecklistFlowConflicts();
-      if (mounted.current) { recoveryRevision.current = next.revision; setSnapshot(next); setReady(true); setConflicts(versions); setShowVersions(false); }
+      if (mounted.current) { recoveryRevision.current = next.revision; setSnapshot(next); setReady(true); setConflicts(versions); setShowVersions(false);
+        publishHistory(emptyChecklistHistory(next.listId, next.revision)); if (next.listId !== listId) onListResolved?.(next.listId); }
       onDataChanged();
     } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'The earlier checklist could not be restored.'); }
     finally { latest.current.busy = false; if (mounted.current) setBusy(false); }
   }
   async function dismissVersion(document: SyncDocument) {
-    if (latest.current.busy) return;
+    if (!mounted.current || AppState.currentState !== 'active' || latest.current.busy) return;
     latest.current.busy = true; setBusy(true);
     try { await dismissChecklistFlowConflict(document); const versions = await getChecklistFlowConflicts(); if (mounted.current) setConflicts(versions); }
     catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'The earlier version could not be dismissed.'); }
@@ -263,16 +350,10 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
     onLayout={(event) => { avoidingLayoutY.current = event.nativeEvent.layout.y; measureKeyboardOffset(); }}>
     <View ref={viewportRef} collapsable={false} style={styles.container}>
     <View style={styles.heading}>
-      <InfoButton title="Checklist task flow" message="Check completed tasks, hide them when needed, and reset all checks to reuse your list. Drag a handle to reorder a task with its subtasks. Open a row’s actions to move, indent, outdent or add a subtask. Tasks created from minute text keep a snapshot; checking a task does not change your minute ledger or calendar event." />
-      <Pressable accessibilityRole="button" accessibilityLabel="Add task" disabled={!ready || busy || Boolean(draft)} onPress={() => startNew()}
-        style={[styles.addButton, (!ready || busy || Boolean(draft)) && styles.disabled]}><Text style={styles.addGlyph}>+</Text></Pressable>
-    </View>
-    <View style={styles.listControls}><View style={styles.hideControl}><Switch accessibilityLabel="Hide completed tasks" value={hideCompleted}
-      onValueChange={setHideCompleted} disabled={Boolean(draft) || Boolean(drag)} trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }} thumbColor={colors.switchThumb} />
-      <Text style={styles.secondaryText}>Hide completed</Text></View>
+      <Text accessibilityRole="header" style={styles.listName}>{listName}</Text>
       <Pressable accessibilityRole="button" accessibilityLabel="Reset all task checks" disabled={!ready || !checkedCount || busy || Boolean(draft)}
         onPress={() => void perform({ type: 'reset' })} style={[styles.textButton, (!ready || !checkedCount || busy || Boolean(draft)) && styles.disabled]}>
-        <Text style={styles.secondaryText}>↺ Reset checks</Text></Pressable></View>
+        <Text style={styles.resetGlyph}>↺</Text></Pressable></View>
     {conflicts.length ? <Pressable accessibilityRole="button" disabled={busy || Boolean(draft)} onPress={() => setShowVersions(true)} style={styles.versionsButton}>
       <Text style={styles.secondaryText}>Other versions ({conflicts.length})</Text></Pressable> : null}
     {error ? <View accessibilityLiveRegion="polite" style={styles.errorRow}><Text style={styles.error}>{error}</Text>
@@ -323,19 +404,19 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
         </Animated.View>{draftAnchor?.id === task.id ? <View style={{ marginLeft: Math.min(draftAnchor.depth, 8) * 16 }}>{editor}</View> : null}</Fragment>;
       })}
       {draft && (draft.isNew ? !draftAnchor : !rows.some(({ task }) => task.id === draft.id)) ? editor : null}
-      {ready && !rows.length && !draft ? <Text style={styles.empty}>{snapshot.flow.items.length ? 'All tasks are completed.' : 'Add a task to begin.'}</Text> : null}
-      {ready && !draft ? <Pressable accessibilityRole="button" accessibilityLabel="Add another task" disabled={busy} onPress={() => startNew()} style={styles.addRow}>
-        <Text style={styles.secondaryText}>+ Add task</Text></Pressable> : null}
     </ScrollView>
+    {ready && !draft ? <Pressable accessibilityRole="button" accessibilityLabel="Add task" disabled={busy || Boolean(drag)} onPress={() => startNew()}
+      style={[styles.floatingAdd, (busy || Boolean(drag)) && styles.disabled]}><Text style={styles.floatingAddGlyph}>+</Text></Pressable> : null}
     <Modal visible={showVersions} transparent animationType="fade" onRequestClose={() => setShowVersions(false)}>
       <View style={styles.modalOverlay}><Pressable accessible={false} style={StyleSheet.absoluteFill} onPress={() => setShowVersions(false)} />
         <View accessibilityViewIsModal style={styles.versionsCard}>
-          <View style={styles.modalHeading}><Text accessibilityRole="header" style={styles.title}>Other checklist versions</Text>
+          <View style={styles.modalHeading}><Text accessibilityRole="header" style={styles.title}>Other Priority versions</Text>
             <Pressable accessibilityRole="button" accessibilityLabel="Close other checklist versions" style={styles.moreButton} onPress={() => setShowVersions(false)}>
               <Text style={styles.moreGlyph}>×</Text></Pressable></View>
           <ScrollView keyboardShouldPersistTaps="handled">{conflicts.map((document) => {
-            const value = document.value; const items = Array.isArray(value?.items) ? value.items : [];
+            const collection = readChecklistCollection(document.value); const items = collection.lists.flatMap((list) => list.items);
             return <View key={document.revision} style={styles.versionRow}>
+              <Text style={styles.secondaryText}>{collection.lists.map((list) => list.name).join(' · ')}</Text>
               <Text style={styles.secondaryText}>{items.length} {items.length === 1 ? 'task' : 'tasks'}</Text>
               {items.slice(0, 5).map((item, index) => <Text key={index} numberOfLines={2} style={styles.versionPreview}>
                 {item && typeof item === 'object' && 'text' in item && typeof item.text === 'string' ? item.text : 'Task'}</Text>)}
@@ -381,16 +462,17 @@ function TaskDragHandle({ disabled, label, onBegin, onMove, onEnd, onStep, style
 
 const createStyles = (colors: AppColors) => StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.paper },
-  heading: { paddingLeft: 20, paddingRight: 8, paddingTop: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 2 },
+  heading: { paddingLeft: 20, paddingRight: 8, paddingTop: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 2 },
+  listName: { color: colors.graphite, flex: 1, fontSize: 16, lineHeight: 23, fontWeight: '500' },
+  resetGlyph: { color: colors.muted, fontSize: 24, lineHeight: 30 },
+  floatingAdd: { position: 'absolute', right: 16, bottom: 16, width: 56, height: 56, borderRadius: 16,
+    justifyContent: 'center', alignItems: 'center', backgroundColor: colors.accent },
+  floatingAddGlyph: { color: colors.onAccent, fontSize: 34, fontWeight: '400', lineHeight: 40 },
   title: { flex: 1, color: colors.ink, fontSize: 20, lineHeight: 27, fontWeight: '600' },
-  addButton: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
-  addGlyph: { color: colors.graphite, fontSize: 30, lineHeight: 36 },
-  listControls: { paddingHorizontal: 16, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 },
-  hideControl: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   secondaryText: { color: colors.muted, fontSize: 14, lineHeight: 20 },
   textButton: { minHeight: 44, paddingHorizontal: 8, justifyContent: 'center', alignItems: 'center' },
   disabled: { opacity: 0.35 },
-  scroll: { flex: 1 }, content: { paddingHorizontal: 12, paddingBottom: 40 },
+  scroll: { flex: 1 }, content: { paddingHorizontal: 12, paddingBottom: 88 },
   rowContainer: { borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, backgroundColor: colors.paper },
   dropBefore: { borderTopWidth: 2, borderTopColor: colors.graphite },
   row: { minHeight: 64, flexDirection: 'row', alignItems: 'center' },
@@ -418,8 +500,6 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   editorActions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 6 },
   saveButton: { width: 48, minHeight: 42, backgroundColor: colors.accent, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   saveText: { color: colors.onAccent, fontSize: 23, lineHeight: 28 },
-  addRow: { minHeight: 56, paddingLeft: 12, justifyContent: 'center' },
-  empty: { color: colors.muted, fontSize: 15, lineHeight: 22, padding: 20 },
   errorRow: { paddingHorizontal: 20, paddingVertical: 8 },
   error: { color: colors.danger, fontSize: 14, lineHeight: 21 },
   loading: { marginTop: 32 },

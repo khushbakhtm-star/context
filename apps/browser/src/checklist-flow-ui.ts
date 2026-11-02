@@ -1,7 +1,7 @@
 import { checklistRows, checklistSubtreeIds, type ChecklistChange, type ChecklistFlow, type ChecklistTask } from '../shared/utils/checklist-flow';
 import { newBrowserTask } from './checklist-flow';
 
-type Snapshot = { scope: object; flow: ChecklistFlow; revision: string | undefined; versions: { revision: string; flow: ChecklistFlow }[] };
+type Snapshot = { scope: object; name?: string; flow: ChecklistFlow; revision: string | undefined; versions: { revision: string; flow: ChecklistFlow }[] };
 export type ChecklistFlowHooks = {
   snapshot(): Snapshot | null;
   change(command: ChecklistChange, expected: string | undefined, scope: object): Promise<string | undefined>;
@@ -20,6 +20,7 @@ export class ChecklistFlowUI {
   private revision: string | undefined;
   private rendered = false;
   private hiddenCompleted = false;
+  private composerOpen = false;
   private draft: { id: string; input: HTMLTextAreaElement; original: string; revision: string | undefined; scope: object } | null = null;
   private composerDraft: { input: HTMLTextAreaElement; revision: string | undefined; scope: object; parentId: string | null; taskId?: string; savedText?: string } | null = null;
   private saving: Promise<{ revision: string | undefined; scope: object } | null> | null = null;
@@ -35,7 +36,13 @@ export class ChecklistFlowUI {
     }
   }
   hasDraft() { return Boolean(this.draft || this.composerDraft?.input.value.length); }
-  clear() { this.draft = null; this.composerDraft = null; this.dragged = null; this.rendered = false; this.addParent = null; this.host.replaceChildren(); }
+  clear() { this.draft = null; this.composerDraft = null; this.dragged = null; this.rendered = false; this.addParent = null; this.composerOpen = false; this.host.replaceChildren(); }
+  setHideCompleted(value: boolean) { this.hiddenCompleted = value; this.refresh(true); }
+  async resetChecks() { const current = this.hooks.snapshot(); if (current) await this.command({ type: 'reset' }, current.revision, current.scope); }
+  async openComposer(parentId: string | null = null) {
+    await this.act(async () => { this.addParent = parentId; this.composerOpen = true; });
+    this.host.querySelector<HTMLTextAreaElement>('.checklist-add textarea')?.focus();
+  }
   refresh(force = false) {
     if (this.host.hidden) return;
     let current: Snapshot | null;
@@ -45,25 +52,26 @@ export class ChecklistFlowUI {
     if (!force && this.rendered && this.revision === current.revision) return;
     const composerHadFocus = Boolean(this.composerDraft && document.activeElement === this.composerDraft.input);
     this.rendered = true; this.revision = current.revision; this.host.replaceChildren();
-    const heading = document.createElement('div'); heading.className = 'checklist-heading';
-    const title = document.createElement('h1'); title.textContent = 'Checklist task flow';
-    heading.append(button('Back to calendar', '←', () => { void this.flush().then(() => this.hooks.back()).catch(this.hooks.error); }), title);
-    const controls = document.createElement('div'); controls.className = 'checklist-controls';
-    const hide = document.createElement('label'); const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.setAttribute('aria-label', 'Hide completed'); toggle.checked = this.hiddenCompleted;
-    toggle.onchange = () => { void this.act(async () => { this.hiddenCompleted = toggle.checked; }); }; hide.append(toggle, document.createTextNode('Hide completed'));
-    const reset = button('Reset all checks', '↻', () => { void this.command({ type: 'reset' }, current.revision, current.scope); }); reset.disabled = !current.flow.items.some((task) => task.checked);
-    controls.append(hide, reset); heading.append(controls); this.host.append(heading);
+    if (current.name) { const title = document.createElement('h1'); title.className = 'priority-list-name'; title.textContent = current.name; this.host.append(title); }
     this.message = document.createElement('p'); this.message.className = 'checklist-message'; this.message.setAttribute('role', 'status'); this.host.append(this.message);
-    const list = document.createElement('div'); list.className = 'checklist-rows'; list.setAttribute('role', 'list'); list.setAttribute('aria-label', 'Checklist task flow');
+    const list = document.createElement('div'); list.className = 'checklist-rows'; list.setAttribute('role', 'list'); list.setAttribute('aria-label', current.name ?? 'Priority');
     const rows = checklistRows(current.flow, this.hiddenCompleted);
     for (const { task, depth } of rows) list.append(this.row(task, depth, current));
-    if (!rows.length) { const empty = document.createElement('p'); empty.className = 'checklist-empty'; empty.textContent = current.flow.items.length ? 'All tasks are complete.' : 'Add your first task below.'; list.append(empty); }
-    this.host.append(list); this.composer(current, composerHadFocus);
+    this.host.append(list);
+    if (this.composerOpen || this.composerDraft) this.composer(current, composerHadFocus);
+    else { const add = button('Add a task', '+', () => { void this.openComposer(); }); add.className = 'priority-add'; this.host.append(add); }
     if (current.versions.length) this.versions(current);
   }
   async flush() { await this.queue; await this.saveDraft(); await this.saveComposer(); this.refresh(true); }
   private act(work: () => Promise<void>, guard?: { revision: string | undefined; scope: object }) {
-    const pending = this.queue.then(async () => { if (guard && (this.hooks.snapshot()?.scope !== guard.scope || this.hooks.snapshot()?.revision !== guard.revision)) throw new Error('Your task list changed. Review the latest list before trying again.'); await this.saveDraft(); await work(); this.refresh(true); });
+    const intendedScope = guard?.scope ?? this.hooks.snapshot()?.scope;
+    const pending = this.queue.then(async () => {
+      if (this.hooks.snapshot()?.scope !== intendedScope || (guard && this.hooks.snapshot()?.revision !== guard.revision)) throw new Error('Your task list changed. Review the latest list before trying again.');
+      const saved = await this.saveDraft(); const current = this.hooks.snapshot();
+      if (current?.scope !== intendedScope) throw new Error('The account or checklist changed. Reopen Priority.');
+      if (guard && current?.revision !== (saved && saved.scope === intendedScope ? saved.revision : guard.revision)) throw new Error('Your task list changed. Review the latest list before trying again.');
+      await work(); this.refresh(true);
+    });
     this.queue = pending.catch((error) => { this.hooks.error(error); if (this.message) this.message.textContent = error instanceof Error ? error.message : 'The task could not be saved.'; });
     return this.queue;
   }
@@ -79,6 +87,7 @@ export class ChecklistFlowUI {
         const text = draft.input.value;
         const acknowledgedRevision = await this.hooks.change({ type: 'edit', id: draft.id, text }, draft.revision, draft.scope);
         draft.original = text; draft.revision = acknowledgedRevision;
+        if (this.hooks.snapshot()?.scope !== draft.scope) return null;
         if (this.draft === draft && draft.input.value === text) { this.draft = null; break; }
       }
       return { revision: draft.revision, scope: draft.scope };
@@ -106,7 +115,7 @@ export class ChecklistFlowUI {
         }
         if (this.composerDraft !== draft || this.hooks.snapshot()?.scope !== draft.scope) return;
         draft.savedText = text; draft.revision = acknowledgedRevision;
-        if (draft.input.value === text) { draft.input.value = ''; this.composerDraft = null; this.addParent = null; break; }
+        if (draft.input.value === text) { draft.input.value = ''; this.composerDraft = null; this.addParent = null; this.composerOpen = false; break; }
       }
     })().finally(() => { this.savingComposer = null; });
     return this.savingComposer;
@@ -167,7 +176,7 @@ export class ChecklistFlowUI {
     const color = document.createElement('input'); color.type = 'color'; color.value = task.format.textColor ?? '#242424'; color.setAttribute('aria-label', 'Task text color');
     color.onchange = () => { void this.command({ type: 'edit', id: task.id, format: { ...task.format, textColor: color.value } }, snapshot.revision, snapshot.scope); }; colorLabel.append(color); actions.append(colorLabel);
     actions.append(button('Reset text color', 'A↻', () => { const format = { ...task.format }; delete format.textColor; void this.command({ type: 'edit', id: task.id, format }, snapshot.revision, snapshot.scope); }));
-    actions.append(button('Add subtask', '+ Subtask', () => { void this.act(async () => { this.addParent = task.id; }); }),
+    actions.append(button('Add subtask', '+ Subtask', () => { void this.openComposer(task.id); }),
       button('Move task up', '↑', () => { void this.command({ type: 'moveRelative', id: task.id, direction: 'up' }, snapshot.revision, snapshot.scope); }),
       button('Move task down', '↓', () => { void this.command({ type: 'moveRelative', id: task.id, direction: 'down' }, snapshot.revision, snapshot.scope); }),
       button('Indent task', '→', () => { void this.command({ type: 'indent', id: task.id }, snapshot.revision, snapshot.scope); }),
@@ -187,7 +196,7 @@ export class ChecklistFlowUI {
     input.oninput = captureDraft;
     const add = document.createElement('button'); add.type = 'submit'; add.textContent = '+'; add.setAttribute('aria-label', input.placeholder);
     form.onsubmit = (event) => { event.preventDefault(); const text = input.value; if (!text.trim()) { input.focus(); return; }
-      captureDraft(); void this.act(() => this.saveComposer()).then(() => { this.host.querySelector<HTMLTextAreaElement>('.checklist-add textarea')?.focus(); }); };
+      captureDraft(); void this.act(() => this.saveComposer()); };
     input.onkeydown = (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } };
     form.append(input, add); if (this.addParent) form.append(button('Make this a top-level task', '←', () => { this.addParent = null; if (this.composerDraft) this.composerDraft.parentId = null; this.refresh(true); })); this.host.append(form);
     if (restoreFocus) input.focus({ preventScroll: true });

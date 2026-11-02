@@ -68,12 +68,21 @@ test('actual Today reports selected and manually scrolled minutes without treati
 
 function returnController(tab = 'settings', guard = null) {
   const fn = controller.body.statements.find((node) => node.name?.text === 'returnToCalendar'); assert.ok(fn);
+  const transition = controller.body.statements.find((node) => node.name?.text === 'transitionFromCalendar'); assert.ok(transition);
+  const helpers = ['CalendarTransitionCancelled', 'awaitCalendarTransition'].map((name) => {
+    const declaration = app.statements.find((node) => node.name?.text === name); assert.ok(declaration); return declaration.getText(app);
+  });
   const module = { exports: {} }; const values = {}; const sequence = { current: 12 }; const mounted = { current: true };
-  vm.runInNewContext(emit(fn.getText(app) + '\nexport { returnToCalendar };'), { module, exports: module.exports,
-    tab, checklistBeforeLeaveRef: { current: guard }, controllerMountedRef: mounted,
+  let guardCalls = 0;
+  vm.runInNewContext(emit([...helpers, transition.getText(app), fn.getText(app), 'export { returnToCalendar };'].join('\n')), { module, exports: module.exports,
+    AbortController, Promise, Error, tab, primaryTabRef: { current: 'today' },
+    checklistBeforeLeaveRef: { current: guard && (() => { guardCalls++; return guard(); }) }, controllerMountedRef: mounted,
+    viewChangingRef: { current: false }, lifecycleEpochRef: { current: 0 }, transitionSequenceRef: { current: 0 }, activeTransitionRef: { current: null },
+    AppState: { currentState: 'active' }, Keyboard: { dismiss() {} }, setViewChanging() {},
+    flushInlineMinutes: async () => {}, inlineMinuteDrafts: { snapshot: () => [] }, Alert: { alert: (...message) => assert.fail(message.join(': ')) },
     calendarFocusRef: { current: { dateKey: '2026-10-24', minuteIndex: 530 } }, focusSequence: sequence,
     setFocusRequest: (value) => values.focus = value, setTab: (value) => values.tab = value });
-  return { leave: module.exports.returnToCalendar, values, sequence, mounted };
+  return { leave: module.exports.returnToCalendar, values, sequence, mounted, get guardCalls() { return guardCalls; } };
 }
 
 test('returning from a secondary screen restores the same focused point without changing its view or zoom', async () => {
@@ -91,6 +100,8 @@ test('returning from checklist waits for its draft acknowledgement and ignores a
   for (const unmount of [false, true]) {
     let release; const saved = new Promise((resolve) => { release = resolve; });
     const h = returnController('checklist', () => saved); const pending = h.leave();
+    for (let tick = 0; tick < 12; tick++) await Promise.resolve();
+    assert.equal(h.guardCalls, 1, 'the real navigation transition has reached the original task draft acknowledgement');
     assert.deepEqual(h.values, {}); assert.equal(h.sequence.current, 12);
     if (unmount) h.mounted.current = false;
     release(true); await pending;

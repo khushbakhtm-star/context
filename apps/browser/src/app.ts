@@ -16,9 +16,10 @@ import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
 import { applySyncGlyphState } from './sync-glyph';
 import { ChecklistFlowUI } from './checklist-flow-ui';
-import { browserChecklist, browserChecklistVersions, changeBrowserChecklist, restoreBrowserChecklist,
+import { browserChecklist, browserChecklistVersions, changeBrowserChecklist, replaceBrowserChecklistList,
+  createBrowserChecklistList, renameBrowserChecklistList,
   minuteTaskSnapshot, newBrowserTask, type MinuteTaskSnapshot } from './checklist-flow';
-import type { ChecklistChange, ChecklistFlow } from '../shared/utils/checklist-flow';
+import { DEFAULT_CHECKLIST_LIST_ID, checklistRows, type ChecklistChange, type ChecklistFlow } from '../shared/utils/checklist-flow';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const main = element('main'), grid = element('grid'), options = element<HTMLDialogElement>('options');
@@ -51,22 +52,40 @@ let moveDraft: { store: BrowserStore; coords: GridPoint[]; grabbed: GridPoint; o
 let movePreview: GridPoint[] = [];
 type CellClipboard = { store: BrowserStore; coords: GridPoint[]; origin: GridPoint; fingerprint: string; text: string; cut: boolean };
 let cellClipboard: CellClipboard | null = null;
-const settings = { appearance: 'system', clock: '12' };
+const settings = { appearance: 'system', clock: '12', hideCompleted: false };
 let checklistVisible = false;
 let calendarScrollBeforeChecklist = 0;
+let activeChecklistId = DEFAULT_CHECKLIST_LIST_ID;
+let priorityScope: { store: BrowserStore | null; listId: string } = { store: null, listId: activeChecklistId };
+const priorityUndos = new Map<string, { store: BrowserStore; edit: UndoEdit }>();
+let priorityNavigation = 0;
+function bindPriorityList(active: BrowserStore | null, listId = DEFAULT_CHECKLIST_LIST_ID) {
+  activeChecklistId = listId; priorityScope = { store: active, listId };
+}
+function prioritySnapshot() {
+  if (!store || priorityScope.store !== store) return null;
+  const current = browserChecklist(store.state, activeChecklistId);
+  return { ...current, name: current.lists.find((list) => list.id === activeChecklistId)!.name,
+    scope: priorityScope, versions: browserChecklistVersions(store.state, activeChecklistId).filter((version) => version.listId === activeChecklistId) };
+}
 const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
-  snapshot: () => store ? { scope: store, ...browserChecklist(store.state), versions: browserChecklistVersions(store.state) } : null,
+  snapshot: prioritySnapshot,
   change: async (command: ChecklistChange, expected: string | undefined, scope: object) => {
-    if (!store || store !== scope) throw new Error('The connected account changed. Reopen your checklist.'); const active = store;
+    if (!store || priorityScope !== scope || priorityScope.store !== store) throw new Error('The account or checklist changed. Reopen Priority.'); const active = store; const listId = activeChecklistId;
     let acknowledgedRevision: string | undefined;
-    await active.update((state) => { if (store !== active) throw new Error('The connected account changed. Unlock your ledger again.');
-      const result = changeBrowserChecklist(state, expected, command); acknowledgedRevision = browserChecklist(result.state).revision; undo = result.undo; return result.state; });
+    let changedUndo: UndoEdit | undefined;
+    await active.update((state) => { if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Your draft stays in its original list.');
+      const result = changeBrowserChecklist(state, expected, command, Date.now(), listId); acknowledgedRevision = browserChecklist(result.state, listId).revision; changedUndo = result.undo; return result.state; });
+    if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Reopen Priority.');
+    if (changedUndo?.after.length) priorityUndos.set(listId, { store: active, edit: changedUndo });
     updateHeader(); void synchronize(false); return acknowledgedRevision;
   },
   restore: async (flow: ChecklistFlow, expected: string | undefined, scope: object) => {
-    if (!store || store !== scope) throw new Error('The connected account changed. Reopen your checklist.'); const active = store;
-    await active.update((state) => { if (store !== active) throw new Error('The connected account changed. Unlock your ledger again.');
-      const result = restoreBrowserChecklist(state, expected, flow); undo = result.undo; return result.state; });
+    if (!store || priorityScope !== scope || priorityScope.store !== store) throw new Error('The account or checklist changed. Reopen Priority.'); const active = store; const listId = activeChecklistId; let changedUndo: UndoEdit | undefined;
+    await active.update((state) => { if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Reopen Priority.');
+      const result = replaceBrowserChecklistList(state, expected, listId, flow); changedUndo = result.undo; return result.state; });
+    if (store !== active || priorityScope !== scope) return;
+    if (changedUndo?.after.length) priorityUndos.set(listId, { store: active, edit: changedUndo });
     updateHeader(); void synchronize(false);
   },
   source: (source) => { const point = source.ranges[0]; if (!point) return; setChecklistVisible(false);
@@ -82,19 +101,138 @@ function setChecklistVisible(visible: boolean) {
   updateHeader();
 }
 async function showChecklistView() {
-  cancelSelectedTap(); mouseSelection.cancel(false); await saveEditor(); await checklistUI.flush(); closeCellMenu();
+  const active = store; const scope = priorityScope;
+  cancelSelectedTap(); mouseSelection.cancel(false); await saveEditor(); await checklistUI.flush();
+  if (store !== active || priorityScope !== scope) return; closeCellMenu();
   element<HTMLDialogElement>('menu-dialog').close(); element<HTMLDialogElement>('view-dialog').close(); setChecklistVisible(true);
 }
 async function createChecklistTask(snapshot: MinuteTaskSnapshot) {
-  if (!store) throw new Error('Unlock your private ledger first.'); const active = store; const expected = browserChecklist(active.state).revision;
-  await active.update((state) => { if (store !== active) throw new Error('The connected account changed. Unlock your ledger again.');
-    const result = changeBrowserChecklist(state, expected, { type: 'add', item: newBrowserTask(snapshot.text, snapshot.source) }); undo = result.undo; return result.state; });
+  if (!store || priorityScope.store !== store) throw new Error('Unlock your private ledger first.'); const active = store; const scope = priorityScope; const listId = activeChecklistId;
+  const expected = browserChecklist(active.state, listId).revision; let changedUndo: UndoEdit | undefined;
+  await active.update((state) => { if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Select the task text again.');
+    const result = changeBrowserChecklist(state, expected, { type: 'add', item: newBrowserTask(snapshot.text, snapshot.source) }, Date.now(), listId); changedUndo = result.undo; return result.state; });
+  if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Reopen Priority.');
+  if (changedUndo?.after.length) priorityUndos.set(listId, { store: active, edit: changedUndo });
   void synchronize(false);
 }
 async function addEditorTextToChecklist() {
   if (!editor || !store) return; const current = editor; const active = store; const start = current.input.selectionStart, end = current.input.selectionEnd;
   const snapshot = minuteTaskSnapshot([{ day: current.day, minute: current.minute, text: current.input.value }], end > start ? { start, end } : undefined);
   await saveEditor(); if (store !== active) throw new Error('The connected account changed. Select the task text again.'); await createChecklistTask(snapshot); await showChecklistView();
+}
+async function choosePriorityList(listId: string) {
+  const active = store, scope = priorityScope, request = ++priorityNavigation;
+  if (!active) return;
+  await saveEditor(); await checklistUI.flush();
+  if (store !== active || priorityScope !== scope || request !== priorityNavigation) return;
+  browserChecklist(active.state, listId); // Missing IDs fail closed; never redirect to another list.
+  checklistUI.clear(); bindPriorityList(active, listId); setChecklistVisible(true);
+}
+async function stepPriorityList(direction: number) {
+  if (!store || priorityScope.store !== store) return;
+  const lists = browserChecklist(store.state).lists;
+  const index = lists.findIndex((list) => list.id === activeChecklistId);
+  if (!lists.length || (index >= 0 && lists.length < 2)) return;
+  const next = lists[index < 0 ? 0 : (index + direction + lists.length) % lists.length]!;
+  await choosePriorityList(next.id);
+}
+type PrioritySettingsSession = { store: BrowserStore; scope: object; revision: string | undefined };
+let prioritySettingsSession: PrioritySettingsSession | null = null;
+let prioritySettingsBusy = false;
+function renderPrioritySettings(drafts = new Map<string, string>()) {
+  const host = element('priority-lists'); host.replaceChildren();
+  const current = store && priorityScope.store === store ? browserChecklist(store.state) : null;
+  prioritySettingsSession = current && store ? { store, scope: priorityScope, revision: current.revision } : null;
+  let canReset = false; try { canReset = Boolean(prioritySnapshot()?.flow.items.some((task) => task.checked)); } catch { /* Keep a missing list selected until the user chooses another one. */ }
+  element<HTMLButtonElement>('priority-reset').disabled = !canReset;
+  element<HTMLInputElement>('priority-new-name').disabled = !current;
+  element<HTMLInputElement>('hide-completed').checked = settings.hideCompleted;
+  if (!current || !prioritySettingsSession) return;
+  const session = prioritySettingsSession;
+  for (const list of current.lists) {
+    const form = document.createElement('form'); form.className = 'priority-list-setting';
+    const input = document.createElement('input'); input.value = drafts.get(list.id) ?? list.name; input.dataset.listId = list.id; input.maxLength = 80; input.required = true; input.setAttribute('aria-label', `Checklist name: ${list.name}`);
+    const save = document.createElement('button'); save.type = 'submit'; save.textContent = 'Rename';
+    form.onsubmit = (event) => { event.preventDefault(); void changePriorityCatalog(session, () => input.value, list.id, input); };
+    form.append(input, save); host.append(form);
+  }
+}
+async function changePriorityCatalog(session: PrioritySettingsSession, name: () => string, renameId?: string, input?: HTMLInputElement) {
+  if (prioritySettingsBusy) return;
+  const typed = name(); const newId = renameId ?? `list_${crypto.randomUUID().replaceAll('-', '')}`;
+  prioritySettingsBusy = true; element('priority-settings-error').textContent = '';
+  try {
+    if (store !== session.store || priorityScope !== session.scope || prioritySettingsSession !== session) throw new Error('The account or checklist changed. Reopen Settings; your name has not been copied to another list.');
+    await session.store.update((state) => {
+      if (store !== session.store || priorityScope !== session.scope || prioritySettingsSession !== session) throw new Error('The account or checklist changed. Reopen Settings.');
+      const result = renameId ? renameBrowserChecklistList(state, session.revision, newId, typed) : createBrowserChecklistList(state, session.revision, newId, typed);
+      return result.state;
+    });
+    if (store !== session.store || priorityScope !== session.scope || prioritySettingsSession !== session) return;
+    // A late acknowledgement cannot erase words entered while this request ran.
+    const target = input ?? element<HTMLInputElement>('priority-new-name');
+    if (target.value === typed && !renameId) target.value = '';
+    const drafts = new Map(Array.from(element('priority-lists').querySelectorAll<HTMLInputElement>('input[data-list-id]'), (node) => [node.dataset.listId!, node.value]));
+    if (renameId && target.value === typed) drafts.delete(renameId);
+    renderPrioritySettings(drafts); checklistUI.refresh(true); updateHeader(); void synchronize(false);
+  } catch (error) {
+    if (store === session.store && prioritySettingsSession === session) element('priority-settings-error').textContent = error instanceof Error ? error.message : 'The checklist could not be saved.';
+  } finally { prioritySettingsBusy = false; }
+}
+type BrowserSearchScope = { kind: 'all' } | { kind: 'calendar'; dates: string[] } | { kind: 'priority'; listId: string };
+type BrowserSearchHit = { text: string; day: string; minute: number } | { text: string; listId: string; listName: string; taskId: string };
+function browserSearch(state: BrowserStore['state'], query: string, scope: BrowserSearchScope): BrowserSearchHit[] {
+  const needle = query.trim().toLocaleLowerCase(); const hits: BrowserSearchHit[] = [];
+  if (!needle) return hits;
+  if (scope.kind !== 'priority') {
+    const selectedDates = scope.kind === 'calendar' ? new Set(scope.dates) : null;
+    for (const document of state.documents) {
+      const point = /^minute:(\d{4}-\d{2}-\d{2}):(\d{1,4})$/.exec(document.key);
+      if (!point || !document.value || (selectedDates && !selectedDates.has(point[1]!))) continue;
+      const text = String(document.value.text ?? '');
+      if (text.trim() && text.toLocaleLowerCase().includes(needle)) hits.push({ text, day: point[1]!, minute: Number(point[2]) });
+    }
+  }
+  if (scope.kind !== 'calendar') {
+    const current = browserChecklist(state, scope.kind === 'priority' ? scope.listId : DEFAULT_CHECKLIST_LIST_ID);
+    for (const list of current.collection.lists) {
+      if (scope.kind === 'priority' && list.id !== scope.listId) continue;
+      const tasks = scope.kind === 'priority' ? checklistRows(current.flow, settings.hideCompleted).map((row) => row.task) : list.items;
+      for (const task of tasks) if (task.text.trim() &&
+        (task.text.toLocaleLowerCase().includes(needle) || (scope.kind === 'all' && list.name.toLocaleLowerCase().includes(needle))))
+        hits.push({ text: task.text, listId: list.id, listName: list.name, taskId: task.id });
+    }
+  }
+  return hits;
+}
+let searchSession: { store: BrowserStore; priorityScope: object; scope: BrowserSearchScope } | null = null;
+async function openSearch(all = false) {
+  const active = store, scope = priorityScope; if (!active) { options.showModal(); return; }
+  await saveEditor(); await checklistUI.flush(); if (store !== active || priorityScope !== scope) return;
+  const selectedScope: BrowserSearchScope = all ? { kind: 'all' } : checklistVisible ? { kind: 'priority', listId: activeChecklistId } : { kind: 'calendar', dates: dates() };
+  searchSession = { store: active, priorityScope: scope, scope: selectedScope };
+  element('search-scope').textContent = all ? 'All minutes and checklists' : checklistVisible ? prioritySnapshot()!.name : 'Displayed dates';
+  element('search-results').replaceChildren(); element<HTMLInputElement>('search-query').value = '';
+  element<HTMLDialogElement>('menu-dialog').close(); element<HTMLDialogElement>('search-dialog').showModal(); element('search-query').focus();
+}
+function showSearchResults() {
+  const session = searchSession; if (!session || store !== session.store || priorityScope !== session.priorityScope) { element<HTMLDialogElement>('search-dialog').close(); return; }
+  const host = element('search-results'); host.replaceChildren();
+  const hits = browserSearch(session.store.state, element<HTMLInputElement>('search-query').value, session.scope);
+  for (const hit of hits.slice(0, 500)) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'search-result'; button.setAttribute('role', 'listitem');
+    const label = document.createElement('strong'); label.textContent = 'listId' in hit ? hit.listName : `${hit.day} · ${minuteLabel(hit.minute, clock12)}`;
+    const text = document.createElement('span'); text.textContent = hit.text; button.append(label, text);
+    button.onclick = () => { void (async () => {
+      if (searchSession !== session || store !== session.store || priorityScope !== session.priorityScope) return;
+      element<HTMLDialogElement>('search-dialog').close();
+      if ('listId' in hit) { await choosePriorityList(hit.listId); if (store !== session.store || activeChecklistId !== hit.listId) return;
+        element('checklist-flow').querySelector<HTMLElement>(`[data-task-id="${hit.taskId}"]`)?.scrollIntoView({ block: 'center' });
+      } else { await navigation(() => { setChecklistVisible(false); day = hit.day; selected = { day, minute: hit.minute }; rangeEnd = null; plans = []; render(); scrollMinute(hit.minute); void refreshPlans(); }); }
+    })().catch(report); };
+    host.append(button);
+  }
+  if (!hits.length) { const empty = document.createElement('p'); empty.textContent = 'No matches.'; host.append(empty); }
 }
 function report(error: unknown) { status(error instanceof Error ? error.message : 'The action could not finish. Your saved notes remain available.', true); }
 function selectionCells(): { day: string; minute: number }[] {
@@ -211,7 +349,7 @@ async function showCellMenu(x: number, y: number) {
   add('Paste', async () => { if (!navigator.clipboard?.readText) throw new Error('Select the destination and use Ctrl+V or⌘V.'); const text = await navigator.clipboard.readText(); if (selectionStamp() !== stamp) throw new Error('The selection changed. Paste again.'); await paste(text); });
   if (distinct.length) add('Clear', () => writeSelectedText(coords.map((point) => ({ ...point, text: '' })), source));
   if (coords.length > 1 && distinct.length === 1) add('AutoFill', () => writeSelectedText(coords.map((point) => ({ ...point, text: distinct[0]! })), source));
-  if (distinct.some((text) => text.trim())) add('Add to checklist', async () => {
+  if (distinct.some((text) => text.trim())) add('Add to Priority', async () => {
     if (store !== active || selectionStamp() !== stamp) throw new Error('The selection changed. Choose your task text again.');
     await createChecklistTask(minuteTaskSnapshot(coords.map((point, index) => ({ ...point, text: textValues[index]! })))); await showChecklistView();
   });
@@ -298,11 +436,22 @@ function planForMinute(date: string, minute: number) {
 function cell(day: string, minute: number) { return grid.querySelector<HTMLElement>(`[data-day="${day}"][data-minute="${minute}"]`); }
 function updateHeader() {
   const now = new Date(); element('month').textContent = now.toLocaleDateString(undefined, { month: 'short' }); element('date').textContent = String(now.getDate());
-  dayInput.value = day; daysInput.value = String(days); element<HTMLButtonElement>('undo').disabled = !undo || !store;
+  dayInput.value = day; daysInput.value = String(days);
+  const availableUndo = checklistVisible ? priorityUndos.get(activeChecklistId)?.store === store : Boolean(undo);
+  element<HTMLButtonElement>('undo').disabled = !availableUndo || !store;
   element('identity').textContent = connection?.identity?.email ?? 'No Google account connected';
   element<HTMLButtonElement>('unlock').disabled = !connection?.isAuthorized() || busy;
   applySyncGlyphState(element('sync'), busy, element('status').dataset.error === 'true');
-  element<HTMLButtonElement>('previous').disabled = checklistVisible; element<HTMLButtonElement>('next').disabled = checklistVisible;
+  element('now').dataset.view = checklistVisible ? 'priority' : 'calendar';
+  element('now').setAttribute('aria-label', checklistVisible ? 'Priority. Double-click or hold to choose a view.' : 'Go to the current minute. Double-click for views; hold to choose dates.');
+  let listNavigationDisabled = false;
+  if (checklistVisible) {
+    try { const lists = store ? browserChecklist(store.state).lists : [];
+      listNavigationDisabled = !lists.length || (lists.length < 2 && lists.some((list) => list.id === activeChecklistId));
+    } catch { listNavigationDisabled = true; }
+  }
+  element<HTMLButtonElement>('previous').disabled = listNavigationDisabled; element<HTMLButtonElement>('next').disabled = listNavigationDisabled;
+  element('previous').setAttribute('aria-label', checklistVisible ? 'Previous checklist' : 'Previous dates'); element('next').setAttribute('aria-label', checklistVisible ? 'Next checklist' : 'Next dates');
   if (!store) checklistUI.clear();
   if (checklistVisible) checklistUI.refresh();
 }
@@ -517,7 +666,14 @@ async function refreshPlans() {
 }
 async function connect(calendarRead = false) {
   cellClipboard = null;
-  try { const identity = await connection.authorize(calendarRead); updateHeader(); status(`Connected ${identity.email}. Unlock the same ledger as your phone.`);
+  const active = store, scope = priorityScope;
+  try { await saveEditor(); await checklistUI.flush(); if (store !== active || priorityScope !== scope) return;
+    const identity = await connection.authorize(calendarRead);
+    if (active && identity.subject !== active.subject && store === active) {
+      active.lock(); store = null; bindPriorityList(null); checklistUI.clear(); priorityUndos.clear(); prioritySettingsSession = null; searchSession = null;
+      element<HTMLInputElement>('priority-new-name').value = ''; passphrase = ''; passInput.value = ''; undo = null; plans = []; render();
+    }
+    updateHeader(); status(`Connected ${identity.email}. Unlock the same ledger as your phone.`);
     if (calendarRead) { calendars = await connection.calendars(); selectedCalendars = new Set(calendars.filter((value) => value.primary).map((value) => value.id)); renderCalendarChoices(); await refreshPlans(); }
   } catch (error) { report(error); }
 }
@@ -528,10 +684,17 @@ function renderCalendarChoices() {
 }
 function scrollMinute(minute: number) { main.scrollTop = Math.max(0, 50 + minute * 32 - main.clientHeight / 2); render(); }
 function goNow() { setChecklistVisible(false); selectionActivated = false; day = dateKey(new Date()); selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); }
-async function navigation(action: () => void) { if (commandBusy) return; cancelSelectedTap(); mouseSelection.cancel(false); try { await saveEditor(); await checklistUI.flush(); entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
+async function navigation(action: () => void) { if (commandBusy) return; const active = store, scope = priorityScope; cancelSelectedTap(); mouseSelection.cancel(false); try { await saveEditor(); await checklistUI.flush(); if (store !== active || priorityScope !== scope) return; entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
 element('menu').onclick = () => { element<HTMLDialogElement>('menu-dialog').showModal(); };
 element('open-checklist').onclick = element('view-checklist').onclick = () => { void showChecklistView().catch(report); };
-element('settings').onclick = () => { element<HTMLDialogElement>('menu-dialog').close(); updateHeader(); options.showModal(); };
+element('settings').onclick = () => { void navigation(() => { element<HTMLDialogElement>('menu-dialog').close(); updateHeader(); renderPrioritySettings(); options.showModal(); }); };
+element('search').onclick = () => { void openSearch().catch(report); };
+element('menu-search').onclick = () => { void openSearch(true).catch(report); };
+element<HTMLFormElement>('search-form').onsubmit = (event) => { event.preventDefault(); try { showSearchResults(); } catch (error) { report(error); } };
+element<HTMLInputElement>('hide-completed').onchange = (event) => { settings.hideCompleted = (event.target as HTMLInputElement).checked; checklistUI.setHideCompleted(settings.hideCompleted); };
+element('priority-hide-info').onclick = () => { info('Hide completed', 'Checked tasks and their completed subtasks fade out. Turn this on to hide them in Priority and its current-list search. Uncheck tasks or reset checks to show them again.'); };
+element('priority-reset').onclick = () => { void checklistUI.resetChecks().then(() => renderPrioritySettings()).catch(report); };
+element<HTMLFormElement>('priority-create').onsubmit = (event) => { event.preventDefault(); const session = prioritySettingsSession; if (session) void changePriorityCatalog(session, () => element<HTMLInputElement>('priority-new-name').value); };
 element('editing-info').onclick = () => { info('Editing', 'Click a cell and type in the bottom box, or double-click to focus it. Drag across cells or Shift-click to extend the selection. A range stays selected after release. Tap the selection again or right-click for its actions. Group names an event without replacing the words inside its minutes. From and Through can include midnight, up to 24 hours. After saving, press and drag anywhere in the selection to move the whole cells; Alt-drag copies them to empty cells. Undo restores the previous local edit. Paste spreadsheet text with Ctrl+V / ⌘V; rows are minutes and columns are dates. Formulas remain text.'); };
 element('passphrase-info').onclick = () => { info('Ledger passphrase', 'Use the same passphrase as your phone. Google access and the passphrase stay in memory. Notes are encrypted in this browser’s local cache and in Google’s private app folder. Lock Context when finished on a shared computer. Browser storage may be cleared or evicted; synchronize to keep a cross-device copy.'); };
 element('calendar-info').onclick = () => { info('Calendar access', 'Calendar access here is read-only. Minute notes synchronize through the private ledger; explicitly authorized phone calendar links can update when the phone synchronizes.'); };
@@ -545,21 +708,32 @@ element('sync').oncontextmenu = (event) => { event.preventDefault(); syncHeld = 
 element('sync').onkeydown = (event) => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); info('Synchronization', lastStatus); } };
 element('sync').onclick = () => { if (syncHeld) { syncHeld = false; return; } if (!store) { options.showModal(); return; } void synchronize(); };
 let binderSingle: ReturnType<typeof setTimeout> | undefined; let binderHold: ReturnType<typeof setTimeout> | undefined; let held = false;
-element('now').onpointerdown = () => { held = false; binderHold = setTimeout(() => { held = true; if (binderSingle) clearTimeout(binderSingle); updateHeader(); element<HTMLDialogElement>('date-dialog').showModal(); }, 550); };
+element('now').onpointerdown = () => { held = false; binderHold = setTimeout(() => { held = true; if (binderSingle) clearTimeout(binderSingle); updateHeader(); element<HTMLDialogElement>(checklistVisible ? 'view-dialog' : 'date-dialog').showModal(); }, 550); };
 element('now').onpointerup = element('now').onpointerleave = () => { if (binderHold) clearTimeout(binderHold); };
-element('now').onclick = () => { if (held) return; if (binderSingle) clearTimeout(binderSingle); binderSingle = setTimeout(() => { void navigation(goNow); }, 260); };
+element('now').onclick = () => { if (held) return; if (binderSingle) clearTimeout(binderSingle); binderSingle = setTimeout(() => { if (checklistVisible) element<HTMLDialogElement>('view-dialog').showModal(); else void navigation(goNow); }, 260); };
 element('now').ondblclick = () => { if (binderSingle) clearTimeout(binderSingle); element<HTMLDialogElement>('view-dialog').showModal(); };
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-days]')) button.onclick = () => { void navigation(() => { setChecklistVisible(false); days = Number(button.dataset.days); element<HTMLDialogElement>('view-dialog').close(); render(); void refreshPlans(); }); };
 element('apply-dates').onclick = () => { if (!dayInput.value) return; void navigation(() => { day = dayInput.value; days = Number(daysInput.value); plans = []; element<HTMLDialogElement>('date-dialog').close(); render(); void refreshPlans(); }); };
-element('previous').onclick = () => { void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
-element('next').onclick = () => { void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
-element('undo').onclick = () => { void navigation(() => { if (!store || !undo) return; const target = undo; void store.update((state) => undoEdit(state, target)).then(() => { undo = null; render(); status('Edit undone.'); }).catch(report); }); };
-element('lock').onclick = () => { void navigation(() => { unlockRequest++; cellClipboard = null; store?.lock(); store = null; passphrase = ''; passInput.value = ''; connection.lock(); plans = []; liveFillColors = []; undo = null; entryBarMode = null; busy = false; viewGeneration++; render(); status('Context is locked.'); }); };
+element('previous').onclick = () => { if (checklistVisible) void stepPriorityList(-1).catch(report); else void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
+element('next').onclick = () => { if (checklistVisible) void stepPriorityList(1).catch(report); else void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
+async function undoCurrentView() {
+  const active = store, scope = priorityScope, listId = activeChecklistId, priority = checklistVisible; if (!active) return;
+  await saveEditor(); await checklistUI.flush();
+  if (store !== active || priorityScope !== scope || checklistVisible !== priority) return;
+  const target = priority ? priorityUndos.get(listId) : null; const edit = priority ? target?.store === active ? target.edit : null : undo;
+  if (!edit) return;
+  await active.update((state) => { if (store !== active || priorityScope !== scope || checklistVisible !== priority) throw new Error('The account or view changed. Reopen Undo.'); return undoEdit(state, edit); });
+  if (store !== active || priorityScope !== scope || checklistVisible !== priority) return;
+  if (priority) { if (priorityUndos.get(listId) === target) priorityUndos.delete(listId); } else if (undo === edit) undo = null;
+  render(); status('Edit undone.'); void synchronize(false);
+}
+element('undo').onclick = () => { void undoCurrentView().catch(report); };
+element('lock').onclick = () => { void navigation(() => { unlockRequest++; priorityNavigation++; cellClipboard = null; store?.lock(); store = null; bindPriorityList(null); checklistUI.clear(); priorityUndos.clear(); prioritySettingsSession = null; searchSession = null; element<HTMLInputElement>('priority-new-name').value = ''; passphrase = ''; passInput.value = ''; connection.lock(); plans = []; liveFillColors = []; undo = null; entryBarMode = null; busy = false; viewGeneration++; render(); status('Context is locked.'); }); };
 element<HTMLFormElement>('unlock-form').onsubmit = (event) => { event.preventDefault(); if (busy || !connection.identity) return;
   const request = ++unlockRequest; busy = true; updateHeader();
   const entered = passInput.value; passInput.value = ''; const subject = connection.identity.subject; status('Unlocking the private ledger…');
   void (async () => { const unlocked = await BrowserStore.unlock(subject, entered); if (request !== unlockRequest || connection.identity?.subject !== subject) { unlocked.lock(); return; }
-    cellClipboard = null; store?.lock(); store = unlocked; passphrase = entered;
+    cellClipboard = null; store?.lock(); store = unlocked; bindPriorityList(unlocked); checklistUI.clear(); priorityUndos.clear(); prioritySettingsSession = null; searchSession = null; element<HTMLInputElement>('priority-new-name').value = ''; passphrase = entered;
     // A new browser must discover and decrypt the phone ledger before enabling new entries.
     if (!unlocked.hasSavedLedger()) { try { await connection.sync(unlocked, entered); } catch (error) { unlocked.lock(); if (store === unlocked) { store = null; passphrase = ''; } throw error; } }
     if (request !== unlockRequest || store !== unlocked) return;

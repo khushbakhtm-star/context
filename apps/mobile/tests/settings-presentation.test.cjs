@@ -10,7 +10,7 @@ const transpile = (text) => ts.transpileModule(text, { compilerOptions: { module
 function all(node, result = []) { if (!node || typeof node !== 'object') return result; result.push(node); for (const child of [node.props?.children].flat(Infinity)) all(child, result); return result; }
 function text(node) { if (typeof node === 'string' || typeof node === 'number') return String(node); return [node?.props?.children].flat(Infinity).map(text).join(''); }
 function style(node) { return Object.assign({}, ...[node?.props?.style].flat(Infinity).filter(Boolean)); }
-const native = Object.fromEntries(['View', 'Text', 'Pressable', 'ScrollView', 'Switch', 'Modal', 'SafeAreaView'].map((name) => [name, name]));
+const native = Object.fromEntries(['View', 'Text', 'TextInput', 'Pressable', 'ScrollView', 'Switch', 'Modal', 'SafeAreaView'].map((name) => [name, name]));
 native.StyleSheet = { create: (value) => value, hairlineWidth: 0.5 }; native.Platform = { OS: 'android' };
 const colors = { ink: '#171817', graphite: '#2B2C2A', paper: '#FBFAF7', surface: '#FFFFFF', panel: '#F5F2EC', accent: '#171817', onAccent: '#FFFFFF', hairline: '#DDD9D1', muted: '#6E706C' };
 function settingsFixture() {
@@ -19,7 +19,7 @@ function settingsFixture() {
   const react = { useMemo: (work) => work(), useRef(value) { const i = cursor++; return slots[i] ??= { current: value }; },
     useState(value) { const i = cursor++; if (!slots[i]) slots[i] = { value: typeof value === 'function' ? value() : value }; return [slots[i].value, (next) => { slots[i].value = typeof next === 'function' ? next(slots[i].value) : next; }]; }, useEffect() {} };
   const module = { exports: {} };
-  vm.runInNewContext(transpile(fs.readFileSync(path.join(mobile, 'src/screens/SettingsScreen.tsx'), 'utf8')), { module, exports: module.exports,
+  vm.runInNewContext(transpile(fs.readFileSync(path.join(mobile, 'src/screens/SettingsScreen.tsx'), 'utf8')), { module, exports: module.exports, Error,
     require(name) {
       if (name === 'react') return react; if (name === 'react-native') return native; if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
       if (name === '../appearance') return { useAppTheme: () => ({ colors, mode: 'dark', setMode: (mode) => modes.push(mode) }) };
@@ -34,7 +34,7 @@ function settingsFixture() {
   const props = { permissionStatus: 'granted', calendars: [calendar('checked', 'Checked plan'), calendar('other', 'Unchecked plan'), calendar('actuals', 'Unchecked actuals destination')],
     preferences: { selectedCalendarIds: ['checked'], writeCalendarId: 'actuals', syncActuals: true },
     onChange: (value) => changes.push(value), onOpenAccounts() {}, onOpenCategories() {}, onRequestAccess: async () => effects.push('allow'), onRefreshCalendars: async () => effects.push('refresh'),
-    clockFormat: '24h', onClockFormatChange: (value) => clocks.push(value), updates: {} };
+    clockFormat: '24h', onClockFormatChange: (value) => clocks.push(value), updates: {}, priorityRevision: 'catalog_1' };
   function render() { cursor = 0; tree = module.exports.SettingsScreen(props); return all(tree); } render();
   return { props, render, changes, modes, clocks, effects, nodes: () => all(tree), tree: () => tree };
 }
@@ -67,6 +67,48 @@ test('choosing an Actuals destination does not implicitly check the source calen
   const h = settingsFixture(); h.nodes().find((node) => node.props.accessibilityLabel === 'Other calendars (2)').props.onPress(); h.render();
   h.nodes().find((node) => node.props.accessibilityLabel === 'Use Unchecked plan for actuals').props.onPress();
   assert.equal(h.changes[0].writeCalendarId, 'other'); assert.deepEqual([...h.changes[0].selectedCalendarIds], ['checked']);
+});
+
+test('Priority Settings creates a named checklist once and keeps its draft locked until acknowledgement', async () => {
+  const h = settingsFixture(); let release; const gate = new Promise((resolve) => release = resolve); const created = [];
+  h.props.priorityLists = [{ id: 'main', name: 'Priority', taskCount: 0 }];
+  h.props.onCreatePriorityList = async (name, expected) => { created.push([name, expected]); await gate; };
+  h.render(); h.nodes().find((node) => node.props.accessibilityLabel === 'Create checklist').props.onPress(); h.render();
+  h.nodes().find((node) => node.props.accessibilityLabel === 'Checklist name').props.onChangeText('  Family plans  '); h.render();
+  h.props.priorityRevision = 'peer_after_draft'; h.render();
+  const save = h.nodes().find((node) => node.type === 'Pressable' && text(node) === 'Save');
+  save.props.onPress(); save.props.onPress(); h.render(); assert.deepEqual(created, [['Family plans', 'catalog_1']]);
+  const input = h.nodes().find((node) => node.props.accessibilityLabel === 'Checklist name'); assert.equal(input.props.editable, false);
+  input.props.onChangeText('Late keyboard event'); h.render(); assert.equal(h.nodes().find((node) => node.props.accessibilityLabel === 'Checklist name').props.value, '  Family plans  ');
+  release(); for (let tick = 0; tick < 8; tick++) await Promise.resolve(); h.render();
+  assert.equal(h.nodes().some((node) => node.props.accessibilityLabel === 'Checklist name'), false);
+  assert.ok(h.nodes().some((node) => node.props.accessibilityLabel === 'Create checklist'));
+});
+
+test('Priority Settings renames the exact list and retains its words when a concurrent edit rejects the save', async () => {
+  const h = settingsFixture(); const renamed = [];
+  h.props.priorityLists = [{ id: 'family', name: 'Family', taskCount: 2 }];
+  h.props.onRenamePriorityList = async (id, name, expected) => { renamed.push([id, name, expected]); throw Error('Priority changed on another device.'); };
+  h.render(); h.nodes().find((node) => node.props.accessibilityLabel === 'Rename checklist Family').props.onPress(); h.render();
+  h.nodes().find((node) => node.props.accessibilityLabel === 'Checklist name').props.onChangeText('Family today'); h.render();
+  h.props.priorityRevision = 'peer_after_draft'; h.render();
+  h.nodes().find((node) => node.type === 'Pressable' && text(node) === 'Save').props.onPress();
+  for (let tick = 0; tick < 8; tick++) await Promise.resolve(); h.render();
+  assert.deepEqual(renamed, [['family', 'Family today', 'catalog_1']]);
+  assert.equal(h.nodes().find((node) => node.props.accessibilityLabel === 'Checklist name').props.value, 'Family today');
+  assert.ok(h.nodes().some((node) => node.props.accessibilityRole === 'alert' && text(node).includes('changed on another device')));
+});
+
+test('the completed-task preference lives in Settings with its optional explanation and no list creation side effect', async () => {
+  const h = settingsFixture(); const values = []; h.props.priorityHideCompleted = false;
+  h.props.onPriorityHideCompletedChange = async (value) => { values.push(value); h.props.priorityHideCompleted = value; };
+  h.render(); const toggle = h.nodes().find((node) => node.props.accessibilityLabel === 'Hide completed Priority tasks');
+  assert.equal(toggle.props.value, false); toggle.props.onValueChange(true);
+  for (let tick = 0; tick < 8; tick++) await Promise.resolve(); h.render();
+  assert.deepEqual(values, [true]); assert.equal(h.nodes().find((node) => node.props.accessibilityLabel === 'Hide completed Priority tasks').props.value, true);
+  const info = h.nodes().find((node) => node.type === 'InfoButton' && node.props.title === 'Checklist task flow');
+  assert.match(info.props.message, /arrows to switch lists/); assert.match(info.props.message, /Reset removes all checks/);
+  assert.equal(h.nodes().some((node) => node.props.accessibilityLabel === 'Checklist name'), false);
 });
 
 test('Watch synchronization and update checks use the same action styling and section heading as Settings', async () => {

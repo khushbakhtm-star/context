@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.35",
-  "sourceAndroidVersionCode": 36,
-  "sourceIosBuildNumber": "36",
+  "version": "0.1.36",
+  "sourceAndroidVersionCode": 37,
+  "sourceIosBuildNumber": "37",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context phone 0.1.35/code36. Add Checklist task flow: checkable editable formatted task rows, optional hiding of completed tasks, Reset all checks, nested subtasks and subtree-preserving priority reordering. New tasks can snapshot selected minute text, highlighted text or a selected range without changing source minutes or calendar events. A validated bounded single-document list travels through the existing encrypted private ledger. Exact observed-revision checks prevent stale task editors, drag actions or Reset from silently replacing newer synchronized lists; retained conflicting list versions can be reviewed and restored with an exact current revision. Minute selection stays visually plain and retains the cell\u2019s assigned fill color. A quick tap on a selected cell opens its actions. A short hold and drag moves the selected cell or range without an automatic popup blocking the gesture. Existing activity colors, calendar LWW/source ownership, consent, source-event borders, plaintext-free encryption, category initialization, clipboard, draft-saving, native-module, packaging, signing, Watch0.1.15 and OAuth-origin protections remain required. The owner-private browser preview gains the same task flow without changing its audience, Google origin hold or account connections. New 0.1.35 phone/FOSS builds, signatures and exact-source tag CI must pass before update/availability records change. No official catalog/store inclusion or physical-device behavior is asserted by source preparation."
+  "notes": "Prepare Context phone 0.1.36/code37 and independent Watch0.1.16/code100017 from a shared reviewed source. Priority uses the existing top bar with a clipboard view icon, checklist navigation, revision-guarded Undo/Redo, current-view Search and always-visible static Sync. Hide completed and checklist creation/rename move to Settings; menu Search covers all minute history and Priority lists. Existing tasks migrate in memory into a bounded encrypted collection and writes preserve all other lists under exact revision checks. Sync arrowheads lie at opposite points on the circle with congruent arms. The watch receives spacious minute cards, curved scrolling, icon-only Settings/Now/Add, inclusive guarded range entry and a lighter automatic dictation startup. Existing privacy, source-event/LWW, encryption, draft preservation, calendar, native-module, original-signature and FOSS source-removal protections remain required. The owner-private browser preview receives Priority without changing audience, account connection or the Google origin hold. Fresh phone/FOSS/watch builds, signing and exact-source CI are required before availability changes; source preparation does not assert catalog inclusion or physical-device performance."
 }

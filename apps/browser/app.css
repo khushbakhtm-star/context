@@ -75,3 +75,26 @@ body.view-checklist #grid,body.view-checklist #welcome{display:none!important}
 .checklist-versions p{white-space:pre-wrap;max-height:140px;overflow:auto;line-height:1.6}
 .visually-hidden{position:absolute!important;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 @media(max-width:600px){#checklist-flow{padding:18px 12px 70px}.checklist-heading{gap:6px;margin-bottom:14px}.checklist-heading h1{font-size:19px}.checklist-row{gap:6px;padding-left:calc(var(--task-depth)*14px)}.checklist-row>textarea{font-size:15px}.checklist-controls{gap:7px}.checklist-controls label{font-size:12px}}
+
+/* Priority keeps the same navigation and working space as the minute ledger. */
+header>button svg{display:block;width:24px;height:24px;pointer-events:none}
+header #now .priority-binder{display:none}
+header #now[data-view=priority]{display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent}
+header #now[data-view=priority] .priority-binder{display:block;width:30px;height:30px}
+header #now[data-view=priority] #month,header #now[data-view=priority] #date{display:none}
+.menu-items button{display:flex;align-items:center;gap:12px}
+.menu-items svg{display:block;width:24px;height:24px;flex:none}
+.priority-list-name{font-size:19px;font-weight:500;letter-spacing:0;margin:0 0 22px}
+.priority-add{position:fixed;right:24px;bottom:24px;width:54px;height:54px;border-radius:16px;background:var(--header);font-size:30px;line-height:1;padding:0;z-index:7;box-shadow:0 3px 14px #0002}
+.checklist-add{position:fixed;left:max(16px,calc((100vw - 940px)/2));right:max(16px,calc((100vw - 940px)/2));bottom:16px;z-index:7;background:var(--header);border:1px solid var(--line);border-radius:10px;padding:8px;margin:0;box-shadow:0 3px 14px #0002}
+.checklist-add textarea{max-height:160px;background:var(--surface)}
+#priority-options h2{font-size:19px;font-weight:500;margin:0 0 14px}
+.priority-setting{display:flex;align-items:center;gap:8px}
+.priority-list-setting{display:flex;align-items:center;gap:8px;margin-top:12px}
+.priority-list-setting input{min-width:0;flex:1;width:100%}
+#priority-settings-error:empty{display:none}
+#priority-settings-error{font-size:13px;color:var(--muted);line-height:1.5}
+.search-result{display:block;text-align:left;width:100%;padding:12px 0;border:0;border-bottom:1px solid var(--line);background:transparent;border-radius:0}
+.search-result strong,.search-result span{display:block;overflow-wrap:anywhere}
+.search-result strong{font-size:12px;font-weight:500;color:var(--muted);margin-bottom:5px}
+.search-result span{white-space:pre-wrap;max-height:110px;overflow:auto}

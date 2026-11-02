@@ -29,6 +29,7 @@ import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ImageButton
 import android.widget.ListView
@@ -44,8 +45,8 @@ import kotlin.math.abs
 class MinuteActivity : Activity() {
     private lateinit var store: WatchStore
     private lateinit var list: ListView
-    private lateinit var dateButton: Button
     private lateinit var status: TextView
+    private lateinit var scrollIndicator: WatchScrollIndicator
     private lateinit var adapter: MinuteAdapter
     private var selected = now()
     private var followingNow = true
@@ -76,6 +77,9 @@ class MinuteActivity : Activity() {
     private var wasStopped = false
     private var editorAutoNow = false
     private var editorInitialText = ""
+    private var automaticCapturePrepared = false
+    private var rangeEditor: WatchRangeEditorDialog? = null
+    private var pendingRangeDraft: Bundle? = null
     private var launchGeneration = 0
     private var displayedEntries = emptyMap<Int, JSONObject>()
     private var displayedPending = emptyMap<Int, JSONObject>()
@@ -86,7 +90,8 @@ class MinuteActivity : Activity() {
     private val ticker = object : Runnable {
         override fun run() {
             val current = now()
-            if (followingNow && editing == null && selected != current) {
+            if (followingNow && resumed && !freshEntryPending && !deferredNow && editing == null &&
+                rangeEditor == null && pickers.isEmpty() && selected != current) {
                 val changedDay = selected.dateKey != current.dateKey
                 selected = current; render(); centerMinute()
                 if (changedDay) WatchTransport.requestDay(this@MinuteActivity, selected.dateKey)
@@ -95,7 +100,11 @@ class MinuteActivity : Activity() {
         }
     }
     private val receiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) { render() }
+        override fun onReceive(context: Context, intent: Intent) {
+            // A phone refresh must not parse/repaint the ledger ahead of speech callbacks.
+            // The list reads the newest snapshot when the current editor closes.
+            if (editing == null && rangeEditor == null && pickers.isEmpty() && !deferredNow) render()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -116,22 +125,14 @@ class MinuteActivity : Activity() {
             followingNow = it.getBoolean("follow", true)
         }
         window.statusBarColor = Color.BLACK; window.navigationBarColor = Color.BLACK
-        val root = column().apply { setPadding(dp(24), dp(WatchLayout.TOP), dp(24), 0); setBackgroundColor(BACKGROUND) }
-        val dates = row()
-        dateButton = button("", "Choose ledger date") { chooseDate() }
-        dates.addView(dateButton, LinearLayout.LayoutParams(0, dp(WatchLayout.HEADER), 1f))
-        dates.addView(button("Now", "Return to the current minute") {
-            cancelPendingLaunch()
-            applyLaunch(LaunchTrigger.ON_START)
-        }, LinearLayout.LayoutParams(dp(42), dp(WatchLayout.HEADER)))
-        dates.addView(settingsButton { showDictationSettings() }, LinearLayout.LayoutParams(dp(44), dp(44)))
-        root.addView(dates)
+        val root = column().apply { setPadding(dp(18), dp(18), dp(18), dp(14)); setBackgroundColor(BACKGROUND) }
         status = label("", 10f).apply { setTextColor(MUTED); maxLines = 1; gravity = Gravity.CENTER }
-        root.addView(status, LinearLayout.LayoutParams(-1, dp(WatchLayout.STATUS)))
+        status.visibility = View.GONE
+        root.addView(status, LinearLayout.LayoutParams(-1, dp(16)))
         adapter = MinuteAdapter()
         list = ListView(this).apply {
             divider = null; isVerticalScrollBarEnabled = false; clipToPadding = false
-            setPadding(0, 0, 0, dp(30)); setBackgroundColor(BACKGROUND)
+            setPadding(0, dp(2), dp(5), dp(8)); setBackgroundColor(BACKGROUND)
             setOnItemClickListener { _, _, position, _ ->
                 cancelPendingLaunch()
                 followingNow = false; selected = Coordinate(selected.dateKey, position); render(); openEditor(selected)
@@ -147,13 +148,43 @@ class MinuteActivity : Activity() {
                         touchBrowsing = false; this@MinuteActivity.adapter.notifyDataSetChanged()
                     }
                 }
-                override fun onScroll(view: AbsListView?, first: Int, visible: Int, total: Int) = Unit
+                override fun onScroll(view: AbsListView?, first: Int, visible: Int, total: Int) {
+                    if (::scrollIndicator.isInitialized) {
+                        val child = list.getChildAt(0)
+                        val fraction = if (child != null && child.height > 0)
+                            (-child.top.toFloat() / child.height).coerceIn(0f, 1f) else 0f
+                        scrollIndicator.update(first, visible, total, fraction)
+                    }
+                }
             })
             onFocusChangeListener = View.OnFocusChangeListener { _, _ -> Unit }
         }
         list.adapter = adapter
-        root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        setContentView(root); render(); list.post { centerMinute() }
+        val ledger = FrameLayout(this)
+        ledger.addView(list, FrameLayout.LayoutParams(-1, -1))
+        scrollIndicator = WatchScrollIndicator(this)
+        ledger.addView(scrollIndicator, FrameLayout.LayoutParams(-1, -1))
+        root.addView(ledger, LinearLayout.LayoutParams(-1, 0, 1f))
+        val controls = row()
+        controls.addView(WatchRoundActionButton(this, R.drawable.context_settings, "Settings") {
+            cancelPendingLaunch(); showDictationSettings()
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        controls.addView(WatchRoundActionButton(this, R.drawable.context_now_dot, "Go to the current minute") {
+            returnToNow()
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        controls.addView(WatchRoundActionButton(this, R.drawable.context_add, "Add text to a minute or range of minutes") {
+            cancelPendingLaunch(); showRangeEditor()
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        root.addView(controls, LinearLayout.LayoutParams(-1, dp(44)))
+        twelveHourClock = !android.text.format.DateFormat.is24HourFormat(this)
+        pendingRangeDraft = savedInstanceState?.getBundle("rangeDraft")
+        setContentView(root)
+        if (!freshEntryPending) {
+            runCatching { render() }.onFailure {
+                status.text = "Could not refresh minutes"; status.visibility = View.VISIBLE
+            }
+            list.post { centerMinute() }
+        }
         savedInstanceState?.getString("editorText")?.let { text ->
             val target = Coordinate(savedInstanceState.getString("editorDate") ?: selected.dateKey,
                 savedInstanceState.getInt("editorMinute", selected.minuteIndex))
@@ -196,7 +227,9 @@ class MinuteActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, IntentFilter(WatchTransport.ACTION_CHANGED), RECEIVER_NOT_EXPORTED)
         else @Suppress("DEPRECATION") registerReceiver(receiver, IntentFilter(WatchTransport.ACTION_CHANGED))
         handler.post(ticker)
-        WatchTransport.synchronize(this, selected.dateKey); WatchTransport.requestDay(this, selected.dateKey)
+        if (!freshEntryPending) {
+            WatchTransport.synchronize(this, selected.dateKey); WatchTransport.requestDay(this, selected.dateKey)
+        }
     }
     override fun onStop() {
         visible = false; wasStopped = true; launchGeneration++
@@ -211,6 +244,10 @@ class MinuteActivity : Activity() {
         if (wasStopped && !preserveSpeechResume && editor?.hasFocus() != true) discardPristineNowEditor()
         preserveSpeechResume = false
         wasStopped = false
+        if (pendingRangeDraft != null) {
+            val draft = pendingRangeDraft; pendingRangeDraft = null
+            showRangeEditor(draft)
+        }
         if (pendingRestore != null) list.post { restoreEditor() }
         resumePermissionDictation()
         val resumeTrigger = DictationSavePolicy.resumeTrigger(confirmedSpeechReturn, deferredNow)
@@ -220,7 +257,7 @@ class MinuteActivity : Activity() {
             freshEntryPending = false
             applyLaunch(LaunchTrigger.LAUNCHER_OR_TILE)
         } else if (resumeTrigger != null) applyLaunch(resumeTrigger)
-        else { render(); centerMinute() }
+        else if (editing == null && rangeEditor == null) { render(); centerMinute() }
     }
     override fun onPause() {
         resumed = false; launchGeneration++
@@ -237,6 +274,7 @@ class MinuteActivity : Activity() {
         visible = false; resumed = false; launchGeneration++
         cancelMicrophoneRequest()
         watchDictation?.cancel(); watchDictation = null
+        rangeEditor?.dismiss(); rangeEditor = null
         editorDialog?.dismiss(); pickers.toList().forEach { it.dismiss() }
         super.onDestroy()
     }
@@ -272,6 +310,7 @@ class MinuteActivity : Activity() {
         out.putBoolean("deferredNow", deferredNow); out.putInt("nextSpeechRequest", nextSpeechRequest)
         out.putBoolean("preserveSpeechResume", preserveSpeechResume)
         out.putBoolean("confirmedSpeechReturn", confirmedSpeechReturn)
+        (rangeEditor?.draft() ?: pendingRangeDraft)?.let { out.putBundle("rangeDraft", it) }
         out.putBoolean("tileMinuteRequestPending", tileMinuteRequestPending)
         tileMinutePending?.let { out.putString("tileMinuteDate", it.dateKey); out.putInt("tileMinuteIndex", it.minuteIndex) }
         editing?.let { out.putString("editorDate", it.dateKey); out.putInt("editorMinute", it.minuteIndex)
@@ -388,15 +427,37 @@ class MinuteActivity : Activity() {
                 editing != null || restoringEditor || speechInputInFlight() || pickers.isNotEmpty()) return@post
             selected = decision.target(selected, ::now); followingNow = true
             deferredNow = false
-            render(); centerMinute()
-            // Show the cached editor immediately; requesting the phone never gates entry.
-            openEditor(selected, autoNow = true)
-            if (decision.startDictation) editorSession?.takeIf { it.coordinate == selected }?.let { beginWatchDictation(it) }
+            if (decision.startDictation) {
+                // One local baseline read and an unattached draft are enough to own capture.
+                // Do not inflate a second, hidden manual editor or redraw 1,440 rows first.
+                try { prepareAutomaticDictation(selected) }
+                catch (_: Exception) { toast("Could not load this minute. Your saved notes are unchanged."); return@post }
+                editorSession?.takeIf { it.coordinate == selected }?.let { beginWatchDictation(it) }
+            } else { render(); centerMinute() }
             WatchTransport.requestDay(this, selected.dateKey); WatchTransport.synchronize(this, selected.dateKey)
         }
     }
+    private fun returnToNow() {
+        if (editing != null || rangeEditor != null || pickers.isNotEmpty()) return
+        cancelPendingLaunch(); selected = now(); followingNow = true
+        render(); centerMinute(); WatchTransport.requestDay(this, selected.dateKey)
+    }
+    private fun showRangeEditor(restored: Bundle? = null) {
+        if (rangeEditor != null || editing != null || pickers.isNotEmpty() || isFinishing || isDestroyed) return
+        lateinit var screen: WatchRangeEditorDialog
+        screen = WatchRangeEditorDialog(this, store, selected, twelveHourClock, restored,
+            onSaved = { coordinate ->
+                selected = coordinate; followingNow = false
+                runCatching { render(); centerMinute() }.onFailure { status.text = "Saved on watch" }
+                runCatching { WatchTransport.sendPending(this) }
+            }, onClosed = { if (rangeEditor === screen) rangeEditor = null },
+            isActive = { visible && resumed && !isFinishing && !isDestroyed && rangeEditor === screen })
+        rangeEditor = screen
+        showPicker(screen.dialog) { screen.hostClosed() }
+    }
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
-        if (editing == null && event.action == MotionEvent.ACTION_SCROLL &&
+        if (visible && resumed && editing == null && rangeEditor == null && pickers.isEmpty() &&
+            event.action == MotionEvent.ACTION_SCROLL &&
             event.isFromSource(InputDevice.SOURCE_ROTARY_ENCODER)) {
             val scroll = event.getAxisValue(MotionEvent.AXIS_SCROLL)
             if (abs(scroll) > 0.01f) {
@@ -421,11 +482,14 @@ class MinuteActivity : Activity() {
         if (previousDay != selected.dateKey) WatchTransport.requestDay(this, selected.dateKey)
     }
     private fun centerMinute() {
-        list.setSelectionFromTop(selected.minuteIndex, ((list.height - dp(WatchLayout.MINUTE)) / 2).coerceAtLeast(0))
+        val height = list.getChildAt(selected.minuteIndex - list.firstVisiblePosition)?.height
+            ?: dp(WatchCardLayout.MIN_CARD_HEIGHT)
+        list.setSelectionFromTop(selected.minuteIndex, ((list.height - height) / 2).coerceAtLeast(0))
     }
     private fun render() {
         if (!::adapter.isInitialized) return
-        val day = store.day(selected.dateKey)
+        val snapshot = store.snapshot(selected.dateKey)
+        val day = snapshot.day
         twelveHourClock = when (day?.optString("clockFormat")) {
             "12h" -> true
             "24h" -> false
@@ -438,17 +502,18 @@ class MinuteActivity : Activity() {
         val entries = day?.optJSONArray("entries")
         displayedEntries = (0 until (entries?.length() ?: 0)).map { entries!!.getJSONObject(it) }
             .associateBy { it.getInt("minuteIndex") }
-        displayedPending = store.pendingRecords().filter {
+        displayedPending = snapshot.pending.filter {
             it.getJSONObject("operation").getString("dateKey") == selected.dateKey
         }.associateBy { it.getJSONObject("operation").getInt("minuteIndex") }
-        dateButton.text = LocalDate.parse(selected.dateKey).format(DateTimeFormatter.ofPattern("EEE d MMM"))
         status.text = when {
             displayedPending.values.any { it.optString("status") != "pending" } -> "Review on phone"
-            store.pendingRecords().isNotEmpty() -> "Saved · waiting for phone"
+            snapshot.pending.isNotEmpty() -> "Saved · waiting for phone"
             WatchTransport.lastError != null -> "Open phone to sync"
             day == null || day.optBoolean("partial", false) -> "Open phone to load day"
             else -> "Tap a minute to edit"
         }
+        // Routine sync/empty-minute explanations belong in Settings, not above every card.
+        status.visibility = if (displayedPending.values.any { it.optString("status") != "pending" }) View.VISIBLE else View.GONE
         adapter.notifyDataSetChanged()
     }
     private fun timeLabel(minute: Int): String {
@@ -464,27 +529,68 @@ class MinuteActivity : Activity() {
         override fun getItem(position: Int): Any = position
         override fun getItemId(position: Int) = position.toLong()
         override fun getView(position: Int, recycled: View?, parent: ViewGroup?): View {
-            val cell = recycled as? LinearLayout ?: column().apply {
-                setPadding(dp(10), dp(5), dp(10), dp(5))
-                addView(label("", 14f).apply { setTypeface(null, Typeface.BOLD) })
-                addView(label("", 12f).apply { maxLines = 1; setTextColor(MUTED) })
-                layoutParams = AbsListView.LayoutParams(-1, dp(WatchLayout.MINUTE))
+            val cell = recycled as? WatchMinuteCardView ?: WatchMinuteCardView(this@MinuteActivity).apply {
+                layoutParams = AbsListView.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT)
             }
             val pending = displayedPending[position]
             val entry = pending?.getJSONObject("operation") ?: displayedEntries[position]
-            val time = cell.getChildAt(0) as TextView; val note = cell.getChildAt(1) as TextView
-            time.text = timeLabel(position) + if (pending != null) " ·" else ""
-            note.text = entry?.optString("text")?.takeIf { it.isNotEmpty() } ?: "Unrecorded"
-            cell.background = rounded(if (position == selected.minuteIndex) PANEL else BACKGROUND,
-                if (position == selected.minuteIndex) ACCENT else null)
-            val color = entry?.optString("categoryId")?.let { categoryColor(it) } ?: MUTED
-            time.setTextColor(if (position == selected.minuteIndex) ACCENT else FOREGROUND)
-            val swatch = GradientDrawable().apply { setColor(color); cornerRadius = dp(2).toFloat(); setSize(dp(3), dp(13)) }
-            time.setCompoundDrawablesWithIntrinsicBounds(swatch, null, null, null)
-            time.compoundDrawablePadding = dp(6)
-            cell.contentDescription = "${time.text}. ${note.text}. Tap to edit."
+            val date = selected.dateKey
+            val coordinate = Coordinate(date, position)
+            val timestamp = timeLabel(position) + " " + LocalDate.parse(date).format(DateTimeFormatter.ofPattern("MMM d")) +
+                if (pending != null) " ·" else ""
+            val open = {
+                cancelPendingLaunch(); followingNow = false; selected = coordinate
+                render(); openEditor(coordinate)
+            }
+            cell.bind(entry?.optString("text") ?: "", timestamp, position == selected.minuteIndex,
+                coordinate == now(), entry?.optString("categoryId")?.let { categoryColors[it] },
+                onEdit = open, onOpen = open, onDate = { selected = coordinate; chooseDate() })
             return cell
         }
+    }
+
+    private fun editorBaseline(target: Coordinate, restoredSession: EditorSession? = null): Pair<WatchEditorSnapshot, EditorSession> {
+        val snapshot = if (restoredSession == null) store.editorSnapshot(target)
+            else runCatching { store.editorSnapshot(target) }.getOrElse { WatchEditorSnapshot(null, null, null) }
+        val cached = snapshot.cached
+        val pendingOperation = snapshot.pending?.getJSONObject("operation")
+        val known = cached != null || (snapshot.day != null && !snapshot.day.optBoolean("partial", false))
+        val version = cached?.optString("version")?.takeIf { it.isNotEmpty() && it != "null" } ?: "[null,null]"
+        val pendingVersion = pendingOperation?.optString("expectedVersion")?.takeUnless { it.isEmpty() || it == "null" }
+        val category = pendingOperation?.optString("categoryId")?.takeUnless { it.isEmpty() || it == "null" }
+        val session = restoredSession ?: if (pendingOperation != null) EditorSession(target,
+            pendingOperation.optBoolean("baseKnown", false), pendingVersion, category,
+            pendingOperation.optString("operationId"), pendingText = pendingOperation.getString("text"), pendingCategory = category)
+        else EditorSession(target, known, if (known) version else null)
+        return snapshot to session
+    }
+    private fun prepareAutomaticDictation(target: Coordinate) {
+        val (snapshot, session) = editorBaseline(target)
+        snapshot.pending?.takeIf { it.optString("status") != "pending" }?.let { reviewConflict(it); return }
+        val original = snapshot.pending?.getJSONObject("operation") ?: snapshot.cached
+        val initial = original?.optString("text") ?: ""
+        twelveHourClock = when (snapshot.day?.optString("clockFormat")) {
+            "12h" -> true; "24h" -> false; else -> !android.text.format.DateFormat.is24HourFormat(this)
+        }
+        cancelMicrophoneRequest(); retryDictation = null
+        editorSession = session; editing = target; editorInitialText = initial; editorAutoNow = true
+        editor = EditText(this).apply { setText(initial) }
+        automaticCapturePrepared = true
+    }
+    private fun expandPreparedEditor(session: EditorSession, focus: Boolean = false) {
+        if (!automaticCapturePrepared || editorSession?.sessionId != session.sessionId) return
+        val text = editor?.text?.toString() ?: editorInitialText
+        val draft = RestoredEditor(session, text, editorInitialText, editorAutoNow, focus)
+        pendingRestore = draft
+        if (visible && resumed && !isFinishing && !isDestroyed) {
+            try {
+                openEditor(session.coordinate, text, session, draft.autoNow, draft.initialText, focus)
+                pendingRestore = null; automaticCapturePrepared = false
+            } catch (_: Exception) {
+                // Retain the original session and words for lifecycle restoration/retry.
+                toast("Your words are kept. Reopen the note to continue.")
+            }
+        } else automaticCapturePrepared = false
     }
 
     private fun openEditor(target: Coordinate, restored: String? = null, restoredSession: EditorSession? = null,
@@ -492,23 +598,17 @@ class MinuteActivity : Activity() {
         cancelMicrophoneRequest()
         editorDialog?.dismiss(); followingNow = false
         if (restoredSession == null) retryDictation = null
-        val day = store.day(target.dateKey)
-        val cached = store.cachedEntry(target.dateKey, target.minuteIndex)
-        val pending = store.latest(target.dateKey, target.minuteIndex)
+        val (snapshot, baseline) = editorBaseline(target, restoredSession)
+        val day = snapshot.day
+        val cached = snapshot.cached
+        val pending = snapshot.pending
         if (pending != null && pending.optString("status") != "pending" && restored == null) {
             reviewConflict(pending); return
         }
         val pendingOperation = pending?.getJSONObject("operation")
         val original = pendingOperation ?: cached
-        val known = cached != null || (day != null && !day.optBoolean("partial", false))
-        val version = cached?.optString("version")?.takeIf { it.isNotEmpty() && it != "null" } ?: "[null,null]"
-        val pendingVersion = pendingOperation?.optString("expectedVersion")?.takeUnless { it.isEmpty() || it == "null" }
-        val pendingCategory = pendingOperation?.optString("categoryId")?.takeUnless { it.isEmpty() || it == "null" }
-        var session = restoredSession ?: if (pendingOperation != null) EditorSession(target,
-            pendingOperation.optBoolean("baseKnown", false), pendingVersion, pendingCategory,
-            pendingOperation.optString("operationId"), pendingText = pendingOperation.getString("text"),
-            pendingCategory = pendingCategory)
-        else EditorSession(target, known, if (known) version else null)
+        var session = baseline
+        automaticCapturePrepared = false
         editorSession = session
         val content = column().apply { setPadding(dp(26), dp(WatchLayout.TOP), dp(26), dp(WatchLayout.EDITOR_BOTTOM)) }
         val body = column()
@@ -605,8 +705,10 @@ class MinuteActivity : Activity() {
         val speech = SpeechSession(request, session.sessionId, session.coordinate)
         pendingSpeech = speech
         val originalText = editor?.text?.toString() ?: ""
-        (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
-            .hideSoftInputFromWindow(editor?.windowToken, 0)
+        editor?.windowToken?.let { token ->
+            (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(token, 0)
+        }
         lateinit var screen: WatchDictationDialog
         screen = WatchDictationDialog(this, session.coordinate, twelveHourClock, silenceDelaySeconds(),
             isCurrent = { visible && resumed && !isFinishing && !isDestroyed && pickers.isEmpty() && pendingSpeech == speech &&
@@ -623,7 +725,7 @@ class MinuteActivity : Activity() {
                     if (WatchDictationPolicy.mayCloseEmptyCapture(editorInitialText, editor?.text?.toString(),
                         editorSession?.chosenCategory != null, retryDictation != null)) {
                         finishEditor(session, fromDictation = true, saved = false)
-                    }
+                    } else if (automaticCapturePrepared) expandPreparedEditor(session)
                 }
             },
             onClosed = { type, partial ->
@@ -636,6 +738,7 @@ class MinuteActivity : Activity() {
                     }
                     pendingSpeech = null
                 }
+                if (automaticCapturePrepared) expandPreparedEditor(session, focus = type)
                 if (type && visible && resumed && editorSession?.sessionId == session.sessionId) {
                     editor?.requestFocus()
                     (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
@@ -657,7 +760,10 @@ class MinuteActivity : Activity() {
             microphoneReadySession = session
             preserveSpeechResume = true
             resumePermissionDictation()
-        } else toast("Microphone access was not allowed. Tap the note to type.")
+        } else {
+            toast("Microphone access was not allowed. You can type the note.")
+            expandPreparedEditor(session)
+        }
     }
     private fun resumePermissionDictation() {
         val session = microphoneReadySession ?: return
@@ -665,7 +771,7 @@ class MinuteActivity : Activity() {
         // Consume before opening speech; a permission/IME resume cannot reuse this handoff.
         microphoneReadySession = null
         if (editing == session.coordinate && LaunchPolicy.mayResumeMicrophone(session, editorSession,
-            visible, resumed, editorDialog?.isShowing == true, pendingSpeech != null)) beginWatchDictation(session)
+            visible, resumed, editorDialog?.isShowing == true || automaticCapturePrepared, pendingSpeech != null)) beginWatchDictation(session)
     }
     @Deprecated("Retained only for results already launched by an older restored session")
     override fun onActivityResult(request: Int, result: Int, data: Intent?) {
@@ -687,6 +793,7 @@ class MinuteActivity : Activity() {
             store.saveDictation(plan)
         } catch (_: Exception) {
             toast("Could not save. Your dictated words are still here. Tap Save to retry.")
+            expandPreparedEditor(plan.editor)
             return
         }
         finishSavedEditor(plan.editor, fromDictation = true)
@@ -712,7 +819,7 @@ class MinuteActivity : Activity() {
         val oldDialog = editorDialog
         // Clear ownership before dismissing: neither restoration nor an old
         // onDismiss callback may reopen or clear a different minute's editor.
-        pendingRestore = null; restoringEditor = false
+        pendingRestore = null; restoringEditor = false; automaticCapturePrepared = false
         editing = null; editor = null; editorDialog = null; editorSession = null
         pendingSpeech = null; retryDictation = null; cancelMicrophoneRequest()
         selected = session.coordinate; followingNow = false
@@ -729,6 +836,9 @@ class MinuteActivity : Activity() {
     private fun showDictationSettings(onSelected: ((Int) -> Unit)? = null) {
         val content = column().apply { setPadding(dp(26), dp(WatchLayout.TOP), dp(26), dp(WatchLayout.EDITOR_BOTTOM)) }
         content.addView(label("Save after silence", 14f).apply { gravity = Gravity.CENTER })
+        if (onSelected == null && ::status.isInitialized && status.text.isNotBlank()) {
+            content.addView(label(status.text.toString(), 10f).apply { setTextColor(MUTED); gravity = Gravity.CENTER })
+        }
         val options = column(); val scrolling = android.widget.ScrollView(this).apply { addView(options) }
         content.addView(scrolling, LinearLayout.LayoutParams(-1, 0, 1f))
         val dialog = fullDialog(content)
@@ -826,11 +936,16 @@ class MinuteActivity : Activity() {
         content.addView(actions)
         showPicker(dialog)
     }
-    private fun showPicker(dialog: Dialog) {
+    private fun showPicker(dialog: Dialog, onClosed: (() -> Unit)? = null) {
         pickers.add(dialog)
         dialog.setOnDismissListener {
             pickers.remove(dialog)
-            if (visible && !isChangingConfigurations) applyLaunch(LaunchTrigger.EDITOR_CLOSED)
+            onClosed?.invoke()
+            if (visible && !isChangingConfigurations) {
+                if (editing == null && rangeEditor == null && pickers.isEmpty())
+                    runCatching { render() }.onFailure { status.text = "Could not refresh minutes" }
+                applyLaunch(LaunchTrigger.EDITOR_CLOSED)
+            }
         }
         dialog.show()
     }

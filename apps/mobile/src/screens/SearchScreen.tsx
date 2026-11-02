@@ -2,24 +2,34 @@ import { useEffect, useMemo, useState } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { searchEntries } from '../data/database';
+import { getChecklistFlow } from '../data/checklist-flow';
 import { useAppTheme } from '../appearance';
 import type { AppColors } from '../theme';
 import type { SearchResult } from '../types';
 import { formatCompactDate, minuteLabel } from '../utils/time';
+import { searchPriorityLists, type PrioritySearchHit, type SearchScope } from '../utils/search-scope';
+
+export type { SearchScope } from '../utils/search-scope';
+type TaskHit = PrioritySearchHit & { kind: 'priority'; id: string };
+type SearchHit = SearchResult | TaskHit;
+const isTask = (item: SearchHit): item is TaskHit => 'kind' in item && item.kind === 'priority';
 
 type Props = {
   dataVersion: number;
   onOpenResult: (result: SearchResult) => void;
+  scope?: SearchScope;
+  onOpenTask?: (result: { listId: string; taskId: string }) => void;
 };
 
-export function SearchScreen({ dataVersion, onOpenResult }: Props) {
+export function SearchScreen({ dataVersion, onOpenResult, scope, onOpenTask }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SearchResult[]>([]);
+  const [results, setResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(true);
   const [searchError, setSearchError] = useState(false);
   const [retryVersion, setRetryVersion] = useState(0);
+  const scopeKey = JSON.stringify(scope ?? null);
 
   useEffect(() => {
     let current = true;
@@ -27,9 +37,15 @@ export function SearchScreen({ dataVersion, onOpenResult }: Props) {
     setSearching(true);
     setSearchError(false);
     const timer = setTimeout(() => {
-      void searchEntries(query.trim(), 150).then((next) => {
+      const minutes = scope?.kind === 'priority' ? Promise.resolve([] as SearchResult[])
+        : searchEntries(query.trim(), 150, scope?.kind === 'calendar' ? scope.dates : undefined);
+      const tasks = scope?.kind === 'calendar' ? Promise.resolve([] as TaskHit[])
+        : getChecklistFlow(scope?.kind === 'priority' ? scope.listId : undefined).then(({ collection }) =>
+          searchPriorityLists(collection.lists, query, scope?.kind === 'priority' ? scope : undefined)
+            .map((hit): TaskHit => ({ ...hit, kind: 'priority', id: `priority:${hit.listId}:${hit.task.id}` })));
+      void Promise.all([minutes, tasks]).then(([minuteHits, taskHits]) => {
         if (!current) return;
-        setResults(next);
+        setResults(taskHits.length ? [...minuteHits, ...taskHits] : minuteHits);
         setSearching(false);
       }).catch(() => {
         if (!current) return;
@@ -42,17 +58,16 @@ export function SearchScreen({ dataVersion, onOpenResult }: Props) {
       current = false;
       clearTimeout(timer);
     };
-  }, [dataVersion, query, retryVersion]);
+  }, [dataVersion, query, retryVersion, scopeKey]);
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.eyebrow}>HISTORY</Text>
-        <Text style={styles.title}>Find any remembered minute</Text>
         <TextInput keyboardAppearance={resolvedMode}
+          accessibilityLabel={scope ? 'Search current view' : 'Search all data'}
           value={query}
           onChangeText={setQuery}
-          placeholder="Search thoughts, decisions, people, work…"
+          placeholder={scope ? 'Search this view…' : 'Search all data…'}
           placeholderTextColor={colors.muted}
           clearButtonMode="while-editing"
           returnKeyType="search"
@@ -61,7 +76,7 @@ export function SearchScreen({ dataVersion, onOpenResult }: Props) {
         {searchError ? (
           <View style={styles.errorRow}>
             <Text accessibilityRole="alert" style={styles.errorText}>
-              Your history could not be searched. Try again.
+              This search could not finish. Try again.
             </Text>
             <Pressable accessibilityRole="button" onPress={() => setRetryVersion((value) => value + 1)}
               style={styles.retryButton}>
@@ -78,21 +93,21 @@ export function SearchScreen({ dataVersion, onOpenResult }: Props) {
         ListEmptyComponent={searchError ? undefined : (
           <View style={styles.empty}>
             <Text style={styles.emptyTitle}>
-              {searching ? 'Searching your history…' : 'Nothing recorded here yet'}
+              {searching ? 'Searching…' : 'No matches'}
             </Text>
             {!searching ? (
-              <Text style={styles.emptyBody}>Every minute you save becomes searchable history.</Text>
+              <Text style={styles.emptyBody}>{scope ? 'Try another word in this view.' : 'Search minute history and every Priority list.'}</Text>
             ) : null}
           </View>
         )}
         renderItem={({ item }) => (
-          <Pressable onPress={() => onOpenResult(item)} style={styles.result}>
-            <View style={[styles.resultBar, { backgroundColor: item.categoryColor }]} />
+          <Pressable onPress={() => isTask(item) ? onOpenTask?.({ listId: item.listId, taskId: item.task.id }) : onOpenResult(item)} style={styles.result}>
+            <View style={[styles.resultBar, { backgroundColor: isTask(item) ? colors.muted : item.categoryColor }]} />
             <View style={styles.resultBody}>
-              <Text numberOfLines={2} style={styles.resultText}>{item.text}</Text>
+              <Text numberOfLines={2} style={styles.resultText}>{isTask(item) ? item.task.text : item.text}</Text>
               <Text style={styles.resultMeta}>
-                {formatCompactDate(item.dateKey)} · {minuteLabel(item.minuteIndex, true)} ·{' '}
-                {item.categoryName}
+                {isTask(item) ? `Priority · ${item.listName}${item.task.checked ? ' · Completed' : ''}` :
+                  `${formatCompactDate(item.dateKey)} · ${minuteLabel(item.minuteIndex, true)} · ${item.categoryName}`}
               </Text>
             </View>
           </Pressable>

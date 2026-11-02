@@ -35,7 +35,7 @@ function headerHarness(props = {}, options = {}) {
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => value === b[index]);
   const listeners = new Set(); const state = { currentState: 'active', addEventListener: (_name, callback) => { listeners.add(callback); return { remove: () => listeners.delete(callback) }; } };
   const dimensions = { width: 360, height: 500 };
-  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, checklist: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
+  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, globalSearch: 0, settings: 0, checklist: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
   const history = { canUndo: true, canRedo: true, busy: false, ...options.history };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   const module = { exports: {} };
@@ -62,6 +62,7 @@ function headerHarness(props = {}, options = {}) {
   };
   vm.runInNewContext(transpile([declaration('CALENDAR_VIEW_OPTIONS'), declaration('createStyles'), declaration('CalendarHeader'), 'export { CalendarHeader };'].join('\n')), context);
   const defaults = { onOpenSettings: () => calls.settings++, onPrint: () => calls.print++, onOpenSearch: () => calls.search++,
+    onOpenGlobalSearch: () => calls.globalSearch++,
     onOpenReports: () => calls.dashboard++, onOpenChecklist: () => calls.checklist++, onSync: () => calls.sync++, syncing: false, syncError: null,
     onJumpToNow: () => calls.now++, onOpenDatePicker: () => calls.picker++, canGoPrevious: true, canGoNext: true,
     onPrevious() {}, onNext() {}, viewMode: 'day', viewChanging: false, onViewModeChange: async (mode) => { calls.modes.push(mode); } };
@@ -79,7 +80,7 @@ function headerHarness(props = {}, options = {}) {
   render();
   const hold = (button) => { button.props.onPressIn?.({ nativeEvent: { touches: [{}] } }); advance(450);
     button.props.onLongPress(); button.props.onPress(); };
-  return { calls, history, advance, render, nodes, press, hold, binder: () => nodes().find((node) => /^.* view\. Go to now/.test(node.props.accessibilityLabel ?? '')),
+  return { calls, history, advance, render, nodes, press, hold, binder: () => nodes().find((node) => /^.* view\. Go to (now|top)/.test(node.props.accessibilityLabel ?? '')),
     async settle() { for (let i = 0; i < 25; i++) await Promise.resolve(); render(); },
     changeHeight: (height) => { dimensions.height = height; render(); },
     background: () => { state.currentState = 'background'; for (const listener of listeners) listener('background'); },
@@ -100,14 +101,14 @@ test('holding the current-view icon opens choices after saving and consumes its 
   const h = headerHarness({ viewMode: 'week' }); h.hold(h.binder()); await h.settle();
   const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible); assert.ok(menu);
   assert.deepEqual(h.nodes(menu).filter((node) => node.type === 'Pressable' && / view$/.test(node.props.accessibilityLabel ?? ''))
-    .map((node) => node.props.accessibilityLabel), ['Day view', 'Week view', 'Month view', 'Year view', 'Schedule view', 'Checklist task flow view']);
+    .map((node) => node.props.accessibilityLabel), ['Day view', 'Week view', 'Month view', 'Year view', 'Schedule view', 'Priority view']);
   h.nodes(menu).find((node) => node.props.accessibilityLabel === 'Month view').props.onPress();
   assert.deepEqual(h.calls.modes, ['month']); assert.equal(h.calls.now, 0);
 });
 
 test('checklist view dispatches once after the view picker closes and retains calendar focus', async () => {
   const h = headerHarness(); h.hold(h.binder()); await h.settle();
-  const button = h.nodes().find((node) => node.props?.accessibilityLabel === 'Checklist task flow view');
+  const button = h.nodes().find((node) => node.props?.accessibilityLabel === 'Priority view');
   assert.ok(button); button.props.onPress(); button.props.onPress(); h.advance(0); await h.settle();
   assert.equal(h.calls.checklist, 1); assert.equal(h.calls.now, 0); assert.equal(h.calls.picker, 0);
   assert.deepEqual(h.calls.modes, []);
@@ -171,11 +172,11 @@ test('iOS opens Pick / Range only after the view sheet dismisses and cancels a s
   stale.background(); old.props.onDismiss(); assert.equal(stale.calls.picker, 0);
 });
 
-test('actual hamburger menu orders Dashboard, Print, Redo, Settings and dispatches after dismissal', () => {
+test('actual hamburger menu orders Dashboard, Print, Redo, global Search, Settings and dispatches after dismissal', () => {
   const h = headerHarness(); h.nodes().find((node) => node.props.accessibilityLabel === 'Open menu').props.onPress(); h.render();
   const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible);
-  const options = h.nodes(menu).filter((node) => node.type === 'Pressable' && /^(?:Open Dashboard|Print displayed dates|Redo Context edit|Open Settings)$/.test(node.props.accessibilityLabel ?? ''));
-  assert.deepEqual(options.map((node) => node.props.accessibilityLabel), ['Open Dashboard', 'Print displayed dates', 'Redo Context edit', 'Open Settings']);
+  const options = h.nodes(menu).filter((node) => node.type === 'Pressable' && /^(?:Open Dashboard|Print displayed dates|Redo Context edit|Search all Context|Open Settings)$/.test(node.props.accessibilityLabel ?? ''));
+  assert.deepEqual(options.map((node) => node.props.accessibilityLabel), ['Open Dashboard', 'Print displayed dates', 'Redo Context edit', 'Search all Context', 'Open Settings']);
   h.changeHeight(800);
   assert.ok(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), 'keyboard dismissal must not close the newly requested menu');
   options[0].props.onPress(); assert.equal(h.calls.dashboard, 0); h.advance(0); assert.equal(h.calls.dashboard, 1);
@@ -183,6 +184,43 @@ test('actual hamburger menu orders Dashboard, Print, Redo, Settings and dispatch
   for (const scroll of h.nodes().filter((node) => node.type === 'ScrollView')) {
     assert.equal(scroll.props.keyboardShouldPersistTaps, 'always');
     assert.equal(scroll.props.keyboardDismissMode, 'none');
+  }
+});
+
+test('Priority keeps the complete toolbar, uses a clipboard, and never borrows calendar Undo', async () => {
+  let undo = 0; let redo = 0; let flushes = 0;
+  const priority = { listId: 'family', canUndo: true, canRedo: true, busy: false,
+    undo: async () => { undo++; return true; }, redo: async () => { redo++; return true; }, beforeLeave: async () => true };
+  const h = headerHarness({ priority, canGoPrevious: false }, { history: { canUndo: false, canRedo: false, busy: true }, flush: async () => { flushes++; } });
+  const toolbar = h.nodes().find((node) => node.type === 'ScrollView');
+  const buttons = h.nodes(toolbar).filter((node) => node.type === 'Pressable');
+  assert.deepEqual(buttons.map((node) => node.props.accessibilityLabel), ['Open menu', 'Previous checklist', 'Priority view. Go to top',
+    'Next checklist', 'Undo Context edit', 'Open Search', 'Sync attached calendars']);
+  assert.equal(buttons[2].props.children.props.name, 'checklist'); assert.equal(buttons[1].props.disabled, true);
+  assert.equal(buttons[4].props.disabled, false); h.press(buttons[4]); await h.settle(); assert.equal(undo, 1); assert.equal(h.calls.undo, 0);
+  h.nodes().find((node) => node.props.accessibilityLabel === 'Open menu').props.onPress(); h.render();
+  h.nodes().find((node) => node.props.accessibilityLabel === 'Redo Context edit').props.onPress(); h.advance(0); await h.settle();
+  assert.equal(redo, 1); assert.equal(h.calls.redo, 0); assert.equal(flushes, 0);
+});
+
+test('toolbar Search keeps its current-view callback while menu Search dispatches global Search only once', async () => {
+  const h = headerHarness(); h.nodes().find((node) => node.props.accessibilityLabel === 'Open Search').props.onPress();
+  assert.equal(h.calls.search, 1); assert.equal(h.calls.globalSearch, 0);
+  h.nodes().find((node) => node.props.accessibilityLabel === 'Open menu').props.onPress(); h.render();
+  const search = h.nodes().find((node) => node.props.accessibilityLabel === 'Search all Context');
+  search.props.onPress(); search.props.onPress(); assert.equal(h.calls.globalSearch, 0);
+  h.advance(0); await h.settle(); assert.equal(h.calls.globalSearch, 1); assert.equal(h.calls.search, 1);
+});
+
+test('Priority view chooser preserves its draft until its own acknowledgement and cancels a background continuation', async () => {
+  for (const background of [false, true]) {
+    let release; let saves = 0; const gate = new Promise((resolve) => release = resolve);
+    const priority = { listId: 'main', canUndo: false, canRedo: false, busy: false, undo: async () => false, redo: async () => false,
+      beforeLeave: async () => { saves++; return gate; } };
+    const h = headerHarness({ priority }); h.hold(h.binder()); await Promise.resolve();
+    assert.equal(saves, 1); assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
+    if (background) h.background(); release(true); await h.settle();
+    assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), !background);
   }
 });
 

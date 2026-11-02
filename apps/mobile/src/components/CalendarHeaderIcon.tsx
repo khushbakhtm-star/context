@@ -20,18 +20,21 @@ export function CalendarHeaderIcon({ name, active = false, issue = false }: {
     </> : name === 'sync' ? <>
       <View testID={active || issue ? 'sync-loop-closed' : 'sync-loop-open'} style={[styles.syncRing,
         { borderColor: syncColor }, !active && !issue && styles.syncOpen]} />
-      <View testID="sync-left-arrow" style={[styles.syncArrow, { left: -0.5, top: 11.75, backgroundColor: syncColor, transform: [{ rotate: '45deg' }] }]} />
-      <View testID="sync-left-arrow" style={[styles.syncArrow, { left: 2.5, top: 11.75, backgroundColor: syncColor, transform: [{ rotate: '-45deg' }] }]} />
-      <View testID="sync-right-arrow" style={[styles.syncArrow, { left: 17.5, top: 9.75, backgroundColor: syncColor, transform: [{ rotate: '-45deg' }] }]} />
-      <View testID="sync-right-arrow" style={[styles.syncArrow, { left: 20.5, top: 9.75, backgroundColor: syncColor, transform: [{ rotate: '45deg' }] }]} />
+      {/* Tips sit on the stroke's centerline at opposite ends of one diameter.
+          Every arm has the same length; the second arrow is a 180° copy. */}
+      <View testID="sync-left-arrow" style={[styles.syncArrow, { left: 1.75 - Math.SQRT2 - 2, top: 12 - Math.SQRT2 - 0.75, backgroundColor: syncColor, transform: [{ rotate: '45deg' }] }]} />
+      <View testID="sync-left-arrow" style={[styles.syncArrow, { left: 1.75 + Math.SQRT2 - 2, top: 12 - Math.SQRT2 - 0.75, backgroundColor: syncColor, transform: [{ rotate: '-45deg' }] }]} />
+      <View testID="sync-right-arrow" style={[styles.syncArrow, { left: 22.25 - Math.SQRT2 - 2, top: 12 + Math.SQRT2 - 0.75, backgroundColor: syncColor, transform: [{ rotate: '-45deg' }] }]} />
+      <View testID="sync-right-arrow" style={[styles.syncArrow, { left: 22.25 + Math.SQRT2 - 2, top: 12 + Math.SQRT2 - 0.75, backgroundColor: syncColor, transform: [{ rotate: '45deg' }] }]} />
       {issue ? <View testID="sync-issue-mark" style={styles.syncIssue}>
         <View testID="sync-issue-stem" style={[styles.syncIssueStem, { backgroundColor: syncColor }]} />
         <View testID="sync-issue-dot" style={[styles.syncIssueDot, { backgroundColor: syncColor }]} />
       </View> : null}
     </> : name === 'checklist' ? <>
-      {[3, 10, 17].map((top) => <View key={top}>
-        <View style={{ position: 'absolute', left: 1, top, width: 5, height: 5, borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 1 }} />
-        <View style={{ position: 'absolute', left: 10, top: top + 2, width: 13, height: 1.5, backgroundColor: colors.graphite, borderRadius: 1 }} />
+      <View style={styles.clipboardBody} /><View style={styles.clipboardClip} />
+      {[8, 13, 18].map((top) => <View key={top}>
+        <View style={[styles.clipboardCheck, { top }]} />
+        <View style={[styles.clipboardLine, { top: top + 1.5 }]} />
       </View>)}
     </> : name === 'print' ? <>
       <View style={styles.printPaperTop} /><View style={styles.printBody} />
@@ -63,6 +66,12 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   graphAxes: { position: 'absolute', left: 1, bottom: 1, width: 22, height: 22,
     borderLeftWidth: 1.5, borderBottomWidth: 1.5, borderColor: colors.graphite },
   graphBar: { position: 'absolute', bottom: 4, width: 3, borderRadius: 0.5, backgroundColor: colors.graphite },
+  clipboardBody: { position: 'absolute', left: 3, top: 3, width: 18, height: 20, borderWidth: 1.5,
+    borderColor: colors.graphite, borderRadius: 2.5 },
+  clipboardClip: { position: 'absolute', left: 8, top: 0.5, width: 8, height: 5, borderWidth: 1.5,
+    borderColor: colors.graphite, backgroundColor: colors.paper, borderRadius: 1.5 },
+  clipboardCheck: { position: 'absolute', left: 6.5, width: 3, height: 3, borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 0.5 },
+  clipboardLine: { position: 'absolute', left: 12, width: 6, height: 1.5, backgroundColor: colors.graphite, borderRadius: 0.75 },
   syncRing: { position: 'absolute', left: 1, top: 1, width: 22, height: 22,
     borderWidth: 1.5, borderRadius: 11 },
   syncOpen: { borderLeftColor: 'transparent', borderRightColor: 'transparent' },

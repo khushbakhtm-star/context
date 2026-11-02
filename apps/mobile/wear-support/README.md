@@ -20,10 +20,39 @@ note, intentional historical-minute edit, dictation or color picker retains its 
 minute and text; a new Now request waits for Save or Cancel. Saving a restored note keeps
 its original phone-version baseline rather than silently adopting a newer phone snapshot.
 
-The main ledger contains the date heading, Now, and the 1,440-minute list.
-Cancel or save the entry to browse. Scroll the list or use the touch bezel to step by a minute.
-Tap a historical minute to type with the installed watch keyboard or choose **Dictate** to
-start listening. In an automatic capture, **Type** opens that same minute's keyboard.
+The 1,440-minute ledger uses separate rounded cards with space between them. Each card
+shows the note first, then its time and date on the left and a pencil on the right. Long
+notes show the lines that fit and truncate the remaining preview; the pencil opens the
+complete minute note. A curved indicator on the right shows the list's scroll position.
+Cancel or save a capture to browse. Scroll the list or use the touch bezel to step by a
+minute. Tap a card or its **pencil** to type with the installed watch keyboard or choose
+**Dictate** to start listening. In an automatic capture, **Type** opens that same minute's keyboard.
+
+The three bottom controls are **Settings**, the solid **Now dot**, and **+**, from left
+to right. The dot returns to the actual current date and minute without starting a new
+microphone session. Tap a card's timestamp to choose a date with the existing date picker.
+The gear opens the local dictation silence-delay settings.
+
+**+** opens an Add text editor for one minute or a consecutive range. Its From and Through
+fields use explicit `YYYY-MM-DD` dates and `HH:mm` in 24-hour time. Through includes the
+whole selected minute, and the range can contain 1–1,440 minutes, including across midnight.
+The same text fills each selected minute while retaining its existing color. Different
+occupied text requires an explicit Replace confirmation; identical existing text is left
+alone. Cancel or invalid fields do not change minutes. The local range is committed as one
+atomic journal write after rechecking every selected minute's original cached and pending
+state. A phone edit, acknowledgement or conflict invalidates an old confirmation rather
+than silently replacing its baseline. The phone still receives the normal individual-minute
+operations, so delivery is not a single atomic phone transaction and conflicts remain for
+review on the phone.
+
+Fresh automatic entry prepares only the selected minute's baseline and an unattached draft
+before showing dictation. It does not build a hidden manual editor or render the entire
+ledger first. Coherent ledger/editor snapshots each read local storage once. Speech-provider
+availability is checked lazily during a permitted, visible capture and cached briefly in
+process memory; it stores availability flags, not speech or an Activity. These changes remove
+unnecessary app-side work; they do not establish measured watch/provider startup latency or
+make an unavailable offline speech model available.
+
 Context prefers on-device recognition when available and otherwise
 uses the installed system speech provider, which may need internet on the watch or paired
 phone. An unavailable on-device model falls back to system speech once; an actual speech
@@ -38,8 +67,8 @@ phone synchronization; a second manual Save is unnecessary. Canceled or blank di
 keeps the existing text. A local save failure retains the dictated words for retry. Capture
 receipts prevent a repeated result from adding another operation, including after a phone
 acknowledgement. Typed edits still use Save. The editor keeps its original date/minute
-while the clock changes. Tap the date heading to open a
-dialog with a `YYYY-MM-DD` field and previous/next day controls. Now returns to the current
+while the clock changes. Tap a minute's timestamp to open a
+dialog with a `YYYY-MM-DD` field and previous/next day controls. The Now dot returns to the current
 minute. Downloaded days remain available offline. An uncached day loads after the paired
 phone is running Context.
 
@@ -81,7 +110,7 @@ The config plugin generates `android/wear` from reviewed sources; the EAS profil
 tests; AGP 9 only creates unit tests for its selected test build type, which defaults to
 debug. Cloud-only `credentials.json` supplies
 the same remote signing key used by the phone. Independent watch identity comes from the
-strict `watch/version.json` metadata (0.1.15/code100016); phone version changes do not alter it.
+strict `watch/version.json` metadata (0.1.16/code100017); phone version changes do not alter it.
 Previous watch 0.1.9 used code100010. Watch and phone update artifacts remain separate.
 Release signing fails if those credentials
 are absent. Never create a new watch key, export credentials or change the watch package ID.

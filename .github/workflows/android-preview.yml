@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: Exact reviewed Context 0.1.35 source commit
+        description: Exact reviewed Context 0.1.36 source commit
         required: true
         default: 58c310a2a1a58d593f35fc3b6fcc6041c26a12c4
         type: string
@@ -103,7 +103,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: context-0.1.35-wear-phone-unsigned
+          name: context-0.1.36-wear-phone-unsigned
           path: ${{ runner.temp }}/context-android-preview/
           if-no-files-found: warn
           compression-level: 0

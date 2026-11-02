@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const model = require('../src/utils/checklist-flow.ts');
 const dragModel = require('../src/utils/checklist-drag.ts');
+const historyModel = require('../src/utils/checklist-history.ts');
 
 const task = (id, text, parentId = null, checked = false) => ({ id, text, parentId, checked, format: {} });
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -19,7 +20,14 @@ function harness(items, options = {}) {
   let conflicts = options.conflicts ?? []; const commands = []; const timers = new Map(); let nextTimer = 0;
   let pendingDelete;
   const beforeLeaveRef = { current: null };
+  const controlsRef = { current: null }; let historyState; let hideCompleted = Boolean(options.hideCompleted);
+  const receiveHistory = (value) => { historyState = value; };
+  const listId = options.listId ?? 'main';
+  const fullSnapshot = () => ({ ...clone(snapshot), listId, lists: [{ id: listId, name: options.name ?? 'Priority', taskCount: snapshot.flow.items.length }] });
   const keyboardListeners = new Map();
+  const lifecycleListeners = new Set();
+  const appState = { currentState: 'active', addEventListener(_event, listener) { lifecycleListeners.add(listener);
+    return { remove() { lifecycleListeners.delete(listener); } }; } };
   const root = { slots: [], cursor: 0, effects: [], dirty: true, tree: null, writes: 0 };
   let active = root;
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
@@ -44,23 +52,30 @@ function harness(items, options = {}) {
   const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View', 'Switch'].map((name) => [name, name]));
   Object.assign(native, { Animated: { View: 'AnimatedView', Value }, Keyboard: { dismiss() {}, addListener(name, listener) {
     keyboardListeners.set(name, listener); return { remove() { keyboardListeners.delete(name); } };
-  } },
+  } }, AppState: appState,
     Alert: { alert(_title, _body, actions) { const confirm = actions.find((action) => action.text === 'Delete')?.onPress;
       if (options.holdDelete) pendingDelete = confirm; else confirm?.(); } },
     PanResponder: { create: (config) => ({ panHandlers: { responder: config } }) },
     StyleSheet: { create: (styles) => styles, absoluteFill: {}, hairlineWidth: 0.5 } });
   const service = {
-    getChecklistFlow: async () => { if (failRead) throw Error('Invalid checklist'); return clone(snapshot); },
+    getChecklistFlow: async (requestedId) => { assert.equal(requestedId, listId); if (failRead) throw Error('Invalid checklist'); return fullSnapshot(); },
     getChecklistFlowRevision: async () => snapshot.revision,
     getChecklistFlowConflicts: async () => clone(conflicts),
-    changeChecklistFlow: async (command, expected) => {
+    changeChecklistFlow: async (command, expected, requestedId) => {
+      assert.equal(requestedId, listId);
       if (options.saveGate) await options.saveGate;
       if (snapshot.revision !== expected) throw Error('The checklist changed on another device. Refresh it before applying this edit.');
-      commands.push(clone(command)); snapshot = { flow: model.applyChecklistChange(snapshot.flow, command), revision: `edit_${++revision}` }; return clone(snapshot);
+      commands.push(clone(command)); snapshot = { flow: model.applyChecklistChange(snapshot.flow, command), revision: `edit_${++revision}` }; return fullSnapshot();
+    },
+    replaceChecklistList: async (requestedId, flow, expected) => {
+      assert.equal(requestedId, listId);
+      if (options.historyGate) await options.historyGate;
+      if (snapshot.revision !== expected) throw Error('The checklist changed on another device. Refresh it before applying this edit.');
+      commands.push({ type: 'restore', expected, listId: requestedId }); snapshot = { flow: clone(flow), revision: `history_${++revision}` }; return fullSnapshot();
     },
     restoreChecklistFlowConflict: async (document, expected) => {
       assert.equal(expected, snapshot.revision); snapshot = { flow: model.readChecklistFlow(document.value), revision: `restore_${++revision}` };
-      failRead = false; conflicts = []; return clone(snapshot);
+      failRead = false; conflicts = []; return fullSnapshot();
     },
     dismissChecklistFlowConflict: async (document) => { conflicts = conflicts.filter((item) => item.revision !== document.revision); },
   };
@@ -79,11 +94,13 @@ function harness(items, options = {}) {
       if (name === '../data/checklist-flow') return service;
       if (name === '../utils/checklist-flow') return model;
       if (name === '../utils/checklist-drag') return dragModel;
+      if (name === '../utils/checklist-history') return historyModel;
       throw Error('Unexpected checklist screen import: ' + name);
     } }, { filename });
   function render() { let iterations = 0;
     do { assert.ok(iterations++ < 12); active = root; root.cursor = 0; root.dirty = false;
-      root.tree = module.exports.ChecklistFlowScreen({ dataVersion, onDataChanged: () => { changed++; }, beforeLeaveRef });
+      root.tree = module.exports.ChecklistFlowScreen({ dataVersion, onDataChanged: () => { changed++; }, beforeLeaveRef,
+        listId, hideCompleted, controlsRef, onHistoryChange: receiveHistory });
       for (const effect of root.effects.splice(0)) effect();
     } while (root.dirty); return root.tree;
   }
@@ -99,8 +116,13 @@ function harness(items, options = {}) {
     remote(items) { snapshot = { flow: model.readChecklistFlow({ kind: 'checklistFlow', version: 1, items }), revision: 'remote' }; },
     async refresh() { dataVersion++; render(); await settle(); render(); },
     async leave() { const result = await beforeLeaveRef.current(); await settle(); render(); return result; },
+    setHideCompleted(value) { hideCompleted = value; render(); },
+    async history(action) { const pending = controlsRef.current[action](); render(); const result = await pending; await settle(); render(); return result; },
+    get historyState() { return historyState; },
     async confirmDelete() { assert.ok(pendingDelete); pendingDelete(); await settle(); render(); },
     keyboard() { keyboardListeners.get('keyboardDidShow')?.(); },
+    background() { appState.currentState = 'background'; for (const listener of lifecycleListeners) listener('background'); render(); },
+    foreground() { appState.currentState = 'active'; for (const listener of lifecycleListeners) listener('active'); render(); },
     nativeHandle(label) { const node = nodes().find((item) => typeof item.type === 'function' && item.type.name === 'TaskDragHandle' && item.props.label === label);
       assert.ok(node); const child = { slots: [], cursor: 0, effects: [] }; active = child; const result = node.type(node.props); active = root;
       return result.props.responder; },
@@ -116,11 +138,49 @@ test('native checkbox is single-tap, fades tasks, hides completion and resets ev
   assert.deepEqual(h.snapshot.flow.items.map((item) => item.checked), [true, true]);
   assert.equal(h.commands.length, 1); assert.equal(h.changed, 1);
   assert.ok(h.nodes().some((node) => Array.isArray(node.props.style) && node.props.style.some((value) => value?.opacity === 0.42)));
-  h.find('Hide completed tasks').props.onValueChange(true); h.render();
+  assert.equal(h.find('Hide completed tasks'), undefined, 'The preference is in Settings');
+  h.setHideCompleted(true);
   assert.equal(h.find('Complete Main task'), undefined);
   await h.press('Reset all task checks');
   assert.deepEqual(h.snapshot.flow.items.map((item) => item.checked), [false, false]);
   assert.ok(h.find('Complete Main task')); h.unmount();
+});
+
+test('Priority uses its selected list for edits and native Undo/Redo restores the complete task subtree', async () => {
+  const h = harness([task('parent', 'Family'), task('child', 'Call mum', 'parent')], { listId: 'family', name: 'Family plans' }); await h.ready();
+  assert.ok(h.nodes().some((node) => node.type === 'Text' && node.props.children === 'Family plans'));
+  assert.equal(h.nodes().some((node) => node.props.children === 'Add a task to begin'), false);
+  await h.press('Complete Family'); assert.equal(h.historyState.canUndo, true);
+  assert.equal(await h.history('undo'), true); assert.deepEqual(h.snapshot.flow.items.map((item) => item.checked), [false, false]);
+  assert.equal(h.historyState.canRedo, true);
+  assert.equal(await h.history('redo'), true); assert.deepEqual(h.snapshot.flow.items.map((item) => item.checked), [true, true]);
+  assert.equal(h.commands.filter((command) => command.type === 'restore').length, 2); h.unmount();
+});
+
+test('Priority Undo cannot overwrite a peer update and a refresh drops its stale local history', async () => {
+  const h = harness([task('task', 'Before')]); await h.ready(); await h.press('Edit task: Before'); h.setDraft('My edit'); await h.press('Save task');
+  assert.equal(h.historyState.canUndo, true); h.remote([task('task', 'Peer update')]);
+  assert.equal(await h.history('undo'), false); assert.equal(h.snapshot.flow.items[0].text, 'Peer update');
+  assert.equal(h.commands.filter((command) => command.type === 'restore').length, 0);
+  await h.refresh(); assert.equal(h.historyState.canUndo, false); assert.equal(h.historyState.canRedo, false); h.unmount();
+});
+
+test('Priority history stays unavailable during a text draft and becomes available after its own save', async () => {
+  const h = harness([task('task', 'Before')]); await h.ready(); await h.press('Complete Before'); await h.press('Edit task: Before');
+  h.setDraft('Not saved yet'); assert.equal(h.historyState.canUndo, false);
+  assert.equal(await h.history('undo'), false); assert.equal(h.snapshot.flow.items[0].text, 'Before');
+  await h.press('Save task'); assert.equal(h.historyState.canUndo, true); assert.equal(await h.history('undo'), true);
+  assert.equal(h.snapshot.flow.items[0].text, 'Before'); h.unmount();
+});
+
+test('a retained deletion prompt cannot write after backgrounding or unmounting Priority', async () => {
+  for (const lifecycle of ['background', 'unmount']) {
+    const h = harness([task('parent', 'Parent'), task('child', 'Child', 'parent')], { holdDelete: true }); await h.ready();
+    await h.press('Actions for Parent'); await h.press('Delete task');
+    h[lifecycle](); if (lifecycle === 'background') h.foreground();
+    await h.confirmDelete(); assert.equal(h.snapshot.flow.items.length, 2); assert.equal(h.commands.length, 0);
+    if (lifecycle !== 'unmount') h.unmount();
+  }
 });
 
 test('native row editing saves text and formatting and preserves minute-source metadata', async () => {

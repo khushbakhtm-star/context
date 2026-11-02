@@ -55,9 +55,9 @@ function fixture(t: TestContext, items = [item('parent_task', 'Prepare'), item('
 test('browser checks fade parent and subtasks, hide completed removes them, Reset restores all checks', async (t) => {
   const h = fixture(t); const checkbox = h.label('Complete: Prepare'); checkbox.checked = true; checkbox.onchange?.(); await h.ui.flush();
   assert.ok(h.flow.items.slice(0, 2).every((task) => task.checked)); assert.match(h.row('parent_task').className, /completed/);
-  const hide = h.label('Hide completed'); hide.checked = true; hide.onchange?.(); await h.ui.flush();
+  h.ui.setHideCompleted(true); await h.ui.flush();
   assert.equal(walk(h.host).filter((node) => node.dataset.taskId).length, 1);
-  await h.click('Reset all checks'); assert.ok(h.flow.items.every((task) => !task.checked)); assert.equal(walk(h.host).filter((node) => node.dataset.taskId).length, 3); assert.deepEqual(h.errors, []);
+  await h.ui.resetChecks(); await h.ui.flush(); assert.ok(h.flow.items.every((task) => !task.checked)); assert.equal(walk(h.host).filter((node) => node.dataset.taskId).length, 3); assert.deepEqual(h.errors, []);
 });
 
 test('task options apply typed formatting and accessible subtree reordering with one action', async (t) => {
@@ -74,6 +74,12 @@ test('pointer drag moves a parent together with its nested task', async (t) => {
 
 test('stale row actions do not replace newly downloaded task content or formatting', async (t) => {
   const h = fixture(t); h.changeRemote(); await h.click('Bold'); assert.match(h.errors[0]!, /changed/); assert.equal(h.flow.items[0]!.text, 'New remote words'); assert.equal(h.flow.items[0]!.format.bold, undefined); assert.equal(h.commands.length, 0);
+});
+
+test('a peer revision arriving while a row command yields for draft flush never becomes authority for the old command', async (t) => {
+  const h = fixture(t); h.label('Bold').onclick?.(); await Promise.resolve(); h.changeRemote(); await h.ui.flush();
+  assert.equal(h.flow.items[0]!.text, 'New remote words'); assert.equal(h.flow.items[0]!.format.bold, undefined);
+  assert.equal(h.commands.length, 0); assert.match(h.errors[0]!, /changed/);
 });
 
 test('saving task text keeps text as plain text and opens source navigation without changing the source', async (t) => {
@@ -97,20 +103,20 @@ test('a failed draft save keeps the exact editable words visible rather than rep
 });
 
 test('a queued composer command cannot copy task text into a different newly unlocked account with the same absent revision', async (t) => {
-  const h = fixture(t, []); h.changeAccount(); h.ui.clear(); h.ui.refresh();
+  const h = fixture(t, []); h.changeAccount(); h.ui.clear(); h.ui.refresh(); await h.ui.openComposer();
   const composer = walk(h.host).find((node) => node.className === 'checklist-add')!; const input = composer.children[0]!; input.value = 'Private task from first account';
   composer.onsubmit?.({ preventDefault() {} }); h.changeAccount(); await assert.rejects(h.ui.flush(), /account changed/);
   assert.equal(h.flow.items.length, 0); assert.equal(h.commands.length, 0); assert.match(h.errors[0]!, /changed/);
 });
 
 test('a remote refresh preserves the new-task composer text, and flushing adds it without replacing incoming tasks', async (t) => {
-  const h = fixture(t); const input = h.label('Add a task'); input.value = 'Unsaved new task'; input.oninput?.(); assert.ok(h.ui.hasDraft()); h.changeRemote(); h.ui.refresh();
+  const h = fixture(t); await h.ui.openComposer(); const input = h.label('Add a task'); input.value = 'Unsaved new task'; input.oninput?.(); assert.ok(h.ui.hasDraft()); h.changeRemote(); h.ui.refresh();
   const retained = h.label('Add a task'); assert.equal(retained, input); assert.equal(retained.value, 'Unsaved new task');
   await h.ui.flush(); assert.equal(h.flow.items[0]!.text, 'New remote words'); assert.equal(h.flow.items.at(-1)!.text, 'Unsaved new task'); assert.equal(h.ui.hasDraft(), false); assert.deepEqual(h.errors, []);
 });
 
 test('typing while a composer write is pending updates the same new task instead of losing the tail or creating duplicates', async (t) => {
-  const h = fixture(t); const input = h.label('Add a task'); input.value = 'First'; input.oninput?.(); const gate = h.gateNext(); const pending = h.ui.flush(); await gate.started;
+  const h = fixture(t); await h.ui.openComposer(); const input = h.label('Add a task'); input.value = 'First'; input.oninput?.(); const gate = h.gateNext(); const pending = h.ui.flush(); await gate.started;
   input.value = 'First and newest tail'; input.oninput?.(); gate.release(); await pending;
   assert.equal(h.flow.items.length, 4); assert.equal(h.flow.items.at(-1)!.text, 'First and newest tail'); assert.deepEqual(h.commands.map((command) => command.type), ['add', 'edit']); assert.equal(h.ui.hasDraft(), false);
 });
@@ -128,10 +134,28 @@ test('a peer revision arriving between pointerdown and the ready microtask never
 });
 
 test('a late successful acknowledgement from a locked account cannot clear the newly unlocked account composer', async (t) => {
-  const h = fixture(t); const first = h.label('Add a task'); first.value = 'First account private task'; first.oninput?.();
+  const h = fixture(t); await h.ui.openComposer(); const first = h.label('Add a task'); first.value = 'First account private task'; first.oninput?.();
   const gate = h.gateAcknowledgementNext(); const oldSave = h.ui.flush(); await gate.started;
-  h.changeAccount(); h.ui.clear(); h.ui.refresh(); const second = h.label('Add a task'); second.value = 'Second account unsaved task'; second.oninput?.();
+  h.changeAccount(); h.ui.clear(); h.ui.refresh(); await h.ui.openComposer(); const second = h.label('Add a task'); second.value = 'Second account unsaved task'; second.oninput?.();
   gate.release(); await oldSave;
   assert.equal(h.flow.items.length, 0); assert.equal(h.label('Add a task').value, 'Second account unsaved task'); assert.ok(h.ui.hasDraft());
   await h.ui.flush(); assert.deepEqual(h.flow.items.map((task) => task.text), ['Second account unsaved task']); assert.deepEqual(h.errors, []);
+});
+
+test('empty Priority has only its floating add action until the user opens the composer', async (t) => {
+  const h = fixture(t, []);
+  assert.equal(walk(h.host).some((node) => node.tag === 'textarea'), false);
+  assert.equal(walk(h.host).some((node) => /Add your first|Checklist task flow|Hide completed|Back to calendar/.test(node.textContent)), false);
+  assert.equal(h.label('Add a task').className, 'priority-add');
+  h.label('Add a task').onclick?.(); await h.ui.flush();
+  const input = h.label('Add a task'); assert.equal(input.tag, 'textarea');
+  input.value = 'New task from plus'; input.oninput?.(); await h.ui.flush();
+  assert.deepEqual(h.flow.items.map((task) => task.text), ['New task from plus']);
+  assert.equal(h.label('Add a task').className, 'priority-add');
+});
+
+test('an old queued row action cannot apply to another selected list with the same task identities', async (t) => {
+  const h = fixture(t); const button = h.label('Bold'); h.changeAccount();
+  button.onclick?.(); await h.ui.flush();
+  assert.equal(h.commands.length, 0); assert.match(h.errors[0]!, /changed/);
 });

@@ -38,11 +38,13 @@ import {
   reconcileLinkedCalendarColors,
   requestCalendarAccess,
 } from './src/services/calendar';
-import { SearchScreen } from './src/screens/SearchScreen';
+import { SearchScreen, type SearchScope } from './src/screens/SearchScreen';
 import { AccountsScreen } from './src/screens/AccountsScreen';
 import { CategoriesScreen } from './src/screens/CategoriesScreen';
 import { ReportsScreen } from './src/screens/ReportsScreen';
-import { ChecklistFlowScreen } from './src/screens/ChecklistFlowScreen';
+import { ChecklistFlowScreen, type PriorityHistoryState, type PriorityScreenControls } from './src/screens/ChecklistFlowScreen';
+import { createChecklistList, getChecklistFlow, renameChecklistList } from './src/data/checklist-flow';
+import type { ChecklistListSummary } from './src/utils/checklist-flow';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { TodayScreen } from './src/screens/TodayScreen';
 import { DateSelectionPopup } from './src/components/DateSelectionPopup';
@@ -160,7 +162,22 @@ function AppController() {
   const [initializationError, setInitializationError] = useState<string | null>(null);
   const [initializationAttempt, setInitializationAttempt] = useState(0);
   const [tab, setTab] = useState<Tab>('today');
+  const tabRef = useRef(tab); tabRef.current = tab;
+  const primaryTabRef = useRef<'today' | 'checklist'>('today');
+  if (tab === 'today' || tab === 'checklist') primaryTabRef.current = tab;
   const checklistBeforeLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
+  const priorityControlsRef = useRef<PriorityScreenControls | null>(null);
+  const [priorityHistory, setPriorityHistory] = useState<PriorityHistoryState>({ canUndo: false, canRedo: false, busy: false });
+  const [selectedPriorityListId, setSelectedPriorityListId] = useState('main');
+  const selectedPriorityListIdRef = useRef(selectedPriorityListId); selectedPriorityListIdRef.current = selectedPriorityListId;
+  const [priorityHideCompleted, setPriorityHideCompleted] = useState(false);
+  const [priorityCatalog, setPriorityCatalog] = useState<{ revision: string | null; lists: ChecklistListSummary[] } | null>(null);
+  const [priorityCatalogError, setPriorityCatalogError] = useState<string | null>(null);
+  const priorityCatalogRequest = useRef(0);
+  const priorityMutationSequence = useRef(0);
+  const [priorityFocusTaskId, setPriorityFocusTaskId] = useState<string | null>(null);
+  const consumePriorityFocus = useCallback(() => setPriorityFocusTaskId(null), []);
+  const [searchScope, setSearchScope] = useState<SearchScope | undefined>(undefined);
   const [dayCount, setDayCount] = useState<DayCount>(1);
   const [viewMode, setViewMode] = useState<CalendarViewMode>('day');
   const [viewChanging, setViewChanging] = useState(false);
@@ -309,13 +326,15 @@ function AppController() {
       try {
         await initializeDatabase();
         await listCategories();
-        const [savedPreferences, savedDayCount, savedZoom, savedClockFormat, savedSelectedDates, savedViewMode] = await Promise.all([
+        const [savedPreferences, savedDayCount, savedZoom, savedClockFormat, savedSelectedDates, savedViewMode, savedPriorityList, savedHideCompleted] = await Promise.all([
           getSetting<CalendarPreferences>('calendar.preferences', DEFAULT_PREFERENCES),
           getSetting<unknown>('calendar.day-count', 1),
           getSetting<unknown>('calendar.zoom', 1),
           getSetting<unknown>('calendar.clock-format', '12h'),
           getSetting<unknown>('calendar.selected-date-keys', null),
           getSetting<unknown>('calendar.view-mode', null),
+          getSetting<unknown>('priority.selected-list-id', 'main'),
+          getSetting<unknown>('priority.hide-completed', false),
         ]);
         const directWrites = await hasConfiguredAccountCalendarWriter();
         setAccountCalendarWrites(directWrites);
@@ -338,6 +357,8 @@ function AppController() {
         setFocusRequest({ ...restoredFocus, token: ++focusSequence.current, openEditor: false });
         setCalendarZoom(normalizeCalendarZoom(savedZoom));
         setClockFormat(savedClockFormat === '24h' ? '24h' : '12h');
+        setSelectedPriorityListId(typeof savedPriorityList === 'string' && savedPriorityList ? savedPriorityList : 'main');
+        setPriorityHideCompleted(savedHideCompleted === true);
         await refreshCalendars();
         if (mounted) setReady(true);
       } catch (error) {
@@ -352,6 +373,25 @@ function AppController() {
       mounted = false;
     };
   }, [initializationAttempt, refreshCalendars]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const request = ++priorityCatalogRequest.current;
+    void getChecklistFlow().then((next) => {
+      if (!controllerMountedRef.current || request !== priorityCatalogRequest.current) return;
+      setPriorityCatalog({ revision: next.revision, lists: next.lists }); setPriorityCatalogError(null);
+      // A peer may restore a collection without the list currently being edited.
+      // Keep that editor mounted so its unsaved words can be recovered or cancelled.
+      if (tabRef.current !== 'checklist' && !next.lists.some((list) => list.id === selectedPriorityListIdRef.current)) {
+        setSelectedPriorityListId(next.listId);
+        void setSetting('priority.selected-list-id', next.listId).catch(() => undefined);
+      }
+    }).catch((failure) => {
+      if (controllerMountedRef.current && request === priorityCatalogRequest.current)
+        setPriorityCatalogError(failure instanceof Error ? failure.message : 'Priority lists could not load.');
+    });
+    return () => { priorityCatalogRequest.current++; };
+  }, [ready, dataVersion]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
@@ -580,6 +620,10 @@ function AppController() {
       // Navigation can unmount the minute editor. Keep its draft in place if saving fails.
       await awaitCalendarTransition(flushInlineMinutes(), controller.signal);
       if (!current()) throw new CalendarTransitionCancelled();
+      if (tab === 'checklist' && checklistBeforeLeaveRef.current) {
+        if (!await awaitCalendarTransition(checklistBeforeLeaveRef.current(), controller.signal)) return;
+        if (!current()) throw new CalendarTransitionCancelled();
+      }
       if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
         throw new Error('Your current minute could not be saved. Try again.');
       }
@@ -647,10 +691,61 @@ function AppController() {
   }
 
   async function returnToCalendar() {
-    if (tab === 'checklist' && checklistBeforeLeaveRef.current && !await checklistBeforeLeaveRef.current()) return;
-    if (!controllerMountedRef.current) return;
-    setFocusRequest({ ...calendarFocusRef.current, token: ++focusSequence.current, openEditor: false });
-    setTab('today');
+    return transitionFromCalendar(() => {
+      const target = tab === 'checklist' ? 'today' : primaryTabRef.current;
+      if (target === 'today') setFocusRequest({ ...calendarFocusRef.current, token: ++focusSequence.current, openEditor: false });
+      setTab(target);
+    }, 'Could not return to calendar');
+  }
+
+  function resolvePriorityList(id: string) {
+    setSelectedPriorityListId(id); setPriorityFocusTaskId(null);
+    void setSetting('priority.selected-list-id', id).catch(() => undefined);
+  }
+  function switchPriorityList(direction: -1 | 1) {
+    const lists = priorityCatalog?.lists ?? []; const index = lists.findIndex((list) => list.id === selectedPriorityListId);
+    const next = index < 0 ? direction === 1 ? lists[0] : undefined : lists[index + direction]; if (!next) return;
+    return transitionFromCalendar(async () => {
+      await setSetting('priority.selected-list-id', next.id); setSelectedPriorityListId(next.id); setPriorityFocusTaskId(null);
+    }, 'Could not change Priority list');
+  }
+  async function createPriorityList(name: string, expectedRevision: string | null) {
+    if (!priorityCatalog) throw new Error('Wait for Priority lists to load.');
+    if (!controllerMountedRef.current || tabRef.current !== 'settings' || AppState.currentState !== 'active') throw new Error('Open Settings to create a checklist.');
+    const sequence = ++priorityMutationSequence.current; const epoch = lifecycleEpochRef.current;
+    const transition = transitionSequenceRef.current; priorityCatalogRequest.current++;
+    const next = await createChecklistList(name, expectedRevision);
+    priorityCatalogRequest.current++;
+    if (controllerMountedRef.current && sequence === priorityMutationSequence.current && epoch === lifecycleEpochRef.current &&
+        transition === transitionSequenceRef.current && tabRef.current === 'settings' && AppState.currentState === 'active') {
+      setPriorityCatalog({ revision: next.revision, lists: next.lists }); setPriorityCatalogError(null); resolvePriorityList(next.listId);
+    }
+    dataChanged();
+  }
+  async function renamePriorityList(id: string, name: string, expectedRevision: string | null) {
+    if (!priorityCatalog) throw new Error('Wait for Priority lists to load.');
+    if (!controllerMountedRef.current || tabRef.current !== 'settings' || AppState.currentState !== 'active') throw new Error('Open Settings to rename a checklist.');
+    const sequence = ++priorityMutationSequence.current; const epoch = lifecycleEpochRef.current;
+    const transition = transitionSequenceRef.current; priorityCatalogRequest.current++;
+    const next = await renameChecklistList(id, name, expectedRevision);
+    priorityCatalogRequest.current++;
+    if (controllerMountedRef.current && sequence === priorityMutationSequence.current && epoch === lifecycleEpochRef.current &&
+        transition === transitionSequenceRef.current && tabRef.current === 'settings' && AppState.currentState === 'active') {
+      setPriorityCatalog({ revision: next.revision, lists: next.lists }); setPriorityCatalogError(null);
+    }
+    dataChanged();
+  }
+  async function changePriorityHideCompleted(value: boolean) {
+    await setSetting('priority.hide-completed', value);
+    if (controllerMountedRef.current) setPriorityHideCompleted(value);
+  }
+  function openSearch(global = false) {
+    const scope: SearchScope | undefined = global ? undefined : tab === 'checklist'
+      ? { kind: 'priority', listId: selectedPriorityListId, hideCompleted: priorityHideCompleted } : { kind: 'calendar', dates: [...overviewDates] };
+    return transitionFromCalendar(() => { setSearchScope(scope); setTab('search'); }, 'Could not open Search');
+  }
+  function openPriorityResult(result: { listId: string; taskId: string }) {
+    resolvePriorityList(result.listId); setPriorityFocusTaskId(result.taskId); setTab('checklist');
   }
 
   function openCalendarMinute(day: string, minute: number) {
@@ -1012,6 +1107,7 @@ function AppController() {
       <ApplicationFrame
         ready={ready}
         tab={tab}
+        returnView={primaryTabRef.current}
         onReturnToCalendar={returnToCalendar}
       >
         {!ready ? (
@@ -1024,17 +1120,28 @@ function AppController() {
             <ReleaseUpdateNotice updates={releaseUpdates} />
             {printPreparing ? <PrintPreparationNotice action={printPreparationAction} onCancel={() => printAbortRef.current?.abort()} /> : null}
             <View style={{ flex: 1 }} pointerEvents={viewChanging ? 'none' : 'auto'}>
-              {tab === 'today' ? <>
-                <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void navigate('search')}
+              {tab === 'today' || tab === 'checklist' ?
+                <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void openSearch()}
+                  onOpenGlobalSearch={() => void openSearch(true)}
                   onPrint={() => void openPrintOptions()}
                   onSync={() => void synchronizeCalendar()} syncing={manualSyncing || accountSyncStatus.running} syncError={calendarSyncError}
                   syncDetails={calendarSyncDetails} syncTimingDetails={calendarSyncTimingDetails}
-                  onOpenReports={() => void navigate('reports')} onJumpToNow={jumpToCurrentMinute}
+                  onOpenReports={() => void navigate('reports')} onJumpToNow={tab === 'checklist'
+                    ? () => { void transitionFromCalendar(() => priorityControlsRef.current?.jumpToTop(), 'Could not finish task'); } : jumpToCurrentMinute}
                   onOpenChecklist={() => void navigate('checklist')}
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
-                  canGoPrevious={previousView != null} canGoNext={nextView != null}
-                  onPrevious={() => shiftCalendarView(previousView)} onNext={() => shiftCalendarView(nextView)}
-                  onOpenDatePicker={() => void transitionFromCalendar(() => setDatePickerOpen(true), 'Could not choose dates')} />
+                  canGoPrevious={tab === 'checklist' ? Boolean(priorityCatalog && priorityCatalog.lists.findIndex((list) => list.id === selectedPriorityListId) > 0) : previousView != null}
+                  canGoNext={tab === 'checklist' ? Boolean(priorityCatalog && priorityCatalog.lists.length > 0 &&
+                    (priorityCatalog.lists.every((list) => list.id !== selectedPriorityListId) ||
+                      priorityCatalog.lists.some((list, index) => list.id === selectedPriorityListId && index < priorityCatalog.lists.length - 1))) : nextView != null}
+                  onPrevious={() => { if (tab === 'checklist') void switchPriorityList(-1); else void shiftCalendarView(previousView); }}
+                  onNext={() => { if (tab === 'checklist') void switchPriorityList(1); else void shiftCalendarView(nextView); }}
+                  priority={tab === 'checklist' ? { ...priorityHistory, listId: selectedPriorityListId,
+                    undo: () => priorityControlsRef.current?.undo() ?? Promise.resolve(false),
+                    redo: () => priorityControlsRef.current?.redo() ?? Promise.resolve(false),
+                    beforeLeave: () => checklistBeforeLeaveRef.current?.() ?? Promise.resolve(true) } : undefined}
+                  onOpenDatePicker={() => void transitionFromCalendar(() => setDatePickerOpen(true), 'Could not choose dates')} /> : null}
+              {tab === 'today' ? <>
                 <CalendarPeriodSwipe scope={viewKind + '|' + activeDate + '|' + (selectedDateKeys?.join(',') ?? '')}
                   enabled={viewKind !== 'minutes' && viewKind !== 'year' && !viewChanging && !datePickerOpen}
                   onPage={(direction) => void swipeCalendarPeriod(direction)}>
@@ -1086,10 +1193,13 @@ function AppController() {
               {tab === 'reports' ? <ReportsScreen dataVersion={dataVersion} initialDate={activeDate}
                 initialSelectedDates={selectedDateKeys}
                 metric={dashboardMetric} onMetricChange={setDashboardMetric} /> : null}
-              {tab === 'checklist' ? <ChecklistFlowScreen dataVersion={dataVersion} onDataChanged={dataChanged}
+              {tab === 'checklist' ? <ChecklistFlowScreen key={selectedPriorityListId} listId={selectedPriorityListId}
+                dataVersion={dataVersion} onDataChanged={dataChanged} hideCompleted={priorityHideCompleted}
+                controlsRef={priorityControlsRef} onHistoryChange={setPriorityHistory} onListResolved={resolvePriorityList}
+                focusTaskId={priorityFocusTaskId} onFocusConsumed={consumePriorityFocus}
                 beforeLeaveRef={checklistBeforeLeaveRef} /> : null}
               {tab === 'search' ? (
-                <SearchScreen dataVersion={dataVersion} onOpenResult={openSearchResult} />
+                <SearchScreen dataVersion={dataVersion} scope={searchScope} onOpenResult={openSearchResult} onOpenTask={openPriorityResult} />
               ) : null}
               {tab === 'settings' ? (
                 <SettingsScreen
@@ -1105,6 +1215,10 @@ function AppController() {
                   clockFormat={clockFormat}
                   onClockFormatChange={changeClockFormat}
                   updates={releaseUpdates}
+                  priorityLists={priorityCatalog?.lists} priorityHideCompleted={priorityHideCompleted}
+                  priorityRevision={priorityCatalog?.revision}
+                  priorityError={priorityCatalogError} onPriorityHideCompletedChange={changePriorityHideCompleted}
+                  onCreatePriorityList={createPriorityList} onRenamePriorityList={renamePriorityList}
                 />
               ) : null}
               {tab === 'accounts' ? <AccountsScreen onDataChanged={dataChanged} /> : null}
@@ -1133,11 +1247,12 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onOpenChecklist, onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
-  viewMode, viewChanging, onViewModeChange }: {
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSearch, onOpenReports, onOpenChecklist, onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+  viewMode, viewChanging, onViewModeChange, priority }: {
   onOpenSettings: () => void;
   onPrint: () => void;
   onOpenSearch: () => void;
+  onOpenGlobalSearch: () => void;
   onOpenReports: () => void;
   onOpenChecklist: () => void;
   onSync: () => void;
@@ -1154,6 +1269,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   viewMode: CalendarViewMode;
   viewChanging: boolean;
   onViewModeChange: (mode: CalendarViewMode) => Promise<void>;
+  priority?: PriorityHistoryState & { listId: string; undo: () => Promise<boolean>; redo: () => Promise<boolean>; beforeLeave: () => Promise<boolean> };
 }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -1172,7 +1288,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const [gearMenuTop, setGearMenuTop] = useState(48);
   const [gearMenuLeft, setGearMenuLeft] = useState(8);
   const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
-  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates' | 'checklist'; sequence: number } | null>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates' | 'checklist' | 'search'; sequence: number } | null>(null);
   const gearVisibleRef = useRef(false);
   const gearClosingRef = useRef(false);
   const headerMountedRef = useRef(true);
@@ -1184,7 +1300,8 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const [availableWidth, setAvailableWidth] = useState(width);
   const controlWidth = Math.max(40, Math.min(44, availableWidth / 7));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
-  const navigationBusy = viewChanging || historyPending || history.busy;
+  const headerHistory = priority ?? history;
+  const navigationBusy = viewChanging || historyPending || headerHistory.busy;
   const hasSyncDetails = Boolean(syncDetails || syncError || syncing);
   const showSyncDetails = () => {
     const detail = typeof syncDetails === 'function' ? syncDetails() : syncDetails;
@@ -1204,6 +1321,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   };
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
+  const priorityModeRef = useRef(Boolean(priority)); priorityModeRef.current = Boolean(priority);
   const binderActions = useRef({ single: () => {}, long: () => {} });
   const binderPress = useMemo(() => createCalendarBinderPress({ allowed: () => headerMayNavigate(),
     single: () => binderActions.current.single(),
@@ -1235,7 +1353,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
 
   function headerMayNavigate() {
     return headerMountedRef.current && AppState.currentState === 'active' && !navigationBusyRef.current &&
-      !historyOperation.current && !spreadsheetEditor.snapshot().busy && !dispatchingGearAction.current && !preparingViews.current;
+      !historyOperation.current && (priorityModeRef.current || !spreadsheetEditor.snapshot().busy) && !dispatchingGearAction.current && !preparingViews.current;
   }
 
   useEffect(() => {
@@ -1243,7 +1361,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     return () => { headerMountedRef.current = false; invalidateMenus(false); };
   }, []);
 
-  useEffect(() => { invalidateMenus(); }, [width, viewMode]);
+  useEffect(() => { invalidateMenus(); }, [width, viewMode, priority?.listId]);
   // Dismissing an open keyboard can change only the window height. Cancel a
   // pending tap, but keep the dropdown the user just requested visible.
   useEffect(() => { binderPress.cancel(); }, [height]);
@@ -1260,6 +1378,13 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   }, []);
 
   async function changeHistory(action: 'undo' | 'redo') {
+    if (priority) {
+      if (viewChanging || historyOperation.current || priority.busy || !(action === 'undo' ? priority.canUndo : priority.canRedo)) return;
+      binderPress.cancel(); historyOperation.current = true; setHistoryPending(true); Keyboard.dismiss();
+      try { await (action === 'undo' ? priority.undo() : priority.redo()); }
+      finally { historyOperation.current = false; if (headerMountedRef.current) setHistoryPending(false); }
+      return;
+    }
     const snapshot = spreadsheetEditor.snapshot();
     if (viewChanging || historyOperation.current || snapshot.busy || !(action === 'undo' ? snapshot.canUndo : snapshot.canRedo)) return;
     binderPress.cancel();
@@ -1311,9 +1436,12 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     const sequence = menuRequestSequence.current;
     Keyboard.dismiss(); preparingViews.current = true;
     try {
-      await flushInlineMinutes();
-      if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
-        throw new Error('Your current minute could not be saved. Try again.');
+      if (priority) { if (!await priority.beforeLeave()) return; }
+      else {
+        await flushInlineMinutes();
+        if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
+          throw new Error('Your current minute could not be saved. Try again.');
+        }
       }
     } catch (error) {
       if (headerMountedRef.current && sequence === menuRequestSequence.current && AppState.currentState === 'active')
@@ -1337,7 +1465,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     Keyboard.dismiss();
     gearMenuAnchor.current?.measureInWindow((x, y, _anchorWidth, anchorHeight) => {
       if (sequence !== menuRequestSequence.current || !headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
-      setGearMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 248)));
+      setGearMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 296)));
       setGearMenuLeft(Math.max(8, Math.min(x, width - 216)));
       gearVisibleRef.current = true;
       setGearMenuOpen(true);
@@ -1356,6 +1484,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     else if (pending.action === 'redo') void changeHistory('redo');
     else if (pending.action === 'dates') onOpenDatePicker();
     else if (pending.action === 'checklist') onOpenChecklist();
+    else if (pending.action === 'search') onOpenGlobalSearch();
     else onOpenReports();
     // Also release the local lock when a transition finishes within the same React batch.
     gearActionFrame.current = requestAnimationFrame(() => {
@@ -1363,9 +1492,9 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       if (headerMountedRef.current && !navigationBusyRef.current) dispatchingGearAction.current = false;
     });
   };
-  const chooseGearAction = (action: 'settings' | 'print' | 'redo' | 'reports') => {
+  const chooseGearAction = (action: 'settings' | 'print' | 'redo' | 'reports' | 'search') => {
     if (!headerMayNavigate() || !gearVisibleRef.current || gearClosingRef.current || pendingGearAction.current) return;
-    if (action === 'redo' && !spreadsheetEditor.snapshot().canRedo) return;
+    if (action === 'redo' && !(priority ? priority.canRedo : spreadsheetEditor.snapshot().canRedo)) return;
     const sequence = ++menuRequestSequence.current;
     pendingGearAction.current = { action, sequence };
     gearVisibleRef.current = false;
@@ -1388,7 +1517,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     });
   };
   binderActions.current = { single: onJumpToNow, long: openViews };
-  const viewLabel = CALENDAR_VIEW_OPTIONS.find((option) => option.mode === viewMode)?.label ?? 'Day';
+  const viewLabel = priority ? 'Priority' : CALENDAR_VIEW_OPTIONS.find((option) => option.mode === viewMode)?.label ?? 'Day';
 
   return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
     keyboardShouldPersistTaps="always" keyboardDismissMode="none" onScrollBeginDrag={() => binderPress.cancelPress()}
@@ -1402,15 +1531,15 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       <CalendarHeaderIcon name="menu" />
     </Pressable>
     </View>
-    <Pressable accessibilityRole="button" accessibilityLabel="Previous calendar view"
+    <Pressable accessibilityRole="button" accessibilityLabel={priority ? 'Previous checklist' : 'Previous calendar view'}
       accessibilityState={{ disabled: !canGoPrevious || navigationBusy }} disabled={!canGoPrevious || navigationBusy}
       onPressIn={() => binderPress.cancel()} onPress={() => { binderPress.cancel(); onPrevious(); }}
       style={[controlStyle, (!canGoPrevious || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
     </Pressable>
     <View ref={viewMenuAnchor} collapsable={false}>
-      <Pressable accessibilityRole="button" accessibilityLabel={`${viewLabel} view. Go to now`}
-        accessibilityHint="Tap to go to the current minute. Press and hold to choose a view."
+      <Pressable accessibilityRole="button" accessibilityLabel={priority ? 'Priority view. Go to top' : `${viewLabel} view. Go to now`}
+        accessibilityHint={priority ? 'Tap to go to the top of this checklist. Press and hold to choose a view.' : 'Tap to go to the current minute. Press and hold to choose a view.'}
         accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy, busy: viewChanging }} disabled={navigationBusy}
         accessibilityActions={[{ name: 'showViews', label: 'Choose calendar view' }, { name: 'goToNow', label: 'Go to the current minute' }]}
         onAccessibilityAction={(event) => {
@@ -1422,19 +1551,19 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
         onLongPress={() => binderPress.longPress()} delayLongPress={450}
         onTouchEnd={() => binderPress.touchEnd()} onTouchCancel={() => binderPress.cancelPress()}
         onPress={() => binderPress.press()} style={controlStyle}>
-        <CalendarViewIcon mode={viewMode} currentDate={current} />
+        {priority ? <CalendarHeaderIcon name="checklist" /> : <CalendarViewIcon mode={viewMode} currentDate={current} />}
       </Pressable>
     </View>
-    <Pressable accessibilityRole="button" accessibilityLabel="Next calendar view"
+    <Pressable accessibilityRole="button" accessibilityLabel={priority ? 'Next checklist' : 'Next calendar view'}
       accessibilityState={{ disabled: !canGoNext || navigationBusy }} disabled={!canGoNext || navigationBusy}
       onPressIn={() => binderPress.cancel()} onPress={() => { binderPress.cancel(); onNext(); }}
       style={[controlStyle, (!canGoNext || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>›</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Undo Context edit"
-      accessibilityState={{ disabled: !history.canUndo || navigationBusy }}
-      disabled={!history.canUndo || navigationBusy} onPressIn={() => binderPress.cancel()} onPress={() => void changeHistory('undo')}
-      style={[controlStyle, (!history.canUndo || navigationBusy) && styles.disabledCalendarNavigation]}>
+      accessibilityState={{ disabled: !headerHistory.canUndo || navigationBusy }}
+      disabled={!headerHistory.canUndo || navigationBusy} onPressIn={() => binderPress.cancel()} onPress={() => void changeHistory('undo')}
+      style={[controlStyle, (!headerHistory.canUndo || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.historyArrow}>↶</Text>
     </Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Open Search"
@@ -1478,12 +1607,17 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Print</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
-              accessibilityState={{ disabled: !history.canRedo || navigationBusy }} disabled={!history.canRedo || navigationBusy}
+              accessibilityState={{ disabled: !headerHistory.canRedo || navigationBusy }} disabled={!headerHistory.canRedo || navigationBusy}
               onPress={() => chooseGearAction('redo')} style={[styles.viewOption,
-                (!history.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
+                (!headerHistory.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
               <Text accessible={false} importantForAccessibility="no" allowFontScaling={false}
                 style={[styles.historyArrow, { width: 24, textAlign: 'center' }]}>↷</Text>
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Redo</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Search all Context"
+              onPress={() => chooseGearAction('search')} style={styles.viewOption}>
+              <CalendarHeaderIcon name="search" />
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Search</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Open Settings"
               onPress={() => chooseGearAction('settings')} style={styles.viewOption}>
@@ -1503,7 +1637,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
           maxHeight: Math.max(44, height - viewMenuTop - 8) }]}>
           <ScrollView keyboardShouldPersistTaps="always" keyboardDismissMode="none">
             {CALENDAR_VIEW_OPTIONS.map((option) => {
-              const selected = viewMode === option.mode || (viewMode === 'three-days' && option.mode === 'day');
+              const selected = !priority && (viewMode === option.mode || (viewMode === 'three-days' && option.mode === 'day'));
               return <Pressable key={option.mode} accessibilityRole="button" accessibilityLabel={`${option.label} view`}
                 accessibilityState={{ selected }} onPress={() => {
                   if (!headerMayNavigate()) return;
@@ -1516,10 +1650,10 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
                 </Text>
               </Pressable>;
             })}
-            <Pressable accessibilityRole="button" accessibilityLabel="Checklist task flow view"
-              onPress={() => chooseDateSelection('checklist')} style={styles.viewOption}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Priority view" accessibilityState={{ selected: Boolean(priority) }}
+              onPress={() => chooseDateSelection('checklist')} style={[styles.viewOption, priority && styles.viewOptionSelected]}>
               <CalendarHeaderIcon name="checklist" />
-              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Checklist task flow</Text>
+              <Text maxFontSizeMultiplier={1.5} style={[styles.viewOptionText, priority && styles.viewOptionTextSelected]}>Priority</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Pick or range dates" onPress={() => chooseDateSelection()} style={styles.viewOption}>
               <CalendarViewIcon mode="month" />
@@ -1534,16 +1668,17 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
 
 const SCREEN_TITLES: Record<Tab, string> = {
   today: 'Day', reports: 'Dashboard', search: 'Search', settings: 'Settings',
-  accounts: 'Calendar accounts', categories: 'Activity colors', checklist: 'Checklist task flow',
+  accounts: 'Calendar accounts', categories: 'Activity colors', checklist: 'Priority',
 };
 
 function ApplicationFrame({
-  ready, tab, onReturnToCalendar, children,
+  ready, tab, onReturnToCalendar, children, returnView = 'today',
 }: {
   ready: boolean;
   tab: Tab;
   onReturnToCalendar: () => void;
   children: ReactNode;
+  returnView?: 'today' | 'checklist';
 }) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -1560,9 +1695,9 @@ function ApplicationFrame({
       ) : null}
       <SafeAreaView edges={['top', 'right', 'bottom', 'left']} style={styles.safeArea}>
         <View style={styles.screen}>
-          {ready && tab !== 'today' ? (
+          {ready && tab !== 'today' && tab !== 'checklist' ? (
             <View style={styles.screenHeader}>
-              <Pressable accessibilityRole="button" accessibilityLabel="Back to calendar"
+              <Pressable accessibilityRole="button" accessibilityLabel={returnView === 'checklist' ? 'Back to Priority' : 'Back to calendar'}
                 onPress={onReturnToCalendar} style={styles.menuButton}>
                 <CalendarHeaderIcon name="back" />
               </Pressable>
