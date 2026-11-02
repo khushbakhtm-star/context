@@ -11,8 +11,8 @@ import subprocess
 import zipfile
 
 SOURCE = "e937ee36b4111e182e8d434eccdc9cc535559f67"
-VERSION = "0.1.34"
-CODE = 35
+VERSION = "0.1.35"
+CODE = 36
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned Wear-phone preview: local publisher signing is separate"
 NATIVE_RULE_MARKER = "# Context audited native module identities for packaging verification"
@@ -120,7 +120,7 @@ def verify(source, reports, receipt):
         raise ValueError("The audited native module rules changed during the build")
     tools = Path(os.environ["ANDROID_HOME"]) / "build-tools/37.0.0"
     original = mobile / "android/app/build/outputs/apk/release/app-release-unsigned.apk"
-    apk = reports / "context-0.1.34-wear-phone-unsigned.apk"
+    apk = reports / "context-0.1.35-wear-phone-unsigned.apk"
     run([tools / "zipalign", "-P", "16", "-f", "4", original, apk])
     run([tools / "zipalign", "-c", "-P", "16", "-v", "4", apk])
     data = apk.read_bytes()
@@ -138,6 +138,12 @@ def verify(source, reports, receipt):
                 config.get("extra", {}).get("distribution") != "store"):
             raise ValueError("Embedded phone configuration differs from the expected store edition")
         bundle = archive.read("assets/index.android.bundle")
+        checklist_markers = ("Checklist task flow", "Reset all task checks", "Hide completed tasks",
+                             "Add minute or highlighted text to checklist", "Move task up", "Indent task",
+                             "Outdent task", "Task text color hex", "Close other checklist versions")
+        for marker in checklist_markers:
+            if not contains(bundle, marker):
+                raise ValueError("Actual checklist task-flow UI marker missing: " + marker)
         clients = {}
         for key in ("EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID", "EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID"):
             value = os.environ.get(key, "")
@@ -194,7 +200,7 @@ def main():
         # A failed verifier may have produced an aligned intermediate. Retain diagnostics,
         # but never let upload-artifact expose that APK as a usable unsigned build.
         if args.mode == "verify":
-            (reports / "context-0.1.34-wear-phone-unsigned.apk").unlink(missing_ok=True)
+            (reports / "context-0.1.35-wear-phone-unsigned.apk").unlink(missing_ok=True)
         receipt.update({"status": "failed", "scope": "Not a verified build; never install or publish this output.",
                         "error": str(error)})
         path.write_text(json.dumps(receipt, indent=2) + "\n")

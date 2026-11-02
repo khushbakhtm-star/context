@@ -143,6 +143,11 @@ function screen(t, options = {}) {
         if (resolved === source('data/database')) return { getDayEntries: options.readEntries ?? (async (date) => [...rows.values()].filter((row) => row.dateKey === date).map((row) => ({ ...row }))),
           getEntriesForBlock: async (blockId) => [...rows.values()].filter((row) => row.blockId === blockId).map((row) => ({ ...row })),
           getMinuteEntry: options.readMinuteEntry ?? (async (date, minute) => rows.get(`${date}:${minute}`) ? { ...rows.get(`${date}:${minute}`) } : null) };
+        if (resolved === source('data/checklist-flow')) return { addChecklistTask: async (text, source, format) => {
+          command('checklist-task', { text, source: JSON.parse(JSON.stringify(source)), format: JSON.parse(JSON.stringify(format)) });
+          if (options.checklistWriteGate) await options.checklistWriteGate;
+          return { taskId: 'task_test_capture' };
+        } };
         if (resolved === source('services/calendar')) return { loadPlannedEventsResult: options.readNative ?? (async () => ({ plans: [], failures: [] })),
           reconcileLinkedNativeColors: options.reconcileColors ?? (async () => []), flushPendingActuals: async () => ({}) };
         if (resolved === source('services/categories')) return {
@@ -217,19 +222,23 @@ function screen(t, options = {}) {
   async function tap(minute) { const target = cell(minute); target.props.onPressIn(); target.props.onTouchStart(event()); now += 60;
     target.props.onTouchEnd(event()); target.props.onPress(event()); await settle(); }
   async function hold(minute) { const target = cell(minute); target.props.onPressIn(); target.props.onTouchStart(event());
+    if (target.props.accessibilityState.selected) { target.props.onTouchEnd(event()); await tap(minute); return; }
     now += 460; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); }
     await settle(); target.props.onTouchEnd(event()); target.props.onPress(event()); await settle(); }
   let disposed = false;
   function unmount() { if (disposed) return; disposed = true;
     for (const slot of slots) slot?.cleanup?.(); timers.clear(); animationFrames.clear(); }
   t.after(unmount);
+  async function selectThrough(minute, openMenu = true) {
+    function handle(node) { if (!node || typeof node !== 'object') return null;
+      if (node.props?.accessibilityLabel === 'Drag to select minutes for Auto fill') return node;
+      for (const child of [node.props?.children].flat(Infinity)) { const found = handle(child); if (found) return found; } return null; }
+    handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
+    if (openMenu) await tap(minute);
+  }
   return { day, calls, pastePreviews, externalPreviews, spanPreviews, alerts, rows, drafts, async start() { render(); await settle(); }, tap, hold, settle,
-    async selectThrough(minute) {
-      function handle(node) { if (!node || typeof node !== 'object') return null;
-        if (node.props?.accessibilityLabel === 'Drag to select minutes for Auto fill') return node;
-        for (const child of [node.props?.children].flat(Infinity)) { const found = handle(child); if (found) return found; } return null; }
-      handle(tree).props.onAccessibilityTap(); await settle(); await tap(minute);
-    },
+    selectThrough, selectPlainThrough: (minute) => selectThrough(minute, false),
+    async edit(minute, date = day) { cell(minute, date).props.onAccessibilityAction({ nativeEvent: { actionName: 'editMinute' } }); await settle(); },
     details: () => find(tree, 'MinuteSpanEditor')?.props, overview: () => find(tree, 'CompactMinuteOverview')?.props,
     categoryPicker: () => { const props = find(tree, 'ActivityCategoryPicker')?.props; return props?.visible ? props : undefined; },
     pinchPreview: () => { const props = find(tree, 'CalendarPinchPreview')?.props; return props?.active ? props : undefined; },
@@ -247,13 +256,14 @@ function screen(t, options = {}) {
     menuBox: () => { const style = menuAncestors()?.at(-1)?.props.style[1];
       return style ? { width: style.width, left: style.left.value } : null; },
     async beginMove(minute, { date = day, x = 150, y = 400 } = {}) {
+      if (!cell(minute, date).props.accessibilityState.selected) await tap(minute);
       measureViewport();
       const list = find(tree, 'FlatList'); const rowHeight = list.props.getItemLayout(null, minute).length;
       list.props.onScroll({ nativeEvent: { contentOffset: { x: 0, y: (minute + 0.5) * rowHeight - (y - 146) } } });
       const target = cell(minute, date); const touch = { nativeEvent: { pageX: x, pageY: y, touches: [{ pageX: x, pageY: y }] } };
       const parent = () => { const screen = tree.props.children; return [screen.props.children].flat(Infinity).find((node) => node?.props?.onPanResponderGrant)?.props; };
       parent().onStartShouldSetPanResponderCapture(touch); target.props.onPressIn(); target.props.onTouchStart(touch);
-      for (const duration of [460, 650]) { now += duration;
+      for (const duration of [170]) { now += duration;
         for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); }
         await settle(); }
       const responder = parent(); const claimed = responder.onMoveShouldSetPanResponderCapture(touch, { dx: 1, dy: 1, numberActiveTouches: 1 });
@@ -282,6 +292,109 @@ function plan(id, minute, account = false) {
     endDate: new Date(2026, 9, 25, Math.floor(minute / 60), minute % 60 + 1),
     ...(account ? { accountEvent: { accountId: 'account', event: {} } } : {}) };
 }
+
+test('one checklist action captures the committed selected minute range as one task without altering its cells', async (t) => {
+  let opened = 0, changed = 0;
+  const h = screen(t, { readFormats: async () => new Map([[600, { bold: true, textColor: '#123456' }]]),
+    props: { onOpenChecklist() { opened++; }, onDataChanged() { changed++; } } });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Read the instructions', categoryId: 'study', blockId: 'first' });
+  h.rows.set(`${h.day}:601`, { dateKey: h.day, minuteIndex: 601, text: 'Follow the instructions', categoryId: 'work', blockId: 'second' });
+  h.rows.set(`${h.day}:603`, { dateKey: h.day, minuteIndex: 603, text: 'Outside selected cells', categoryId: 'family', blockId: 'outside' });
+  await h.start(); await h.tap(600); await h.selectThrough(602);
+  h.drafts.edit(h.day, 600, { text: 'Read the newest instructions' });
+  const capture = h.menu().onTask;
+  assert.equal(typeof capture, 'function'); capture(); capture(); await h.settle();
+  const tasks = h.calls.filter((call) => call.action === 'checklist-task');
+  assert.equal(tasks.length, 1, 'one action completes once, including a repeated tap during acknowledgement');
+  assert.deepEqual(tasks[0], { action: 'checklist-task', text: 'Read the newest instructions\nFollow the instructions',
+    source: { ranges: [{ dateKey: h.day, startMinute: 600, endMinute: 602 }] }, format: { bold: true, textColor: '#123456' } });
+  assert.deepEqual([600, 601, 603].map((minute) => h.rows.get(`${h.day}:${minute}`).text),
+    ['Read the newest instructions', 'Follow the instructions', 'Outside selected cells']);
+  assert.deepEqual([600, 601, 603].map((minute) => h.rows.get(`${h.day}:${minute}`).categoryId), ['study', 'work', 'family']);
+  assert.equal(h.rows.has(`${h.day}:602`), false, 'a blank source minute stays blank');
+  assert.equal(h.calls.some((call) => call.action !== 'checklist-task'), false, 'no cell formatting, grouping or calendar command is invoked');
+  assert.equal(opened, 1); assert.ok(changed >= 1); assert.equal(h.bar(), undefined);
+});
+
+test('highlighted minute text creates a task sourced only from that minute and retains exact passage offsets', async (t) => {
+  let opened = 0;
+  const h = screen(t, { readFormats: async () => new Map([[600, { italic: true, underline: true }]]),
+    props: { onOpenChecklist() { opened++; } } });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Make coffee; talk to Mum', categoryId: 'family', blockId: 'source' });
+  h.rows.set(`${h.day}:601`, { dateKey: h.day, minuteIndex: 601, text: 'Another independent note', categoryId: 'work', blockId: 'next' });
+  await h.start(); await h.tap(600); await h.edit(600);
+  const before = JSON.stringify([...h.rows]);
+  h.input().onSelectionChange({ nativeEvent: { selection: { start: 13, end: 24 } } });
+  h.action('Add minute or highlighted text to checklist').onPress(); await h.settle();
+  const task = h.calls.find((call) => call.action === 'checklist-task');
+  assert.deepEqual(task, { action: 'checklist-task', text: 'talk to Mum',
+    source: { ranges: [{ dateKey: h.day, startMinute: 600, endMinute: 600 }], selection: { start: 13, end: 24 } },
+    format: { italic: true, underline: true } });
+  assert.equal(JSON.stringify([...h.rows]), before); assert.equal(opened, 1);
+});
+
+test('navigation or backgrounding during a checklist source read cannot create a task from the old selection', async (t) => {
+  for (const action of ['navigate', 'background', 'unmount']) {
+    let blocked = false, release; const gate = new Promise((resolve) => { release = resolve; });
+    let h, opened = 0;
+    h = screen(t, { readEntries: async (date) => {
+      if (blocked) await gate;
+      return [...h.rows.values()].filter((row) => row.dateKey === date).map((row) => ({ ...row }));
+    }, props: { onOpenChecklist() { opened++; } } });
+    h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Keep original source note', categoryId: 'family', blockId: 'source' });
+    await h.start(); await h.hold(600); blocked = true;
+    const before = JSON.stringify([...h.rows]);
+    h.menu().onTask(); await h.settle(); assert.equal(h.calls.length, 0);
+    if (action === 'navigate') await h.navigate('2026-10-26');
+    else if (action === 'background') await h.background(); else h.unmount();
+    release(); if (action !== 'unmount') await h.settle();
+    else for (let turn = 0; turn < 80; turn++) await Promise.resolve();
+    assert.equal(h.calls.some((call) => call.action === 'checklist-task'), false, action);
+    assert.equal(JSON.stringify([...h.rows]), before, action); assert.equal(opened, 0, action);
+  }
+});
+
+test('a late checklist write acknowledgement reports saved data without closing or navigating a newer screen', async (t) => {
+  for (const action of ['navigate', 'background', 'unmount']) {
+    let release; const gate = new Promise((resolve) => { release = resolve; }); let opened = 0, changed = 0;
+    const h = screen(t, { checklistWriteGate: gate, props: { onOpenChecklist() { opened++; }, onDataChanged() { changed++; } } });
+    h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Task snapshot', categoryId: 'family', blockId: 'source' });
+    await h.start(); await h.hold(600); h.menu().onTask(); await h.settle();
+    assert.equal(h.calls.filter((call) => call.action === 'checklist-task').length, 1);
+    if (action === 'navigate') await h.navigate('2026-10-26'); else if (action === 'background') await h.background(); else h.unmount();
+    const dismisses = h.dismisses; release(); if (action !== 'unmount') await h.settle(); else for (let round = 0; round < 80; round++) await Promise.resolve();
+    assert.equal(opened, 0, action); assert.ok(changed >= 1, action); assert.equal(h.dismisses, dismisses, action);
+  }
+});
+
+test('first cell and range selections stay unobstructed until a quick tap on the selected cells', async (t) => {
+  const h = screen(t); await h.start(); await h.tap(600);
+  assert.equal(h.menu(), undefined); assert.ok(h.bar('entry')); assert.equal(h.cell(600).props.accessibilityState.selected, true);
+  await h.tap(600); assert.ok(h.menu(), 'a quick tap on the already selected cell opens actions');
+  h.menu().onClose(); await h.settle(); await h.tap(601); assert.equal(h.menu(), undefined);
+  await h.selectPlainThrough(604); assert.equal(h.menu(), undefined, 'choosing a range endpoint does not open actions');
+  assert.equal(h.cell(603).props.accessibilityState.selected, true);
+  await h.tap(603); assert.ok(h.menu(), 'a quick tap anywhere within the selected range opens actions');
+});
+
+test('releasing the native selection handle leaves a plain range for an adjacent destination tap', async (t) => {
+  const h = screen(t); await h.start(); await h.tap(600); h.measureViewport();
+  const rowHeight = h.list().getItemLayout(null, 600).length;
+  h.list().onScroll({ nativeEvent: { contentOffset: { x: 0, y: (600 + 0.5) * rowHeight - (400 - 146) } } });
+  const handle = h.action('Drag to select minutes for Auto fill');
+  const pointer = (y) => ({ nativeEvent: { pageX: 150, pageY: y, touches: [{ pageX: 150, pageY: y }] } });
+  handle.onPanResponderGrant(pointer(400)); handle.onPanResponderMove(pointer(400 + 3 * rowHeight));
+  handle.onPanResponderRelease(pointer(400 + 3 * rowHeight)); await h.settle();
+  assert.equal(h.menu(), undefined); assert.equal(h.cell(602).props.accessibilityState.selected, true);
+  await h.tap(605); assert.equal(h.menu(), undefined, 'the adjacent minute remains reachable without dismissing a popup');
+  assert.equal(h.cell(605).props.accessibilityState.selected, true); assert.equal(h.cell(600).props.accessibilityState.selected, false);
+});
+
+test('the compact overview also opens actions only on a selected-minute tap', async (t) => {
+  const h = screen(t, { props: { zoom: 500 / (1440 * 34) } }); await h.start();
+  h.overview().onSelect(h.day, 600); await h.settle(); assert.equal(h.menu(), undefined); assert.ok(h.input());
+  h.overview().onSelect(h.day, 600); await h.settle(); assert.ok(h.menu());
+});
 
 test('uncategorized text gets the same neutral fill in normal and compact light and dark views without a stored color edit', async (t) => {
   const flatten = (style) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
@@ -710,7 +823,7 @@ test('late provider and color reloads cannot replace a newer inline edit', async
   let resolve; const native = new Promise((done) => { resolve = done; });
   const r = screen(t, { readNative: () => native, reconcileColors: async () => ['2026-10-25'] });
   r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Original', categoryId: 'work', blockId: 'note' });
-  await r.start(); await r.tap(600); await r.tap(600); r.input().onChangeText('Latest offline edit'); await r.settle();
+  await r.start(); await r.tap(600); await r.edit(600); r.input().onChangeText('Latest offline edit'); await r.settle();
   resolve({ plans: [plan('Old remote title', 600)], failures: [] }); await r.settle();
   assert.equal(r.input().value, 'Latest offline edit'); r.input().onSubmitEditing(); await r.settle();
   assert.equal(r.text(600), 'Latest offline edit');
@@ -861,7 +974,7 @@ test('Paste forwards every selected minute to both overwrite preview and applica
 
 test('Cut remains deferred until Paste and the single Reset action flushes pending typing before applying', async (t) => {
   const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Initial note', categoryId: 'work', blockId: 'note' });
-  await r.start(); await r.tap(600); await r.tap(600); assert.ok(r.input()); r.input().onChangeText('Latest complete cell'); await r.settle();
+  await r.start(); await r.tap(600); await r.edit(600); assert.ok(r.input()); r.input().onChangeText('Latest complete cell'); await r.settle();
   r.input().onSubmitEditing(); await r.settle();
   await r.hold(600); await r.menu().onCut(); await r.settle(); assert.equal(r.rows.get(`${r.day}:600`).text, 'Latest complete cell');
   await r.tap(601); await r.hold(601); await r.menu().onPaste(); await r.settle();
@@ -978,14 +1091,15 @@ test('late native geometry callbacks cannot replace a newer root/body menu ancho
   old.forEach((complete) => complete()); assert.equal(r.menuPosition(), before + 100);
 });
 
-test('single taps show the unfocused bottom entry bar, double tap edits, and Save waits then closes without formatting', async (t) => {
+test('single taps show the entry bar, selected taps open actions, and explicit editing saves without a formatting strip', async (t) => {
   const r = screen(t); r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Original', categoryId: 'work', blockId: 'note' });
   await r.start(); await r.tap(600); assert.equal(r.input().value, 'Original');
   assert.equal(r.input().autoFocus, undefined); assert.ok(r.bar('entry'));
   let focusRequests = 0; r.input().ref.current = { focus() { focusRequests++; } };
   await r.flushAnimationFrames(); assert.equal(focusRequests, 0);
   r.advance(500); await r.tap(600); await r.flushAnimationFrames(); assert.equal(focusRequests, 0);
-  await r.tap(600); assert.equal(r.input().value, 'Original'); r.input().onChangeText('First edit'); await r.settle();
+  assert.ok(r.menu()); r.menu().onClose(); await r.settle(); await r.edit(600);
+  assert.equal(r.input().value, 'Original'); r.input().onChangeText('First edit'); await r.settle();
   await r.flushAnimationFrames(); assert.equal(focusRequests, 1);
   assert.equal(r.text(600), 'First edit', 'the saved-cell display mirrors raw bottom-input text before SQLite acknowledgement');
   let release; r.writeGate = new Promise((resolve) => { release = resolve; }); const previousDismisses = r.dismisses;
@@ -1007,7 +1121,8 @@ test('an untouched blank closes with one bottom check without recording a minute
   assert.equal(h.action('Choose text color'), undefined); assert.equal(h.action('Choose cell color'), undefined);
   assert.equal(h.bar('format'), undefined); assert.equal(h.bar('entry'), undefined); assert.equal(h.rows.size, 0);
   assert.equal(h.cell(600).props.accessibilityState.selected, true);
-  await h.tap(600); assert.ok(h.bar('entry'), 'a subsequent selection opens entry again');
+  await h.tap(600); assert.ok(h.menu(), 'a selected-cell tap opens actions after saving');
+  h.menu().onClose(); await h.settle(); await h.edit(600); assert.ok(h.bar('entry'), 'explicit Edit keeps keyboard entry accessible');
 });
 
 test('popup format callbacks apply to the captured range while Group uses the existing title composer', async (t) => {
@@ -1050,7 +1165,7 @@ test('the cell popup exposes linked event details and retains the existing selec
 });
 
 test('a failed keyboard Save preserves the typed value and editing for retry', async (t) => {
-  const r = screen(t); await r.start(); await r.tap(600); await r.tap(600);
+  const r = screen(t); await r.start(); await r.tap(600); await r.edit(600);
   r.input().onChangeText('An unsaved thought'); await r.settle(); r.failure = 'save';
   const previousDismisses = r.dismisses; r.input().onSubmitEditing(); await r.settle();
   assert.equal(r.input().value, 'An unsaved thought'); assert.equal(r.dismisses, previousDismisses);
@@ -1063,11 +1178,11 @@ test('a failed keyboard Save preserves the typed value and editing for retry', a
 });
 
 test('a completed old Save cannot close a newer cell keyboard after an asynchronous switch', async (t) => {
-  const r = screen(t); await r.start(); await r.tap(600); await r.tap(600);
+  const r = screen(t); await r.start(); await r.tap(600); await r.edit(600);
   r.input().onChangeText('Save the old cell'); await r.settle();
   let release; r.writeGate = new Promise((resolve) => { release = resolve; });
   r.input().onSubmitEditing(); await r.settle();
-  await r.tap(601); await r.tap(601); const dismissesBeforeAck = r.dismisses;
+  await r.tap(601); await r.edit(601); const dismissesBeforeAck = r.dismisses;
   release(); r.writeGate = null; await r.settle();
   assert.equal(r.rows.get(`${r.day}:600`).text, 'Save the old cell');
   assert.ok(r.input(601), 'the latest double-tapped destination stays in edit mode');
@@ -1078,7 +1193,7 @@ test('editing owns native partial selection and text-only Cut/Paste without open
   const r = screen(t);
   r.rows.set(`${r.day}:600`, { dateKey: r.day, minuteIndex: 600, text: 'Make coffee; talk to Mum', categoryId: 'family', blockId: 'activity_source' });
   r.rows.set(`${r.day}:601`, { dateKey: r.day, minuteIndex: 601, text: 'Remember: ', categoryId: 'work', blockId: 'activity_destination' });
-  await r.start(); await r.tap(600); await r.tap(600);
+  await r.start(); await r.tap(600); await r.edit(600);
   assert.equal(r.input().contextMenuHidden, false);
   r.input().onSelectionChange({ nativeEvent: { selection: { start: 13, end: 24 } } });
   assert.equal(r.input().onTouchStart, undefined, 'the native input is outside the grid hold responder');
@@ -1086,7 +1201,7 @@ test('editing owns native partial selection and text-only Cut/Paste without open
   assert.equal(r.menu(), undefined, 'native word selection does not invoke grid actions');
   const phrase = 'talk to Mum';
   r.input().onChangeText('Make coffee; '); await r.settle(); // Native Cut reports only the new text value.
-  await r.tap(601); await r.tap(601);
+  await r.tap(601); await r.edit(601);
   assert.equal(r.input(601).contextMenuHidden, false);
   r.input(601).onChangeText('Remember: ' + phrase); r.input(601).onSubmitEditing(); await r.settle();
   assert.equal(r.rows.get(`${r.day}:600`).text, 'Make coffee; ');

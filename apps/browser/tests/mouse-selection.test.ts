@@ -14,26 +14,29 @@ function fixture() {
   const doc = Object.assign(hub(), { defaultView: win });
   const surface = Object.assign(hub(), { ownerDocument: doc, setPointerCapture: (id: number) => captures.add(id), hasPointerCapture: (id: number) => captures.has(id), releasePointerCapture: (id: number) => captures.delete(id) });
   const scroller = Object.assign(hub(), { scrollTop: 0, scrollHeight: 2000, clientHeight: 200 });
-  let enabled = true, moving = false; let selection: GridSelection = { anchor: { day: '2026-10-30', minute: 2 }, end: null };
+  let enabled = true, moving = false, active = true; let selection: GridSelection = { anchor: { day: '2026-10-30', minute: 2 }, end: null };
   let selections = 0, starts = 0, restores = 0, scrolls = 0, cancels = 0;
   const completions: number[][] = [], moved: GridPoint[] = [], drops: { point: GridPoint; copy: boolean }[] = [];
+  const taps: { point: GridPoint; alreadySelected: boolean }[] = [];
   const options = { enabled: () => enabled, readSelection: () => selection,
-    select(point: GridPoint, extend: boolean) { selections++; selection = extend ? { ...selection, end: { ...point } } : { anchor: { ...point }, end: null }; },
+    isSelectionActive: () => active,
+    select(point: GridPoint, extend: boolean) { active = true; selections++; selection = extend ? { ...selection, end: { ...point } } : { anchor: { ...point }, end: null }; },
     restore(value: GridSelection) { restores++; selection = value; },
     pointFromTarget: (target: any) => target?.point ?? null,
     pointAt: (x: number, y: number) => ({ day: x < 100 ? '2026-10-30' : '2026-10-31', minute: Math.max(0, Math.floor((scroller.scrollTop + Math.max(0, Math.min(199, y))) / 10)) }),
     viewport: () => ({ top: 0, bottom: 200, left: 0, right: 200 }),
     onStart: () => { starts++; }, onAutoScroll: () => { scrolls++; }, onComplete: (x: number, y: number) => completions.push([x, y]),
+    onTap: (point: GridPoint, alreadySelected: boolean) => taps.push({ point, alreadySelected }),
     moveFromTarget: () => moving, onMoveStart: () => true, onMove: (point: GridPoint) => moved.push(point),
     onMoveComplete: (point: GridPoint, copy: boolean) => drops.push({ point, copy }), onCancel: () => { cancels++; } };
   const controller = bindMouseSelection(surface as unknown as HTMLElement, scroller as unknown as HTMLElement, options);
   const event = (overrides: Record<string, any> = {}) => ({ target: { point: { day: '2026-10-30', minute: 2 } }, pointerId: 1, button: 0, buttons: 1, isPrimary: true,
     pointerType: 'mouse', clientX: 50, clientY: 25, shiftKey: false, altKey: false, preventDefault() {}, ...overrides });
-  return { win, doc, surface, scroller, frames, captures, controller, options, event, completions, moved, drops,
+  return { win, doc, surface, scroller, frames, captures, controller, options, event, completions, moved, drops, taps,
     down: (overrides = {}) => surface.emit('pointerdown', event(overrides)),
     move: (overrides = {}) => doc.emit('pointermove', event(overrides)), up: (overrides = {}) => doc.emit('pointerup', event(overrides)),
     flush(time = 16) { const pending = [...frames.values()]; frames.clear(); pending.forEach((callback) => callback(time)); },
-    set enabled(value: boolean) { enabled = value; }, set moving(value: boolean) { moving = value; },
+    set enabled(value: boolean) { enabled = value; }, set moving(value: boolean) { moving = value; }, set active(value: boolean) { active = value; },
     get selection() { return selection; }, get selections() { return selections; }, get starts() { return starts; }, get restores() { return restores; }, get scrolls() { return scrolls; }, get cancels() { return cancels; } };
 }
 
@@ -47,7 +50,7 @@ test('a real drag captures the stable grid and completes a rectangle across days
   assert.deepEqual(h.completions, [[150, 65]]); assert.equal(h.captures.size, 0); assert.equal(h.controller.suppressesClick(), true);
   h.up(); assert.equal(h.completions.length, 1); h.controller.destroy();
 });
-test('Shift-click preserves the original anchor and opens the same range actions without a long hold', () => {
+test('Shift-click preserves the original anchor and reports a new range separately from a tap', () => {
   const h = fixture(); h.down({ target: { point: { day: '2026-10-31', minute: 1 } }, shiftKey: true, clientX: 150, clientY: 15 });
   h.up({ shiftKey: true, clientX: 150, clientY: 15 });
   assert.deepEqual(h.selection.anchor, { day: '2026-10-30', minute: 2 }); assert.deepEqual(h.selection.end, { day: '2026-10-31', minute: 1 });
@@ -65,9 +68,24 @@ test('Escape, pointer cancellation and focus loss restore the pre-drag selection
     assert.deepEqual(h.selection, { anchor: { day: '2026-10-30', minute: 2 }, end: null });
     assert.equal(h.restores, 1); assert.equal(h.completions.length, 0); assert.equal(h.captures.size, 0); assert.equal(h.frames.size, 0); h.controller.destroy(); }
 });
-test('touch, secondary pointers, right clicks and non-cell targets do not invoke desktop selection', () => {
-  const h = fixture(); for (const overrides of [{ pointerType: 'touch' }, { isPrimary: false }, { button: 2 }, { target: {} }]) h.down(overrides);
+test('secondary pointers, right clicks and non-cell targets do not invoke pointer selection', () => {
+  const h = fixture(); for (const overrides of [{ isPrimary: false }, { button: 2 }, { target: {} }]) h.down(overrides);
   assert.equal(h.starts, 0); assert.equal(h.selections, 0); h.controller.destroy();
+});
+
+test('touch and mouse distinguish the first selection tap from a later selected-cell tap without a hold', () => {
+  for (const pointerType of ['touch', 'mouse']) {
+    const h = fixture(); h.active = false; h.down({ pointerType }); h.up({ pointerType }); assert.equal(h.taps[0]!.alreadySelected, false);
+    h.moving = true; h.down({ pointerType }); h.up({ pointerType }); assert.equal(h.taps[1]!.alreadySelected, true);
+    assert.equal(h.drops.length, 0); assert.equal(h.completions.length, 0); h.controller.destroy();
+  }
+});
+
+test('a short drag from the selected region moves it without reporting a tap or opening range actions', () => {
+  for (const pointerType of ['touch', 'mouse']) {
+    const h = fixture(); h.moving = true; h.down({ pointerType }); h.move({ pointerType, clientY: 65 }); h.up({ pointerType, clientY: 65 });
+    assert.equal(h.taps.length, 0); assert.equal(h.completions.length, 0); assert.equal(h.drops.length, 1); assert.equal(h.drops[0]!.point.minute, 6); h.controller.destroy();
+  }
 });
 test('account or command state changes cancel stale drags without restoring over the new state', () => {
   const h = fixture(); h.down(); h.move({ clientY: 90 }); h.enabled = false; h.up({ clientY: 90 });

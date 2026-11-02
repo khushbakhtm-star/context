@@ -734,6 +734,26 @@ function activate(inline, minuteIndex, text, categoryId = 'study') {
   inline.inlineMinuteDrafts.activate({ dateKey: day, minuteIndex, text, categoryId, keepColor: false });
 }
 
+test('an explicit range fill immediately rebases the active cursor color and Undo/Redo restore it without changing text', async (t) => {
+  const { api, sheet, inline } = harness(t); await api.initializeDatabase();
+  await save(api, 600, 'Current note', 'unaccounted'); await save(api, 601, 'Adjacent note', 'unaccounted');
+  activate(inline, 600, 'Current note', 'unaccounted');
+  await sheet.colorMinuteRange(range(600, 601), 'family');
+  assert.equal(inline.inlineMinuteDrafts.get(day, 600).categoryId, 'family');
+  assert.equal(inline.inlineMinuteDrafts.get(day, 600).text, 'Current note');
+  assert.equal((await api.getMinuteEntry(day, 600)).categoryId, 'family');
+  assert.equal((await api.getMinuteEntry(day, 601)).categoryId, 'family');
+  await sheet.undoSpreadsheetEdit();
+  assert.equal(inline.inlineMinuteDrafts.get(day, 600).categoryId, 'unaccounted');
+  assert.equal((await api.getMinuteEntry(day, 601)).text, 'Adjacent note');
+  await sheet.redoSpreadsheetEdit();
+  assert.equal(inline.inlineMinuteDrafts.get(day, 600).categoryId, 'family');
+  activate(inline, 602, '', 'unaccounted');
+  await sheet.colorMinuteRange(range(602), 'work');
+  assert.equal(inline.inlineMinuteDrafts.get(day, 602).categoryId, 'work');
+  assert.equal(inline.inlineMinuteDrafts.get(day, 602).keepColor, true);
+});
+
 test('local clipboard and Clear acknowledge SQLite while account linking is still pending', async (t) => {
   const r = harness(t); await r.api.initializeDatabase();
   await save(r.api, 100, 'Original', 'family'); await r.sheet.applyCellFormat(range(100), { bold: true });

@@ -19,6 +19,7 @@ export type CellActionMenuProps = {
   onEvent?: () => void;
   onEdit?: () => void;
   onCategorize?: () => void;
+  onTask?: () => void;
   onPaste?: () => void;
   canPaste?: boolean;
   onClose: () => void;
@@ -42,7 +43,7 @@ export type CellActionMenuProps = {
   onTouchActiveChange?: (active: boolean) => void;
 };
 
-export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onReset, onGroup, onUngroup, onEvent, onEdit, onCategorize, onPaste,
+export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onReset, onGroup, onUngroup, onEvent, onEdit, onCategorize, onTask, onPaste,
   canPaste = Boolean(onPaste), onClose, error, maxHeight, maxWidth, width, onWidthChange, onHeightChange, onTouchActiveChange,
   format = {}, textColor, fillColor, colorChoices = [], selectedColorId,
   onToggleBold, onToggleItalic, onToggleUnderline, onTextColor, onCellColor, onResetCellColor,
@@ -75,6 +76,7 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onReset, onGro
     ...(onReset ? [{ id: 'reset' as const, label: 'Reset selected minute cells', run: onReset }] : []),
     ...(onEdit ? [{ id: 'edit' as const, label: 'Edit selected minutes and time range', run: onEdit }] : []),
     ...(onCategorize ? [{ id: 'categorize' as const, label: 'Categorize selected minute cells', run: onCategorize }] : []),
+    ...(onTask ? [{ id: 'task' as const, label: 'Add selected minute text to checklist', run: onTask }] : []),
     ...(onEvent ? [{ id: 'event' as const, label: 'Open source calendar event details', run: onEvent }] : []),
     ...(canFormat ? [{ id: 'format' as const, label: 'Format selected minute cells', run: () => {
       setPalette(null); setFormatOpen((open) => !open);

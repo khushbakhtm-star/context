@@ -6,7 +6,7 @@ import type { AppColors } from '../theme';
 
 /** Decorative monochrome symbols; the containing button provides its accessible name. */
 export function CalendarHeaderIcon({ name, active = false, issue = false }: {
-  name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings'; active?: boolean; issue?: boolean;
+  name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings' | 'checklist'; active?: boolean; issue?: boolean;
 }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -28,6 +28,11 @@ export function CalendarHeaderIcon({ name, active = false, issue = false }: {
         <View testID="sync-issue-stem" style={[styles.syncIssueStem, { backgroundColor: syncColor }]} />
         <View testID="sync-issue-dot" style={[styles.syncIssueDot, { backgroundColor: syncColor }]} />
       </View> : null}
+    </> : name === 'checklist' ? <>
+      {[3, 10, 17].map((top) => <View key={top}>
+        <View style={{ position: 'absolute', left: 1, top, width: 5, height: 5, borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 1 }} />
+        <View style={{ position: 'absolute', left: 10, top: top + 2, width: 13, height: 1.5, backgroundColor: colors.graphite, borderRadius: 1 }} />
+      </View>)}
     </> : name === 'print' ? <>
       <View style={styles.printPaperTop} /><View style={styles.printBody} />
       <View style={styles.printPaperBottom} /><View style={styles.printIndicator} />

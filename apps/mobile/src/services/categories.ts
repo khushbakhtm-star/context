@@ -113,7 +113,7 @@ async function writeCategory(category: ActivityCategory) {
  * Google fallback available offline without changing an existing activity or its reports. */
 export async function listCategories(includeArchived = true, includePaletteProofs = false): Promise<ActivityCategory[]> {
   let documents = await getSyncDocuments('category:', CELL_FORMAT_PREFIX);
-  if (!documents.length) {
+  if (!documents.some((document) => validCategory(document.value))) {
     const previous = await getSetting<ActivityCategory[] | null>(SETTING, null);
     const initial = previous?.filter(validCategory) ?? DEFAULT_CATEGORIES;
     for (const category of initial) await writeCategory(category);

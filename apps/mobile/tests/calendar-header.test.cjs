@@ -35,7 +35,7 @@ function headerHarness(props = {}, options = {}) {
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => value === b[index]);
   const listeners = new Set(); const state = { currentState: 'active', addEventListener: (_name, callback) => { listeners.add(callback); return { remove: () => listeners.delete(callback) }; } };
   const dimensions = { width: 360, height: 500 };
-  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
+  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, settings: 0, checklist: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
   const history = { canUndo: true, canRedo: true, busy: false, ...options.history };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   const module = { exports: {} };
@@ -62,7 +62,7 @@ function headerHarness(props = {}, options = {}) {
   };
   vm.runInNewContext(transpile([declaration('CALENDAR_VIEW_OPTIONS'), declaration('createStyles'), declaration('CalendarHeader'), 'export { CalendarHeader };'].join('\n')), context);
   const defaults = { onOpenSettings: () => calls.settings++, onPrint: () => calls.print++, onOpenSearch: () => calls.search++,
-    onOpenReports: () => calls.dashboard++, onSync: () => calls.sync++, syncing: false, syncError: null,
+    onOpenReports: () => calls.dashboard++, onOpenChecklist: () => calls.checklist++, onSync: () => calls.sync++, syncing: false, syncError: null,
     onJumpToNow: () => calls.now++, onOpenDatePicker: () => calls.picker++, canGoPrevious: true, canGoNext: true,
     onPrevious() {}, onNext() {}, viewMode: 'day', viewChanging: false, onViewModeChange: async (mode) => { calls.modes.push(mode); } };
   let tree;
@@ -100,9 +100,18 @@ test('holding the current-view icon opens choices after saving and consumes its 
   const h = headerHarness({ viewMode: 'week' }); h.hold(h.binder()); await h.settle();
   const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible); assert.ok(menu);
   assert.deepEqual(h.nodes(menu).filter((node) => node.type === 'Pressable' && / view$/.test(node.props.accessibilityLabel ?? ''))
-    .map((node) => node.props.accessibilityLabel), ['Day view', 'Week view', 'Month view', 'Year view', 'Schedule view']);
+    .map((node) => node.props.accessibilityLabel), ['Day view', 'Week view', 'Month view', 'Year view', 'Schedule view', 'Checklist task flow view']);
   h.nodes(menu).find((node) => node.props.accessibilityLabel === 'Month view').props.onPress();
   assert.deepEqual(h.calls.modes, ['month']); assert.equal(h.calls.now, 0);
+});
+
+test('checklist view dispatches once after the view picker closes and retains calendar focus', async () => {
+  const h = headerHarness(); h.hold(h.binder()); await h.settle();
+  const button = h.nodes().find((node) => node.props?.accessibilityLabel === 'Checklist task flow view');
+  assert.ok(button); button.props.onPress(); button.props.onPress(); h.advance(0); await h.settle();
+  assert.equal(h.calls.checklist, 1); assert.equal(h.calls.now, 0); assert.equal(h.calls.picker, 0);
+  assert.deepEqual(h.calls.modes, []);
+  assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
 });
 
 test('lifecycle cancellation consumes an unfinished view-icon touch and cannot open choices or dates later', async () => {

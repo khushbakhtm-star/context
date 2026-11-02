@@ -609,7 +609,9 @@ class SpreadsheetEditor {
       const after = before.map((cell) => ({ ...clone(cell), entry: {
         ...cell.entry, text: cell.entry?.text ?? '', categoryId,
         blockId: cell.entry?.blockId ?? this.newToken('sheet'),
-      }, format: normalizeCellFormat({ ...cell.format, noFill: undefined }) }));
+      }, format: normalizeCellFormat({ ...cell.format, noFill: undefined }),
+        ...(cell.display ? { display: { ...clone(cell.display), categoryId,
+          keepColor: !cell.display.text.trim() } } : {}) }));
       await this.perform({ day: range.dateKey, before: Promise.resolve(before), after,
         textChanged: true, formatChanged: true });
     });

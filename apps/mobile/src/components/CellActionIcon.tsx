@@ -1,6 +1,6 @@
 import { Text, View } from 'react-native';
 
-export type CellActionIconName = 'cut' | 'copy' | 'paste' | 'fill' | 'group' | 'ungroup' | 'reset' | 'edit' | 'categorize' | 'event' | 'format';
+export type CellActionIconName = 'cut' | 'copy' | 'paste' | 'fill' | 'group' | 'ungroup' | 'reset' | 'edit' | 'categorize' | 'event' | 'format' | 'task';
 
 /** Code-native monochrome artwork; the containing button supplies its name. */
 export function CellActionIcon({ name, color, backgroundColor = 'transparent', secondaryColor = color }: {
@@ -40,6 +40,12 @@ export function CellActionIcon({ name, color, backgroundColor = 'transparent', s
       borderWidth: 2.5, justifyContent: 'center' }]}>
       <View testID="group-minute-divider" style={{ height: 0.5, backgroundColor: secondaryColor }} />
     </View>
+    : name === 'task' ? <>
+      {[3, 11, 19].map((top) => <View key={top}>
+        <View style={[line, { left: 1, top, width: 5, height: 5, borderRadius: 1 }]} />
+        <View style={{ position: 'absolute', left: 11, top: top + 2, width: 14, height: 2, backgroundColor: color, borderRadius: 1 }} />
+      </View>)}
+    </>
     : name === 'categorize' ? <>
       <View testID="category-back-paper" style={[line, { left: 8, top: 2, width: 12, height: 15, borderRadius: 1 }]} />
       <View testID="category-front-paper" style={[line, { left: 4, top: 5, width: 13, height: 14,

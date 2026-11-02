@@ -21,7 +21,7 @@ function visit(node, predicate) { if (!node || typeof node !== 'object') return 
 function note(h, minute = 600) { h.rows.set(`${h.day}:${minute}`, { dateKey: h.day, minuteIndex: minute,
   text: `Note ${minute}`, categoryId: 'family', blockId: `note_${minute}` }); }
 
-test('a longer hold moves an ordinary selected range across dates with immutable source/drop tokens and a pointer-transparent minute-note ghost', async (t) => {
+test('a short selected-body hold moves a range across dates with immutable source/drop tokens and a pointer-transparent minute-note ghost', async (t) => {
   const pages = [];
   const h = screen(t, { props: { selectedDates: ['2026-10-25', '2026-10-26'], onPeriodSwipe: (direction) => pages.push(direction) } });
   note(h); note(h, 601); await h.start(); await h.tap(600); await h.selectThrough(602);
@@ -58,7 +58,7 @@ test('a one-cell move can be canceled by a second finger, navigation, or overwri
   }
 });
 
-test('whole named-group hold retains its identity-preserving path and partial selected membership uses detached range move', async (t) => {
+test('short named-group drag retains its identity-preserving path and partial selected membership uses detached range move', async (t) => {
   for (const partial of [false, true]) {
     const group = { blockId: 'activity_coffee', dateKey: '2026-10-25', startMinute: 600, endMinute: 604, title: 'Coffee', categoryId: 'family' };
     const h = screen(t, { readGroups: async () => [group], readMovableGroup: async () => group });
@@ -75,7 +75,7 @@ test('whole named-group hold retains its identity-preserving path and partial se
 });
 
 test('the bottom native editor retains partial text selection independently of whole-cell drag responders', async (t) => {
-  const h = screen(t); note(h); await h.start(); await h.tap(600); await h.tap(600); assert.ok(h.input());
+  const h = screen(t); note(h); await h.start(); await h.tap(600); await h.edit(600); assert.ok(h.input());
   assert.equal(h.input().onTouchStart, undefined); assert.equal(h.input().onTouchMove, undefined);
   h.input().onSelectionChange({ nativeEvent: { selection: { start: 0, end: 4 } } }); await h.settle();
   assert.equal(h.calls.some((call) => call.action.includes('move')), false); assert.ok(h.input());

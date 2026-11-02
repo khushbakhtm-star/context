@@ -1074,9 +1074,16 @@ export async function getSyncDocuments(prefix: string, excludedPrefix?: string) 
   return rows.map(mapDocument);
 }
 
-export async function putSyncDocument(key: string, value: Record<string, unknown> | null) {
+export async function putSyncDocument(key: string, value: Record<string, unknown> | null,
+  options?: { expectedRevision: string | null }) {
   const db = await database();
   await db.withExclusiveTransactionAsync(async (txn) => {
+    if (options) {
+      const current = await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key);
+      if ((current?.revision ?? null) !== options.expectedRevision) {
+        throw new Error('This list changed on another device. Reopen it before editing again.');
+      }
+    }
     const before = /^category:[A-Za-z0-9_-]{1,160}$/.test(key)
       ? await txn.getFirstAsync<DocumentRow>(`SELECT * FROM ledger_documents WHERE key = ?`, key) : null;
     await putSyncDocumentInside(txn, key, value);
@@ -1699,10 +1706,11 @@ export async function mergeSyncDocuments(documents: SyncDocument[]) {
   return changed;
 }
 
-export async function getLedgerConflicts() {
+export async function getLedgerConflicts(exactKey?: string) {
   const db = await database();
   const rows = await db.getAllAsync<DocumentRow>(`SELECT key, revision, value_json, 0 AS local_pending
-    FROM ledger_conflicts WHERE key LIKE 'minute:%' ORDER BY revision DESC LIMIT 100`);
+    FROM ledger_conflicts WHERE ${exactKey === undefined ? "key LIKE 'minute:%'" : 'key = ?'} ORDER BY revision DESC LIMIT 100`,
+    ...(exactKey === undefined ? [] : [exactKey]));
   return rows.map(mapDocument);
 }
 

@@ -14,6 +14,16 @@ const ciphertext = await encryptBatch({ version: 1, id: fixtureId, documents: [
   { key: 'category:coffee', revision: `${wall}:00000000:synthetic_phone`, value: { id: 'coffee', name: 'Coffee', color: '#E1E1E1' } },
   { key: `minute:${day}:${minute}`, revision: `${wall}:00000001:synthetic_phone`, value: {
     id: 'synthetic_note', dateKey: day, minuteIndex: minute, text: 'Synthetic coffee note', categoryId: 'coffee', blockId: 'synthetic_coffee_activity', source: 'manual', createdAt: timestamp, updatedAt: timestamp } },
+  { key: 'category:checklistFlow:main', revision: `${wall}:00000002:synthetic_phone`, value: {
+    kind: 'checklistFlow', version: 1, items: [
+      { id: 'sample_prepare', text: 'Prepare the next release', checked: false, parentId: null, format: { bold: true } },
+      { id: 'sample_review', text: 'Review the design', checked: false, parentId: 'sample_prepare', format: {} },
+      { id: 'sample_test', text: 'Check the phone and browser', checked: false, parentId: 'sample_prepare', format: {} },
+      { id: 'sample_read', text: 'Read the project notes', checked: true, parentId: null, format: {},
+        source: { ranges: [{ dateKey: day, startMinute: minute, endMinute: minute }] } },
+      { id: 'sample_plan', text: 'Plan tomorrow', checked: false, parentId: null, format: {} },
+    ],
+  } },
 ] }, phrase);
 await mkdir(target, { recursive: true });
 for (const name of ['app.js', 'app.css', 'context-app-logo.png', 'config.json']) await copyFile(resolve(root, 'apps/browser/dist', name), resolve(target, name));

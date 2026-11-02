@@ -42,6 +42,7 @@ import { SearchScreen } from './src/screens/SearchScreen';
 import { AccountsScreen } from './src/screens/AccountsScreen';
 import { CategoriesScreen } from './src/screens/CategoriesScreen';
 import { ReportsScreen } from './src/screens/ReportsScreen';
+import { ChecklistFlowScreen } from './src/screens/ChecklistFlowScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { TodayScreen } from './src/screens/TodayScreen';
 import { DateSelectionPopup } from './src/components/DateSelectionPopup';
@@ -79,7 +80,7 @@ import { advanceManualSyncTiming, createManualSyncTiming, finishManualSyncTiming
 import { nativeSyncDiagnosticsText } from './src/utils/native-sync-diagnostics';
 import { accountSyncDiagnosticsText } from './src/utils/account-sync-diagnostics-text';
 
-type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
+type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories' | 'checklist';
 type DayCount = 1 | 3 | 7;
 type NavigationAction = Exclude<Tab, 'today'> | 'plan';
 
@@ -159,6 +160,7 @@ function AppController() {
   const [initializationError, setInitializationError] = useState<string | null>(null);
   const [initializationAttempt, setInitializationAttempt] = useState(0);
   const [tab, setTab] = useState<Tab>('today');
+  const checklistBeforeLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const [dayCount, setDayCount] = useState<DayCount>(1);
   const [viewMode, setViewMode] = useState<CalendarViewMode>('day');
   const [viewChanging, setViewChanging] = useState(false);
@@ -452,7 +454,7 @@ function AppController() {
       if (printAbortRef.current) { printAbortRef.current.abort(); return true; }
       if (viewChangingRef.current) return true;
       if (tab !== 'today') {
-        setTab('today');
+        void returnToCalendar();
         return true;
       }
       return false;
@@ -644,7 +646,9 @@ function AppController() {
       }).catch(() => undefined);
   }
 
-  function returnToCalendar() {
+  async function returnToCalendar() {
+    if (tab === 'checklist' && checklistBeforeLeaveRef.current && !await checklistBeforeLeaveRef.current()) return;
+    if (!controllerMountedRef.current) return;
     setFocusRequest({ ...calendarFocusRef.current, token: ++focusSequence.current, openEditor: false });
     setTab('today');
   }
@@ -1026,6 +1030,7 @@ function AppController() {
                   onSync={() => void synchronizeCalendar()} syncing={manualSyncing || accountSyncStatus.running} syncError={calendarSyncError}
                   syncDetails={calendarSyncDetails} syncTimingDetails={calendarSyncTimingDetails}
                   onOpenReports={() => void navigate('reports')} onJumpToNow={jumpToCurrentMinute}
+                  onOpenChecklist={() => void navigate('checklist')}
                   viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={previousView != null} canGoNext={nextView != null}
                   onPrevious={() => shiftCalendarView(previousView)} onNext={() => shiftCalendarView(nextView)}
@@ -1063,6 +1068,7 @@ function AppController() {
                   onFocusConsumed={consumeFocus} onFocusedMinuteChange={reportFocusedMinute}
                   onDataChanged={dataChanged}
                   onOpenSettings={() => void navigate('settings')}
+                  onOpenChecklist={() => void navigate('checklist')}
                   dayCount={dayCount}
                   selectedDates={selectedDateKeys}
                   dateSelectionOpen={datePickerOpen}
@@ -1080,6 +1086,8 @@ function AppController() {
               {tab === 'reports' ? <ReportsScreen dataVersion={dataVersion} initialDate={activeDate}
                 initialSelectedDates={selectedDateKeys}
                 metric={dashboardMetric} onMetricChange={setDashboardMetric} /> : null}
+              {tab === 'checklist' ? <ChecklistFlowScreen dataVersion={dataVersion} onDataChanged={dataChanged}
+                beforeLeaveRef={checklistBeforeLeaveRef} /> : null}
               {tab === 'search' ? (
                 <SearchScreen dataVersion={dataVersion} onOpenResult={openSearchResult} />
               ) : null}
@@ -1125,12 +1133,13 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, onOpenChecklist, onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
   viewMode, viewChanging, onViewModeChange }: {
   onOpenSettings: () => void;
   onPrint: () => void;
   onOpenSearch: () => void;
   onOpenReports: () => void;
+  onOpenChecklist: () => void;
   onSync: () => void;
   syncing: boolean;
   syncError: string | null;
@@ -1163,7 +1172,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
   const [gearMenuTop, setGearMenuTop] = useState(48);
   const [gearMenuLeft, setGearMenuLeft] = useState(8);
   const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
-  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates'; sequence: number } | null>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates' | 'checklist'; sequence: number } | null>(null);
   const gearVisibleRef = useRef(false);
   const gearClosingRef = useRef(false);
   const headerMountedRef = useRef(true);
@@ -1314,7 +1323,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     if (sequence !== menuRequestSequence.current || !headerMayNavigate()) return;
     viewMenuAnchor.current?.measureInWindow((x, y, anchorWidth, anchorHeight) => {
       if (sequence !== menuRequestSequence.current || !headerMayNavigate() || gearClosingRef.current || viewClosingRef.current || pendingGearAction.current) return;
-      setViewMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 304)));
+      setViewMenuTop(Math.max(8, Math.min(y + anchorHeight + 4, height - 352)));
       setViewMenuRight(Math.max(8, Math.min(width - x - anchorWidth, width - 216)));
       viewVisibleRef.current = true;
       setViewMenuOpen(true);
@@ -1346,6 +1355,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
     else if (pending.action === 'print') onPrint();
     else if (pending.action === 'redo') void changeHistory('redo');
     else if (pending.action === 'dates') onOpenDatePicker();
+    else if (pending.action === 'checklist') onOpenChecklist();
     else onOpenReports();
     // Also release the local lock when a transition finishes within the same React batch.
     gearActionFrame.current = requestAnimationFrame(() => {
@@ -1368,10 +1378,10 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
       finishGearAction(sequence);
     });
   };
-  const chooseDateSelection = () => {
+  const chooseDateSelection = (action: 'dates' | 'checklist' = 'dates') => {
     if (!headerMayNavigate() || !viewVisibleRef.current || viewClosingRef.current || pendingGearAction.current) return;
     const sequence = ++menuRequestSequence.current;
-    pendingGearAction.current = { action: 'dates', sequence };
+    pendingGearAction.current = { action, sequence };
     viewVisibleRef.current = false; viewClosingRef.current = true; setViewMenuOpen(false);
     if (Platform.OS !== 'ios') gearActionFrame.current = requestAnimationFrame(() => {
       gearActionFrame.current = null; viewClosingRef.current = false; finishGearAction(sequence);
@@ -1506,7 +1516,12 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
                 </Text>
               </Pressable>;
             })}
-            <Pressable accessibilityRole="button" accessibilityLabel="Pick or range dates" onPress={chooseDateSelection} style={styles.viewOption}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Checklist task flow view"
+              onPress={() => chooseDateSelection('checklist')} style={styles.viewOption}>
+              <CalendarHeaderIcon name="checklist" />
+              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Checklist task flow</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Pick or range dates" onPress={() => chooseDateSelection()} style={styles.viewOption}>
               <CalendarViewIcon mode="month" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Pick / Range</Text>
             </Pressable>
@@ -1519,7 +1534,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenReports, 
 
 const SCREEN_TITLES: Record<Tab, string> = {
   today: 'Day', reports: 'Dashboard', search: 'Search', settings: 'Settings',
-  accounts: 'Calendar accounts', categories: 'Activity colors',
+  accounts: 'Calendar accounts', categories: 'Activity colors', checklist: 'Checklist task flow',
 };
 
 function ApplicationFrame({

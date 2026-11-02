@@ -9,6 +9,7 @@ type Touch = { day: string; minute: number; x: number; y: number; long: boolean 
 export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines, rowHeight, railWidth, dayWidth, colors,
   current, selection, disabled, scrolling, timeLabel, onSelect, onHold, onScroll, onBegin, onEnd, onLayout, onContentSizeChange,
   refreshControl, hidden = false, backgroundColor = colors.calendarCell, gridLineColor = colors.hairline, fontScale = 1, clockFormat = '12h',
+  onCellTouchStart, onCellTouchMove, onCellTouchEnd, onCellTouchCancel,
 }: { scrollRef: RefObject<ComponentRef<typeof ScrollView> | null>; days: readonly string[]; labels: ReadonlyMap<string, string>;
   bands: ReadonlyMap<string, readonly CompactBand[]>; outlines?: ReadonlyMap<string, readonly CompactBand[]>;
   rowHeight: number; railWidth: number; dayWidth: number; colors: AppColors;
@@ -18,6 +19,10 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
   onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void; onBegin: () => void; onEnd: () => void;
   onLayout: () => void; onContentSizeChange: (width: number, height: number) => void; refreshControl?: ReactElement; hidden?: boolean;
   backgroundColor?: string; gridLineColor?: string; fontScale?: number; clockFormat?: '12h' | '24h';
+  onCellTouchStart?: (day: string, minute: number, event: GestureResponderEvent) => void;
+  onCellTouchMove?: (event: GestureResponderEvent) => void;
+  onCellTouchEnd?: (event: GestureResponderEvent) => void;
+  onCellTouchCancel?: () => void;
 }) {
   const touch = useRef<Touch | null>(null);
   const previousGeometry = useRef({ days: days.join('|'), rowHeight });
@@ -29,8 +34,10 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
     const minute = compactMinuteAt(event.nativeEvent.locationY, rowHeight);
     touch.current = !disabled && event.nativeEvent.touches.length === 1 && minute !== null
       ? { day, minute, x: event.nativeEvent.pageX, y: event.nativeEvent.pageY, long: false } : null;
+    if (touch.current) onCellTouchStart?.(day, touch.current.minute, event);
   }
   function move(event: GestureResponderEvent) {
+    onCellTouchMove?.(event);
     const held = touch.current;
     if (held && (event.nativeEvent.touches.length !== 1 || Math.hypot(event.nativeEvent.pageX - held.x, event.nativeEvent.pageY - held.y) > 8)) touch.current = null;
   }
@@ -46,13 +53,16 @@ export function CompactMinuteOverview({ scrollRef, days, labels, bands, outlines
             fontSize: rail.fontSize, lineHeight: rail.lineHeight, color: colors.muted }}>{calendarTimeRailLabel(hour * 60, rowHeight, clockFormat, fontScale)}</Text> : null)}
       </View>
       {days.map((day) => <Pressable key={day} accessibilityRole="adjustable" accessibilityLabel={`${labels.get(day)}, compact minute overview`}
-        accessibilityHint="Tap a time to select it, then use the pencil for exact dates and times. Hold for cell actions."
+        accessibilityHint="Tap a time to select it. Tap the selection for actions, or briefly hold and drag it to move."
         accessibilityValue={{ min: 0, max: 1439, now: selection?.day === day ? selection.first : current.day === day ? current.minute : 540 }}
         accessibilityActions={[{ name: 'increment', label: 'Next minute' }, { name: 'decrement', label: 'Previous minute' }]}
         onAccessibilityAction={(event) => { if (disabled || !['increment', 'decrement'].includes(event.nativeEvent.actionName)) return; const minute = selection?.day === day ? selection.first : current.day === day ? current.minute : 540;
           onSelect(day, Math.max(0, Math.min(1439, minute + (event.nativeEvent.actionName === 'decrement' ? -1 : 1)))); }}
-        onTouchStart={(event) => start(day, event)} onTouchMove={move} onTouchCancel={() => { touch.current = null; }}
-        onLongPress={() => { const held = touch.current; if (held && held.day === day && !disabled) { held.long = true; onHold(day, held.minute); } }}
+        onTouchStart={(event) => start(day, event)} onTouchMove={move} onTouchEnd={onCellTouchEnd}
+        onTouchCancel={() => { touch.current = null; onCellTouchCancel?.(); }}
+        onLongPress={() => { const held = touch.current; if (held && held.day === day && !disabled) {
+          held.long = true; if (!onCellTouchStart) onHold(day, held.minute);
+        } }}
         onPress={() => { const held = touch.current; touch.current = null; if (held && held.day === day && !held.long && !disabled) onSelect(day, held.minute); }}
         style={{ width: dayWidth, height, backgroundColor, borderLeftWidth: StyleSheet.hairlineWidth, borderColor: gridLineColor }}>
         <View pointerEvents="none" accessible={false} style={StyleSheet.absoluteFill}>

@@ -15,6 +15,7 @@ function fixture(fail = false) {
   let release!:(value:any)=>void,reached!:()=>void;
   const started=new Promise<void>((resolve)=>{reached=resolve;}),gate=new Promise((resolve)=>{release=resolve;});
   const context:any={Error,busy:false,lastStatus:'Initial status',element,applySyncGlyphState,
+    checklistVisible:false,checklistUI:{hasDraft:()=>false,async flush(){},refresh(){},clear(){}},
     dayInput:{value:''},daysInput:{value:''},day:'2026-10-31',days:1,undo:null,
     store:{state:{conflicts:[]},async drain(){}},passphrase:'fixture',editor:null,render(){},
     connection:{identity:{email:'fixture@example.test'},isAuthorized:()=>true,async sync(){reached();if(fail)throw new Error('Synthetic connection error');return gate;}}};

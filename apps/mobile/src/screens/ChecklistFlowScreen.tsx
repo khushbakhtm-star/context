@@ -1,0 +1,432 @@
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ComponentRef, type MutableRefObject } from 'react';
+import { ActivityIndicator, Alert, Animated, Keyboard, KeyboardAvoidingView, Modal, PanResponder, Pressable, ScrollView, StyleSheet,
+  Switch, Text, TextInput, View, type LayoutChangeEvent } from 'react-native';
+import * as Crypto from 'expo-crypto';
+
+import { useAppTheme } from '../appearance';
+import { InfoButton } from '../components/InfoButton';
+import { changeChecklistFlow, dismissChecklistFlowConflict, getChecklistFlow, getChecklistFlowConflicts, getChecklistFlowRevision,
+  restoreChecklistFlowConflict } from '../data/checklist-flow';
+import type { SyncDocument } from '../sync/types';
+import type { AppColors } from '../theme';
+import { applyChecklistChange, checklistRows, checklistSubtreeIds, emptyChecklistFlow,
+  type ChecklistFlow, type ChecklistTask } from '../utils/checklist-flow';
+import { checklistDragDestination, type ChecklistRowLayout } from '../utils/checklist-drag';
+
+type Props = { dataVersion: number; onDataChanged: () => void;
+  beforeLeaveRef?: MutableRefObject<(() => Promise<boolean>) | null> };
+type Snapshot = { flow: ChecklistFlow; revision: string | null };
+type Command = Parameters<typeof applyChecklistChange>[1];
+type Draft = { id: string; text: string; format: ChecklistTask['format']; revision: string | null; isNew: boolean;
+  parentId: string | null; afterId?: string };
+type Drag = { id: string; parentId: string | null; origin: number; originScroll: number; offset: number;
+  beforeId: string | null; revision: string | null };
+
+export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef }: Props) {
+  const { colors, resolvedMode } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const [snapshot, setSnapshot] = useState<Snapshot>(() => ({ flow: emptyChecklistFlow(), revision: null }));
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hideCompleted, setHideCompleted] = useState(false);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [conflicts, setConflicts] = useState<SyncDocument[]>([]);
+  const [showVersions, setShowVersions] = useState(false);
+  const [drag, setDrag] = useState<Drag | null>(null);
+  const [keyboardOffset, setKeyboardOffset] = useState(0);
+  const latest = useRef({ snapshot, busy, draft }); latest.current = { snapshot, busy, draft };
+  const saveDraftRef = useRef<() => Promise<boolean>>(async () => true);
+  const mounted = useRef(true);
+  const requestId = useRef(0);
+  const recoveryRevision = useRef<string | null>(null);
+  const layouts = useRef(new Map<string, ChecklistRowLayout>());
+  const dragRef = useRef<Drag | null>(null);
+  const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  const viewportRef = useRef<ComponentRef<typeof View>>(null);
+  const editorRef = useRef<ComponentRef<typeof View>>(null);
+  const avoidingLayoutY = useRef(0);
+  const scrollOffset = useRef(0);
+  const scrollBounds = useRef({ top: 0, height: 0, contentHeight: 0 });
+  const dragPointer = useRef({ dy: 0, pageY: 0 });
+  const dragMoveRef = useRef<(dy: number) => void>(() => undefined);
+  const translate = useRef(new Animated.Value(0)).current;
+  const rows = useMemo(() => checklistRows(snapshot.flow, hideCompleted), [snapshot.flow, hideCompleted]);
+  const draftAnchor = useMemo(() => {
+    if (!draft?.isNew || !draft.parentId || !snapshot.flow.items.some((task) => task.id === draft.parentId)) return null;
+    const ids = new Set(checklistSubtreeIds(snapshot.flow, draft.parentId));
+    const parentDepth = rows.find(({ task }) => task.id === draft.parentId)?.depth ?? 0;
+    const anchorId = rows.filter(({ task }) => ids.has(task.id)).at(-1)?.task.id;
+    return anchorId ? { id: anchorId, depth: parentDepth + 1 } : null;
+  }, [draft?.isNew, draft?.parentId, snapshot.flow, rows]);
+  const dragIds = useMemo(() => drag && snapshot.flow.items.some((task) => task.id === drag.id)
+    ? new Set(checklistSubtreeIds(snapshot.flow, drag.id)) : new Set<string>(), [snapshot.flow, drag?.id]);
+  const checkedCount = snapshot.flow.items.filter((task) => task.checked).length;
+
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; requestId.current++; }; }, []);
+  function measureKeyboardOffset() {
+    viewportRef.current?.measureInWindow((_x, y) => {
+      if (mounted.current && Number.isFinite(y)) setKeyboardOffset(y - avoidingLayoutY.current);
+    });
+  }
+  const revealEditor = useCallback(() => {
+    if (!latest.current.draft) return;
+    scrollRef.current?.measureInWindow((_x, viewportY, _width, viewportHeight) => {
+      editorRef.current?.measureInWindow((_editorX, editorY, _editorWidth, editorHeight) => {
+        if (!mounted.current || !latest.current.draft || !Number.isFinite(editorY) || !viewportHeight) return;
+        if (editorY < viewportY || editorY + editorHeight > viewportY + viewportHeight) {
+          scrollRef.current?.scrollTo({ y: Math.max(0, scrollOffset.current + editorY - viewportY - 8), animated: true });
+        }
+      });
+    });
+  }, []);
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', revealEditor);
+    const changed = Keyboard.addListener('keyboardDidChangeFrame', revealEditor);
+    return () => { shown.remove(); changed.remove(); };
+  }, [revealEditor]);
+  const load = useCallback(async () => {
+    const request = ++requestId.current;
+    try {
+      const [revision, versions] = await Promise.all([getChecklistFlowRevision(), getChecklistFlowConflicts()]);
+      if (!mounted.current || request !== requestId.current) return;
+      recoveryRevision.current = revision; setConflicts(versions);
+      const next = await getChecklistFlow();
+      if (!mounted.current || request !== requestId.current) return;
+      recoveryRevision.current = next.revision; setSnapshot(next); setReady(true); setError(null);
+    } catch (failure) {
+      if (mounted.current && request === requestId.current) { setReady(false); setError(failure instanceof Error ? failure.message : 'The checklist could not load.'); }
+    }
+  }, []);
+  useEffect(() => { if (!latest.current.busy) void load(); }, [dataVersion, load]);
+  useEffect(() => {
+    if (!draft?.isNew) return;
+    const frame = requestAnimationFrame(() => {
+      if (!draft.parentId) scrollRef.current?.scrollToEnd({ animated: true });
+      else { const layout = layouts.current.get(draft.parentId); if (layout) scrollRef.current?.scrollTo({ y: Math.max(0, layout.y - 20), animated: true }); }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [draft?.id]);
+
+  async function perform(command: Command, expected = latest.current.snapshot.revision) {
+    if (latest.current.busy) return false;
+    latest.current.busy = true; setBusy(true); setError(null); requestId.current++;
+    try {
+      const next = await changeChecklistFlow(command, expected);
+      if (mounted.current) { recoveryRevision.current = next.revision; setSnapshot(next); setReady(true); }
+      onDataChanged(); return true;
+    } catch (failure) {
+      if (mounted.current) setError(failure instanceof Error ? failure.message : 'The checklist change could not be saved.');
+      return false;
+    } finally { latest.current.busy = false; if (mounted.current) setBusy(false); }
+  }
+
+  function startNew(parentId: string | null = null, afterId?: string) {
+    if (!ready || busy || draft) return;
+    setSelectedId(null);
+    setDraft({ id: `task_${Crypto.randomUUID().replaceAll('-', '')}`, text: '', format: {}, revision: snapshot.revision,
+      isNew: true, parentId, afterId });
+  }
+  function edit(task: ChecklistTask) {
+    if (!ready || busy || draft) return;
+    setSelectedId(task.id);
+    setDraft({ id: task.id, text: task.text, format: { ...task.format }, revision: snapshot.revision,
+      isNew: false, parentId: task.parentId });
+  }
+  async function saveDraft(): Promise<boolean> {
+    if (!draft) return true;
+    if (!draft.text.trim() || busy) return false;
+    if (draft.format.textColor && !/^#[0-9a-f]{6}$/i.test(draft.format.textColor)) { setError('Enter a text color as six hex digits, for example #333333.'); return false; }
+    const current = draft;
+    const command: Command = current.isNew ? { type: 'add', item: { id: current.id, text: current.text,
+      checked: false, parentId: current.parentId, format: current.format }, ...(current.afterId ? { afterId: current.afterId } : {}) } :
+      { type: 'edit', id: current.id, text: current.text, format: current.format };
+    if (await perform(command, current.revision)) { setDraft(null); setSelectedId(current.id); Keyboard.dismiss(); return true; }
+    return false;
+  }
+  saveDraftRef.current = saveDraft;
+  useEffect(() => {
+    if (!beforeLeaveRef) return;
+    const beforeLeave = async () => {
+      if (latest.current.busy) { setError('Finish the current checklist change before leaving.'); return false; }
+      const current = latest.current.draft;
+      if (!current) return true;
+      if (!current.text.trim()) { setDraft(null); setError(null); Keyboard.dismiss(); return true; }
+      return saveDraftRef.current();
+    };
+    beforeLeaveRef.current = beforeLeave;
+    return () => { if (beforeLeaveRef.current === beforeLeave) beforeLeaveRef.current = null; };
+  }, [beforeLeaveRef]);
+  function remove(task: ChecklistTask) {
+    const count = checklistSubtreeIds(snapshot.flow, task.id).length;
+    const displayedRevision = snapshot.revision;
+    const erase = () => { void perform({ type: 'delete', id: task.id }, displayedRevision).then((saved) => { if (saved) setSelectedId(null); }); };
+    if (count > 1) Alert.alert('Delete this task and its subtasks?', `${count - 1} ${count === 2 ? 'subtask will' : 'subtasks will'} also be deleted.`,
+      [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: erase }]);
+    else erase();
+  }
+  function canChange(command: Command) {
+    try { return JSON.stringify(applyChecklistChange(snapshot.flow, command)) !== JSON.stringify(snapshot.flow); } catch { return false; }
+  }
+  function beginDrag(id: string, pageY: number) {
+    if (latest.current.busy || latest.current.draft) return;
+    const current = latest.current.snapshot.flow.items.find((task) => task.id === id); const layout = layouts.current.get(id);
+    if (!current || !layout) return;
+    const siblings = latest.current.snapshot.flow.items.filter((task) => task.parentId === current.parentId);
+    const next = siblings[siblings.findIndex((task) => task.id === id) + 1];
+    const value: Drag = { id, parentId: current.parentId, origin: layout.y + layout.height / 2, originScroll: scrollOffset.current,
+      offset: 0, beforeId: next?.id ?? null, revision: latest.current.snapshot.revision };
+    dragPointer.current = { dy: 0, pageY };
+    dragRef.current = value; translate.setValue(0); setDrag(value); setSelectedId(null);
+  }
+  function moveDrag(dy: number) {
+    const value = dragRef.current; if (!value) return;
+    const effectiveOffset = dy + scrollOffset.current - value.originScroll;
+    const visibleIds = new Set(rows.map(({ task }) => task.id));
+    const destination = checklistDragDestination(latest.current.snapshot.flow, value.id, layouts.current, visibleIds, value.origin + effectiveOffset);
+    if (!destination) { finishDrag(true); return; }
+    const beforeId = destination.beforeId;
+    const destinationChanged = value.beforeId !== beforeId;
+    value.offset = effectiveOffset; value.beforeId = beforeId; translate.setValue(effectiveOffset);
+    if (destinationChanged) setDrag({ ...value });
+  }
+  dragMoveRef.current = moveDrag;
+  useEffect(() => {
+    if (!drag?.id) return;
+    const timer = setInterval(() => {
+      if (!dragRef.current) return;
+      const { top, height, contentHeight } = scrollBounds.current; const pointer = dragPointer.current;
+      if (!height) return;
+      const direction = pointer.pageY < top + 48 ? -1 : pointer.pageY > top + height - 48 ? 1 : 0;
+      if (!direction) return;
+      const next = Math.max(0, Math.min(Math.max(0, contentHeight - height), scrollOffset.current + direction * 18));
+      if (next === scrollOffset.current) return;
+      scrollOffset.current = next; scrollRef.current?.scrollTo({ y: next, animated: false }); dragMoveRef.current(pointer.dy);
+    }, 60);
+    return () => clearInterval(timer);
+  }, [drag?.id]);
+  function finishDrag(cancelled = false) {
+    const value = dragRef.current; dragRef.current = null; setDrag(null); translate.setValue(0);
+    if (!value || cancelled || Math.abs(value.offset) < 8) return;
+    void perform({ type: 'move', id: value.id, parentId: value.parentId, beforeId: value.beforeId }, value.revision);
+  }
+  function measure(id: string, event: LayoutChangeEvent) { layouts.current.set(id, event.nativeEvent.layout); }
+
+  async function restoreVersion(document: SyncDocument) {
+    if (latest.current.busy || latest.current.draft) return;
+    latest.current.busy = true; setBusy(true); setError(null); requestId.current++;
+    try {
+      const next = await restoreChecklistFlowConflict(document, recoveryRevision.current);
+      const versions = await getChecklistFlowConflicts();
+      if (mounted.current) { recoveryRevision.current = next.revision; setSnapshot(next); setReady(true); setConflicts(versions); setShowVersions(false); }
+      onDataChanged();
+    } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'The earlier checklist could not be restored.'); }
+    finally { latest.current.busy = false; if (mounted.current) setBusy(false); }
+  }
+  async function dismissVersion(document: SyncDocument) {
+    if (latest.current.busy) return;
+    latest.current.busy = true; setBusy(true);
+    try { await dismissChecklistFlowConflict(document); const versions = await getChecklistFlowConflicts(); if (mounted.current) setConflicts(versions); }
+    catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'The earlier version could not be dismissed.'); }
+    finally { latest.current.busy = false; if (mounted.current) setBusy(false); }
+  }
+
+  const editor = draft ? <View ref={editorRef} collapsable={false} style={styles.editor} onLayout={revealEditor}>
+    <TextInput accessibilityLabel={draft.parentId ? 'Subtask text' : 'Task text'} value={draft.text} multiline autoFocus editable={!busy}
+      maxLength={50000} keyboardAppearance={resolvedMode} placeholder={draft.parentId ? 'Add subtask' : 'Add task'}
+      onFocus={revealEditor}
+      placeholderTextColor={colors.muted} onChangeText={(text) => { if (!latest.current.busy) setDraft((value) => value ? { ...value, text } : value); }}
+      style={[styles.input, { fontWeight: draft.format.bold ? '700' : '400', fontStyle: draft.format.italic ? 'italic' : 'normal',
+        textDecorationLine: draft.format.underline ? 'underline' : 'none', color: /^#[0-9a-f]{6}$/i.test(draft.format.textColor ?? '') ? draft.format.textColor : colors.ink }]} />
+    <View style={styles.formatRow}>
+      {(['bold', 'italic', 'underline'] as const).map((kind) => <Pressable key={kind} accessibilityRole="button"
+        accessibilityLabel={kind[0]!.toUpperCase() + kind.slice(1)} accessibilityState={{ selected: Boolean(draft.format[kind]) }}
+        disabled={busy} onPress={() => { if (!latest.current.busy) setDraft((value) => value ? { ...value, format: { ...value.format, [kind]: !value.format[kind] } } : value); }}
+        style={[styles.formatButton, draft.format[kind] && styles.selectedButton, busy && styles.disabled]}>
+        <Text allowFontScaling={false} style={[styles.formatGlyph, kind === 'bold' && { fontWeight: '800' }, kind === 'italic' && { fontStyle: 'italic' },
+          kind === 'underline' && { textDecorationLine: 'underline' }]}>{kind === 'bold' ? 'B' : kind === 'italic' ? 'I' : 'U'}</Text>
+      </Pressable>)}
+      <TextInput accessibilityLabel="Task text color hex" value={draft.format.textColor ?? ''} autoCapitalize="characters" autoCorrect={false} editable={!busy}
+        maxLength={7} placeholder="#RRGGBB" placeholderTextColor={colors.muted} keyboardAppearance={resolvedMode}
+        onChangeText={(text) => { if (!latest.current.busy) setDraft((value) => value ? { ...value, format: { ...value.format, textColor: text || undefined } } : value); }} style={styles.colorInput} />
+      <Pressable accessibilityRole="button" accessibilityLabel="Reset task text color" disabled={busy} onPress={() => { if (!latest.current.busy) setDraft((value) => value ?
+        { ...value, format: { ...value.format, textColor: undefined } } : value); }} style={styles.formatButton}><Text style={styles.formatGlyph}>↺</Text></Pressable>
+    </View>
+    <View style={styles.editorActions}><Pressable accessibilityRole="button" onPress={() => { if (!latest.current.busy) { setDraft(null); setError(null); Keyboard.dismiss(); } }}
+      disabled={busy} style={styles.textButton}><Text style={styles.secondaryText}>Cancel</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="Save task" onPress={() => void saveDraft()} disabled={busy || !draft.text.trim()}
+        style={[styles.saveButton, (busy || !draft.text.trim()) && styles.disabled]}><Text style={styles.saveText}>✓</Text></Pressable></View>
+  </View> : null;
+
+  return <KeyboardAvoidingView style={styles.container} behavior="padding" keyboardVerticalOffset={keyboardOffset}
+    onLayout={(event) => { avoidingLayoutY.current = event.nativeEvent.layout.y; measureKeyboardOffset(); }}>
+    <View ref={viewportRef} collapsable={false} style={styles.container}>
+    <View style={styles.heading}>
+      <InfoButton title="Checklist task flow" message="Check completed tasks, hide them when needed, and reset all checks to reuse your list. Drag a handle to reorder a task with its subtasks. Open a row’s actions to move, indent, outdent or add a subtask. Tasks created from minute text keep a snapshot; checking a task does not change your minute ledger or calendar event." />
+      <Pressable accessibilityRole="button" accessibilityLabel="Add task" disabled={!ready || busy || Boolean(draft)} onPress={() => startNew()}
+        style={[styles.addButton, (!ready || busy || Boolean(draft)) && styles.disabled]}><Text style={styles.addGlyph}>+</Text></Pressable>
+    </View>
+    <View style={styles.listControls}><View style={styles.hideControl}><Switch accessibilityLabel="Hide completed tasks" value={hideCompleted}
+      onValueChange={setHideCompleted} disabled={Boolean(draft) || Boolean(drag)} trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }} thumbColor={colors.switchThumb} />
+      <Text style={styles.secondaryText}>Hide completed</Text></View>
+      <Pressable accessibilityRole="button" accessibilityLabel="Reset all task checks" disabled={!ready || !checkedCount || busy || Boolean(draft)}
+        onPress={() => void perform({ type: 'reset' })} style={[styles.textButton, (!ready || !checkedCount || busy || Boolean(draft)) && styles.disabled]}>
+        <Text style={styles.secondaryText}>↺ Reset checks</Text></Pressable></View>
+    {conflicts.length ? <Pressable accessibilityRole="button" disabled={busy || Boolean(draft)} onPress={() => setShowVersions(true)} style={styles.versionsButton}>
+      <Text style={styles.secondaryText}>Other versions ({conflicts.length})</Text></Pressable> : null}
+    {error ? <View accessibilityLiveRegion="polite" style={styles.errorRow}><Text style={styles.error}>{error}</Text>
+      <Pressable accessibilityRole="button" disabled={busy} onPress={() => void load()} style={styles.textButton}><Text style={styles.secondaryText}>Reload list</Text></Pressable></View> : null}
+    {!ready && !error ? <ActivityIndicator color={colors.muted} style={styles.loading} /> : null}
+    <ScrollView ref={scrollRef} style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" scrollEnabled={!drag}
+      onLayout={() => { measureKeyboardOffset(); scrollRef.current?.measureInWindow((_x, y, _width, height) => {
+        scrollBounds.current = { ...scrollBounds.current, top: y, height }; revealEditor(); }); }}
+      onContentSizeChange={(_width, height) => { scrollBounds.current.contentHeight = height; }}
+      onScroll={(event) => { scrollOffset.current = event.nativeEvent.contentOffset.y; }} scrollEventThrottle={16}>
+      {rows.map(({ task, depth }) => {
+        const active = selectedId === task.id; const editing = draft?.id === task.id && !draft.isNew;
+        const currentDrag = dragIds.has(task.id); const before = drag?.beforeId === task.id;
+        return <Fragment key={task.id}><Animated.View onLayout={(event) => measure(task.id, event)}
+          style={[styles.rowContainer, { marginLeft: Math.min(depth, 8) * 16 }, before && styles.dropBefore,
+            currentDrag && { zIndex: 10, transform: [{ translateY: translate }], backgroundColor: colors.panel }]}>
+          <View style={[styles.row, task.checked && styles.completed]}>
+            <Pressable accessibilityRole="checkbox" accessibilityLabel={`Complete ${task.text}`} accessibilityState={{ checked: task.checked, disabled: !ready || busy || Boolean(draft) }}
+              disabled={!ready || busy || Boolean(draft)} onPress={() => void perform({ type: 'check', id: task.id, checked: !task.checked })} style={styles.checkButton}>
+              <View style={[styles.checkbox, task.checked && styles.checked]}>{task.checked ? <Text style={styles.checkGlyph}>✓</Text> : null}</View>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Edit task: ${task.text}`} disabled={!ready || busy || Boolean(draft)} onPress={() => edit(task)}
+              onLongPress={() => setSelectedId(active ? null : task.id)} style={styles.taskBody}>
+              <Text style={[styles.taskText, { color: task.format.textColor ?? colors.ink, fontWeight: task.format.bold ? '700' : '400',
+                fontStyle: task.format.italic ? 'italic' : 'normal', textDecorationLine: task.checked ? task.format.underline ? 'underline line-through' : 'line-through' :
+                  task.format.underline ? 'underline' : 'none' }]}>{task.text}</Text>
+              {task.source?.ranges.length ? <Text style={styles.sourceLabel}>From {task.source.ranges[0]!.dateKey}</Text> : null}
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Actions for ${task.text}`} accessibilityState={{ expanded: active }} disabled={!ready || busy || Boolean(draft)}
+              onPress={() => setSelectedId(active ? null : task.id)} style={styles.moreButton}><Text style={styles.moreGlyph}>⋯</Text></Pressable>
+            <TaskDragHandle disabled={!ready || busy || Boolean(draft)} label={task.text} onBegin={(pageY) => beginDrag(task.id, pageY)}
+              onMove={(dy, pageY) => { dragPointer.current = { dy, pageY }; moveDrag(dy); }}
+              onEnd={finishDrag} onStep={(direction) => void perform({ type: 'moveRelative', id: task.id, direction })} styles={styles} />
+          </View>
+          {editing ? editor : null}
+          {active && !draft && ready ? <View style={styles.rowActions}>
+            <Action label="Subtask" accessibilityLabel="Add subtask" onPress={() => startNew(task.id)} styles={styles} />
+            <Action label="↑" accessibilityLabel="Move task up" disabled={!canChange({ type: 'moveRelative', id: task.id, direction: 'up' })}
+              onPress={() => void perform({ type: 'moveRelative', id: task.id, direction: 'up' })} styles={styles} />
+            <Action label="↓" accessibilityLabel="Move task down" disabled={!canChange({ type: 'moveRelative', id: task.id, direction: 'down' })}
+              onPress={() => void perform({ type: 'moveRelative', id: task.id, direction: 'down' })} styles={styles} />
+            <Action label="→" accessibilityLabel="Indent task" disabled={!canChange({ type: 'indent', id: task.id })}
+              onPress={() => void perform({ type: 'indent', id: task.id })} styles={styles} />
+            <Action label="←" accessibilityLabel="Outdent task" disabled={!canChange({ type: 'outdent', id: task.id })}
+              onPress={() => void perform({ type: 'outdent', id: task.id })} styles={styles} />
+            <Action label="Delete" accessibilityLabel="Delete task" onPress={() => remove(task)} styles={styles} />
+          </View> : null}
+        </Animated.View>{draftAnchor?.id === task.id ? <View style={{ marginLeft: Math.min(draftAnchor.depth, 8) * 16 }}>{editor}</View> : null}</Fragment>;
+      })}
+      {draft && (draft.isNew ? !draftAnchor : !rows.some(({ task }) => task.id === draft.id)) ? editor : null}
+      {ready && !rows.length && !draft ? <Text style={styles.empty}>{snapshot.flow.items.length ? 'All tasks are completed.' : 'Add a task to begin.'}</Text> : null}
+      {ready && !draft ? <Pressable accessibilityRole="button" accessibilityLabel="Add another task" disabled={busy} onPress={() => startNew()} style={styles.addRow}>
+        <Text style={styles.secondaryText}>+ Add task</Text></Pressable> : null}
+    </ScrollView>
+    <Modal visible={showVersions} transparent animationType="fade" onRequestClose={() => setShowVersions(false)}>
+      <View style={styles.modalOverlay}><Pressable accessible={false} style={StyleSheet.absoluteFill} onPress={() => setShowVersions(false)} />
+        <View accessibilityViewIsModal style={styles.versionsCard}>
+          <View style={styles.modalHeading}><Text accessibilityRole="header" style={styles.title}>Other checklist versions</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close other checklist versions" style={styles.moreButton} onPress={() => setShowVersions(false)}>
+              <Text style={styles.moreGlyph}>×</Text></Pressable></View>
+          <ScrollView keyboardShouldPersistTaps="handled">{conflicts.map((document) => {
+            const value = document.value; const items = Array.isArray(value?.items) ? value.items : [];
+            return <View key={document.revision} style={styles.versionRow}>
+              <Text style={styles.secondaryText}>{items.length} {items.length === 1 ? 'task' : 'tasks'}</Text>
+              {items.slice(0, 5).map((item, index) => <Text key={index} numberOfLines={2} style={styles.versionPreview}>
+                {item && typeof item === 'object' && 'text' in item && typeof item.text === 'string' ? item.text : 'Task'}</Text>)}
+              {items.length > 5 ? <Text style={styles.secondaryText}>…</Text> : null}
+              <View style={styles.editorActions}><Pressable accessibilityRole="button" disabled={busy} onPress={() => void dismissVersion(document)} style={styles.textButton}>
+                <Text style={styles.secondaryText}>Dismiss</Text></Pressable><Pressable accessibilityRole="button" disabled={busy || Boolean(draft)}
+                onPress={() => void restoreVersion(document)} style={styles.textButton}><Text style={styles.secondaryText}>Restore list</Text></Pressable></View>
+            </View>;
+          })}</ScrollView>
+        </View>
+      </View>
+    </Modal>
+    </View>
+  </KeyboardAvoidingView>;
+}
+
+function Action({ label, accessibilityLabel, disabled = false, onPress, styles }: { label: string; accessibilityLabel: string;
+  disabled?: boolean; onPress: () => void; styles: ReturnType<typeof createStyles> }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled }} disabled={disabled}
+    onPress={onPress} style={[styles.actionButton, disabled && styles.disabled]}><Text style={styles.secondaryText}>{label}</Text></Pressable>;
+}
+
+function TaskDragHandle({ disabled, label, onBegin, onMove, onEnd, onStep, styles }: { disabled: boolean; label: string;
+  onBegin: (pageY: number) => void; onMove: (dy: number, pageY: number) => void; onEnd: (cancelled?: boolean) => void;
+  onStep: (direction: 'up' | 'down') => void; styles: ReturnType<typeof createStyles> }) {
+  const latest = useRef({ disabled, onBegin, onMove, onEnd }); latest.current = { disabled, onBegin, onMove, onEnd };
+  const responder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => !latest.current.disabled,
+    onMoveShouldSetPanResponder: (_, gesture) => !latest.current.disabled && Math.abs(gesture.dy) > 4,
+    onPanResponderGrant: (event) => latest.current.onBegin(event.nativeEvent.pageY),
+    onPanResponderMove: (_, gesture) => latest.current.onMove(gesture.dy, gesture.moveY),
+    onPanResponderRelease: () => latest.current.onEnd(),
+    onPanResponderTerminate: () => latest.current.onEnd(true),
+    onPanResponderTerminationRequest: () => false,
+  }), []);
+  return <View {...responder.panHandlers} accessible accessibilityRole="adjustable" accessibilityLabel={`Drag to reorder ${label}`}
+    accessibilityHint="Drag up or down. Task actions also provide Move up and Move down."
+    accessibilityState={{ disabled }} accessibilityActions={[{ name: 'increment', label: 'Move task down' }, { name: 'decrement', label: 'Move task up' }]}
+    onAccessibilityAction={(event) => { if (!disabled) { if (event.nativeEvent.actionName === 'increment') onStep('down');
+      else if (event.nativeEvent.actionName === 'decrement') onStep('up'); } }}
+    style={[styles.dragHandle, disabled && styles.disabled]}><View style={styles.dragLine} /><View style={styles.dragLine} /><View style={styles.dragLine} /></View>;
+}
+
+const createStyles = (colors: AppColors) => StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.paper },
+  heading: { paddingLeft: 20, paddingRight: 8, paddingTop: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 2 },
+  title: { flex: 1, color: colors.ink, fontSize: 20, lineHeight: 27, fontWeight: '600' },
+  addButton: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  addGlyph: { color: colors.graphite, fontSize: 30, lineHeight: 36 },
+  listControls: { paddingHorizontal: 16, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 },
+  hideControl: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  secondaryText: { color: colors.muted, fontSize: 14, lineHeight: 20 },
+  textButton: { minHeight: 44, paddingHorizontal: 8, justifyContent: 'center', alignItems: 'center' },
+  disabled: { opacity: 0.35 },
+  scroll: { flex: 1 }, content: { paddingHorizontal: 12, paddingBottom: 40 },
+  rowContainer: { borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, backgroundColor: colors.paper },
+  dropBefore: { borderTopWidth: 2, borderTopColor: colors.graphite },
+  row: { minHeight: 64, flexDirection: 'row', alignItems: 'center' },
+  completed: { opacity: 0.42 },
+  checkButton: { width: 44, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
+  checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.muted, alignItems: 'center', justifyContent: 'center' },
+  checked: { borderColor: colors.muted, backgroundColor: colors.panel },
+  checkGlyph: { color: colors.graphite, fontSize: 16, lineHeight: 20, fontWeight: '600' },
+  taskBody: { flex: 1, minWidth: 0, paddingVertical: 16, paddingRight: 4 },
+  taskText: { fontSize: 16, lineHeight: 23 },
+  sourceLabel: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
+  moreButton: { width: 36, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  moreGlyph: { color: colors.muted, fontSize: 25, lineHeight: 30 },
+  dragHandle: { width: 36, minHeight: 48, alignItems: 'center', justifyContent: 'center', gap: 3 },
+  dragLine: { width: 16, height: 1.5, borderRadius: 1, backgroundColor: colors.muted },
+  rowActions: { paddingLeft: 36, paddingBottom: 8, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 1 },
+  actionButton: { paddingHorizontal: 11, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  editor: { borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 10, padding: 12, marginVertical: 8, backgroundColor: colors.surface },
+  input: { color: colors.ink, fontSize: 16, lineHeight: 24, minHeight: 80, maxHeight: 280, textAlignVertical: 'top', padding: 2 },
+  formatRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4, marginTop: 8 },
+  formatButton: { width: 40, minHeight: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
+  selectedButton: { backgroundColor: colors.panel },
+  formatGlyph: { color: colors.graphite, fontSize: 18, lineHeight: 24 },
+  colorInput: { color: colors.ink, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 6, minHeight: 40, paddingHorizontal: 8, width: 100, fontSize: 13 },
+  editorActions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 6 },
+  saveButton: { width: 48, minHeight: 42, backgroundColor: colors.accent, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  saveText: { color: colors.onAccent, fontSize: 23, lineHeight: 28 },
+  addRow: { minHeight: 56, paddingLeft: 12, justifyContent: 'center' },
+  empty: { color: colors.muted, fontSize: 15, lineHeight: 22, padding: 20 },
+  errorRow: { paddingHorizontal: 20, paddingVertical: 8 },
+  error: { color: colors.danger, fontSize: 14, lineHeight: 21 },
+  loading: { marginTop: 32 },
+  versionsButton: { minHeight: 44, paddingHorizontal: 22, justifyContent: 'center' },
+  modalOverlay: { flex: 1, paddingHorizontal: 24, paddingVertical: 40, justifyContent: 'center', backgroundColor: colors.scrim },
+  versionsCard: { maxHeight: '85%', backgroundColor: colors.paper, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, padding: 16 },
+  modalHeading: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  versionRow: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, paddingVertical: 14 },
+  versionPreview: { color: colors.graphite, fontSize: 14, lineHeight: 20, marginTop: 5 },
+});

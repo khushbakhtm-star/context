@@ -44,6 +44,11 @@
       "sha256": "cb611fd672d350abf4f222697ee110dcb9b9f3848a172b5f2dade4183a9164db"
     },
     {
+      "path": "utils/checklist-flow.ts",
+      "bytes": 13267,
+      "sha256": "276acd34917b1d3b62459a8b9b5bff6a8f761b6de79b12aa061c6e349f53e314"
+    },
+    {
       "path": "sync/types.ts",
       "bytes": 6463,
       "sha256": "d291b98ef9ae84812d551266644990d230d0014f2852dedea5b75f4388dc9c93"

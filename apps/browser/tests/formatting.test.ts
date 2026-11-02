@@ -31,7 +31,7 @@ test('browser styles preserve exact note, source/group identity and opaque metad
   const result = formatCells(state, [{ day, minute: 600 }], { bold: false, italic: true, textColor: '#aa11cc' }, [], 2000);
   assert.deepEqual(getMinute(result.state, day, 600), getMinute(state, day, 600));
   const value = document(result.state, cellFormatKey(day, 600))!.value!;
-  const expectedFormat = { ...metadata[1]!.value!.format as Record<string, unknown>, italic: true, textColor: '#AA11CC' };
+  const expectedFormat: Record<string, unknown> = { ...metadata[1]!.value!.format as Record<string, unknown>, italic: true, textColor: '#AA11CC' };
   delete expectedFormat.bold;
   assert.deepEqual(value, { ...metadata[1]!.value, format: expectedFormat });
   assert.equal('bold' in (value.format as object), false);

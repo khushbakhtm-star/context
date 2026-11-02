@@ -15,6 +15,10 @@ import { effectiveTextColor, noteColorOnFill } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
 import { applySyncGlyphState } from './sync-glyph';
+import { ChecklistFlowUI } from './checklist-flow-ui';
+import { browserChecklist, browserChecklistVersions, changeBrowserChecklist, restoreBrowserChecklist,
+  minuteTaskSnapshot, newBrowserTask, type MinuteTaskSnapshot } from './checklist-flow';
+import type { ChecklistChange, ChecklistFlow } from '../shared/utils/checklist-flow';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const main = element('main'), grid = element('grid'), options = element<HTMLDialogElement>('options');
@@ -28,10 +32,11 @@ let unlockRequest = 0;
 let day = dateKey(new Date()); let days = 1; let clock12 = true; let plans: BrowserPlan[] = [];
 let calendars: { id: string; title: string; color: string; primary: boolean }[] = []; let selectedCalendars = new Set<string>();
 let selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; let undo: UndoEdit | null = null;
+let selectionActivated = false;
+let selectedTapTimer: ReturnType<typeof setTimeout> | undefined;
 let editor: { input: HTMLTextAreaElement; day: string; minute: number; revision: string | undefined; original: string; saving: Promise<void> | null } | null = null;
 let entryBarMode: 'entry' | 'format' | null = null;
 let commandBusy = false;
-let cellHoldTimer: ReturnType<typeof setTimeout> | undefined; let cellHeld = false;
 const entryInput = element<HTMLTextAreaElement>('minute-entry');
 const composerViewport = bindComposerViewport(window, main, [element('entry-bar')]);
 let liveFillColors: { color: string; providerColorId: string }[] = [];
@@ -40,13 +45,57 @@ let groupSelectionRevision: string | null = null;
 let groupCoordinates: GridPoint[] = [];
 let groupRangeConfirmed = true;
 let groupFillOptions: BrowserFill[] = [];
-let viewGeneration = 0; let drag: { day: string; minute: number } | null = null; let rangeEnd: { day: string; minute: number } | null = null;
+let viewGeneration = 0; let rangeEnd: { day: string; minute: number } | null = null;
 let firstRendered = -1;
 let moveDraft: { store: BrowserStore; coords: GridPoint[]; grabbed: GridPoint; origin: GridPoint; fingerprint: string; stamp: string } | null = null;
 let movePreview: GridPoint[] = [];
 type CellClipboard = { store: BrowserStore; coords: GridPoint[]; origin: GridPoint; fingerprint: string; text: string; cut: boolean };
 let cellClipboard: CellClipboard | null = null;
 const settings = { appearance: 'system', clock: '12' };
+let checklistVisible = false;
+let calendarScrollBeforeChecklist = 0;
+const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
+  snapshot: () => store ? { scope: store, ...browserChecklist(store.state), versions: browserChecklistVersions(store.state) } : null,
+  change: async (command: ChecklistChange, expected: string | undefined, scope: object) => {
+    if (!store || store !== scope) throw new Error('The connected account changed. Reopen your checklist.'); const active = store;
+    let acknowledgedRevision: string | undefined;
+    await active.update((state) => { if (store !== active) throw new Error('The connected account changed. Unlock your ledger again.');
+      const result = changeBrowserChecklist(state, expected, command); acknowledgedRevision = browserChecklist(result.state).revision; undo = result.undo; return result.state; });
+    updateHeader(); void synchronize(false); return acknowledgedRevision;
+  },
+  restore: async (flow: ChecklistFlow, expected: string | undefined, scope: object) => {
+    if (!store || store !== scope) throw new Error('The connected account changed. Reopen your checklist.'); const active = store;
+    await active.update((state) => { if (store !== active) throw new Error('The connected account changed. Unlock your ledger again.');
+      const result = restoreBrowserChecklist(state, expected, flow); undo = result.undo; return result.state; });
+    updateHeader(); void synchronize(false);
+  },
+  source: (source) => { const point = source.ranges[0]; if (!point) return; setChecklistVisible(false);
+    day = point.dateKey; selected = { day, minute: point.startMinute }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); },
+  back: () => { setChecklistVisible(false); render(); main.scrollTop = calendarScrollBeforeChecklist; },
+  error: report,
+});
+function setChecklistVisible(visible: boolean) {
+  if (visible && !checklistVisible) calendarScrollBeforeChecklist = main.scrollTop;
+  checklistVisible = visible; element('checklist-flow').hidden = !visible;
+  document.body.classList.toggle('view-checklist', visible);
+  if (visible) { entryBarMode = null; updateBars(); main.scrollTop = 0; checklistUI.refresh(true); }
+  updateHeader();
+}
+async function showChecklistView() {
+  cancelSelectedTap(); mouseSelection.cancel(false); await saveEditor(); await checklistUI.flush(); closeCellMenu();
+  element<HTMLDialogElement>('menu-dialog').close(); element<HTMLDialogElement>('view-dialog').close(); setChecklistVisible(true);
+}
+async function createChecklistTask(snapshot: MinuteTaskSnapshot) {
+  if (!store) throw new Error('Unlock your private ledger first.'); const active = store; const expected = browserChecklist(active.state).revision;
+  await active.update((state) => { if (store !== active) throw new Error('The connected account changed. Unlock your ledger again.');
+    const result = changeBrowserChecklist(state, expected, { type: 'add', item: newBrowserTask(snapshot.text, snapshot.source) }); undo = result.undo; return result.state; });
+  void synchronize(false);
+}
+async function addEditorTextToChecklist() {
+  if (!editor || !store) return; const current = editor; const active = store; const start = current.input.selectionStart, end = current.input.selectionEnd;
+  const snapshot = minuteTaskSnapshot([{ day: current.day, minute: current.minute, text: current.input.value }], end > start ? { start, end } : undefined);
+  await saveEditor(); if (store !== active) throw new Error('The connected account changed. Select the task text again.'); await createChecklistTask(snapshot); await showChecklistView();
+}
 function report(error: unknown) { status(error instanceof Error ? error.message : 'The action could not finish. Your saved notes remain available.', true); }
 function selectionCells(): { day: string; minute: number }[] {
   const end = rangeEnd ?? selected; const startDay = [selected.day, end.day].sort()[0]!; const lastDay = [selected.day, end.day].sort()[1]!;
@@ -162,6 +211,10 @@ async function showCellMenu(x: number, y: number) {
   add('Paste', async () => { if (!navigator.clipboard?.readText) throw new Error('Select the destination and use Ctrl+V or⌘V.'); const text = await navigator.clipboard.readText(); if (selectionStamp() !== stamp) throw new Error('The selection changed. Paste again.'); await paste(text); });
   if (distinct.length) add('Clear', () => writeSelectedText(coords.map((point) => ({ ...point, text: '' })), source));
   if (coords.length > 1 && distinct.length === 1) add('AutoFill', () => writeSelectedText(coords.map((point) => ({ ...point, text: distinct[0]! })), source));
+  if (distinct.some((text) => text.trim())) add('Add to checklist', async () => {
+    if (store !== active || selectionStamp() !== stamp) throw new Error('The selection changed. Choose your task text again.');
+    await createChecklistTask(minuteTaskSnapshot(coords.map((point, index) => ({ ...point, text: textValues[index]! })))); await showChecklistView();
+  });
   const sameDay = coords.every((point) => point.day === coords[0]!.day);
   const hasGroup = coords.some((point) => {
     const minute = documents.get(minuteKey(point.day, point.minute))?.value;
@@ -249,8 +302,12 @@ function updateHeader() {
   element('identity').textContent = connection?.identity?.email ?? 'No Google account connected';
   element<HTMLButtonElement>('unlock').disabled = !connection?.isAuthorized() || busy;
   applySyncGlyphState(element('sync'), busy, element('status').dataset.error === 'true');
+  element<HTMLButtonElement>('previous').disabled = checklistVisible; element<HTMLButtonElement>('next').disabled = checklistVisible;
+  if (!store) checklistUI.clear();
+  if (checklistVisible) checklistUI.refresh();
 }
 function select(target: { day: string; minute: number }, extend = false) {
+  selectionActivated = true;
   if (!extend) { selected = target; rangeEnd = null; } else rangeEnd = target;
   paintSelection(); updateBars();
 }
@@ -268,12 +325,16 @@ function paintSelection() {
     node.classList.toggle('move-target', preview.has(minuteKey(node.dataset.day!, Number(node.dataset.minute))));
   }
 }
-function selectedBorder(target: EventTarget | null, x: number, y: number) {
-  if (editor || !(target instanceof Element)) return false;
+function selectedRegion(target: EventTarget | null) {
+  if (!selectionActivated || editor || !(target instanceof Element)) return false;
   const node = target.closest<HTMLElement>('.cell.selected'); if (!node) return false;
-  const rect = node.getBoundingClientRect(), edge = 5;
-  return node.classList.contains('selection-left') && x - rect.left <= edge || node.classList.contains('selection-right') && rect.right - x <= edge ||
-    node.classList.contains('selection-top') && y - rect.top <= edge || node.classList.contains('selection-bottom') && rect.bottom - y <= edge;
+  return true;
+}
+function cancelSelectedTap() { if (selectedTapTimer) clearTimeout(selectedTapTimer); selectedTapTimer = undefined; }
+function tapCalendarCell(point: GridPoint, alreadySelected: boolean, x: number, y: number) {
+  if (commandBusy || mouseSelection.suppressesClick()) return;
+  if (!alreadySelected) { beginEdit(point.day, point.minute); return; }
+  cancelSelectedTap(); selectedTapTimer = setTimeout(() => { selectedTapTimer = undefined; void showCellMenu(x, y).catch(report); }, 260);
 }
 function clearMovePreview() { moveDraft = null; movePreview = []; grid.classList.remove('moving-cells'); paintSelection(); }
 function previewMove(point: GridPoint) {
@@ -352,17 +413,11 @@ function render() {
       }
       if (format.bold) node.style.fontWeight = '700'; if (format.italic) node.style.fontStyle = 'italic'; if (format.underline) node.style.textDecoration = 'underline'; if (format.textColor) node.style.color = format.textColor;
       node.setAttribute('aria-label', `${date}, ${minuteLabel(minute, clock12)}${value ? `, ${String(value.text ?? '')}` : plan ? `, planned: ${plan.title}` : ', empty cell'}`);
-      node.addEventListener('pointerdown', (event) => {
-        if (commandBusy || event.button !== 0 || event.pointerType !== 'touch') return;
-        cellHeld = false; closeCellMenu(); if (cellHoldTimer) clearTimeout(cellHoldTimer);
-        const target = { day: date, minute }; const keepRange = isInSelection(date, minute) && Boolean(rangeEnd);
-        if (!keepRange) select(target, event.shiftKey); drag = target;
-        cellHoldTimer = setTimeout(() => { cellHeld = true; drag = null; void showCellMenu(event.clientX, event.clientY).catch(report); }, 450);
-      });
-      node.addEventListener('pointerenter', () => { if (drag && !commandBusy && !cellHeld) { if (cellHoldTimer) clearTimeout(cellHoldTimer); select({ day: date, minute }, true); } });
-      node.addEventListener('click', () => { if (cellHeld || commandBusy || rangeEnd || mouseSelection.suppressesClick()) return; beginEdit(date, minute); });
-      node.addEventListener('contextmenu', (event) => { event.preventDefault(); mouseSelection.cancel(false); if (!isInSelection(date, minute)) select({ day: date, minute }); void showCellMenu(event.clientX, event.clientY).catch(report); });
-      node.addEventListener('dblclick', () => beginEdit(date, minute, undefined, true)); node.addEventListener('keydown', (event) => cellKey(event, date, minute)); row.append(node);
+      node.addEventListener('click', (event) => { if (event.detail !== 0 || commandBusy || mouseSelection.suppressesClick()) return;
+        if (selectionActivated && isInSelection(date, minute)) { const bounds = node.getBoundingClientRect(); tapCalendarCell({ day: date, minute }, true, bounds.left, bounds.bottom); }
+        else { select({ day: date, minute }); beginEdit(date, minute); } });
+      node.addEventListener('contextmenu', (event) => { event.preventDefault(); cancelSelectedTap(); mouseSelection.cancel(false); if (!isInSelection(date, minute)) select({ day: date, minute }); void showCellMenu(event.clientX, event.clientY).catch(report); });
+      node.addEventListener('dblclick', () => { cancelSelectedTap(); closeCellMenu(); beginEdit(date, minute, undefined, true); }); node.addEventListener('keydown', (event) => cellKey(event, date, minute)); row.append(node);
     }
     grid.append(row);
   }
@@ -445,9 +500,9 @@ async function pasteInternalCells(clip: CellClipboard) {
   entryBarMode = null; render(); void synchronize(false);
 }
 async function synchronize(manual = true) {
-  if (!store || !passphrase || busy || (editor && !manual)) return; busy = true; updateHeader(); if (manual) status('Synchronizing private ledger…');
+  if (!store || !passphrase || busy || ((editor || checklistUI.hasDraft()) && !manual)) return; busy = true; updateHeader(); if (manual) status('Synchronizing private ledger…');
   const active = store;
-  try { if (editor) await saveEditor(); await active.drain(); const result = await connection.sync(active, passphrase);
+  try { if (editor) await saveEditor(); await checklistUI.flush(); await active.drain(); const result = await connection.sync(active, passphrase);
     if (store !== active) return; render(); status(`Synchronized. ${result.downloaded} downloaded batches, ${result.uploaded} uploaded batches.${active.state.conflicts.length ? ' Other note versions are available in Settings.' : ''}`);
   } catch (error) { if (store === active) report(error); }
   finally { busy = false; updateHeader(); }
@@ -472,11 +527,12 @@ function renderCalendarChoices() {
     input.addEventListener('change', () => { input.checked ? selectedCalendars.add(calendar.id) : selectedCalendars.delete(calendar.id); void refreshPlans(); }); label.append(input, document.createTextNode(calendar.title)); list.append(label); }
 }
 function scrollMinute(minute: number) { main.scrollTop = Math.max(0, 50 + minute * 32 - main.clientHeight / 2); render(); }
-function goNow() { day = dateKey(new Date()); selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); }
-async function navigation(action: () => void) { if (commandBusy) return; mouseSelection.cancel(false); try { await saveEditor(); entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
+function goNow() { setChecklistVisible(false); selectionActivated = false; day = dateKey(new Date()); selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); }
+async function navigation(action: () => void) { if (commandBusy) return; cancelSelectedTap(); mouseSelection.cancel(false); try { await saveEditor(); await checklistUI.flush(); entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
 element('menu').onclick = () => { element<HTMLDialogElement>('menu-dialog').showModal(); };
+element('open-checklist').onclick = element('view-checklist').onclick = () => { void showChecklistView().catch(report); };
 element('settings').onclick = () => { element<HTMLDialogElement>('menu-dialog').close(); updateHeader(); options.showModal(); };
-element('editing-info').onclick = () => { info('Editing', 'Click a cell and type in the bottom box, or double-click to focus it. Drag across cells or Shift-click to extend the selection. Release a range to choose Group, Ungroup or other available actions; right-click reopens them. Group names an event without replacing the words inside its minutes. From and Through can include midnight, up to 24 hours. After saving, drag the outside selection border to move the whole cells; Alt-drag copies them to empty cells. Undo restores the previous local edit. Paste spreadsheet text with Ctrl+V / ⌘V; rows are minutes and columns are dates. Formulas remain text.'); };
+element('editing-info').onclick = () => { info('Editing', 'Click a cell and type in the bottom box, or double-click to focus it. Drag across cells or Shift-click to extend the selection. A range stays selected after release. Tap the selection again or right-click for its actions. Group names an event without replacing the words inside its minutes. From and Through can include midnight, up to 24 hours. After saving, press and drag anywhere in the selection to move the whole cells; Alt-drag copies them to empty cells. Undo restores the previous local edit. Paste spreadsheet text with Ctrl+V / ⌘V; rows are minutes and columns are dates. Formulas remain text.'); };
 element('passphrase-info').onclick = () => { info('Ledger passphrase', 'Use the same passphrase as your phone. Google access and the passphrase stay in memory. Notes are encrypted in this browser’s local cache and in Google’s private app folder. Lock Context when finished on a shared computer. Browser storage may be cleared or evicted; synchronize to keep a cross-device copy.'); };
 element('calendar-info').onclick = () => { info('Calendar access', 'Calendar access here is read-only. Minute notes synchronize through the private ledger; explicitly authorized phone calendar links can update when the phone synchronizes.'); };
 element('start').onclick = () => { options.showModal(); void connect(); };
@@ -493,7 +549,7 @@ element('now').onpointerdown = () => { held = false; binderHold = setTimeout(() 
 element('now').onpointerup = element('now').onpointerleave = () => { if (binderHold) clearTimeout(binderHold); };
 element('now').onclick = () => { if (held) return; if (binderSingle) clearTimeout(binderSingle); binderSingle = setTimeout(() => { void navigation(goNow); }, 260); };
 element('now').ondblclick = () => { if (binderSingle) clearTimeout(binderSingle); element<HTMLDialogElement>('view-dialog').showModal(); };
-for (const button of document.querySelectorAll<HTMLButtonElement>('[data-days]')) button.onclick = () => { void navigation(() => { days = Number(button.dataset.days); element<HTMLDialogElement>('view-dialog').close(); render(); void refreshPlans(); }); };
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-days]')) button.onclick = () => { void navigation(() => { setChecklistVisible(false); days = Number(button.dataset.days); element<HTMLDialogElement>('view-dialog').close(); render(); void refreshPlans(); }); };
 element('apply-dates').onclick = () => { if (!dayInput.value) return; void navigation(() => { day = dayInput.value; days = Number(daysInput.value); plans = []; element<HTMLDialogElement>('date-dialog').close(); render(); void refreshPlans(); }); };
 element('previous').onclick = () => { void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
 element('next').onclick = () => { void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
@@ -527,6 +583,8 @@ entryInput.addEventListener('input', mirrorDraft);
 entryInput.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); editor = null; entryBarMode = null; entryInput.blur(); render(); }
   else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void saveEditor().catch(report); } });
 element('save-text').onclick = () => { void saveEditor().catch(report); };
+element('minute-to-task').onpointerdown = (event) => { event.preventDefault(); };
+element('minute-to-task').onclick = () => { void cellCommand(addEditorTextToChecklist); };
 element('finish-format').onclick = () => { if (!commandBusy) { entryBarMode = null; updateBars(); } };
 for (const key of ['bold', 'italic', 'underline'] as const) element(`format-${key}`).onclick = () => toggleFormat(key);
 element('format-text-color').onclick = () => { if (entryBarMode === 'format' && !commandBusy) element<HTMLDialogElement>('text-color-dialog').showModal(); };
@@ -545,9 +603,10 @@ element<HTMLFormElement>('group-form').onsubmit = (event) => { event.preventDefa
     } catch (error) { element('group-range-error').textContent = error instanceof Error ? error.message : 'The event could not be grouped.'; throw error; } }); };
 for (const id of ['group-from-date', 'group-from-time', 'group-through-date', 'group-through-time']) element(id).addEventListener('input', changeGroupRange);
 const mouseSelection = bindMouseSelection(grid, main, {
-  enabled: () => Boolean(store && !commandBusy && !document.querySelector('dialog[open]')),
-  readSelection: () => ({ anchor: selected, end: rangeEnd }),
-  restore: (selection) => { selected = selection.anchor; rangeEnd = selection.end; paintSelection(); updateBars(); },
+  enabled: () => Boolean(store && !checklistVisible && !commandBusy && !document.querySelector('dialog[open]')),
+  isSelectionActive: () => selectionActivated,
+  readSelection: () => ({ anchor: selected, end: rangeEnd, active: selectionActivated }),
+  restore: (selection) => { selected = selection.anchor; rangeEnd = selection.end; if (selection.active !== undefined) selectionActivated = selection.active; paintSelection(); updateBars(); },
   select: (point, extend) => { if (extend && !editor) entryBarMode = null; select(point, extend); cell(point.day, point.minute)?.focus({ preventScroll: true }); },
   pointFromTarget: (target) => { const node = target instanceof Element ? target.closest<HTMLElement>('.cell') : null;
     return node ? { day: node.dataset.day!, minute: Number(node.dataset.minute) } : null; },
@@ -560,9 +619,12 @@ const mouseSelection = bindMouseSelection(grid, main, {
     return { day: visible[column]!, minute };
   },
   viewport: () => { const bounds = main.getBoundingClientRect(); return { top: bounds.top + 50, bottom: bounds.bottom, left: bounds.left, right: bounds.right }; },
-  onStart: () => { closeCellMenu(); if (entryBarMode === 'format') { entryBarMode = null; updateBars(); } if (cellHoldTimer) clearTimeout(cellHoldTimer); cellHeld = false; drag = null; },
-  onComplete: (x, y) => { void showCellMenu(x, y).catch(report); },
-  moveFromTarget: selectedBorder,
+  onStart: () => { cancelSelectedTap(); closeCellMenu();
+    if (editor && !editor.saving && editor.input.value === editor.original) { editor = null; entryBarMode = null; entryInput.blur(); updateBars(); }
+    if (entryBarMode === 'format') { entryBarMode = null; updateBars(); } },
+  onComplete: () => { entryBarMode = null; updateBars(); },
+  onTap: tapCalendarCell,
+  moveFromTarget: selectedRegion,
   onMoveStart: (grabbed) => {
     if (!store || editor) return false; const coords = selectionCells(), origin = coords[0]!;
     moveDraft = { store, coords, grabbed, origin, fingerprint: cellTransferFingerprint(store.state, coords, origin), stamp: selectionStamp() }; return true;
@@ -572,19 +634,18 @@ const mouseSelection = bindMouseSelection(grid, main, {
   onCancel: clearMovePreview,
   onAutoScroll: () => { const next = Math.max(0, Math.floor((main.scrollTop - 50) / 32) - 12); if (Math.abs(next - firstRendered) > 5) render(); },
 });
-document.addEventListener('pointerup', () => { drag = null; if (cellHoldTimer) clearTimeout(cellHoldTimer); });
-document.addEventListener('pointercancel', () => { drag = null; if (cellHoldTimer) clearTimeout(cellHoldTimer); });
 document.addEventListener('pointerdown', (event) => {
+  cancelSelectedTap();
   if (!(event.target instanceof Node)) return;
   if (!element('cell-menu').contains(event.target)) closeCellMenu();
   if (entryBarMode === 'format' && !element('cell-format-menu').contains(event.target) && !element('cell-menu').contains(event.target) && !document.querySelector('dialog[open]')) { entryBarMode = null; updateBars(); }
 });
-main.addEventListener('scroll', () => { const next = Math.max(0, Math.floor((main.scrollTop - 50) / 32) - 12); if (Math.abs(next - firstRendered) > 5) render(); }, { passive: true });
-document.addEventListener('paste', (event) => { if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || document.querySelector('dialog[open]')) return;
+main.addEventListener('scroll', () => { if (checklistVisible) return; const next = Math.max(0, Math.floor((main.scrollTop - 50) / 32) - 12); if (Math.abs(next - firstRendered) > 5) render(); }, { passive: true });
+document.addEventListener('paste', (event) => { if (checklistVisible || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || document.querySelector('dialog[open]')) return;
   if (commandBusy) { event.preventDefault(); return; }
   event.preventDefault(); const text = event.clipboardData?.getData('text/plain'); if (text === undefined) return; void cellCommand(() => paste(text)); });
 document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); element('undo').click(); } });
-window.addEventListener('beforeunload', (event) => { if (editor?.input.value !== editor?.original || (store && Object.keys(store.state.pending).length)) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('beforeunload', (event) => { if (editor?.input.value !== editor?.original || checklistUI.hasDraft() || (store && Object.keys(store.state.pending).length)) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { updateHeader(); void synchronize(false); } });
 setInterval(() => { updateHeader(); if (!document.hidden && !editor) { const minute = new Date().getHours() * 60 + new Date().getMinutes(); const current = grid.querySelector('.minute-row.current'); if (current?.getAttribute('data-row') !== String(minute)) render(); void synchronize(false); } }, 15_000);
 void fetch('./config.json', { cache: 'no-store' }).then((response) => { if (!response.ok) throw new Error('Browser configuration is unavailable.'); return response.json(); }).then((config) => {

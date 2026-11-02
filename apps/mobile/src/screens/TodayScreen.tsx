@@ -18,6 +18,7 @@ import { CalendarCellText } from '../components/CalendarCellText';
 import { MinuteSpanEditor, type MinuteSpanEditorSession } from '../components/MinuteSpanEditor';
 
 import { deleteMinuteEntry, getDayEntries, getMinuteEntry, getEntriesForBlock, saveMinuteRange } from '../data/database';
+import { addChecklistTask } from '../data/checklist-flow';
 import { flushPendingActuals, loadPlannedEventsResult, openPlannedEvent, reconcileLinkedNativeColors } from '../services/calendar';
 import { ensureSourceColorCategory, listSelectableActivityCategories, subscribeWritablePaletteChanges } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits,
@@ -93,6 +94,7 @@ type Props = {
   onFocusedMinuteChange?: (point: { dateKey: string; minuteIndex: number }) => void;
   onDataChanged: () => void;
   onOpenSettings: () => void;
+  onOpenChecklist?: () => void;
   onSyncWarningChange?: (message: string | null) => void;
   dayCount?: CalendarDayCount;
   onDayCountChange?: (count: CalendarDayCount) => void;
@@ -110,7 +112,7 @@ type Props = {
 export function TodayScreen({
   activeDate, onDateChange, calendars, preferences, dataVersion, focusRequest,
   onFocusConsumed, onFocusedMinuteChange, onDataChanged, onOpenSettings, onSyncWarningChange, dayCount = 1, onDayCountChange, selectedDates, dateSelectionOpen = false,
-  zoom = 1, onZoomChange, clockFormat = '12h', onCreatePlan, viewResetToken = 0, onPeriodSwipe,
+  zoom = 1, onZoomChange, clockFormat = '12h', onCreatePlan, viewResetToken = 0, onPeriodSwipe, onOpenChecklist,
 }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -247,6 +249,7 @@ export function TodayScreen({
   const groupTitleInputRef = useRef<ComponentRef<typeof TextInput>>(null);
   const [cellMenuOpen, setCellMenuOpen] = useState(false);
   const [rangeSelecting, setRangeSelecting] = useState(false);
+  const [rangeEndpointPending, setRangeEndpointPending] = useState(false);
   const [rangeStart, setRangeStart] = useState<number | null>(null);
   const [rangeEnd, setRangeEnd] = useState<number | null>(null);
   const [rangeTitle, setRangeTitle] = useState('');
@@ -516,6 +519,8 @@ export function TodayScreen({
     cancelPinchPreview();
     // Keep the original input/Pressable mounted until the parent owns the held pointer.
     setGroupComposerOpen(false); setCellMenuOpen(false);
+    setRangeEndpointPending(false);
+    suppressCellPressRef.current = { key: inlineMinuteKey(hold.day, hold.minute), until: Number.POSITIVE_INFINITY };
     cellTouchRef.current = null; cellActivationRef.current = null;
     Keyboard.dismiss();
     groupDragRef.current = { ...(kind === 'group' ? { kind, source: source as ActivityGroup }
@@ -564,10 +569,11 @@ export function TodayScreen({
       : { dateKey: source.dateKey, startMinute: source.startMinute };
     if (destination.dateKey === source.dateKey && destination.startMinute === source.startMinute) {
       cancelMinuteRangeMove();
-      await openInlineMinute(source.dateKey, source.startMinute, false, drag.kind === 'group' ? drag.source : undefined, true, true);
+      await openInlineMinute(source.dateKey, source.startMinute, false, drag.kind === 'group' ? drag.source : undefined, false, true);
       if (drag.kind === 'range' && groupDragIsCurrent(drag)) {
         rangeStartRef.current = source.startMinute; rangeEndRef.current = source.endMinute;
         setRangeStart(source.startMinute); setRangeEnd(source.endMinute);
+        setRangeSelecting(true);
       }
       return;
     }
@@ -594,11 +600,12 @@ export function TodayScreen({
     if (moved && groupDragIsCurrent(drag)) {
       const movedGroup = drag.kind === 'group' ? { ...drag.source, dateKey: destination.dateKey, startMinute: destination.startMinute,
         endMinute: destination.startMinute + source.endMinute - source.startMinute } : undefined;
-      await openInlineMinute(destination.dateKey, destination.startMinute, false, movedGroup, true, true);
+      await openInlineMinute(destination.dateKey, destination.startMinute, false, movedGroup, false, true);
       if (drag.kind === 'range') { rangeStartRef.current = destination.startMinute;
         rangeEndRef.current = destination.startMinute + source.endMinute - source.startMinute;
         setRangeStart(destination.startMinute);
         setRangeEnd(destination.startMinute + source.endMinute - source.startMinute); }
+      if (drag.kind === 'range') setRangeSelecting(true);
     }
   }
 
@@ -616,6 +623,7 @@ export function TodayScreen({
   }
 
   function beginCellHold(day: string, minute: number, group: boolean, event: GestureResponderEvent) {
+    suppressCellPressRef.current = null;
     const selected = inlineSelectionRef.current;
     if (groupDragRef.current || rangeDragRef.current || menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
     cancelCellHold();
@@ -633,7 +641,10 @@ export function TodayScreen({
       suppressCellPressRef.current = { key: inlineMinuteKey(day, minute), until: Number.POSITIVE_INFINITY };
       void openLongPressMenu(day, minute);
     }, 450));
-    cellHoldTimersRef.current.push(setTimeout(() => { void beginGroupDrag(hold); }, 1100));
+    const isSelected = selected?.dateKey === day && (range ? minute >= range.startMinute && minute <= range.endMinute : selected.minuteIndex === minute);
+    if (isSelected && !inlineEditingRef.current) {
+      cellHoldTimersRef.current.push(setTimeout(() => { void beginGroupDrag(hold); }, 160));
+    }
   }
 
   function moveCellHold(event: GestureResponderEvent) {
@@ -701,6 +712,7 @@ export function TodayScreen({
     scrollMinuteOffset(verticalOffsetRef.current);
     cellTouchRef.current = null; cellActivationRef.current = null;
     if (!hasRange) configureSelectionRange(selection);
+    setRangeEndpointPending(false);
     setGroupComposerOpen(false); setCellMenuOpen(false);
     rangeDragRef.current = { selection, generation: navigationGenerationRef.current,
       pageY: event.nativeEvent.pageY, endMinute: initialEnd,
@@ -731,7 +743,7 @@ export function TodayScreen({
     if (rangeDragTimerRef.current) clearInterval(rangeDragTimerRef.current);
     rangeDragTimerRef.current = null; setRangeDragging(false);
     if (await prepareOptions(drag.selection) && sequence === rangeDragSequenceRef.current && rangeDragIsCurrent(drag)) {
-      setCellMenuOpen(true); Keyboard.dismiss();
+      setCellMenuOpen(false); Keyboard.dismiss(); positionFillHandle();
     }
   }
 
@@ -1378,7 +1390,7 @@ export function TodayScreen({
     setRangeTitle(group?.title ?? selection.plan?.title ?? anchorText.split(/\r?\n/, 1)[0]!.trim().slice(0, 200));
     setRangeColorId(group?.categoryId ?? inlineMinuteDrafts.get(selection.dateKey, selection.minuteIndex)?.categoryId ??
       selection.entry?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted');
-    setToolbarError(null); setInlineEditing(false); setCellMenuOpen(false); setRangeSelecting(true); setGroupComposerOpen(false);
+    setToolbarError(null); setInlineEditing(false); setCellMenuOpen(false); setRangeSelecting(true); setRangeEndpointPending(false); setGroupComposerOpen(false);
     Keyboard.dismiss();
   }
 
@@ -1468,6 +1480,7 @@ export function TodayScreen({
       setCellMenuOpen(false);
       setGroupComposerOpen(false);
       setRangeSelecting(false);
+      setRangeEndpointPending(false);
       setRangeStart(null);
       setRangeEnd(null);
       setToolbarError(null);
@@ -1834,7 +1847,7 @@ export function TodayScreen({
 
   async function startRangeFromActive() {
     const selection = inlineSelectionRef.current;
-    if (selection && await prepareOptions(selection)) configureSelectionRange(selection);
+    if (selection && await prepareOptions(selection)) { configureSelectionRange(selection); setRangeEndpointPending(true); }
   }
 
   async function openCurrentRangeOptions(command?: CellCommandSelection) {
@@ -2003,7 +2016,7 @@ export function TodayScreen({
     cancelRangeDrag();
     selectionTokenRef.current += 1;
     cellActivationRef.current = null;
-    setCellMenuOpen(false); setGroupComposerOpen(false); setRangeSelecting(false); setRangeStart(null); setRangeEnd(null); setToolbarError(null);
+    setCellMenuOpen(false); setGroupComposerOpen(false); setRangeSelecting(false); setRangeEndpointPending(false); setRangeStart(null); setRangeEnd(null); setToolbarError(null);
     setGroupPaletteOpen(false);
   }
 
@@ -2012,7 +2025,8 @@ export function TodayScreen({
     if (!selection) return;
     if (day !== selection.dateKey) { setToolbarError('Choose the last minute in the same date column.'); return; }
     setRangeEnd(minute); setToolbarError(null);
-    if (await prepareOptions(selection)) { setCellMenuOpen(true); Keyboard.dismiss(); }
+    setRangeEndpointPending(false);
+    if (await prepareOptions(selection)) { setCellMenuOpen(false); Keyboard.dismiss(); positionFillHandle(); }
   }
 
   function parsedRange() {
@@ -2160,6 +2174,30 @@ export function TodayScreen({
     }
   }
 
+  async function captureChecklistTask(command: CellCommandSelection, passage?: { start: number; end: number; text: string }) {
+    const { selection } = command;
+    if (!await prepareOptions(selection)) return;
+    const token = selectionTokenRef.current;
+    if (!selectionStillCurrent(selection, token, command.generation)) return;
+    const range = passage && passage.end > passage.start
+      ? { dateKey: selection.dateKey, startMinute: selection.minuteIndex, endMinute: selection.minuteIndex } : command.range;
+    const entries = await getDayEntries(range.dateKey);
+    if (!selectionStillCurrent(selection, token, command.generation)) return;
+    const source = { ranges: [{ ...range }], ...(passage && passage.end > passage.start
+      ? { selection: { start: passage.start, end: passage.end } } : {}) };
+    const texts = entries.filter((entry) => entry.minuteIndex >= range.startMinute && entry.minuteIndex <= range.endMinute)
+      .sort((a, b) => a.minuteIndex - b.minuteIndex).map((entry) => entry.text).filter((text) => text.trim().length > 0);
+    const text = passage && passage.end > passage.start ? passage.text : texts.join('\n');
+    if (!text.trim()) throw new Error('Enter some text before adding a checklist task.');
+    const format = dayData[range.dateKey]?.formats?.get(range.startMinute) ?? {};
+    await addChecklistTask(text, source, { bold: format.bold, italic: format.italic,
+      underline: format.underline, textColor: format.textColor });
+    onDataChanged();
+    if (selectionStillCurrent(selection, token, command.generation)) {
+      closeRangeOptions(); setEntryBarMode(null); setInlineEditing(false); Keyboard.dismiss(); onOpenChecklist?.();
+    }
+  }
+
   async function pasteSelectedCells(command?: CellCommandSelection) {
     const selection = command?.selection ?? inlineSelectionRef.current;
     if (!selection || !await prepareOptions(selection)) return;
@@ -2278,7 +2316,7 @@ export function TodayScreen({
           <Animated.View style={[styles.floatingControls, { width: gridLayout.viewportWidth,
             transform: [{ translateX: horizontalOffset }] }]}>
 
-      {rangeSelecting && !groupComposerOpen && !cellMenuOpen && !rangeDragging && inlineSelection ? <View style={styles.selectionPrompt}>
+      {rangeEndpointPending && rangeSelecting && !groupComposerOpen && !cellMenuOpen && !rangeDragging && inlineSelection ? <View style={styles.selectionPrompt}>
         <Text style={styles.selectionPromptText}>Tap the last minute in this date column.</Text>
         <Pressable accessibilityRole="button" onPress={() => void openLongPressMenu(inlineSelection.dateKey, inlineSelection.minuteIndex)} style={styles.rangeAction}>
           <Text style={styles.rangeActionText}>Options</Text>
@@ -2353,8 +2391,18 @@ export function TodayScreen({
         rowHeight={gridLayout.rowHeight} railWidth={gridLayout.railWidth} dayWidth={gridLayout.dayWidth} colors={colors}
         current={{ day: today, minute: currentMinute }} selection={selectedRange ? { day: selectedRange.dateKey, first: selectedRange.startMinute, last: selectedRange.endMinute } : undefined}
         disabled={pinching || toolBusy || menuCommandPending || spreadsheetState.busy} scrolling={!pinching && !rangeDragging && !groupDragging}
-        clockFormat={clockFormat} timeLabel={timeLabel} onSelect={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current)
-          void openInlineMinute(day, minute, false, undefined, false, true); }}
+        clockFormat={clockFormat} timeLabel={timeLabel} onSelect={(day, minute) => {
+          if (pinchRef.current || menuCommandPendingRef.current || toolBusyRef.current || groupDragRef.current) return;
+          const suppressed = suppressCellPressRef.current; suppressCellPressRef.current = null;
+          if (suppressed?.key === inlineMinuteKey(day, minute) && Date.now() < suppressed.until) return;
+          const selected = inlineSelectionRef.current;
+          const start = rangeStartRef.current ?? selected?.minuteIndex ?? -1, end = rangeEndRef.current ?? selected?.minuteIndex ?? -1;
+          if (selected?.dateKey === day && minute >= Math.min(start, end) && minute <= Math.max(start, end)) void openLongPressMenu(day, minute);
+          else if (rangeEndpointPending && rangeSelecting) void selectRangeEndpoint(day, minute);
+          else void openInlineMinute(day, minute, false, undefined, false, true);
+        }}
+        onCellTouchStart={(day, minute, event) => beginCellHold(day, minute, Boolean(indexedGroups.get(day)?.get(minute)), event)}
+        onCellTouchMove={moveCellHold} onCellTouchEnd={endCellHold} onCellTouchCancel={cancelCellInteraction}
         onHold={(day, minute) => { if (!pinchRef.current && !menuCommandPendingRef.current && !toolBusyRef.current) void openLongPressMenu(day, minute); }}
         onBegin={() => { manualFocusScroll.current = true; }} onEnd={() => { manualFocusScroll.current = false; setPreviewScrollOffset(verticalOffsetRef.current); }}
         onScroll={(event) => {
@@ -2451,8 +2499,8 @@ export function TodayScreen({
                   accessibilityLabel={dayLabels.get(day) + ', ' + timeLabel(minute) +
                     (outline ? ', ' + outline.title : '') + (displayedText ? ', ' + displayedText : ', empty cell')}
                   accessibilityHint={rangeSelecting
-                    ? 'Hold selected cells for actions. Drag the selection handle to change the range.'
-                    : group ? 'Tap to select. Double tap to edit in the bottom text bar. Hold for actions, or hold longer and drag to move this activity.' : 'Tap to select. Double tap to edit in the bottom text bar. Hold for cell actions.'}
+                    ? 'Tap selected cells for actions. Drag the selection handle to change the range. Briefly hold selected cells and drag to move.'
+                    : 'Tap to select. Tap the selected cell for actions. Type in the bottom text bar. Briefly hold the selection and drag to move.'}
                   onPressIn={() => { suppressCellPressRef.current = null; }}
                   onTouchStart={(event) => beginCellHold(day, minute, Boolean(group), event)}
                   onTouchMove={moveCellHold} onTouchEnd={endCellHold} onTouchCancel={cancelCellInteraction}
@@ -2471,8 +2519,12 @@ export function TodayScreen({
                       null) : { action: 'select' as const, next: null };
                     cellActivationRef.current = result.next;
                     if (result.action === 'none' || result.action === 'caret') return;
-                    if (result.action === 'edit') { void openInlineMinute(day, minute, true, undefined, false, true); return; }
-                    if (rangeSelecting && !cellMenuOpen && !groupComposerOpen) { void selectRangeEndpoint(day, minute); return; }
+                    const selected = inlineSelectionRef.current;
+                    const start = rangeStartRef.current ?? selected?.minuteIndex ?? -1;
+                    const end = rangeEndRef.current ?? selected?.minuteIndex ?? -1;
+                    const isSelected = selected?.dateKey === day && minute >= Math.min(start, end) && minute <= Math.max(start, end);
+                    if (isSelected && !groupComposerOpen) { void openLongPressMenu(day, minute); return; }
+                    if (rangeEndpointPending && rangeSelecting && !cellMenuOpen && !groupComposerOpen) { void selectRangeEndpoint(day, minute); return; }
                     if (cellMenuOpen) {
                       if (selectedRange?.dateKey === day && minute >= selectedRange.startMinute && minute <= selectedRange.endMinute) return;
                     }
@@ -2558,7 +2610,7 @@ export function TodayScreen({
           pointerEvents={fillHandleVisible ? 'auto' : 'none'}
           accessibilityElementsHidden={!fillHandleVisible} importantForAccessibility={fillHandleVisible ? 'yes' : 'no-hide-descendants'}
           accessibilityLabel="Drag to select minutes for Auto fill"
-          accessibilityHint="Drag this handle up or down in the same date column, then release for Auto fill or Group. Double tap to choose an endpoint instead."
+          accessibilityHint="Drag this handle up or down to select minutes, then tap the selection for actions. Double tap to choose an endpoint instead."
           onAccessibilityTap={() => void startRangeFromActive()}
           style={[styles.fillHandle, {
             opacity: fillHandleOpacity, transform: [{ translateX: fillHandleLeft }, { translateY: fillHandleTop }],
@@ -2588,6 +2640,7 @@ export function TodayScreen({
         }]}>
           <CellActionMenu busy={menuCommandPending || toolBusy || spreadsheetState.busy}
             onCategorize={() => void dispatchCellCommand(openCategories)}
+            onTask={() => void dispatchCellCommand(captureChecklistTask)}
             onEdit={() => void dispatchCellCommand(openSpanDetails)}
             onEvent={inlineSelection.plan ? () => void dispatchCellCommand((scope) => showMinuteDetails(scope.selection.dateKey, scope.selection.minuteIndex)) : undefined}
             onCut={() => void dispatchCellCommand((scope) => captureSelectedCells('cut', scope))}
@@ -2652,6 +2705,17 @@ export function TodayScreen({
             <Pressable accessibilityRole="button" accessibilityLabel="Edit selected minutes and time range"
               disabled={entrySaving || toolBusy || spreadsheetState.busy} onPress={() => void dispatchCellCommand(openSpanDetails)} style={styles.bottomTool}>
               <CellActionIcon name="edit" color={colors.ink} />
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Add minute or highlighted text to checklist"
+              disabled={entrySaving || toolBusy || spreadsheetState.busy}
+              onPress={() => {
+                const point = inlineSelectionRef.current;
+                const raw = point ? inlineMinuteDrafts.get(point.dateKey, point.minuteIndex)?.text ?? point.entry?.text ?? '' : '';
+                const { start, end } = inlineTextSelectionRef.current;
+                const passage = end > start ? { start, end, text: raw.slice(start, end) } : undefined;
+                void dispatchCellCommand((scope) => captureChecklistTask(scope, passage));
+              }} style={styles.bottomTool}>
+              <CellActionIcon name="task" color={colors.ink} />
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Categorize minute"
               disabled={entrySaving || toolBusy || spreadsheetState.busy}

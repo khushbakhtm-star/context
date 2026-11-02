@@ -57,20 +57,47 @@ test('actual Today reports selected and manually scrolled minutes without treati
   const before = points.length; list.onScroll({ nativeEvent: { contentOffset: { y: row * 700 } } }); assert.equal(points.length, before);
   list.onScrollBeginDrag(); list.onScroll({ nativeEvent: { contentOffset: { y: row * 531 } } }); list.onScrollEndDrag();
   assert.deepEqual(points.at(-1), { dateKey: '2026-10-24', minuteIndex: 531 });
-  await h.tap(530); await h.tap(530); const count = points.length; list = find(h.tree).props;
+  const input = h.input(530, '2026-10-24'); assert.ok(input);
+  input.onFocus(); input.onChangeText('Keep typing in this dated minute'); await h.settle();
+  const count = points.length; list = find(h.tree).props;
   list.onScrollBeginDrag(); list.onScroll({ nativeEvent: { contentOffset: { y: row * 800 } } }); list.onScrollEndDrag();
   assert.equal(points.length, count, 'typing remains bound to its selected dated draft');
+  assert.equal(h.input(530, '2026-10-24').value, 'Keep typing in this dated minute');
 });
 
 
-test('returning from a secondary screen restores the same focused point without changing its view or zoom', () => {
+function returnController(tab = 'settings', guard = null) {
   const fn = controller.body.statements.find((node) => node.name?.text === 'returnToCalendar'); assert.ok(fn);
-  const module = { exports: {} }; const values = {};
+  const module = { exports: {} }; const values = {}; const sequence = { current: 12 }; const mounted = { current: true };
   vm.runInNewContext(emit(fn.getText(app) + '\nexport { returnToCalendar };'), { module, exports: module.exports,
-    calendarFocusRef: { current: { dateKey: '2026-10-24', minuteIndex: 530 } }, focusSequence: { current: 12 },
+    tab, checklistBeforeLeaveRef: { current: guard }, controllerMountedRef: mounted,
+    calendarFocusRef: { current: { dateKey: '2026-10-24', minuteIndex: 530 } }, focusSequence: sequence,
     setFocusRequest: (value) => values.focus = value, setTab: (value) => values.tab = value });
-  module.exports.returnToCalendar(); assert.equal(values.tab, 'today');
+  return { leave: module.exports.returnToCalendar, values, sequence, mounted };
+}
+
+test('returning from a secondary screen restores the same focused point without changing its view or zoom', async () => {
+  const h = returnController(); await h.leave(); const { values } = h;
+  assert.equal(values.tab, 'today');
   assert.deepEqual(plain(values.focus), { dateKey: '2026-10-24', minuteIndex: 530, token: 13, openEditor: false });
+});
+
+test('a checklist draft guard that refuses leaving preserves the focused point and checklist screen', async () => {
+  let calls = 0; const h = returnController('checklist', async () => { calls++; return false; });
+  await h.leave(); assert.equal(calls, 1); assert.deepEqual(h.values, {}); assert.equal(h.sequence.current, 12);
+});
+
+test('returning from checklist waits for its draft acknowledgement and ignores a completion after unmount', async () => {
+  for (const unmount of [false, true]) {
+    let release; const saved = new Promise((resolve) => { release = resolve; });
+    const h = returnController('checklist', () => saved); const pending = h.leave();
+    assert.deepEqual(h.values, {}); assert.equal(h.sequence.current, 12);
+    if (unmount) h.mounted.current = false;
+    release(true); await pending;
+    if (unmount) { assert.deepEqual(h.values, {}); assert.equal(h.sequence.current, 12); }
+    else { assert.equal(h.values.tab, 'today'); assert.deepEqual(plain(h.values.focus),
+      { dateKey: '2026-10-24', minuteIndex: 530, token: 13, openEditor: false }); }
+  }
 });
 
 

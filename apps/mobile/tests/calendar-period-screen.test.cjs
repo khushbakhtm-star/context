@@ -32,9 +32,12 @@ test('actual Today responder pages a whole period once while vertical scrolling 
 });
 test('actual Today responder never steals an active editor, selected range, or open cell menu', async (t) => {
   const pages = []; const h = screen(t, { props: { onPeriodSwipe: (direction) => pages.push(direction) } }); await h.start();
-  await h.tap(600); await h.tap(600); assert.ok(h.input()); assert.equal(await swipe(h), false);
+  await h.tap(600); assert.ok(h.input()); h.input().onFocus(); await h.settle();
+  assert.equal(await swipe(h), false, 'the focused bottom editor retains its swipe');
   h.input().onSubmitEditing(); await h.settle(); await h.hold(600); assert.ok(h.menu()); assert.equal(await swipe(h), false);
-  h.menu().onClose(); await h.settle(); await h.selectThrough(605); assert.equal(await swipe(h), false);
+  h.menu().onClose(); await h.settle(); await h.selectPlainThrough(605);
+  assert.equal(h.menu(), undefined, 'test the selected range independently of an open menu');
+  assert.equal(h.cell(605).props.accessibilityState.selected, true); assert.equal(await swipe(h), false);
   assert.deepEqual(pages, []);
 });
 test('a Today swipe captured before a date or lifecycle change cannot navigate from its stale page', async (t) => {

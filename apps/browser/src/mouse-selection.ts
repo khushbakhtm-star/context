@@ -1,5 +1,5 @@
 export type GridPoint = { day: string; minute: number };
-export type GridSelection = { anchor: GridPoint; end: GridPoint | null };
+export type GridSelection = { anchor: GridPoint; end: GridPoint | null; active?: boolean };
 export type SelectionViewport = { top: number; bottom: number; left: number; right: number };
 type MouseSelectionOptions = {
   enabled(): boolean;
@@ -16,11 +16,15 @@ type MouseSelectionOptions = {
   onMoveComplete?(point: GridPoint, copy: boolean): void;
   onCancel?(): void;
   onAutoScroll?(): void;
+  /** A tap is distinct from completing a range or dropping a move. */
+  onTap?(point: GridPoint, alreadySelected: boolean, x: number, y: number): void;
+  isSelectionActive?(): boolean;
   onComplete(x: number, y: number): void;
 };
 
 const same = (left: GridPoint, right: GridPoint) => left.day === right.day && left.minute === right.minute;
-const copy = (selection: GridSelection): GridSelection => ({ anchor: { ...selection.anchor }, end: selection.end ? { ...selection.end } : null });
+const copy = (selection: GridSelection): GridSelection => ({ anchor: { ...selection.anchor }, end: selection.end ? { ...selection.end } : null,
+  ...(selection.active === undefined ? {} : { active: selection.active }) });
 
 /** Pixels per millisecond. Leaving the edge accelerates a long selection without a jump. */
 export function edgeScrollVelocity(y: number, top: number, bottom: number): number {
@@ -38,7 +42,7 @@ export function bindMouseSelection(surface: HTMLElement, scroller: HTMLElement, 
   if (!win) throw new Error('The calendar view is unavailable.');
   type Gesture = { id: number; x: number; y: number; startX: number; startY: number;
     point: GridPoint; initial: GridSelection; moved: boolean; extended: boolean; captured: boolean; frameTime: number | null;
-    mode: 'select' | 'move' };
+    mode: 'select' | 'move'; alreadySelected: boolean };
   let gesture: Gesture | null = null;
   let frame: number | null = null;
   let suppressClick = false;
@@ -86,16 +90,20 @@ export function bindMouseSelection(surface: HTMLElement, scroller: HTMLElement, 
     options.onAutoScroll?.(); updatePoint(current); requestFrame();
   }
   function down(event: PointerEvent) {
-    if (gesture || !options.enabled() || event.button !== 0 || event.pointerType === 'touch' || event.isPrimary === false) return;
+    if (gesture || !options.enabled() || event.button !== 0 || event.isPrimary === false) return;
     const point = options.pointFromTarget(event.target);
     if (!point) return;
     suppressClick = false;
     const initial = copy(options.readSelection());
+    const last = initial.end ?? initial.anchor;
+    const alreadySelected = (options.isSelectionActive?.() ?? true) &&
+      point.day >= [initial.anchor.day, last.day].sort()[0]! && point.day <= [initial.anchor.day, last.day].sort()[1]! &&
+      point.minute >= Math.min(initial.anchor.minute, last.minute) && point.minute <= Math.max(initial.anchor.minute, last.minute);
     options.onStart?.();
     const moving = !event.shiftKey && options.moveFromTarget?.(event.target, event.clientX, event.clientY) && options.onMoveStart?.(point);
     gesture = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY,
       point: { ...point }, initial, moved: false, extended: event.shiftKey && !same(initial.anchor, point), captured: false, frameTime: null,
-      mode: moving ? 'move' : 'select' };
+      mode: moving ? 'move' : 'select', alreadySelected };
     if (!moving) options.select(point, event.shiftKey);
   }
   function move(event: PointerEvent) {
@@ -115,13 +123,13 @@ export function bindMouseSelection(surface: HTMLElement, scroller: HTMLElement, 
     gesture = null; stopFrame(); release(current);
     if (current.mode === 'move') {
       if (current.moved) { suppressClick = true; options.onMoveComplete?.(current.point, event.altKey); }
-      else options.onCancel?.();
+      else { options.onCancel?.(); options.onTap?.(current.point, current.alreadySelected, current.x, current.y); }
       return;
     }
     const selected = options.readSelection();
     if ((current.moved || current.extended) && selected.end && !same(selected.anchor, selected.end)) {
       suppressClick = true; options.onComplete(current.x, current.y);
-    }
+    } else if (!current.moved && !current.extended) options.onTap?.(current.point, current.alreadySelected, current.x, current.y);
   }
   function lost(event: PointerEvent) { if (gesture?.id === event.pointerId) cancel(); }
   function escape(event: KeyboardEvent) { if (gesture && event.key === 'Escape') { event.preventDefault(); cancel(); } }
