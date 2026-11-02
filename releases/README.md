@@ -1,6 +1,25 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.35/code36** in both channels, verified at **2026-11-02 at 17:24:54 UTC**. Watch **0.1.15/code100016** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability: **0.1.36/code37** in both channels, verified at **2026-11-02 at 18:37:37 UTC**. Watch **0.1.15/code100016** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+
+## Published 0.1.36 phone updates
+
+Both phone editions, code37, and all twelve checked public assets were available by **2026-11-02 at 18:37:37 UTC**, release **431828981**. [Wear-enabled APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.36/context-0.1.36-wear-phone-preview.apk) (asset 702753235) and [FOSS APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.36/context-0.1.36-foss-preview.apk) (asset 702770121) update the existing installation. The separate Watch 0.1.15/code100016 remains the current matching watch release.
+
+Context 0.1.36 names the checklist view Priority and supports multiple named checklists, exact-revision guarded task history, and scoped current-view or global Search. The encrypted checklist collection preserves every list when one list changes; legacy single lists migrate only on a real edit, and conflicting versions recover the whole collection. List navigation and Settings create/rename controls preserve stable list identities. Existing minute notes, calendar borders, task-source snapshots, custom colors and source-calendar conflict protections remain in place. The separate Watch 0.1.16 candidate has roomier minute cards, a current-minute control, a curved scroll indicator, a one-minute or bounded inclusive range editor, and lightweight automatic dictation preparation; native speech-provider startup and offline availability are not established by these source checks. Watch 0.1.15 remains the actually published watch until the separate Watch 0.1.16 publication gates pass. Google website-origin authorization remains on hold; no account access, OAuth client, audience or domain changes are made. Fresh tests, immutable source binding, independent phone/FOSS builds, original publisher signatures, exact-source tag CI and real public assets remain mandatory for availability.
+
+Your local notes, event borders, titles and source-calendar conflict guards remain intact. Choose **Update** over the existing phone installation. The Wear-enabled phone includes native Google sign-in and the optional watch bridge; the FOSS phone omits those native dependencies. The separate Watch 0.1.15 release remains independent.
+
+Source: [3c7067bc52aaccd3a89f8f60656ad121f273adfa](https://github.com/khushbakhtm-star/context/commit/3c7067bc52aaccd3a89f8f60656ad121f273adfa). TypeScript and 1263 mobile tests passed, including 833 focused UI/range-editor/overnight/calendar/crypto/storage/watch checks within that run. Static packaged checks cover 140 required UI labels and 24 obsolete labels. These are automated checks, not physical-phone or live-calendar verification.
+
+- Wear-enabled phone: 79,396,010 bytes; SHA-256 `ce787f27f8cf04c8e0f4db5882ef084c0e4dd55109399a9766ceec393419e778`.
+- FOSS phone: 78,684,063 bytes; SHA-256 `d12dea19e5388cd9c9f9cd535c4a201bf1e3b693a563aa32a87f9b5cdd23ed4b`.
+
+Both are code37, signed with the existing publisher certificate; official signatures, protected source-built content and 16 KiB alignment passed. [Independent F-Droid verification](https://github.com/khushbakhtm-star/context/actions/runs/41499301218) reported zero source errors/warnings and 108 removed inputs, 5 source patches and 57 reviewed Wear removals. The attached permanent evidence ZIP preserves 23 checked entries. This publisher preview does not establish official F-Droid catalog acceptance or Apple/Google store availability.
+
+The [phone build](https://github.com/khushbakhtm-star/context/actions/runs/41499545486) used controller `9bcbff8787a10f3de36baeeab2690d91eef2ceac`; FOSS used `9bcbff8787a10f3de36baeeab2690d91eef2ceac`. The [source-tag workflow](https://github.com/khushbakhtm-star/context/actions/runs/41501350197) passed at the exact application source.
+
+The [permanent FOSS evidence ZIP](https://github.com/khushbakhtm-star/context/releases/download/v0.1.36/context-0.1.36-foss-build-evidence.zip) is **7,755,358 bytes**, SHA-256 `66d3f01ecb38811e5015b64003b53a99b424e0f1f21fdff970539bfc542c2faa`. Public/local file sizes and digests match. No physical phone/watch, live account or store/catalog result is implied.
 
 ## Published 0.1.35 phone updates
 
