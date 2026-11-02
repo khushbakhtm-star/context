@@ -2,6 +2,20 @@
 
 ## Current matching releases
 
+Use the [Wear-enabled phone 0.1.36/code37](https://github.com/khushbakhtm-star/context/releases/download/v0.1.36/context-0.1.36-wear-phone-preview.apk) with the separately published [Watch 0.1.16/code100017](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.16). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
+
+## Published 0.1.16 Watch update
+
+The separate [Watch 0.1.16/code100017 release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.16) and all five verified assets were available by **2026-11-02 at 18:41:44 UTC**, release **431838340**. [Watch APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.16/context-0.1.16-wear-preview.apk) (asset 702780929): **11,499,502 bytes**, SHA-256 `30a8bb4b0c395eb064aa55d779530449c4e4c4e0ff1314de5afacc43bbea8110`. Public asset sizes/digests match verified local files. The exact tag points to application source `3c7067bc52aaccd3a89f8f60656ad121f273adfa`; [build 41499440658](https://github.com/khushbakhtm-star/context/actions/runs/41499440658) used controller `8059cdb43da835d04ba5c91fad03a251e569a9f0`. Signing stayed local with the existing publisher certificate.
+
+Watch 0.1.16 gives each minute a spacious rounded card: note text above a compact time/date row and a pencil action. Longer notes wrap and truncate within the card; editing retains the complete text. A curved right-edge indicator shows position in the day. Three small bottom controls open Settings, return to Now without starting another capture, and add text to a chosen minute or an inclusive range, including across midnight. Range writes are all-or-nothing against the exact displayed baseline; changed or occupied destinations require review. Fresh app-icon/current-Tile entry still starts current-minute dictation while protecting existing drafts. Startup avoids inflating a hidden manual editor and repeating capability checks, but actual provider startup speed still depends on the watch. The original minute, configured 1-300-second silence delay, visible-only microphone/wake ownership, phrase retention and guarded local save remain intact. Type, interruption, microphone denial and save errors retain an editable draft. The Tile and approved emblem remain unchanged. System speech may need internet; offline availability and physical-watch speed are not established by automated checks.
+
+The actual native build ran 142 JVM cases (0 skipped) with zero failures/errors; all 11 required suites were verified. 24 actual native class definitions, compiled minute-control vectors, Tile/logo and microphone/query/clock checks, protected ZIP contents, original publisher certificate, official supported-SDK v3 verification, separate contained-v2 proof and 16 KiB alignment passed. No runtime support below minimum SDK30 is claimed. These automated checks do not establish physical-watch speed, offline-model availability or live paired-phone delivery.
+
+Use with the separate Wear-enabled phone **0.1.36/code37**. Install as an Update on the watch to preserve its saved data. Phone APKs and their update feed remain unchanged. This optional Google-dependent companion is separate from official Play/Apple store or F-Droid catalog availability.
+
+## Previous matching releases
+
 Use the [Wear-enabled phone 0.1.36/code37](https://github.com/khushbakhtm-star/context/releases/download/v0.1.36/context-0.1.36-wear-phone-preview.apk) with the separately published [Watch 0.1.15/code100016](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.15). The FOSS phone edition has no watch transport. Keep each app installed and choose Update.
 
 ## Previous matching releases: 0.1.35

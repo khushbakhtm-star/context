@@ -56,6 +56,24 @@ Sources: [Obtainium links](https://wiki.obtainium.imranr.dev/deep_links/),
 
 ## Galaxy Watch7 tile and watch update
 
+The separate [Watch 0.1.16 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.16/context-0.1.16-wear-preview.apk) updates the existing watch installation.
+Minute cards show note text above time/date and a pencil. Scroll the day using touch or the bezel;
+the curved right-side indicator shows your position. The bottom Settings, Now and Add controls
+keep navigation separate from capture. Now returns to the current minute without starting speech.
+Add can fill a chosen minute or an inclusive range, including across midnight. Existing entries
+require replacement review, and a changed baseline cancels the whole write.
+
+Fresh app-icon/current Tile-row entry starts dictation when no draft is protected.
+The default 10-second silence delay saves a nonempty note; Settings supports 1-300 whole seconds.
+Provider startup and offline availability depend on the watch; Context does not promise instant speech.
+The screen stays awake only for visible listening, the silence wait and final-result flush.
+Type, interruptions, permission denial and save failures retain an editable draft.
+
+Install as Update using the previously paired PC; phone Obtainium filters still select phone APKs.
+The [watch release](https://github.com/khushbakhtm-star/context/releases/tag/watch-v0.1.16) preserves the exact source, signatures and compiled-package proof.
+
+## Previous Watch 0.1.15 guidance
+
 The separate [Watch 0.1.15 APK](https://github.com/khushbakhtm-star/context/releases/download/watch-v0.1.15/context-0.1.15-wear-preview.apk)
 opens at the current minute and starts dictation for a fresh app launch or current Tile-row tap.
 The default 10-second silence delay saves a nonempty note and returns to the minute list.
