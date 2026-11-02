@@ -17,24 +17,13 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 
-SOURCE = "58d9f0e252015821bbb319db51175308701c8533"
-VERSION = "0.1.15"
-CODE = 100016
+SOURCE = "3c7067bc52aaccd3a89f8f60656ad121f273adfa"
+VERSION = "0.1.16"
+CODE = 100017
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned watch preview: local publisher signing is separate"
 CERTIFICATE = "44075039f7febaab9c6721a75cdc20be419ba93dea9c36c5db7b08e217617772"
-MODULES = {
-    "activity": "Lcom/context/minuteledger/wear/MinuteActivity;",
-    "tile": "Lcom/context/minuteledger/wear/ContextTileService;",
-    "tileLayout": "Lcom/context/minuteledger/wear/ContextTileLayout;",
-    "transport": "Lcom/context/minuteledger/wear/WatchDataService;",
-    "dictationPolicy": "Lcom/context/minuteledger/wear/DictationSavePolicy;",
-    "speechDialog": "Lcom/context/minuteledger/wear/WatchDictationDialog;",
-    "speechPolicy": "Lcom/context/minuteledger/wear/WatchDictationPolicy;",
-    "pendingWork": "Lcom/context/minuteledger/wear/CoalescedPendingWork;",
-    "noteDraft": "Lcom/context/minuteledger/wear/WatchDictationNote;",
-    "silencePolicy": "Lcom/context/minuteledger/wear/WatchSilencePolicy;",
-}
+MODULES = {'activity': 'Lcom/context/minuteledger/wear/MinuteActivity;', 'tile': 'Lcom/context/minuteledger/wear/ContextTileService;', 'tileLayout': 'Lcom/context/minuteledger/wear/ContextTileLayout;', 'transport': 'Lcom/context/minuteledger/wear/WatchDataService;', 'dictationPolicy': 'Lcom/context/minuteledger/wear/DictationSavePolicy;', 'speechDialog': 'Lcom/context/minuteledger/wear/WatchDictationDialog;', 'speechPolicy': 'Lcom/context/minuteledger/wear/WatchDictationPolicy;', 'pendingWork': 'Lcom/context/minuteledger/wear/CoalescedPendingWork;', 'noteDraft': 'Lcom/context/minuteledger/wear/WatchDictationNote;', 'silencePolicy': 'Lcom/context/minuteledger/wear/WatchSilencePolicy;', 'minuteCard': 'Lcom/context/minuteledger/wear/WatchMinuteCardView;', 'scrollIndicator': 'Lcom/context/minuteledger/wear/WatchScrollIndicator;', 'roundAction': 'Lcom/context/minuteledger/wear/WatchRoundActionButton;', 'cardLayout': 'Lcom/context/minuteledger/wear/WatchCardLayout;', 'scrollThumb': 'Lcom/context/minuteledger/wear/WatchScrollThumb;', 'speechAvailability': 'Lcom/context/minuteledger/wear/WatchSpeechAvailabilityCache;', 'rangePolicy': 'Lcom/context/minuteledger/wear/WatchRangePolicy;', 'rangePlan': 'Lcom/context/minuteledger/wear/WatchRangePlan;', 'rangeCellBaseline': 'Lcom/context/minuteledger/wear/WatchRangeCellBaseline;', 'rangeEditor': 'Lcom/context/minuteledger/wear/WatchRangeEditorDialog;', 'ledgerSnapshot': 'Lcom/context/minuteledger/wear/WatchLedgerSnapshot;', 'editorSnapshot': 'Lcom/context/minuteledger/wear/WatchEditorSnapshot;', 'watchStore': 'Lcom/context/minuteledger/wear/WatchStore;', 'rangeIndex': 'Lcom/context/minuteledger/wear/WatchStore$RangeIndex;'}
 
 
 def sha(data):
@@ -164,6 +153,15 @@ def resource_file(resources, kind, name):
     return found[0]
 
 
+
+def minute_control_files(resources):
+    return {key:resource_file(resources,"drawable",name) for key,name in {'edit': 'context_edit', 'now': 'context_now_dot', 'add': 'context_add', 'settings': 'context_settings'}.items()}
+
+def minute_control_vector_verified(xml):
+    if len(re.findall(r"^\s*E: vector(?: |$)",xml,re.M))!=1 or not re.search(r"^\s*E: path(?: |$)",xml,re.M):
+        raise ValueError("Minute controls must decode to actual vector paths")
+    return True
+
 def tile_resource_files(resources):
     return {"preview": resource_file(resources, "drawable", "context_tile_preview"),
             "logo": resource_file(resources, "drawable", "context_logo")}
@@ -238,6 +236,7 @@ def verify(source, reports, receipt):
     resources = run([tools / "aapt2", "dump", "resources", apk])
     (reports / "compiled-watch-resources.txt").write_text(resources)
     links = tile_resource_files(resources)
+    minute_controls = minute_control_files(resources)
     tile_manifest_verified(xml, resources)
     speech = speech_manifest_verified(xml)
     preview_proof = []
@@ -256,6 +255,16 @@ def verify(source, reports, receipt):
         preview_proof.append({"member": item["member"], "configuration": item["configuration"],
                               "applicableAtSupportedSdk": required, "xmlReport": filename,
                               "xmlSha256": sha(preview_xml.encode())})
+    with zipfile.ZipFile(apk) as control_zip:
+        for key, resource in minute_controls.items():
+            for index, item in enumerate(resource["files"]):
+                if item["member"] not in control_zip.namelist(): raise ValueError("A compiled minute control is missing")
+                item["sha256"] = sha(control_zip.read(item["member"]))
+                control_xml = run([tools / "aapt2", "dump", "xmltree", apk, "--file", item["member"]])
+                minute_control_vector_verified(control_xml)
+                item["compiledVectorVerified"] = True
+                item["xmlSha256"] = sha(control_xml.encode())
+                (reports / f"compiled-minute-control-{key}-{index}.txt").write_text(control_xml)
     if has_signing_block(data):
         raise ValueError("An unsigned watch artifact unexpectedly contains an APK signing block")
     with zipfile.ZipFile(apk) as archive:
@@ -267,6 +276,9 @@ def verify(source, reports, receipt):
             raise ValueError("The unsigned native watch APK contains a signature or phone bundle")
         dex_files = {name: archive.read(name) for name in names if re.fullmatch(r"classes(?:[2-9]|[1-9][0-9]+)?\.dex", name)}
         classes = verify_required_class_definitions(dex_files, MODULES)
+        ui_markers = ['Go to the current minute', 'Add text to a minute or range of minutes', 'Save after silence', 'Enter a custom silence delay between 1 and 300 seconds', 'Empty minute', 'Choose day. ', '. Current minute', 'Settings']
+        ui_proof = {marker:any(marker.encode() in value for value in dex_files.values()) for marker in ui_markers}
+        if not all(ui_proof.values()): raise ValueError("Required minute-card/control strings are missing from actual DEX")
         if not any(b"HH:mm:ss" in value for value in dex_files.values()):
             raise ValueError("Live dictation clock format is absent from actual DEX")
     if (f"package: name='{APP_ID}' versionCode='{CODE}' versionName='{VERSION}'" not in identity or
@@ -278,14 +290,7 @@ def verify(source, reports, receipt):
         raise ValueError("Actual watch JVM test result files are missing")
     test_reports = reports / "watch-unit-tests"
     test_reports.mkdir(exist_ok=True)
-    required_suites = {"com.context.minuteledger.wear.ContextTileLayoutTest",
-                       "com.context.minuteledger.wear.JVMLaunchPolicyTest",
-                       "com.context.minuteledger.wear.JVMSpeechSessionGuardTest",
-                       "com.context.minuteledger.wear.JVMDictationSavePolicyTest",
-                       "com.context.minuteledger.wear.JVMWatchDictationPolicyTest",
-                       "com.context.minuteledger.wear.JVMCoalescedPendingWorkTest",
-                       "com.context.minuteledger.wear.JVMWatchSilencePolicyTest",
-                       "com.context.minuteledger.wear.JVMWatchCustomSilencePolicyTest"}
+    required_suites = {'com.context.minuteledger.wear.JVMWatchCustomSilencePolicyTest', 'com.context.minuteledger.wear.JVMWatchDictationPolicyTest', 'com.context.minuteledger.wear.JVMWatchCardLayoutTest', 'com.context.minuteledger.wear.JVMLaunchPolicyTest', 'com.context.minuteledger.wear.JVMSpeechSessionGuardTest', 'com.context.minuteledger.wear.JVMDictationSavePolicyTest', 'com.context.minuteledger.wear.JVMWatchSilencePolicyTest', 'com.context.minuteledger.wear.JVMWatchRangePolicyTest', 'com.context.minuteledger.wear.JVMCoalescedPendingWorkTest', 'com.context.minuteledger.wear.JVMWatchSpeechAvailabilityCacheTest', 'com.context.minuteledger.wear.ContextTileLayoutTest'}
     completed_suites = set()
     for index, file in enumerate(test_files):
         suite = ET.fromstring(file.read_bytes())
@@ -311,6 +316,7 @@ def verify(source, reports, receipt):
                     "noPhoneBundle": True, "actualClassDefinitionsVerified": True,
                     "nativeClassDefinitions": classes, "tileManifestVerified": True, "unitTests": tests,
                     "speechManifest": speech, "watchDictationClockPackaged": True,
+                    "minuteControls": minute_controls, "minuteCardsUiPackaged": True, "watchUiStrings": ui_proof,
                     "approvedTilePreviewPresent": True, "tileResources": links,
                     "compiledPreviewAlternatives": preview_proof,
                     "tileResourceSelectionPolicy": {"minimumSdk": 30, "configurationSource": "compiled resource table, never ZIP filenames",
