@@ -34,7 +34,7 @@ Builds:
   - versionName: 0.1.35
     versionCode: 36
     disable: Official F-Droid maintainer review, inclusion assessment, and server-toolchain approval are pending
-    commit: e937ee36b4111e182e8d434eccdc9cc535559f67
+    commit: 58c310a2a1a58d593f35fc3b6fcc6041c26a12c4
     subdir: apps/mobile
     sudo:
       - apt-get update
