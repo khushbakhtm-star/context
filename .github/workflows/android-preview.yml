@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: Exact reviewed Context 0.1.41 source commit
+        description: Exact reviewed Context 0.1.42 source commit
         required: true
-        default: 1883334ccf992de45fd8899b8cca98a6c9bff656
+        default: 6fc3e899bb2acb5517c2b533f41a9cd3a973f9c3
         type: string
 
 permissions:
@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CONTEXT_SOURCE_COMMIT: 1883334ccf992de45fd8899b8cca98a6c9bff656
+  CONTEXT_SOURCE_COMMIT: 6fc3e899bb2acb5517c2b533f41a9cd3a973f9c3
   EXPO_PUBLIC_CONTEXT_DISTRIBUTION: store
   EXPO_PUBLIC_CONTEXT_RELEASE_CHANNEL: standalone-wear
   EAS_BUILD_PROFILE: wear-phone-preview
@@ -75,7 +75,13 @@ jobs:
           printf 'y\n%.0s' {1..100} | "$bootstrap" --sdk_root="$ANDROID_HOME" --licenses > "$CONTEXT_PREVIEW_REPORTS/android-licenses.txt"
           "$bootstrap" --sdk_root="$ANDROID_HOME" 'cmdline-tools;23.0'
           sdkmanager="$ANDROID_HOME/cmdline-tools/23.0/bin/sdkmanager"
-          "$sdkmanager" --sdk_root="$ANDROID_HOME" 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'
+          for attempt in 1 2 3; do
+            if "$sdkmanager" --sdk_root="$ANDROID_HOME" 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'; then
+              break
+            fi
+            test "$attempt" -lt 3
+            sleep "$((attempt * 5))"
+          done
           "$sdkmanager" --sdk_root="$ANDROID_HOME" --list_installed > "$CONTEXT_PREVIEW_REPORTS/android-packages.txt"
           curl --fail --location --retry 3 https://services.gradle.org/distributions/gradle-9.4.1-bin.zip -o "$RUNNER_TEMP/context-gradle.zip"
           printf '%s  %s\n' '2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb' "$RUNNER_TEMP/context-gradle.zip" | sha256sum --check -
@@ -103,7 +109,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: context-0.1.41-wear-phone-unsigned
+          name: context-0.1.42-wear-phone-unsigned
           path: ${{ runner.temp }}/context-android-preview/
           if-no-files-found: warn
           compression-level: 0
