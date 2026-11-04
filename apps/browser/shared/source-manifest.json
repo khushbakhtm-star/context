@@ -67,6 +67,11 @@
       "path": "utils/canvas-layout.ts",
       "bytes": 40469,
       "sha256": "7edb3f958fd5fa5f29fe94555cc104dea27f48fdde84f6f2dc7753dec7402e1d"
+    },
+    {
+      "path": "utils/canvas-workplane.ts",
+      "bytes": 4714,
+      "sha256": "64088c4f7f300aebe04fce8839c829a3eacf8fdc1935d238c7872f7904eaa42b"
     }
   ]
 }

@@ -8,7 +8,7 @@ const mobile = path.resolve(root, '../mobile');
 const files = ['utils/time.ts', 'utils/cell-format.ts', 'utils/calendar-cell-color.ts',
   'utils/calendar-minute-log.ts', 'utils/calendar-description.ts', 'sync/codec.ts',
   'utils/date-selection.ts', 'utils/spreadsheet-paste.ts', 'utils/checklist-flow.ts', 'sync/types.ts', 'types.ts',
-  'utils/canvas.ts', 'utils/canvas-layout.ts'];
+  'utils/canvas.ts', 'utils/canvas-layout.ts', 'utils/canvas-workplane.ts'];
 const { version } = JSON.parse(fs.readFileSync(path.join(mobile, 'package.json'), 'utf8'));
 const manifest = files.map((file) => {
   const bytes = Buffer.from(fs.readFileSync(path.join(mobile, 'src', file), 'utf8').replace(/\r\n/g, '\n'));

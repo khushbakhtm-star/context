@@ -7,6 +7,8 @@ import {
   type CanvasFamilyPersonInput, type CanvasNodeKind, type CanvasPoint, type CanvasSpace, type CanvasStroke, type CanvasViewport,
 } from '../shared/utils/canvas';
 import { arrangeCanvas, canvasPersonSymbol, routeCanvasEdges, routeCanvasFamilies, type CanvasLayoutMode } from '../shared/utils/canvas-layout';
+import { canvasWorkplaneGrid, canvasWorkplaneMatrix, nextCanvasWorkplaneTurn, projectCanvasWorkplane,
+  unprojectCanvasWorkplane, type CanvasWorkplaneTurn } from '../shared/utils/canvas-workplane';
 import { browserCanvas, setBrowserCanvas } from './ledger';
 import type { BrowserStore } from './store';
 
@@ -100,6 +102,9 @@ function groupAncestors(node: CanvasNode, byId: Map<string, CanvasNode>) {
 function boardPoint(point: CanvasPoint, viewport: CanvasViewport) {
   return { x: viewport.x + point.x / viewport.zoom, y: viewport.y + point.y / viewport.zoom };
 }
+function viewPoint(point: CanvasPoint, viewport: CanvasViewport) {
+  return { x: (point.x - viewport.x) * viewport.zoom, y: (point.y - viewport.y) * viewport.zoom };
+}
 function cardSpaceIds(board: CanvasBoard, node: CanvasNode) {
   return canvasSpacesAtPoint(board.spaces ?? [], { x: node.x + node.width / 2, y: node.y + node.height / 2 });
 }
@@ -126,6 +131,8 @@ export class BrowserCanvas {
   private viewTimer: ReturnType<typeof setTimeout> | undefined;
   private viewportDraft: { boardId: string; viewport: CanvasViewport } | undefined;
   private viewport: CanvasViewport = { x: 0, y: 0, zoom: 1 };
+  private workplane = false;
+  private turn: CanvasWorkplaneTurn = 0;
   private undoStack: CanvasDocument[] = [];
   private redoStack: CanvasDocument[] = [];
   private selected = new Set<string>();
@@ -167,8 +174,21 @@ export class BrowserCanvas {
   private zoomOut = action('−', () => this.zoomBy(0.8));
   private zoomIn = action('+', () => this.zoomBy(1.25));
   private fit = action('Fit board', () => this.fitBoard());
+  private flatView = action('Flat', () => this.changeWorkplane(false));
+  private planeView = action('3D', () => this.changeWorkplane(true));
+  private rotateView = action('Rotate', () => {
+    if (!this.workplane || this.pointers.size) return;
+    this.turn = nextCanvasWorkplaneTurn(this.turn);
+    this.paintViewport();
+  });
   private status = html('p');
   private surface = html('div');
+  private plane = html('div');
+  private planeGrid = document.createElementNS(SVG, 'svg');
+  private gridPaths = {
+    minor: document.createElementNS(SVG, 'path'), major: document.createElementNS(SVG, 'path'),
+    x: document.createElementNS(SVG, 'path'), y: document.createElementNS(SVG, 'path'),
+  };
   private scene = html('div');
   private spaceShapes = document.createElementNS(SVG, 'svg');
   private spaceControls = html('div');
@@ -206,13 +226,27 @@ export class BrowserCanvas {
     this.selectTool.title = 'Select and move cards. Click empty space to write.';
     this.drawTool.title = 'Draw freehand on the board.';
     this.spaceTool.title = 'Click or drag to create an overlapping space.';
-    toolbar.append(this.boards, this.newBoard, this.rename, tools, this.add, this.addFamily, this.families, this.edit, this.editSpace, this.multi, this.group, this.connect,
-      this.layout, this.arrange, this.search, this.undoButton, this.redoButton, this.zoomOut, this.zoomIn, this.fit);
+    const views = html('div');
+    views.className = 'canvas-tools';
+    views.setAttribute('role', 'group');
+    views.setAttribute('aria-label', 'Canvas view');
+    this.planeView.title = 'View the same board on the angled Workplane.';
+    this.rotateView.title = 'Rotate the Workplane by a quarter turn.';
+    views.append(this.flatView, this.planeView, this.rotateView);
+    toolbar.append(this.boards, views, this.newBoard, this.rename, tools, this.add, this.addFamily, this.families, this.edit, this.editSpace, this.multi, this.group,
+      this.connect, this.layout, this.arrange, this.search, this.undoButton, this.redoButton, this.zoomOut, this.zoomIn, this.fit);
     this.status.className = 'canvas-status';
     this.status.setAttribute('role', 'status');
     this.surface.className = 'canvas-surface';
     this.surface.setAttribute('aria-label', 'Canvas board. Click empty space to write. Drag the background to pan.');
     this.surface.tabIndex = 0;
+    this.plane.className = 'canvas-plane';
+    this.planeGrid.classList.add('canvas-plane-grid');
+    this.planeGrid.setAttribute('aria-hidden', 'true');
+    for (const [kind, path] of Object.entries(this.gridPaths)) {
+      path.setAttribute('class', 'canvas-plane-grid-' + kind);
+      this.planeGrid.append(path);
+    }
     this.scene.className = 'canvas-scene';
     this.spaceShapes.classList.add('canvas-spaces');
     this.spaceShapes.setAttribute('aria-hidden', 'true');
@@ -224,7 +258,8 @@ export class BrowserCanvas {
     this.wires.setAttribute('aria-hidden', 'true');
     this.cardLayer.className = 'canvas-cards';
     this.scene.append(this.spaceShapes, this.strokes, this.wires, this.spaceControls, this.cardLayer);
-    this.surface.append(this.scene);
+    this.plane.append(this.planeGrid, this.scene);
+    this.surface.append(this.plane, this.status);
     this.dialog.className = 'canvas-dialog';
     this.dialogHeading.id = 'canvas-dialog-title';
     this.dialog.setAttribute('aria-labelledby', this.dialogHeading.id);
@@ -232,8 +267,9 @@ export class BrowserCanvas {
     this.dialogError.setAttribute('role', 'alert');
     this.dialogActions.className = 'canvas-dialog-actions';
     this.dialog.append(this.dialogHeading, this.dialogContent, this.dialogError, this.dialogActions);
-    this.host.append(toolbar, this.status, this.surface, this.dialog);
+    this.host.append(toolbar, this.surface, this.dialog);
     this.bindGestures();
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => this.paintViewport()).observe(this.surface);
     this.render();
   }
 
@@ -319,6 +355,13 @@ export class BrowserCanvas {
     }).catch((error: unknown) => this.error(error));
   }
 
+  private changeWorkplane(enabled: boolean) {
+    if (this.workplane === enabled || this.pointers.size) return;
+    this.workplane = enabled;
+    this.updateSelection();
+    this.paintViewport();
+  }
+
   private startInline(point: CanvasPoint) {
     const board = this.board();
     if (!board) return;
@@ -339,7 +382,7 @@ export class BrowserCanvas {
       if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); finish(); }
     };
     this.inlineDraft = { boardId: board.id, point, input, form };
-    this.scene.append(form);
+    this.surface.append(form);
     this.positionInline();
     input.focus({ preventScroll: true });
   }
@@ -347,12 +390,11 @@ export class BrowserCanvas {
   private positionInline() {
     if (!this.inlineDraft) return;
     const { form, point } = this.inlineDraft;
-    const { x, y, zoom } = this.viewport;
-    const anchorX = Math.min((point.x - x) * zoom, this.surface.clientWidth - form.offsetWidth);
-    const anchorY = Math.min((point.y - y) * zoom, this.surface.clientHeight - form.offsetHeight);
-    form.style.left = x + anchorX / zoom + 'px';
-    form.style.top = y + anchorY / zoom + 'px';
-    form.style.transform = 'scale(' + 1 / zoom + ')';
+    const screen = viewPoint(point, this.viewport);
+    const { width, height } = this.surfaceSize();
+    const anchor = this.workplane ? projectCanvasWorkplane(screen, { width, height }, this.turn) : screen;
+    form.style.left = Math.max(0, Math.min(anchor.x, width - form.offsetWidth)) + 'px';
+    form.style.top = Math.max(0, Math.min(anchor.y, height - form.offsetHeight)) + 'px';
   }
 
   private closeInline() {
@@ -428,7 +470,10 @@ export class BrowserCanvas {
     }
     const disabled = !board || Boolean(this.pending);
     for (const control of [this.boards, this.newBoard, this.rename, this.add, this.addFamily, this.multi, this.layout, this.search,
-      this.selectTool, this.drawTool, this.spaceTool, this.zoomOut, this.zoomIn, this.fit]) control.disabled = disabled;
+      this.selectTool, this.drawTool, this.spaceTool, this.zoomOut, this.zoomIn, this.fit, this.flatView, this.planeView]) control.disabled = disabled;
+    this.flatView.setAttribute('aria-pressed', String(!this.workplane));
+    this.planeView.setAttribute('aria-pressed', String(this.workplane));
+    this.rotateView.disabled = disabled || !this.workplane;
     this.surface.dataset.tool = this.tool;
     this.selectTool.setAttribute('aria-pressed', String(this.tool === 'select'));
     this.drawTool.setAttribute('aria-pressed', String(this.tool === 'draw'));
@@ -669,14 +714,52 @@ export class BrowserCanvas {
   private paintViewport() {
     const { x, y, zoom } = this.viewport;
     this.scene.style.transform = 'translate(' + -x * zoom + 'px,' + -y * zoom + 'px) scale(' + zoom + ')';
-    this.surface.style.backgroundSize = 24 * zoom + 'px ' + 24 * zoom + 'px';
-    this.surface.style.backgroundPosition = -x * zoom + 'px ' + -y * zoom + 'px';
+    this.surface.dataset.workplane = String(this.workplane);
+    this.surface.dataset.workplaneTurn = String(this.turn);
+    if (this.workplane) {
+      this.surface.style.backgroundSize = '';
+      this.surface.style.backgroundPosition = '';
+      const { a, b, c, d } = canvasWorkplaneMatrix(this.turn);
+      this.plane.style.transform = `matrix(${a},${b},${c},${d},0,0)`;
+      const determinant = a * d - b * c;
+      this.plane.style.setProperty('--canvas-upright', `matrix(${d / determinant},${-b / determinant},${-c / determinant},${a / determinant},0,0)`);
+      this.paintWorkplaneGrid();
+    } else {
+      this.plane.style.transform = '';
+      this.surface.style.backgroundSize = 24 * zoom + 'px ' + 24 * zoom + 'px';
+      this.surface.style.backgroundPosition = -x * zoom + 'px ' + -y * zoom + 'px';
+    }
     this.positionInline();
+  }
+
+  private paintWorkplaneGrid() {
+    const commands: Record<keyof typeof this.gridPaths, string[]> = { minor: [], major: [], x: [], y: [] };
+    for (const { start, end, major, axis } of canvasWorkplaneGrid(this.viewport, this.surfaceSize(), this.turn)) {
+      commands[axis ?? (major ? 'major' : 'minor')].push(`M${start.x.toFixed(2)},${start.y.toFixed(2)}L${end.x.toFixed(2)},${end.y.toFixed(2)}`);
+    }
+    this.gridPaths.minor.setAttribute('d', commands.minor.join(''));
+    this.gridPaths.major.setAttribute('d', commands.major.join(''));
+    this.gridPaths.x.setAttribute('d', commands.x.join(''));
+    this.gridPaths.y.setAttribute('d', commands.y.join(''));
+  }
+
+  private surfaceSize() {
+    return { width: this.surface.clientWidth, height: this.surface.clientHeight };
   }
 
   private point(event: PointerEvent | WheelEvent) {
     const bounds = this.surface.getBoundingClientRect();
     return { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+  }
+
+  private unproject(point: CanvasPoint) {
+    return this.workplane ? unprojectCanvasWorkplane(point, this.surfaceSize(), this.turn) : point;
+  }
+
+  private panBy(delta: CanvasPoint) {
+    // A displacement needs the linear inverse, without the stage-center offset.
+    const offset = this.workplane ? unprojectCanvasWorkplane(delta, { width: 0, height: 0 }, this.turn) : delta;
+    this.viewport = { ...boardPoint(offset, this.viewport), zoom: this.viewport.zoom };
   }
 
   private setZoom(zoom: number, point: CanvasPoint, baseline = this.viewport, target = point) {
@@ -715,10 +798,13 @@ export class BrowserCanvas {
       for (const point of stroke.points) extend(point.x - radius, point.y - radius, stroke.width, stroke.width);
     }
     if (left === Infinity) return;
-    const zoom = Math.max(0.15, Math.min(1.8, (this.surface.clientWidth - 48) / (right - left),
-      (this.surface.clientHeight - 48) / (bottom - top)));
-    this.viewport = { zoom, x: (left + right) / 2 - this.surface.clientWidth / (2 * zoom),
-      y: (top + bottom) / 2 - this.surface.clientHeight / (2 * zoom) };
+    const size = this.surfaceSize();
+    const { a, b, c, d } = this.workplane ? canvasWorkplaneMatrix(this.turn) : { a: 1, b: 0, c: 0, d: 1 };
+    const width = Math.abs(a) * (right - left) + Math.abs(c) * (bottom - top);
+    const height = Math.abs(b) * (right - left) + Math.abs(d) * (bottom - top);
+    const zoom = Math.max(0.15, Math.min(1.8, (size.width - 48) / width, (size.height - 48) / height));
+    this.viewport = { zoom, x: (left + right) / 2 - size.width / (2 * zoom),
+      y: (top + bottom) / 2 - size.height / (2 * zoom) };
     this.paintViewport();
     this.scheduleViewport();
   }
@@ -727,10 +813,9 @@ export class BrowserCanvas {
     this.surface.addEventListener('wheel', (event) => {
       if (!this.store || this.pending || (event.target as Element).closest('.canvas-inline')) return;
       event.preventDefault();
-      if (event.ctrlKey || event.metaKey) this.setZoom(this.viewport.zoom * Math.exp(-event.deltaY * 0.003), this.point(event));
+      if (event.ctrlKey || event.metaKey) this.setZoom(this.viewport.zoom * Math.exp(-event.deltaY * 0.003), this.unproject(this.point(event)));
       else {
-        this.viewport = { ...this.viewport, x: this.viewport.x + (event.shiftKey ? event.deltaY : event.deltaX) / this.viewport.zoom,
-          y: this.viewport.y + (event.shiftKey ? 0 : event.deltaY) / this.viewport.zoom };
+        this.panBy({ x: event.shiftKey ? event.deltaY : event.deltaX, y: event.shiftKey ? 0 : event.deltaY });
         this.paintViewport();
       }
       this.scheduleViewport();
@@ -739,18 +824,19 @@ export class BrowserCanvas {
       const target = event.target as Element;
       if (!this.store || this.pending || (event.button !== 0 && event.button !== 1) || target.closest('.canvas-inline') ||
         (this.tool === 'select' && event.button === 0 && target.closest('.canvas-wire'))) return;
-      const point = this.point(event);
-      this.pointers.set(event.pointerId, point);
+      const screen = this.point(event);
+      this.pointers.set(event.pointerId, screen);
       this.surface.setPointerCapture(event.pointerId);
       if (this.pointers.size === 2) {
         const [first, second] = [...this.pointers.values()];
         if (this.gesture) this.clearPreview(this.gesture);
         this.gesture = undefined;
         this.pinch = { distance: Math.max(1, Math.hypot(first!.x - second!.x, first!.y - second!.y)),
-          center: { x: (first!.x + second!.x) / 2, y: (first!.y + second!.y) / 2 }, viewport: this.viewport };
+          center: this.unproject({ x: (first!.x + second!.x) / 2, y: (first!.y + second!.y) / 2 }), viewport: this.viewport };
         return;
       }
       if (this.pointers.size > 1) return;
+      const point = this.unproject(screen);
       const base = { id: event.pointerId, start: point, viewport: this.viewport, dx: 0, dy: 0, moved: false };
       const board = this.board();
       if (event.button === 1 || this.inlineDraft) this.gesture = { ...base, kind: 'pan', captureText: event.button === 0 };
@@ -771,17 +857,18 @@ export class BrowserCanvas {
     };
     this.surface.onpointermove = (event) => {
       if (!this.pointers.has(event.pointerId)) return;
-      const point = this.point(event);
-      this.pointers.set(event.pointerId, point);
+      const screen = this.point(event);
+      this.pointers.set(event.pointerId, screen);
       if (this.pinch && this.pointers.size === 2) {
         const [first, second] = [...this.pointers.values()];
         const distance = Math.hypot(first!.x - second!.x, first!.y - second!.y);
         this.setZoom(this.pinch.viewport.zoom * distance / this.pinch.distance, this.pinch.center, this.pinch.viewport,
-          { x: (first!.x + second!.x) / 2, y: (first!.y + second!.y) / 2 });
+          this.unproject({ x: (first!.x + second!.x) / 2, y: (first!.y + second!.y) / 2 }));
         return;
       }
       const gesture = this.gesture;
       if (!gesture || gesture.id !== event.pointerId) return;
+      const point = this.unproject(screen);
       if (gesture.kind === 'draw') {
         this.recordStrokePoint(gesture, point);
         this.paintStroke(this.strokePreview, gesture.points, STROKE_WIDTH);
@@ -828,7 +915,7 @@ export class BrowserCanvas {
       const board = this.board();
       if (!board) return;
       if (gesture.kind === 'draw') {
-        this.recordStrokePoint(gesture, this.point(event));
+        this.recordStrokePoint(gesture, this.unproject(this.point(event)));
         this.saveGesture((doc) => addCanvasStroke(doc, { points: gesture.points, width: STROKE_WIDTH }, board.id));
         return;
       }
@@ -874,8 +961,7 @@ export class BrowserCanvas {
       const direction = directions[event.key];
       if (direction) {
         event.preventDefault();
-        this.viewport = { ...this.viewport, x: this.viewport.x + direction.x / this.viewport.zoom,
-          y: this.viewport.y + direction.y / this.viewport.zoom };
+        this.panBy(direction);
         this.paintViewport();
         this.scheduleViewport();
       } else if (event.key === '+' || event.key === '=') this.zoomBy(1.25);

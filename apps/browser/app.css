@@ -181,7 +181,7 @@ body.view-checklist main { touch-action: pan-y pinch-zoom; }
 .canvas-toolbar select { max-width: 180px; }
 .canvas-toolbar button[aria-pressed=true] { border-color: var(--selected); background: color-mix(in srgb,var(--selected) 19%,var(--surface)); }
 .canvas-tools { display: flex; gap: 2px; padding-inline: 4px; border-inline: 1px solid var(--line); }
-.canvas-status { min-height: 18px; margin: 0; padding: 4px 12px; color: var(--muted); font-size: 12px; }
+.canvas-status { position: absolute; z-index: 2; left: 8px; bottom: 8px; max-width: calc(100% - 16px); margin: 0; padding: 4px 8px; border-radius: 4px; background: var(--header); color: var(--muted); font-size: 12px; pointer-events: none; }
 .canvas-status:empty { display: none; }
 .canvas-surface {
   position: relative;
@@ -197,6 +197,29 @@ body.view-checklist main { touch-action: pan-y pinch-zoom; }
 .canvas-surface:is([data-tool=draw],[data-tool=space]) { cursor: crosshair; }
 .canvas-surface:is([data-tool=draw],[data-tool=space]) :is(.canvas-card,.canvas-wire,.canvas-space-title,.canvas-space-resize) { cursor: crosshair; }
 .canvas-surface:focus-visible { outline: 2px solid var(--selected); outline-offset: -2px; }
+.canvas-plane { position: absolute; inset: 0; transform-origin: center; }
+.canvas-plane-grid { display: none; position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.canvas-plane-grid path { fill: none; stroke: currentColor; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.canvas-plane-grid-minor { color: color-mix(in srgb,var(--ink) 13%,transparent); }
+.canvas-plane-grid-major { color: color-mix(in srgb,var(--ink) 22%,transparent); }
+.canvas-plane-grid-x,.canvas-plane-grid-y { color: color-mix(in srgb,var(--ink) 35%,transparent); }
+.canvas-surface[data-workplane=true] { background: radial-gradient(ellipse at 50% 35%,var(--surface),var(--bg) 90%); }
+.canvas-surface[data-workplane=true] .canvas-plane-grid { display: block; }
+.canvas-surface[data-workplane=true] .canvas-card:not(.canvas-person,.canvas-group) {
+  background: color-mix(in srgb,var(--card-color,var(--surface)) 50%,var(--surface));
+  box-shadow: 0 4px 0 color-mix(in srgb,var(--card-color,var(--ink)) 30%,var(--line)), 0 8px 13px #0002;
+}
+.canvas-surface[data-workplane=true] .canvas-card:not(.canvas-person,.canvas-group,.canvas-image) .canvas-card-text {
+  position: absolute; top: 50%; left: 50%; width: min(76%,140px);
+  transform: translate(-50%,-50%) var(--canvas-upright);
+  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.canvas-surface[data-workplane=true]:is([data-workplane-turn="1"],[data-workplane-turn="3"])
+  .canvas-card:not(.canvas-person,.canvas-group,.canvas-image) .canvas-card-text { width: min(60%,82px); }
+.canvas-surface[data-workplane=true] .canvas-person { overflow: visible; }
+.canvas-surface[data-workplane=true] .canvas-person .canvas-card-text { transform: var(--canvas-upright); }
+.canvas-surface[data-workplane=true] .canvas-space-title { transform: translate(-50%,-50%) var(--canvas-upright); }
+.canvas-surface[data-workplane=true] .canvas-wire-label { transform-box: fill-box; transform-origin: center; transform: var(--canvas-upright); }
 .canvas-scene,.canvas-cards,.canvas-space-controls { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: top left; }
 .canvas-spaces,.canvas-strokes,.canvas-wires { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; color: var(--muted); }
 .canvas-space { --space-color: #8d8277; fill: color-mix(in srgb,var(--space-color) 16%,transparent); stroke: var(--space-color); stroke-width: 2; pointer-events: stroke; }
@@ -251,8 +274,8 @@ body.view-checklist main { touch-action: pan-y pinch-zoom; }
 .canvas-card.is-checked .canvas-card-text { text-decoration: line-through; opacity: .55; }
 .canvas-linked { color: var(--muted); font-size: 10px; }
 .canvas-empty { position: absolute; margin: 24px; width: 260px; pointer-events: none; color: var(--muted); }
-.canvas-scene:has(.canvas-inline) .canvas-empty { display: none; }
-.canvas-inline { position: absolute; display: flex; align-items: flex-end; gap: 5px; width: 224px; padding: 6px; border: 1px solid var(--selected); border-radius: 6px; background: var(--surface); box-shadow: 0 2px 8px #0002; transform-origin: top left; }
+.canvas-surface:has(.canvas-inline) .canvas-empty { display: none; }
+.canvas-inline { position: absolute; z-index: 3; display: flex; align-items: flex-end; gap: 5px; width: min(224px,100%); padding: 6px; border: 1px solid var(--selected); border-radius: 6px; background: var(--surface); box-shadow: 0 2px 8px #0002; }
 .canvas-inline textarea { min-width: 0; width: 100%; min-height: 58px; resize: none; padding: 5px; border: 0; outline: none; background: transparent; user-select: text; }
 .canvas-inline button { min-height: 32px; padding: 3px 8px; }
 .canvas-dialog h2 { margin-top: 0; font-size: 19px; }
