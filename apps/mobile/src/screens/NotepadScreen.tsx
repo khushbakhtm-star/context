@@ -5,15 +5,44 @@ import { useAppTheme } from '../appearance';
 import { loadCanvasDocument, saveCanvasDocument } from '../data/canvas';
 import { useCanvasDraft } from '../hooks/useCanvasDraft';
 import type { AppColors } from '../theme';
-import { addLinkedCanvasNode, setCanvasText, type CanvasTextRange } from '../utils/canvas';
+import { addLinkedCanvasNode, setCanvasText, type CanvasDocument, type CanvasTextRange } from '../utils/canvas';
+import type { ViewAddAction, ViewAddActionsRef } from './view-add-actions';
+import type { ViewHistoryControls, ViewHistoryState } from './view-history';
 
 type Props = {
   beforeLeaveRef?: { current: (() => Promise<boolean>) | null };
   inputRef?: RefObject<ComponentRef<typeof TextInput> | null>;
   onOpenCanvas?: (nodeId: string) => void;
+  addActionsRef?: ViewAddActionsRef;
+  historyControlsRef?: { current: ViewHistoryControls | null };
+  onHistoryStateChange?: (state: ViewHistoryState) => void;
 };
 
-export function NotepadScreen({ beforeLeaveRef, inputRef, onOpenCanvas }: Props) {
+const NOTEPAD_HISTORY_LIMIT = 30;
+
+function restoreNoteText(current: CanvasDocument, revision: CanvasDocument): CanvasDocument {
+  const restored = setCanvasText(current, revision.text);
+  const snapshots = new Map(revision.boards.map((board) => [board.id, new Map(board.nodes.map((node) => [node.id, node]))]));
+  return { ...restored, boards: restored.boards.map((board, index) => {
+    const recorded = snapshots.get(board.id);
+    if (!recorded) return board;
+    let changed = false;
+    const nodes = board.nodes.map((node, nodeIndex) => {
+      const wanted = recorded.get(node.id);
+      const previous = current.boards[index]?.nodes[nodeIndex];
+      if (!wanted || !previous || (!previous.source && !wanted.source)) return node;
+      // Restoring the exact source also restores a link detached by a text deletion.
+      // Keep the live board and card geometry, along with independently added cards.
+      changed = true;
+      const { source: _source, ...base } = node;
+      return { ...base, text: wanted.text, ...(wanted.source ? { source: wanted.source } : {}) };
+    });
+    return changed ? { ...board, nodes } : board;
+  }) };
+}
+
+export function NotepadScreen({ beforeLeaveRef, inputRef, onOpenCanvas, addActionsRef,
+  historyControlsRef, onHistoryStateChange }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const { value, loadFailed, saveFailed, update, flush, reload, latest } = useCanvasDraft(loadCanvasDocument, saveCanvasDocument);
@@ -23,12 +52,19 @@ export function NotepadScreen({ beforeLeaveRef, inputRef, onOpenCanvas }: Props)
   const [linkError, setLinkError] = useState<string | null>(null);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const screenRef = useRef<ComponentRef<typeof View>>(null);
+  const ownInputRef = useRef<ComponentRef<typeof TextInput>>(null);
+  const input = inputRef ?? ownInputRef;
   const alive = useRef(false);
   const pendingLink = useRef<Promise<boolean> | null>(null);
+  const caretFrame = useRef<ReturnType<typeof requestAnimationFrame> | null>(null);
+  const history = useRef<{ undo: CanvasDocument[]; redo: CanvasDocument[] }>({ undo: [], redo: [] });
 
   useEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; };
+    return () => {
+      alive.current = false;
+      if (caretFrame.current !== null) cancelAnimationFrame(caretFrame.current);
+    };
   }, []);
 
   const beforeLeave = useCallback(async () => {
@@ -44,19 +80,54 @@ export function NotepadScreen({ beforeLeaveRef, inputRef, onOpenCanvas }: Props)
 
   function edit(next: string) {
     const current = latest();
-    if (!current) return;
+    if (!current || pendingLink.current || current.text === next) return;
+    const { undo } = history.current;
+    history.current = { undo: [...undo.slice(-(NOTEPAD_HISTORY_LIMIT - 1)), current], redo: [] };
     setSelected(null);
     setLinkError(null);
     update(setCanvasText(current, next, selectionRef.current));
   }
 
-  async function sendToCanvas() {
+  function restoreHistory(action: keyof typeof history.current) {
     const current = latest();
-    if (pendingLink.current || !selected || !current || selected.end > current.text.length) return;
+    if (!alive.current || !current || pendingLink.current || AppState.currentState !== 'active') return;
+    const revision = history.current[action].pop();
+    if (!revision) return;
+    history.current[action === 'undo' ? 'redo' : 'undo'].push(current);
+    setSelected(null);
+    selectionRef.current = undefined;
+    setLinkError(null);
+    update(restoreNoteText(current, revision));
+  }
+
+  function addNote() {
+    const current = latest();
+    if (!alive.current || !current || pendingLink.current || AppState.currentState !== 'active') return;
+    const separator = !current.text || current.text.endsWith('\n\n') ? '' : current.text.endsWith('\n') ? '\n' : '\n\n';
+    const next = current.text + separator;
+    if (separator) {
+      const tail = current.text.length;
+      selectionRef.current = { start: tail, end: tail };
+      edit(next);
+    }
+    const end = next.length;
+    setSelected(null);
+    selectionRef.current = { start: end, end };
+    input.current?.focus();
+    if (caretFrame.current !== null) cancelAnimationFrame(caretFrame.current);
+    caretFrame.current = requestAnimationFrame(() => {
+      caretFrame.current = null;
+      if (alive.current && latest()?.text === next) input.current?.setSelection(end, end);
+    });
+  }
+
+  async function sendToCanvas(range = selected) {
+    const current = latest();
+    if (!alive.current || AppState.currentState !== 'active' || pendingLink.current || !range || !current || range.end > current.text.length) return;
     setLinking(true);
     setLinkError(null);
     try {
-      const result = addLinkedCanvasNode(current, selected);
+      const result = addLinkedCanvasNode(current, range);
       setSelected(null);
       update(result.document);
       const saving = flush();
@@ -69,6 +140,37 @@ export function NotepadScreen({ beforeLeaveRef, inputRef, onOpenCanvas }: Props)
       if (alive.current) setLinking(false);
     }
   }
+
+  const actions = useRef<() => ViewAddAction[]>(() => []);
+  actions.current = () => {
+    const text = latest()?.text;
+    if (text === undefined || pendingLink.current) return [];
+    const options: ViewAddAction[] = [{ label: 'Add note', run: addNote }];
+    if (onOpenCanvas && selected && selected.end <= text.length && selected.start < selected.end) {
+      const range = { ...selected };
+      options.push({ label: 'Add selection to Canvas', run: () => {
+        if (latest()?.text === text) void sendToCanvas(range);
+      } });
+    }
+    return options;
+  };
+  const historyActions = useRef<ViewHistoryControls>({ undo: () => {}, redo: () => {} });
+  historyActions.current = { undo: () => restoreHistory('undo'), redo: () => restoreHistory('redo') };
+  const canUndo = Boolean(value && !linking && history.current.undo.length);
+  const canRedo = Boolean(value && !linking && history.current.redo.length);
+  useEffect(() => {
+    if (!addActionsRef) return;
+    const get = () => actions.current();
+    addActionsRef.current = get;
+    return () => { if (addActionsRef.current === get) addActionsRef.current = null; };
+  }, [addActionsRef]);
+  useEffect(() => {
+    if (!historyControlsRef) return;
+    const controls: ViewHistoryControls = { undo: () => historyActions.current.undo(), redo: () => historyActions.current.redo() };
+    historyControlsRef.current = controls;
+    return () => { if (historyControlsRef.current === controls) historyControlsRef.current = null; };
+  }, [historyControlsRef]);
+  useEffect(() => { onHistoryStateChange?.({ canUndo, canRedo }); }, [canUndo, canRedo, onHistoryStateChange]);
 
   function measureKeyboardOffset() {
     if (Platform.OS !== 'ios') return;
@@ -94,7 +196,7 @@ export function NotepadScreen({ beforeLeaveRef, inputRef, onOpenCanvas }: Props)
         {loadFailed || saveFailed ? <Pressable accessibilityRole="button" onPress={() => { if (loadFailed) void reload(); else void flush(); }}
           style={styles.retry}><Text style={styles.retryText}>Retry</Text></Pressable> : null}
       </View> : null}
-      {value ? <TextInput ref={inputRef} accessibilityLabel="Notepad text" autoFocus multiline editable={!linking} keyboardAppearance={resolvedMode}
+      {value ? <TextInput ref={input} accessibilityLabel="Notepad text" autoFocus multiline editable={!linking} keyboardAppearance={resolvedMode}
         value={value.text} onChangeText={edit} onBlur={() => void flush()} placeholder="Start typing…" placeholderTextColor={colors.muted}
         onSelectionChange={({ nativeEvent: { selection } }) => {
           selectionRef.current = selection;

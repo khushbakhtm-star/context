@@ -5,11 +5,17 @@ import { loadCanvasDocument, saveCanvasDocument } from '../data/canvas';
 import { useCanvasDraft } from '../hooks/useCanvasDraft';
 import type { AppColors } from '../theme';
 import { CanvasScreen } from './CanvasScreen';
+import type { ViewAddActionsRef } from './view-add-actions';
+import type { ViewHistoryControls, ViewHistoryState } from './view-history';
 
-export function CanvasWorkspace({ beforeLeaveRef, focusNodeId, onFocusConsumed }: {
+export function CanvasWorkspace({ beforeLeaveRef, focusNodeId, onFocusConsumed, addActionsRef,
+  historyControlsRef, onHistoryStateChange }: {
   beforeLeaveRef: { current: (() => Promise<boolean>) | null };
   focusNodeId: string | null;
   onFocusConsumed: () => void;
+  addActionsRef?: ViewAddActionsRef;
+  historyControlsRef?: { current: ViewHistoryControls | null };
+  onHistoryStateChange?: (state: ViewHistoryState) => void;
 }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -32,7 +38,8 @@ export function CanvasWorkspace({ beforeLeaveRef, focusNodeId, onFocusConsumed }
       </Pressable>
     </View> : null}
     {value ? <CanvasScreen document={value} onChange={update} focusNodeId={focusNodeId} onFocusConsumed={onFocusConsumed}
-      beforeLeaveRef={finishCapture} />
+      beforeLeaveRef={finishCapture} addActionsRef={addActionsRef}
+      historyControlsRef={historyControlsRef} onHistoryStateChange={onHistoryStateChange} />
       : !loadFailed ? <ActivityIndicator accessibilityLabel="Loading Canvas" color={colors.muted} style={styles.spinner} /> : null}
   </View>;
 }

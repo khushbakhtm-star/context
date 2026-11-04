@@ -14,7 +14,7 @@ function fixture() {
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('app.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const names = ['showCellMenu', 'cellCommand', 'closeCellMenu', 'closeCleanEditor', 'cellMenuDraftPending',
-    'updateCellMenuAvailability', 'beginEdit', 'mirrorDraft', 'saveEditor', 'writeSelectedText', 'mutateSelection', 'paste', 'pasteInternalCells'];
+    'updateCellMenuAvailability', 'beginEdit', 'mirrorDraft', 'saveEditor', 'writeSelectedText', 'mutateSelection', 'paste', 'pasteInternalCells', 'rememberCalendarEdit'];
   const nodes = parsed.statements.filter((node: any) => names.includes(node.name?.text) ||
     ts.isExpressionStatement(node) && /element\('save-text'\)\.onclick/.test(node.getText(parsed)));
   class Node {
@@ -32,7 +32,7 @@ function fixture() {
     async update(change: any) { writes++; this.state = change(this.state); return this.state; } };
   const input = { value: '', focused: 0, focus() { this.focused++; }, blur() {}, setAttribute() {} };
   const context: any = { store, selected: { ...point }, rangeEnd: null, cellClipboard: null, cellMenuRequest: 0, checklistVisible: false,
-    entryBarMode: null, editor: null, entryInput: input, commandBusy: false, undo: null,
+    entryBarMode: null, editor: null, entryInput: input, commandBusy: false, undo: null, redo: null, updateHistoryControl() {},
     main: { getBoundingClientRect: () => ({ top: 72 }) }, cell: () => null, minuteLabel: String, clock12: false, flushBrowserText,
     document: { createElement: () => new Node() }, navigator: { clipboard: { async writeText(text: string) { clipboardText = text; }, async readText() { return clipboardText; } } },
     innerWidth: 1200, innerHeight: 800, element, getMinute, minuteKey, cellFormatKey, cellEventLabel, formatFromDocument,
@@ -147,7 +147,7 @@ test('account connection and Lock clear in-memory whole-cell metadata before ano
   const nodes = parsed.statements.filter((node: any) => node.name?.text === 'connect' || ts.isExpressionStatement(node) && /element\('lock'\)\.onclick/.test(node.getText(parsed)));
   h.context.connection = { async authorize() { throw new Error('Synthetic authorization canceled'); }, lock() {} };
   h.context.navigation = (action: () => void) => action(); h.context.passInput = { value: '' }; h.context.unlockRequest = 0;
-  h.context.priorityNavigation = 0; h.context.priorityScope = {}; h.context.priorityUndos = new Map();
+  h.context.priorityNavigation = 0; h.context.priorityScope = {}; h.context.priorityUndos = new Map(); h.context.priorityRedos = new Map();
   h.context.bindPriorityList = () => {}; h.context.checklistUI = { async flush() {}, clear() {} };
   h.context.notepad = { async flush() {} }; h.context.canvas = { async flush() {} };
   h.context.prioritySettingsSession = null; h.context.searchSession = null;

@@ -26,7 +26,7 @@ const hooks = { useMemo: (work) => work(), useEffect: () => {}, useRef: (value) 
   useState: (value) => [value, () => {}] };
 const style = { create: (value) => value, hairlineWidth: 0.5 };
 
-function renderFrame(tab, onReturnToCalendar = () => {}, returnView = 'today') {
+function renderFrame(tab, onReturnToCalendar = () => {}, returnView = 'today', settingsAction) {
   const file = path.join(mobile, 'App.tsx'); const text = fs.readFileSync(file, 'utf8');
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const declarations = ['SCREEN_TITLES', 'createStyles', 'ApplicationFrame'].map((name) => {
@@ -40,7 +40,7 @@ function renderFrame(tab, onReturnToCalendar = () => {}, returnView = 'today') {
     useAppTheme: () => ({ colors, resolvedMode: 'light' }),
     require: (name) => { assert.equal(name, 'react/jsx-runtime'); return { jsx, jsxs: jsx, Fragment: 'Fragment' }; },
   });
-  return module.exports.ApplicationFrame({ ready: true, tab, onReturnToCalendar, returnView, children: 'Screen content' });
+  return module.exports.ApplicationFrame({ ready: true, tab, onReturnToCalendar, returnView, settingsAction, children: 'Screen content' });
 }
 
 function renderSettings(permissionStatus = 'granted') {
@@ -92,6 +92,20 @@ test('every secondary frame uses a left back icon without Calendar text and the 
   }
   assert.equal(nodes(renderFrame('today')).some((node) => node.props.accessibilityLabel === 'Back to calendar'), false);
   assert.equal(nodes(renderFrame('checklist')).some((node) => node.props.accessibilityRole === 'header'), false, 'Priority has the shared toolbar without a second title/back row');
+});
+
+test('only the Settings header places the Sync action after the title', () => {
+  const sync = jsx('SettingsSyncButton', { accessibilityLabel: 'Sync attached calendars' });
+  for (const tab of ['settings', 'accounts', 'categories', 'today', 'checklist', 'notepad', 'canvas']) {
+    const tree = renderFrame(tab, undefined, 'today', sync);
+    const list = nodes(tree);
+    assert.equal(list.includes(sync), tab === 'settings', tab);
+    if (tab === 'settings') {
+      const header = list.find((node) => node.type === 'View' && node.props.children?.includes(sync));
+      assert.equal(textOf(header.props.children[1]), 'Settings');
+      assert.equal(header.props.children.at(-1), sync);
+    }
+  }
 });
 
 test('Settings and Search back arrows return to the Priority list they came from without moving calendar focus', async () => {

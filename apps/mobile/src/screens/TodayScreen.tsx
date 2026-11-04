@@ -16,6 +16,7 @@ import { CompactMinuteOverview } from '../components/CompactMinuteOverview';
 import { CalendarPinchPreview } from '../components/CalendarPinchPreview';
 import { CalendarCellText } from '../components/CalendarCellText';
 import { MinuteSpanEditor, type MinuteSpanEditorSession } from '../components/MinuteSpanEditor';
+import type { ViewAddAction, ViewAddActionsRef } from './view-add-actions';
 
 import { deleteMinuteEntry, getDayEntries, getMinuteEntry, getEntriesForBlock, getSpreadsheetCells, saveMinuteRange } from '../data/database';
 import { addChecklistTask, getChecklistFlow } from '../data/checklist-flow';
@@ -110,13 +111,14 @@ type Props = {
   clockFormat?: '12h' | '24h';
   viewResetToken?: number;
   onPeriodSwipe?: (direction: CalendarPeriodDirection) => void;
+  addActionsRef?: ViewAddActionsRef;
 };
 
 export function TodayScreen({
   activeDate, onDateChange, calendars, preferences, dataVersion, focusRequest,
   priorityCaptureListId = null,
   onFocusConsumed, onFocusedMinuteChange, onDataChanged, onOpenSettings, onSyncWarningChange, dayCount = 1, onDayCountChange, selectedDates, dateSelectionOpen = false,
-  zoom = 1, onZoomChange, clockFormat = '12h', viewResetToken = 0, onPeriodSwipe, onOpenChecklist,
+  zoom = 1, onZoomChange, clockFormat = '12h', viewResetToken = 0, onPeriodSwipe, onOpenChecklist, addActionsRef,
 }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -256,6 +258,8 @@ export function TodayScreen({
   const groupTitleInputRef = useRef<ComponentRef<typeof TextInput>>(null);
   const [cellMenuOpen, setCellMenuOpen] = useState(false);
   const [rangeSelecting, setRangeSelecting] = useState(false);
+  const rangeSelectingRef = useRef(rangeSelecting);
+  rangeSelectingRef.current = rangeSelecting;
   const [rangeEndpointPending, setRangeEndpointPending] = useState(false);
   const [rangeStart, setRangeStart] = useState<number | null>(null);
   const [rangeEnd, setRangeEnd] = useState<number | null>(null);
@@ -719,6 +723,11 @@ export function TodayScreen({
     scrollMinuteOffset(verticalOffsetRef.current);
     cellTouchRef.current = null; cellActivationRef.current = null;
     if (!hasRange) configureSelectionRange(selection);
+    else if (inlineEditingRef.current) {
+      inlineEditingRef.current = false;
+      setInlineEditing(false);
+      Keyboard.dismiss();
+    }
     setRangeEndpointPending(false);
     setGroupComposerOpen(false); setCellMenuOpen(false);
     rangeDragRef.current = { selection, generation: navigationGenerationRef.current,
@@ -1374,10 +1383,14 @@ export function TodayScreen({
     }
   }, []);
 
-  const revealInlineMinute = useCallback((minute: number, day?: string) => {
+  const revealInlineMinute = useCallback((minute: number, day?: string, onlyWhileEditing = false) => {
     const generation = navigationGenerationRef.current;
+    const selectionToken = selectionTokenRef.current;
+    const rangeGesture = rangeDragSequenceRef.current;
     requestAnimationFrame(() => {
       if (!mountedRef.current || generation !== navigationGenerationRef.current || rangeDragRef.current || groupDragRef.current || cellHoldRef.current) return;
+      if (onlyWhileEditing && (selectionToken !== selectionTokenRef.current || rangeGesture !== rangeDragSequenceRef.current || rangeSelectingRef.current ||
+        !inlineEditingRef.current || !inlineInputRef.current?.isFocused() || pinchRef.current || pendingZoomAnchorRef.current)) return;
       const selectedDay = day ?? inlineSelectionRef.current?.dateKey;
       if (selectedDay) {
         const offset = revealCalendarDay(horizontalOffsetRef.current,
@@ -1389,6 +1402,15 @@ export function TodayScreen({
       positionedViewRef.current = true;
     });
   }, []);
+
+  const revealFocusedMinute = useCallback(() => {
+    const selected = inlineSelectionRef.current;
+    // Range controls can resize the list after the handle has been released.
+    // Only the actual minute input owns automatic repositioning on layout.
+    if (selected && inlineEditingRef.current && !rangeSelectingRef.current && inlineInputRef.current?.isFocused()) {
+      revealInlineMinute(selected.minuteIndex, selected.dateKey, true);
+    }
+  }, [revealInlineMinute]);
 
   function configureSelectionRange(selection: CalendarMinuteSelection, group?: ActivityGroup) {
     const start = group?.startMinute ?? selection.minuteIndex;
@@ -1538,12 +1560,9 @@ export function TodayScreen({
   }
 
   useEffect(() => {
-    const keyboard = Keyboard.addListener('keyboardDidShow', () => {
-      const selected = inlineSelectionRef.current;
-      if (selected && (inlineEditingRef.current || groupComposerOpenRef.current)) revealInlineMinute(selected.minuteIndex);
-    });
+    const keyboard = Keyboard.addListener('keyboardDidShow', revealFocusedMinute);
     return () => keyboard.remove();
-  }, [revealInlineMinute]);
+  }, [revealFocusedMinute]);
 
   useEffect(() => subscribeInlineMinuteCommits((commit) => {
     markLocalChange(commit.affectedDates);
@@ -1985,8 +2004,8 @@ export function TodayScreen({
     setCellMenuOpen(false); setGroupComposerOpen(false); setInlineEditing(false); Keyboard.dismiss();
   }
 
-  async function editMinuteFromPlus() {
-    if (inlineSelectionRef.current || spanEditorScopeRef.current || menuCommandPendingRef.current ||
+  async function editMinuteFromPlus(replaceSelection = false) {
+    if ((!replaceSelection && inlineSelectionRef.current) || spanEditorScopeRef.current || menuCommandPendingRef.current ||
         toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
     const current = new Date();
     const day = visibleDaysRef.current.includes(activeDate) ? activeDate : visibleDaysRef.current[0];
@@ -1997,6 +2016,40 @@ export function TodayScreen({
     if (!selection || inlineSelectionRef.current !== selection) return;
     await dispatchCellCommand((scope) => openSpanDetails(scope, true), { dateKey: day, startMinute: minute, endMinute: minute });
   }
+
+  const viewAddActions = useRef<() => ViewAddAction[]>(() => []);
+  viewAddActions.current = () => {
+    const generation = navigationGenerationRef.current;
+    const allowed = () => mountedRef.current && generation === navigationGenerationRef.current && AppState.currentState === 'active' &&
+      !dateSelectionOpen && !editorRef.current && !spanEditorScopeRef.current && !categoryPickerRef.current &&
+      !checklistChoiceRef.current && !inlineEditingRef.current && !groupComposerOpenRef.current &&
+      !pinchRef.current && !pinchSettlingRef.current && !rangeDragRef.current && !groupDragRef.current && !cellHoldRef.current &&
+      !inlineDoneBusyRef.current && !menuCommandPendingRef.current && !toolBusyRef.current && !spreadsheetEditor.snapshot().busy;
+    if (!allowed()) return [];
+    const actions: ViewAddAction[] = [{ label: 'Add minute entry', run: () => {
+      if (allowed()) void editMinuteFromPlus(true);
+    } }];
+    const selection = inlineSelectionRef.current;
+    const range = parsedRange();
+    if (selection && range && range.startMinute < range.endMinute && cellPolicy.canGroup) {
+      const token = selectionTokenRef.current;
+      actions.push({ label: 'Group selected minutes', run: () => {
+        if (!allowed() || !rangeSelectingRef.current || !selectionStillCurrent(selection, token, generation)) return;
+        const start = rangeStartRef.current ?? selection.minuteIndex;
+        const end = rangeEndRef.current ?? selection.minuteIndex;
+        if (Math.min(start, end) === range.startMinute && Math.max(start, end) === range.endMinute) {
+          void dispatchCellCommand(openCurrentRangeOptions, range);
+        }
+      } });
+    }
+    return actions;
+  };
+  useEffect(() => {
+    if (!addActionsRef) return;
+    const get = () => viewAddActions.current();
+    addActionsRef.current = get;
+    return () => { if (addActionsRef.current === get) addActionsRef.current = null; };
+  }, [addActionsRef]);
 
   function closeSpanDetails() {
     const scope = spanEditorScopeRef.current;
@@ -2501,9 +2554,7 @@ export function TodayScreen({
         onContentSizeChange={(_width, height) => { pinchContentReady(height, false); if (pendingZoomAnchorRef.current && !pinchSettlingRef.current) restoreZoomAnchor(); }}
         onLayout={() => {
           measureMinuteViewport();
-          if (pinchRef.current || pendingZoomAnchorRef.current || rangeDragRef.current || groupDragRef.current || cellHoldRef.current) return;
-          const selected = inlineSelectionRef.current;
-          if (selected) revealInlineMinute(selected.minuteIndex);
+          revealFocusedMinute();
         }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.ink}
           colors={[colors.currentTime]} progressBackgroundColor={colors.surface} />}
@@ -2732,11 +2783,13 @@ export function TodayScreen({
         </View>
       ) : null}
 
-      {inlineSelection && entryBarMode === 'entry' && !categoryPicker && !groupDragging && !rangeDragging && !groupComposerOpen && !editor ? (
-        <View accessibilityLabel="Minute text entry bar" style={styles.bottomBar}>
+      {inlineSelection && entryBarMode === 'entry' && !categoryPicker && !groupDragging && !groupComposerOpen && !editor ? (
+        <View accessibilityLabel="Minute text entry bar" pointerEvents={rangeDragging ? 'none' : 'auto'}
+          accessibilityElementsHidden={rangeDragging} importantForAccessibility={rangeDragging ? 'no-hide-descendants' : 'auto'}
+          style={[styles.bottomBar, rangeDragging && styles.hiddenDuringRangeDrag]}>
           <View style={styles.entryBarRow}>
             <TextInput ref={inlineInputRef} value={selectedDraft?.text ?? inlineSelection.entry?.text ?? ''}
-              editable={!spreadsheetState.busy && !toolBusy && !menuCommandPending}
+              editable={!rangeDragging && !spreadsheetState.busy && !toolBusy && !menuCommandPending}
               contextMenuHidden={false} rejectResponderTermination={false}
               multiline scrollEnabled maxLength={50000} returnKeyType="done" submitBehavior="submit"
               accessibilityLabel={dayLabels.get(inlineSelection.dateKey) + ', ' + timeLabel(inlineSelection.minuteIndex) + ', minute text'}
@@ -2754,13 +2807,18 @@ export function TodayScreen({
               }}
               onBlur={() => {
                 const current = inlineSelectionRef.current;
-                if (current?.dateKey === inlineSelection.dateKey && current.minuteIndex === inlineSelection.minuteIndex) setInlineEditing(false);
+                if (current?.dateKey === inlineSelection.dateKey && current.minuteIndex === inlineSelection.minuteIndex) {
+                  inlineEditingRef.current = false;
+                  setInlineEditing(false);
+                }
                 void inlineMinuteDrafts.flush(inlineMinuteKey(inlineSelection.dateKey, inlineSelection.minuteIndex));
               }}
               onFocus={() => {
                 const current = inlineSelectionRef.current;
                 if (current?.dateKey !== inlineSelection.dateKey || current.minuteIndex !== inlineSelection.minuteIndex) return;
-                setInlineEditing(true); revealInlineMinute(inlineSelection.minuteIndex);
+                inlineEditingRef.current = true;
+                setInlineEditing(true);
+                revealFocusedMinute();
               }}
               onSubmitEditing={() => void finishInlineEditing()}
               style={styles.bottomTextInput} />
@@ -2854,6 +2912,7 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     checklistChoiceText: { color: colors.ink, fontSize: 15 },
     bottomBar: { flexShrink: 0, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline,
       backgroundColor: colors.panel },
+    hiddenDuringRangeDrag: { opacity: 0 },
     entryBarRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6, paddingVertical: 4, gap: 4 },
     bottomTextInput: { flex: 1, minHeight: 44, maxHeight: 132, paddingHorizontal: 10, paddingVertical: 10,
       color: colors.ink, fontSize: 16, textAlignVertical: 'top', borderWidth: StyleSheet.hairlineWidth,

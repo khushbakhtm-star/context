@@ -3,6 +3,8 @@ import { newBrowserTask } from './checklist-flow';
 
 type Snapshot = { scope: object; name?: string; flow: ChecklistFlow; revision: string | undefined;
   versions: { revision: string; flow: ChecklistFlow }[]; canMoveToList?: boolean };
+type RowDraft = { id: string; input: HTMLTextAreaElement; original: string; revision: string | undefined; scope: object };
+type RowSave = { revision: string | undefined; scope: object };
 export type ChecklistFlowHooks = {
   snapshot(): Snapshot | null;
   change(command: ChecklistChange, expected: string | undefined, scope: object): Promise<string | undefined>;
@@ -23,9 +25,12 @@ export class ChecklistFlowUI {
   private rendered = false;
   private hiddenCompleted = false;
   private composerOpen = false;
-  private draft: { id: string; input: HTMLTextAreaElement; original: string; revision: string | undefined; scope: object } | null = null;
+  private selectedTask: { id: string; scope: object } | null = null;
+  private draft: RowDraft | null = null;
+  private leaving: RowDraft[] = [];
+  private rendering = false;
   private composerDraft: { input: HTMLTextAreaElement; revision: string | undefined; scope: object; parentId: string | null; taskId?: string; savedText?: string } | null = null;
-  private saving: Promise<{ revision: string | undefined; scope: object } | null> | null = null;
+  private saving: Promise<RowSave | null> | null = null;
   private savingComposer: Promise<void> | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private dragged: { id: string; pointerId: number; row: HTMLElement; ready: Promise<string | undefined>; target: HTMLElement | null; after: boolean } | null = null;
@@ -37,39 +42,64 @@ export class ChecklistFlowUI {
       window.addEventListener('keydown', (event) => { if (event.key === 'Escape' && this.dragged) { event.preventDefault(); this.cancelDrag(); this.refresh(); } });
     }
   }
-  hasDraft() { return Boolean(this.draft || this.composerDraft?.input.value.length); }
-  clear() { this.draft = null; this.composerDraft = null; this.dragged = null; this.rendered = false; this.addParent = null; this.composerOpen = false; this.host.replaceChildren(); }
+  hasDraft() { return Boolean(this.draft || this.leaving.length || this.composerDraft?.input.value.length); }
+  clear() { this.draft = null; this.leaving = []; this.selectedTask = null; this.composerDraft = null; this.dragged = null; this.rendered = false; this.addParent = null; this.composerOpen = false; this.host.replaceChildren(); }
   setHideCompleted(value: boolean) { this.hiddenCompleted = value; this.refresh(true); }
   async resetChecks() { const current = this.hooks.snapshot(); if (current) await this.command({ type: 'reset' }, current.revision, current.scope); }
   async openComposer(parentId: string | null = null) {
-    await this.act(async () => { this.addParent = parentId; this.composerOpen = true; });
-    this.host.querySelector<HTMLTextAreaElement>('.checklist-add textarea')?.focus();
+    const scope = this.hooks.snapshot()?.scope;
+    let opened = false;
+    await this.act(async () => {
+      if (this.composerDraft && this.composerDraft.parentId !== parentId) await this.saveComposer();
+      const current = this.hooks.snapshot();
+      if (current?.scope !== scope || (parentId && !current?.flow.items.some(({ id }) => id === parentId))) return;
+      this.addParent = parentId; this.composerOpen = true; opened = true;
+    });
+    if (opened) this.host.querySelector<HTMLTextAreaElement>('.checklist-add textarea')?.focus();
+  }
+  hasSelectedTask() { return Boolean(this.selectedParent()); }
+  async openSubtaskComposer() {
+    const parent = this.selectedParent();
+    if (parent) await this.openComposer(parent);
+  }
+  private selectedParent() {
+    const current = this.hooks.snapshot();
+    const selected = this.selectedTask;
+    if (!selected || !current || current.scope !== selected.scope) return;
+    if ([this.draft, ...this.leaving].some((draft) =>
+      draft?.scope === selected.scope && draft.id === selected.id && !draft.input.value.trim())) return;
+    if (checklistRows(current.flow, this.hiddenCompleted).some(({ task }) => task.id === selected.id)) return selected.id;
   }
   refresh(force = false) {
     if (this.host.hidden) return;
     let current: Snapshot | null;
     try { current = this.hooks.snapshot(); } catch (error) { this.hooks.error(error); return; }
     if (!current) { this.clear(); const text = document.createElement('p'); text.textContent = 'Connect Google and unlock your private ledger to use your checklist.'; this.host.append(text); return; }
-    if (this.dragged || this.draft) return;
+    if (this.dragged || this.leaving.length || (this.draft && (!force || this.draft.scope !== current.scope))) return;
     if (!force && this.rendered && this.revision === current.revision) return;
+    const rows = prioritizeChecklistRows(checklistRows(current.flow, this.hiddenCompleted));
+    if (this.draft && !rows.some(({ task }) => task.id === this.draft?.id)) return;
+    const focused = this.draft?.input === document.activeElement ? this.draft : null;
     const composerHadFocus = Boolean(this.composerDraft && document.activeElement === this.composerDraft.input);
+    this.rendering = true;
     this.rendered = true; this.revision = current.revision; this.host.replaceChildren();
     if (current.name) { const title = document.createElement('h1'); title.className = 'priority-list-name'; title.textContent = current.name; this.host.append(title); }
     this.message = document.createElement('p'); this.message.className = 'checklist-message'; this.message.setAttribute('role', 'status'); this.host.append(this.message);
     const list = document.createElement('div'); list.className = 'checklist-rows'; list.setAttribute('role', 'list'); list.setAttribute('aria-label', current.name ?? 'Priority');
-    const rows = prioritizeChecklistRows(checklistRows(current.flow, this.hiddenCompleted));
-    for (const { task, depth } of rows) list.append(this.row(task, depth, current));
+    for (const { task, depth } of rows) list.append(this.row(task, depth, current, task.id === this.draft?.id ? this.draft : null));
     this.host.append(list);
     if (this.composerOpen || this.composerDraft) this.composer(current, composerHadFocus);
     else { const add = button('Add a task', '+', () => { void this.openComposer(); }); add.className = 'priority-add'; this.host.append(add); }
     if (current.versions.length) this.versions(current);
+    this.rendering = false;
+    focused?.input.focus({ preventScroll: true });
   }
   async flush() { await this.queue; await this.saveDraft(); await this.saveComposer(); this.refresh(true); }
-  private act(work: () => Promise<void>, guard?: { revision: string | undefined; scope: object }) {
+  private act(work: () => Promise<void>, guard?: { revision: string | undefined; scope: object }, includeActive = true) {
     const intendedScope = guard?.scope ?? this.hooks.snapshot()?.scope;
     const pending = this.queue.then(async () => {
       if (this.hooks.snapshot()?.scope !== intendedScope || (guard && this.hooks.snapshot()?.revision !== guard.revision)) throw new Error('Your task list changed. Review the latest list before trying again.');
-      const saved = await this.saveDraft(); const current = this.hooks.snapshot();
+      const saved = await this.saveDraft(includeActive); const current = this.hooks.snapshot();
       if (current?.scope !== intendedScope) throw new Error('The account or checklist changed. Reopen Priority.');
       if (guard && current?.revision !== (saved && saved.scope === intendedScope ? saved.revision : guard.revision)) throw new Error('Your task list changed. Review the latest list before trying again.');
       await work(); this.refresh(true);
@@ -80,19 +110,43 @@ export class ChecklistFlowUI {
   private command(command: ChecklistChange, revision: string | undefined, scope: object) {
     return this.act(async () => { const current = this.hooks.snapshot(); if (!current) throw new Error('Unlock your private ledger first.'); await this.hooks.change(command, current.revision, scope); }, { revision, scope });
   }
-  private async saveDraft() {
-    if (this.saving) return this.saving;
-    const draft = this.draft; if (!draft) return null;
-    if (draft.input.value === draft.original) { if (this.draft === draft) this.draft = null; return { revision: draft.revision, scope: draft.scope }; }
+  private releaseDraft(draft: RowDraft) {
+    if (this.draft === draft) this.draft = null;
+    this.leaving = this.leaving.filter((row) => row !== draft);
+  }
+  private async saveDraft(includeActive = true): Promise<RowSave | null> {
+    if (this.saving) {
+      const saved = await this.saving;
+      return await this.saveDraft(includeActive) ?? saved;
+    }
+    const nextDraft = () => this.leaving[0] ?? (includeActive ? this.draft : null);
+    if (!nextDraft()) return null;
     this.saving = (async () => {
-      while (this.draft === draft) {
+      let saved: RowSave | null = null;
+      for (let draft = nextDraft(); draft; draft = nextDraft()) {
         const text = draft.input.value;
-        const acknowledgedRevision = await this.hooks.change({ type: 'edit', id: draft.id, text }, draft.revision, draft.scope);
-        draft.original = text; draft.revision = acknowledgedRevision;
+        const deleting = !text.trim();
+        if (!deleting && text === draft.original) {
+          this.releaseDraft(draft);
+          continue;
+        }
+        const previousRevision = draft.revision;
+        if (deleting) draft.input.readOnly = true;
+        try {
+          draft.revision = await this.hooks.change(deleting ? { type: 'deleteRow', id: draft.id } :
+            { type: 'edit', id: draft.id, text }, previousRevision, draft.scope);
+        } finally {
+          draft.input.readOnly = false;
+        }
         if (this.hooks.snapshot()?.scope !== draft.scope) return null;
-        if (this.draft === draft && draft.input.value === text) { this.draft = null; break; }
+        draft.original = text;
+        saved = { revision: draft.revision, scope: draft.scope };
+        for (const waiting of [...this.leaving, this.draft]) {
+          if (waiting?.scope === draft.scope && waiting.revision === previousRevision) waiting.revision = draft.revision;
+        }
+        if (deleting || (draft.input.value === text && (includeActive || this.draft !== draft))) this.releaseDraft(draft);
       }
-      return { revision: draft.revision, scope: draft.scope };
+      return saved;
     })().finally(() => { this.saving = null; });
     return this.saving;
   }
@@ -102,13 +156,24 @@ export class ChecklistFlowUI {
   private async saveComposer() {
     if (this.savingComposer) return this.savingComposer;
     const draft = this.composerDraft; if (!draft) return;
-    if (!draft.input.value.trim()) { if (this.composerDraft === draft) this.composerDraft = null; return; }
+    if (!draft.input.value.trim() && !draft.taskId) { if (this.composerDraft === draft) this.composerDraft = null; return; }
     this.savingComposer = (async () => {
       // New tasks are additive to the latest list. The exact account/session and
       // the store's queued CAS still fence the write; no existing task is reset.
       while (this.composerDraft === draft) {
         const current = this.hooks.snapshot(); if (!current || current.scope !== draft.scope) throw new Error('The connected account changed. Your draft has not been copied to another account.');
         const text = draft.input.value;
+        if (!text.trim()) {
+          if (draft.taskId) {
+            draft.revision = await this.hooks.change({ type: 'deleteRow', id: draft.taskId }, draft.revision, draft.scope);
+            draft.taskId = undefined;
+            draft.savedText = undefined;
+            if (this.composerDraft !== draft || this.hooks.snapshot()?.scope !== draft.scope) return;
+            if (draft.input.value.trim()) continue;
+          }
+          this.composerDraft = null;
+          break;
+        }
         let acknowledgedRevision: string | undefined;
         if (draft.taskId) acknowledgedRevision = await this.hooks.change({ type: 'edit', id: draft.taskId, text }, draft.revision, draft.scope);
         else {
@@ -122,20 +187,40 @@ export class ChecklistFlowUI {
     })().finally(() => { this.savingComposer = null; });
     return this.savingComposer;
   }
-  private row(task: ChecklistTask, depth: number, snapshot: Snapshot) {
+  private row(task: ChecklistTask, depth: number, snapshot: Snapshot, preserved: RowDraft | null) {
     const row = document.createElement('div'); row.className = `checklist-row${task.checked ? ' completed' : ''}`;
     row.dataset.taskId = task.id; row.dataset.depth = String(depth); row.style.setProperty('--task-depth', String(depth)); row.setAttribute('role', 'listitem');
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.checked = task.checked; tick.setAttribute('aria-label', `${task.checked ? 'Mark incomplete' : 'Complete'}: ${task.text || 'Untitled task'}`);
     tick.onchange = () => { void this.command({ type: 'check', id: task.id, checked: tick.checked }, snapshot.revision, snapshot.scope); };
-    const input = document.createElement('textarea'); input.rows = 1; input.value = task.text; input.maxLength = 50_000; input.placeholder = 'Task'; input.setAttribute('aria-label', `Edit task: ${task.text || 'Untitled task'}`);
+    const input = preserved?.input ?? document.createElement('textarea');
+    input.rows = 1; if (!preserved) input.value = task.text; input.maxLength = 50_000; input.placeholder = 'Task'; input.setAttribute('aria-label', `Edit task: ${task.text || 'Untitled task'}`);
     input.style.fontWeight = task.format.bold ? '700' : '400'; input.style.fontStyle = task.format.italic ? 'italic' : 'normal'; input.style.textDecoration = task.format.underline ? 'underline' : 'none';
     if (task.format.textColor) input.style.color = task.format.textColor;
     const size = () => { input.style.height = 'auto'; input.style.height = `${Math.min(220, Math.max(40, input.scrollHeight))}px`; };
-    input.onfocus = () => { this.draft = { id: task.id, input, original: task.text, revision: snapshot.revision, scope: snapshot.scope }; };
+    input.onfocus = () => {
+      this.selectedTask = { id: task.id, scope: snapshot.scope };
+      if (this.draft?.input === input) return;
+      const waiting = this.leaving.find((draft) => draft.input === input);
+      if (waiting && !input.readOnly) this.leaving = this.leaving.filter((draft) => draft !== waiting);
+      this.draft = waiting ?? { id: task.id, input, original: task.text, revision: snapshot.revision, scope: snapshot.scope };
+    };
     input.oninput = size;
-    input.onblur = () => { void this.act(async () => {}); };
-    input.onkeydown = (event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); input.blur(); }
-      else if (event.key === 'Escape') { input.value = task.text; this.draft = null; input.blur(); this.refresh(true); } };
+    input.onblur = () => {
+      if (this.rendering || this.draft?.input !== input) return;
+      if (!this.leaving.includes(this.draft)) this.leaving.push(this.draft);
+      this.draft = null;
+      void this.act(async () => {}, undefined, false);
+    };
+    input.onkeydown = (event) => {
+      if (!event.isComposing && event.key === 'Enter' && (event.ctrlKey || event.metaKey || (!event.shiftKey && !input.value.trim()))) {
+        event.preventDefault(); input.blur();
+      } else if (event.key === 'Escape' && !input.readOnly) {
+        input.value = task.text;
+        if (this.draft?.input === input) this.releaseDraft(this.draft);
+        input.blur();
+        this.refresh(true);
+      }
+    };
     const handle = button(`Drag ${task.text || 'task'} to reorder`, '⠿', () => {}); handle.className = 'checklist-drag'; handle.setAttribute('aria-describedby', 'checklist-move-help');
     handle.onpointerdown = (event) => {
       if (event.button !== 0 || this.dragged) return; event.preventDefault();
@@ -198,7 +283,7 @@ export class ChecklistFlowUI {
     const form = document.createElement('form'); form.className = 'checklist-add';
     const preserved = this.composerDraft?.scope === snapshot.scope ? this.composerDraft : null;
     const input = preserved?.input ?? document.createElement('textarea');
-    input.rows = 1; input.maxLength = 50_000; input.placeholder = (preserved?.parentId ?? this.addParent) ? 'Add a subtask' : 'Add a task'; input.setAttribute('aria-label', input.placeholder);
+    input.rows = 1; input.maxLength = 50_000; input.placeholder = (preserved ? preserved.parentId : this.addParent) ? 'Add a subtask' : 'Add a task'; input.setAttribute('aria-label', input.placeholder);
     const captureDraft = () => { if (!this.composerDraft || this.composerDraft.input !== input) this.composerDraft = {
       input, revision: snapshot.revision, scope: snapshot.scope, parentId: this.addParent }; };
     input.oninput = captureDraft;

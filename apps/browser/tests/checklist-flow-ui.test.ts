@@ -89,6 +89,74 @@ test('saving task text keeps text as plain text and opens source navigation with
   await h.click('Open source minute'); assert.deepEqual(h.sourceCalls, [source]); assert.equal(h.commands.length, 1); assert.deepEqual(h.errors, []);
 });
 
+test('erasing a parent and moving focus commits its removal and promotes the subtasks without losing the next draft', async (t) => {
+  const h = fixture(t);
+  const parent = h.label('Edit task: Prepare'), other = h.label('Edit task: Shop');
+  parent.onfocus?.();
+  parent.value = ' \n\t ';
+  parent.onblur?.();
+  other.onfocus?.();
+  other.value = 'Shop and return';
+  await h.ui.flush();
+  assert.deepEqual(h.commands.map((command) => command.type), ['deleteRow', 'edit']);
+  assert.deepEqual(h.flow.items.map(({ id, parentId, text }) => ({ id, parentId, text })), [
+    { id: 'child_task', parentId: null, text: 'Call dentist' },
+    { id: 'other_task', parentId: null, text: 'Shop and return' },
+  ]);
+  assert.equal(walk(h.host).some((node) => node.dataset.taskId === 'parent_task'), false);
+  assert.deepEqual(h.errors, []);
+});
+
+test('Enter commits an erased row', async (t) => {
+  const h = fixture(t);
+  const input = h.label('Edit task: Prepare');
+  input.onfocus?.();
+  input.value = '';
+  let stopped = false;
+  input.onkeydown?.({ key: 'Enter', preventDefault() { stopped = true; } });
+  await h.ui.flush();
+  assert.equal(stopped, true);
+  assert.deepEqual(h.commands, [{ type: 'deleteRow', id: 'parent_task' }]);
+});
+
+test('a stale erased draft cannot delete a remotely edited row', async (t) => {
+  const h = fixture(t);
+  const input = h.label('Edit task: Prepare');
+  input.onfocus?.();
+  input.value = '';
+  h.changeRemote();
+  input.onblur?.();
+  await assert.rejects(h.ui.flush(), /stale/);
+  assert.equal(h.commands.length, 0);
+  assert.equal(h.flow.items[0]?.text, 'New remote words');
+});
+
+test('the contextual add action opens a subtask for the selected row in the current list', async (t) => {
+  const h = fixture(t);
+  assert.equal(h.ui.hasSelectedTask(), false);
+  await h.ui.openComposer();
+  const topLevel = h.label('Add a task');
+  topLevel.value = 'Unrelated task';
+  topLevel.oninput?.();
+  const parent = h.label('Edit task: Prepare');
+  parent.onfocus?.();
+  assert.equal(h.ui.hasSelectedTask(), true);
+  await h.ui.openSubtaskComposer();
+  const input = h.label('Add a subtask');
+  input.value = 'Check hours';
+  input.oninput?.();
+  await h.ui.flush();
+  assert.equal(h.flow.items.find(({ text }) => text === 'Check hours')?.parentId, 'parent_task');
+  assert.equal(h.flow.items.find(({ text }) => text === 'Unrelated task')?.parentId, null);
+
+  const updated = h.label('Edit task: Prepare');
+  updated.onfocus?.();
+  updated.value = ' ';
+  assert.equal(h.ui.hasSelectedTask(), false);
+  h.changeAccount();
+  assert.equal(h.ui.hasSelectedTask(), false);
+});
+
 test('canceling or losing capture during a drag leaves every task and subtask unchanged', async (t) => {
   const h = fixture(t); const before = structuredClone(h.flow); const handle = h.label('Drag Prepare to reorder'); const target = h.row('other_task'); h.target(target);
   handle.onpointerdown?.({ button: 0, pointerId: 1, preventDefault() {} }); handle.onpointermove?.({ pointerId: 1, clientX: 100, clientY: 40 }); handle.onpointercancel?.(); await h.ui.flush();

@@ -8,19 +8,21 @@ import { changeChecklistFlow, dismissChecklistFlowConflict, getChecklistFlow, ge
   replaceChecklistCollection, replaceChecklistList, restoreChecklistFlowConflict, transferChecklistTask } from '../data/checklist-flow';
 import type { SyncDocument } from '../sync/types';
 import type { AppColors } from '../theme';
-import { applyChecklistChange, checklistRows, checklistSubtreeIds, emptyChecklistFlow,
+import { applyChecklistChange, checklistRows, checklistSubtreeIds, emptyChecklistFlow, MAX_CHECKLIST_DEPTH, MAX_CHECKLIST_TASKS,
   prioritizeChecklistRows, readChecklistCollection, type ChecklistCollection, type ChecklistFlow,
   type ChecklistTask, type ChecklistListSummary } from '../utils/checklist-flow';
 import { checklistDragDestination, type ChecklistRowLayout } from '../utils/checklist-drag';
 import { createCalendarPeriodSwipe, type CalendarPeriodDirection } from '../utils/calendar-period-swipe';
 import { acknowledgeChecklistHistory, checklistHistoryTarget, emptyChecklistHistory, observeChecklistHistory,
   recordChecklistHistory, type ChecklistHistoryAction } from '../utils/checklist-history';
+import type { ViewAddAction, ViewAddActionsRef } from './view-add-actions';
 
 type Props = { dataVersion: number; onDataChanged: () => void;
   listId?: string; hideCompleted?: boolean; focusTaskId?: string | null; onFocusConsumed?: () => void;
   onListResolved?: (listId: string) => void; onHistoryChange?: (state: PriorityHistoryState) => void;
   onSwipeList?: (direction: CalendarPeriodDirection) => void;
   controlsRef?: MutableRefObject<PriorityScreenControls | null>;
+  addActionsRef?: ViewAddActionsRef;
   beforeLeaveRef?: MutableRefObject<(() => Promise<boolean>) | null> };
 
 export type PriorityHistoryState = { canUndo: boolean; canRedo: boolean; busy: boolean };
@@ -36,7 +38,7 @@ type MoveChoice = { taskId: string; revision: string | null; epoch: number };
 const CONTENT_BOTTOM_PADDING = 88;
 
 export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef, listId = 'main', hideCompleted = false,
-  controlsRef, onHistoryChange, focusTaskId, onFocusConsumed, onListResolved, onSwipeList }: Props) {
+  controlsRef, addActionsRef, onHistoryChange, focusTaskId, onFocusConsumed, onListResolved, onSwipeList }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [snapshot, setSnapshot] = useState<Snapshot>(() => ({ flow: emptyChecklistFlow(), revision: null }));
@@ -54,8 +56,12 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   const [drag, setDrag] = useState<Drag | null>(null);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [tailSpace, setTailSpace] = useState(0);
-  const latest = useRef({ snapshot, busy, draft, moveChoice }); latest.current = { snapshot, busy, draft, moveChoice };
+  const latest = useRef({ snapshot, busy, draft, moveChoice, ready, showVersions, selectedId });
+  latest.current = { snapshot, busy, draft, moveChoice, ready, showVersions, selectedId };
   const saveDraftRef = useRef<() => Promise<boolean>>(async () => true);
+  const draftBlurFrame = useRef<ReturnType<typeof requestAnimationFrame> | null>(null);
+  const draftField = useRef<'text' | 'color' | null>(null);
+  const draftActionPressed = useRef(false);
   const mounted = useRef(true);
   const lifecycleEpoch = useRef(0);
   const requestId = useRef(0);
@@ -143,9 +149,9 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   useEffect(() => {
     mounted.current = true;
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') { lifecycleEpoch.current++; closeMoveChoice(); if (dragRef.current) finishDrag(true); }
+      if (state !== 'active') { lifecycleEpoch.current++; cancelDraftBlur(); closeMoveChoice(); if (dragRef.current) finishDrag(true); }
     });
-    return () => { mounted.current = false; lifecycleEpoch.current++; requestId.current++; subscription.remove(); };
+    return () => { mounted.current = false; lifecycleEpoch.current++; requestId.current++; cancelDraftBlur(); subscription.remove(); };
   }, []);
   function measureKeyboardOffset() {
     viewportRef.current?.measureInWindow((_x, y) => {
@@ -271,29 +277,102 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   }
 
   function startNew(parentId: string | null = null, afterId?: string) {
-    if (!mounted.current || AppState.currentState !== 'active' || !ready || busy || draft) return;
+    if (!mounted.current || AppState.currentState !== 'active' || !ready || latest.current.busy || latest.current.draft) return;
     setSelectedId(null);
-    setDraft({ id: `task_${Crypto.randomUUID().replaceAll('-', '')}`, text: '', format: {}, revision: snapshot.revision,
+    updateDraft({ id: `task_${Crypto.randomUUID().replaceAll('-', '')}`, text: '', format: {}, revision: snapshot.revision,
       isNew: true, parentId, afterId });
   }
   function edit(task: ChecklistTask) {
-    if (!mounted.current || AppState.currentState !== 'active' || !ready || busy || draft) return;
+    if (!mounted.current || AppState.currentState !== 'active' || !ready || latest.current.busy || latest.current.draft) return;
     setSelectedId(task.id);
-    setDraft({ id: task.id, text: task.text, format: { ...task.format }, revision: snapshot.revision,
+    updateDraft({ id: task.id, text: task.text, format: { ...task.format }, revision: snapshot.revision,
       isNew: false, parentId: task.parentId });
   }
+  function updateDraft(next: Draft | null) {
+    latest.current.draft = next;
+    setDraft(next);
+  }
+  function changeDraft(id: string, change: (current: Draft) => Draft) {
+    const current = latest.current.draft;
+    if (current?.id === id && !latest.current.busy) updateDraft(change(current));
+  }
+  function cancelDraftBlur() {
+    if (draftBlurFrame.current !== null) cancelAnimationFrame(draftBlurFrame.current);
+    draftBlurFrame.current = null;
+  }
+  function focusDraft(id: string, field: 'text' | 'color') {
+    if (latest.current.draft?.id !== id) return;
+    cancelDraftBlur();
+    draftField.current = field;
+  }
+  function blurDraft(id: string, field: 'text' | 'color') {
+    const current = latest.current.draft;
+    if (current?.id !== id) return;
+    if (draftField.current === field) draftField.current = null;
+    if (current.text.trim() || latest.current.busy || draftField.current || draftActionPressed.current) return;
+    cancelDraftBlur();
+    const epoch = lifecycleEpoch.current;
+    // Text and color belong to the same editor. Let the next field receive
+    // focus before treating a blur as the end of this empty edit.
+    draftBlurFrame.current = requestAnimationFrame(() => {
+      draftBlurFrame.current = null;
+      const active = latest.current.draft;
+      if (!mounted.current || AppState.currentState !== 'active' || lifecycleEpoch.current !== epoch ||
+          active?.id !== id || active.text.trim() || draftField.current || draftActionPressed.current) return;
+      void saveDraftRef.current();
+    });
+  }
+  function beginDraftAction() { draftActionPressed.current = true; cancelDraftBlur(); }
+  function endDraftAction() { draftActionPressed.current = false; }
+  function discardDraft() {
+    cancelDraftBlur(); draftField.current = null; endDraftAction();
+    updateDraft(null); setError(null); Keyboard.dismiss();
+  }
   async function saveDraft(): Promise<boolean> {
-    if (!draft) return true;
-    if (!draft.text.trim() || busy) return false;
-    if (draft.format.textColor && !/^#[0-9a-f]{6}$/i.test(draft.format.textColor)) { setError('Enter a text color as six hex digits, for example #333333.'); return false; }
-    const current = draft;
-    const command: Command = current.isNew ? { type: 'add', item: { id: current.id, text: current.text,
+    const current = latest.current.draft;
+    if (!current) return true;
+    if (latest.current.busy) return false;
+    const empty = !current.text.trim();
+    if (empty && current.isNew) { discardDraft(); return true; }
+    if (!empty && current.format.textColor && !/^#[0-9a-f]{6}$/i.test(current.format.textColor)) {
+      setError('Enter a text color as six hex digits, for example #333333.'); return false;
+    }
+    const command: Command = empty ? { type: 'deleteRow', id: current.id } :
+      current.isNew ? { type: 'add', item: { id: current.id, text: current.text,
       checked: false, parentId: current.parentId, format: current.format }, ...(current.afterId ? { afterId: current.afterId } : {}) } :
       { type: 'edit', id: current.id, text: current.text, format: current.format };
-    if (await perform(command, current.revision)) { setDraft(null); setSelectedId(current.id); Keyboard.dismiss(); return true; }
-    return false;
+    const saved = await perform(command, current.revision);
+    if (saved && mounted.current) { discardDraft(); setSelectedId(empty ? null : current.id); }
+    return saved;
   }
   saveDraftRef.current = saveDraft;
+  const viewAddActions = useRef<() => ViewAddAction[]>(() => []);
+  viewAddActions.current = () => {
+    const epoch = lifecycleEpoch.current;
+    const allowed = () => {
+      const state = latest.current;
+      return mounted.current && epoch === lifecycleEpoch.current && AppState.currentState === 'active' &&
+        state.ready && !state.busy && !state.draft && !state.showVersions && !state.moveChoice && !dragRef.current &&
+        state.snapshot.flow.items.length < MAX_CHECKLIST_TASKS;
+    };
+    if (!allowed()) return [];
+    const actions: ViewAddAction[] = [{ label: 'Add task', run: () => { if (allowed()) startNew(); } }];
+    const parent = rows.find(({ task }) => task.id === selectedId);
+    if (parent && parent.depth + 1 < MAX_CHECKLIST_DEPTH) {
+      const id = parent.task.id;
+      const revision = snapshot.revision;
+      actions.push({ label: 'Add subtask', run: () => {
+        if (allowed() && latest.current.selectedId === id && latest.current.snapshot.revision === revision) startNew(id);
+      } });
+    }
+    return actions;
+  };
+  useEffect(() => {
+    if (!addActionsRef) return;
+    const get = () => viewAddActions.current();
+    addActionsRef.current = get;
+    return () => { if (addActionsRef.current === get) addActionsRef.current = null; };
+  }, [addActionsRef]);
   const commands = useRef({ addTask: () => startNew(), undo: () => changeHistory('undo'), redo: () => changeHistory('redo') });
   commands.current = { addTask: () => startNew(), undo: () => changeHistory('undo'), redo: () => changeHistory('redo') };
   const jumpToUnfinished = useRef(() => {});
@@ -326,9 +405,6 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
     const beforeLeave = async () => {
       if (latest.current.busy) { setError('Finish the current checklist change before leaving.'); return false; }
       if (dragRef.current) finishDrag(true);
-      const current = latest.current.draft;
-      if (!current) return true;
-      if (!current.text.trim()) { setDraft(null); setError(null); Keyboard.dismiss(); return true; }
       return saveDraftRef.current();
     };
     beforeLeaveRef.current = beforeLeave;
@@ -430,28 +506,36 @@ export function ChecklistFlowScreen({ dataVersion, onDataChanged, beforeLeaveRef
   const editor = draft ? <View ref={editorRef} collapsable={false} style={styles.editor} onLayout={revealEditor}>
     <TextInput accessibilityLabel={draft.parentId ? 'Subtask text' : 'Task text'} value={draft.text} multiline autoFocus editable={!busy}
       maxLength={50000} keyboardAppearance={resolvedMode} placeholder={draft.parentId ? 'Add subtask' : 'Add task'}
-      onFocus={revealEditor}
-      placeholderTextColor={colors.muted} onChangeText={(text) => { if (!latest.current.busy) setDraft((value) => value ? { ...value, text } : value); }}
+      onFocus={() => { focusDraft(draft.id, 'text'); revealEditor(); }} onBlur={() => blurDraft(draft.id, 'text')}
+      placeholderTextColor={colors.muted} onChangeText={(text) => changeDraft(draft.id, (value) => ({ ...value, text }))}
       style={[styles.input, { fontWeight: draft.format.bold ? '700' : '400', fontStyle: draft.format.italic ? 'italic' : 'normal',
         textDecorationLine: draft.format.underline ? 'underline' : 'none', color: /^#[0-9a-f]{6}$/i.test(draft.format.textColor ?? '') ? draft.format.textColor : colors.ink }]} />
     <View style={styles.formatRow}>
       {(['bold', 'italic', 'underline'] as const).map((kind) => <Pressable key={kind} accessibilityRole="button"
         accessibilityLabel={kind[0]!.toUpperCase() + kind.slice(1)} accessibilityState={{ selected: Boolean(draft.format[kind]) }}
-        disabled={busy} onPress={() => { if (!latest.current.busy) setDraft((value) => value ? { ...value, format: { ...value.format, [kind]: !value.format[kind] } } : value); }}
+        disabled={busy} onPressIn={beginDraftAction} onPressOut={endDraftAction}
+        onPress={() => changeDraft(draft.id, (value) => ({ ...value, format: { ...value.format, [kind]: !value.format[kind] } }))}
         style={[styles.formatButton, draft.format[kind] && styles.selectedButton, busy && styles.disabled]}>
         <Text allowFontScaling={false} style={[styles.formatGlyph, kind === 'bold' && { fontWeight: '800' }, kind === 'italic' && { fontStyle: 'italic' },
           kind === 'underline' && { textDecorationLine: 'underline' }]}>{kind === 'bold' ? 'B' : kind === 'italic' ? 'I' : 'U'}</Text>
       </Pressable>)}
       <TextInput accessibilityLabel="Task text color hex" value={draft.format.textColor ?? ''} autoCapitalize="characters" autoCorrect={false} editable={!busy}
         maxLength={7} placeholder="#RRGGBB" placeholderTextColor={colors.muted} keyboardAppearance={resolvedMode}
-        onChangeText={(text) => { if (!latest.current.busy) setDraft((value) => value ? { ...value, format: { ...value.format, textColor: text || undefined } } : value); }} style={styles.colorInput} />
-      <Pressable accessibilityRole="button" accessibilityLabel="Reset task text color" disabled={busy} onPress={() => { if (!latest.current.busy) setDraft((value) => value ?
-        { ...value, format: { ...value.format, textColor: undefined } } : value); }} style={styles.formatButton}><Text style={styles.formatGlyph}>↺</Text></Pressable>
+        onFocus={() => focusDraft(draft.id, 'color')} onBlur={() => blurDraft(draft.id, 'color')}
+        onChangeText={(text) => changeDraft(draft.id, (value) => ({ ...value, format: { ...value.format, textColor: text || undefined } }))}
+        style={styles.colorInput} />
+      <Pressable accessibilityRole="button" accessibilityLabel="Reset task text color" disabled={busy}
+        onPressIn={beginDraftAction} onPressOut={endDraftAction}
+        onPress={() => changeDraft(draft.id, (value) => ({ ...value, format: { ...value.format, textColor: undefined } }))}
+        style={styles.formatButton}><Text style={styles.formatGlyph}>↺</Text></Pressable>
     </View>
-    <View style={styles.editorActions}><Pressable accessibilityRole="button" onPress={() => { if (!latest.current.busy) { setDraft(null); setError(null); Keyboard.dismiss(); } }}
+    <View style={styles.editorActions}><Pressable accessibilityRole="button" accessibilityLabel="Cancel task edit"
+      onPressIn={beginDraftAction} onPressOut={endDraftAction}
+      onPress={() => { if (!latest.current.busy) discardDraft(); }}
       disabled={busy} style={styles.textButton}><Text style={styles.secondaryText}>Cancel</Text></Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="Save task" onPress={() => void saveDraft()} disabled={busy || !draft.text.trim()}
-        style={[styles.saveButton, (busy || !draft.text.trim()) && styles.disabled]}><Text style={styles.saveText}>✓</Text></Pressable></View>
+      <Pressable accessibilityRole="button" accessibilityLabel="Save task" onPressIn={beginDraftAction} onPressOut={endDraftAction}
+        onPress={() => void saveDraft()} disabled={busy}
+        style={[styles.saveButton, busy && styles.disabled]}><Text style={styles.saveText}>✓</Text></Pressable></View>
   </View> : null;
 
   return <KeyboardAvoidingView style={styles.container} behavior="padding" keyboardVerticalOffset={keyboardOffset}

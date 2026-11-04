@@ -8,17 +8,17 @@ import { flushBrowserText } from '../src/editor';
 
 function fixture() {
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8'); const parsed = ts.createSourceFile('app.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const functions = ['beginEdit', 'saveEditor', 'mirrorDraft', 'setCellNote'];
+  const functions = ['beginEdit', 'saveEditor', 'mirrorDraft', 'setCellNote', 'rememberCalendarEdit'];
   const nodes = parsed.statements.filter((node: any) => functions.includes(node.name?.text) ||
     ts.isExpressionStatement(node) && /element\('finish-format'\)\.onclick/.test(node.getText(parsed)));
   const input = { value: '', focusCount: 0, blurCount: 0, focus() { this.focusCount++; }, blur() { this.blurCount++; }, setAttribute() {}, setSelectionRange() {} };
   const node = { textContent: '', dataset: { defaultFillEligible: 'true', defaultFill: 'false' }, classList: { remove() {} }, setAttribute() {}, querySelector: () => null }; const buttons: Record<string, any> = {};
   let gate: Promise<void> | null = null; let writes = 0;
   const store = { state: emptyLedger('browser_fixture'), async update(change: any) { writes++; if (gate) { const wait = gate; gate = null; await wait; } this.state = change(this.state); return this.state; } };
-  const module = { exports: {} as any }; const context: any = { module, exports: module.exports, store, editor: null, undo: null,
+  const module = { exports: {} as any }; const context: any = { module, exports: module.exports, store, editor: null, undo: null, redo: null,
     entryBarMode: null, commandBusy: false, entryInput: input, selected: { day: '2026-10-27', minute: 800 },
     editCells, getMinute, flushBrowserText, minuteLabel: (minute: number) => String(minute), clock12: true, planForMinute: () => undefined,
-    element: (id: string) => buttons[id] ??= {}, cell: () => node, updateBars() {}, updateCellMenuAvailability() {},
+    element: (id: string) => buttons[id] ??= {}, cell: () => node, updateBars() {}, updateCellMenuAvailability() {}, updateHistoryControl() {},
     render() {}, status() {}, report() {}, options: { showModal() {} },
     select: (point: any) => { context.selected = point; },
   };

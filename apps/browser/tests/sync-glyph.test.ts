@@ -18,7 +18,7 @@ function fixture(fail = false) {
     checklistVisible:false,checklistUI:{hasDraft:()=>false,async flush(){},refresh(){},clear(){}},
     notepadVisible:false,notepad:{hasDraft:()=>false,bind(){},async flush(){}},
     canvasVisible:false,canvas:{hasDraft:()=>false,bind(){},async flush(){}},
-    dayInput:{value:''},daysInput:{value:''},day:'2026-10-31',days:1,undo:null,
+    dayInput:{value:''},daysInput:{value:''},day:'2026-10-31',days:1,undo:null,updateHistoryControl(){},
     store:{state:{conflicts:[]},async drain(){}},passphrase:'fixture',editor:null,render(){},
     connection:{identity:{email:'fixture@example.test'},isAuthorized:()=>true,async sync(){reached();if(fail)throw new Error('Synthetic connection error');return gate;}}};
   vm.runInNewContext(ts.transpileModule(nodes.map((node)=>node.getText(source)).join('\n'),
@@ -49,15 +49,24 @@ test('a real browser sync failure keeps the centered issue state after work ends
 test('the browser glyph is a static circular side-arrow emblem with a centered issue mark and no outer badge',()=>{
   const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
   const css=fs.readFileSync(new URL('../app.css',import.meta.url),'utf8');
-  const button=/<button id="sync"[\s\S]*?<\/button>/.exec(html)![0];
+  const button=/<button\b[^>]*\bid="sync"[\s\S]*?<\/button>/.exec(html)![0];
   assert.match(button,/aria-hidden="true" focusable="false"/);assert.match(button,/viewBox="0 0 24 24"/);
   assert.match(button,/stroke-width="1\.5"/);assert.match(button,/class="sync-loop-closed" cx="12" cy="12" r="10\.25"/);
   assert.match(button,/class="sync-loop-open"/);assert.match(button,/class="sync-side-arrows"/);
   assert.match(button,/class="sync-issue"><path d="M12 7\.25V12\.75"/);
   assert.doesNotMatch(button,/⇄|sync-warning|animate|ellipse/i);
   assert.match(css,/#sync\[data-sync-state=active\]\{color:var\(--ink\)\}/);
-  assert.match(css,/header #sync\{[^}]*color:var\(--muted\)/);
+  assert.match(css,/\.settings-actions #sync\{[^}]*color:var\(--muted\)/);
   assert.doesNotMatch(css,/animation|@keyframes|transition:/);
+});
+
+test('one Sync button lives in Settings and never submits its close form', () => {
+  const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const header = /<header>[\s\S]*?<\/header>/.exec(html)![0];
+  const settings = /<dialog id="options"[\s\S]*?<\/dialog>/.exec(html)![0];
+  assert.equal([...html.matchAll(/id="sync"/g)].length, 1);
+  assert.doesNotMatch(header, /id="sync"/);
+  assert.match(settings, /<h2 id="settings-title">Settings<\/h2><div class="settings-actions"><button type="button" id="sync"/);
 });
 
 test('sync arrowheads sit on opposite points of the loop with congruent arms',()=>{

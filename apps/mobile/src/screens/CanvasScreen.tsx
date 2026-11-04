@@ -14,6 +14,8 @@ import { arrangeCanvas, canvasPersonSymbol, routeCanvasEdges, routeCanvasFamilie
 import { canvasWorkplaneGrid, nextCanvasWorkplaneTurn, projectCanvasWorkplane, unprojectCanvasWorkplane,
   type CanvasWorkplaneTurn } from '../utils/canvas-workplane';
 import { CanvasFamilyEditor, type FamilyForm } from './CanvasFamilyEditor';
+import type { ViewAddAction, ViewAddActionsRef } from './view-add-actions';
+import { EMPTY_VIEW_HISTORY, type ViewHistoryControls, type ViewHistoryState } from './view-history';
 import { canvasDragNodes, canvasWorkplaneFrame, centerCanvasNode, fitCanvasWorkplane, intersectsCanvasViewport,
   previewCanvasRoutes, screenPoint, visibleCanvasBoard, worldPoint, zoomViewport,
   type DragPreview, type Point, type Size, type Viewport } from './canvas-viewport';
@@ -24,6 +26,9 @@ type Props = {
   focusNodeId?: string | null;
   onFocusConsumed?: () => void;
   beforeLeaveRef?: { current: (() => boolean) | null };
+  addActionsRef?: ViewAddActionsRef;
+  historyControlsRef?: { current: ViewHistoryControls | null };
+  onHistoryStateChange?: (state: ViewHistoryState) => void;
 };
 type NodeKind = CanvasNode['kind'];
 type NodeDraft = {
@@ -223,7 +228,8 @@ const WorkplaneGrid = memo(function WorkplaneGrid({ viewport, size, offset, turn
   </View>;
 });
 
-export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed, beforeLeaveRef }: Props) {
+export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed, beforeLeaveRef, addActionsRef,
+  historyControlsRef, onHistoryStateChange }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const board = activeCanvasBoard(document);
@@ -250,6 +256,28 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   const previewRef = useRef<Preview | null>(null);
   const previewFrame = useRef<number | null>(null);
   const history = useRef<{ undo: CanvasDocument[]; redo: CanvasDocument[] }>({ undo: [], redo: [] });
+  const restoreHistory = useRef<(action: 'undo' | 'redo') => void>(restore);
+  restoreHistory.current = restore;
+  const addChoices = useRef<() => ViewAddAction[]>(() => []);
+  addChoices.current = () => [
+    { label: 'Add card', run: () => editNode() },
+    { label: 'Add family', run: () => openDialog({ kind: 'family' }) },
+    { label: 'Add space', run: () => editSpace() },
+    { label: 'New board', run: () => openDialog({ kind: 'boards', text: '' }) },
+  ];
+  useEffect(() => {
+    if (!addActionsRef) return;
+    const actions = () => addChoices.current();
+    addActionsRef.current = actions;
+    return () => { if (addActionsRef.current === actions) addActionsRef.current = null; };
+  }, [addActionsRef]);
+  useEffect(() => {
+    if (!historyControlsRef) return;
+    const controls = { undo: () => restoreHistory.current('undo'), redo: () => restoreHistory.current('redo') };
+    historyControlsRef.current = controls;
+    return () => { if (historyControlsRef.current === controls) historyControlsRef.current = null; };
+  }, [historyControlsRef]);
+  useEffect(() => () => onHistoryStateChange?.(EMPTY_VIEW_HISTORY), [onHistoryStateChange]);
   const focusedRequest = useRef<string | null>(null);
   const lastBoardId = useRef(board.id);
 
@@ -296,9 +324,14 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     if (remember) {
       history.current.undo = [...history.current.undo.slice(-29), previous];
       history.current.redo = [];
+      publishHistory();
     }
     docRef.current = next;
     onChangeRef.current(next);
+  }
+
+  function publishHistory() {
+    onHistoryStateChange?.({ canUndo: history.current.undo.length > 0, canRedo: history.current.redo.length > 0 });
   }
 
   function safeChange(change: () => void) {
@@ -705,6 +738,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     const previous = stack.pop();
     if (!previous) return;
     history.current[which === 'undo' ? 'redo' : 'undo'].push(docRef.current);
+    publishHistory();
     setSelectedIds([]);
     setLinkFrom(null);
     apply(previous, false);
@@ -854,20 +888,20 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
               dialog?.kind === 'node' && dialog.draft.id ? 'Edit card' : 'Add card';
 
   return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.screen}>
-    <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false}
-      style={styles.bar} contentContainerStyle={styles.barContent}>
-      <Tool title={board.title} accessibilityLabel={'Workspaces, current workspace ' + board.title} styles={styles} compact
-        onPress={() => openDialog({ kind: 'boards', text: '' })} />
-      <Tool title="+ Family" accessibilityLabel="Add family" styles={styles} onPress={() => openDialog({ kind: 'family' })} />
-      <Tool title="+ Card" accessibilityLabel="Add card" styles={styles} onPress={() => editNode()} />
-      <Tool title="Auto Arrange" styles={styles} disabled={!board.nodes.length} onPress={() => openDialog({ kind: 'layout' })} />
-      <Tool title="Select" styles={styles} selected={multi} onPress={() => {
-        setMulti(!multi); setSelectedIds([]); setLinkFrom(null);
-      }} />
-      <Tool title="Search" styles={styles} onPress={() => openDialog({ kind: 'search', text: '' })} />
-      <Tool title="Undo" styles={styles} disabled={!history.current.undo.length} onPress={() => restore('undo')} />
-      <Tool title="Redo" styles={styles} disabled={!history.current.redo.length} onPress={() => restore('redo')} />
-    </ScrollView>
+    <View style={[styles.bar, styles.commandBar]}>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false}
+        style={styles.commandScroll} contentContainerStyle={styles.barContent}>
+        <Tool title={board.title} accessibilityLabel={'Workspaces, current workspace ' + board.title} styles={styles} compact
+          onPress={() => openDialog({ kind: 'boards', text: '' })} />
+        <Tool title="+ Family" accessibilityLabel="Add family" styles={styles} onPress={() => openDialog({ kind: 'family' })} />
+        <Tool title="+ Card" accessibilityLabel="Add card" styles={styles} onPress={() => editNode()} />
+        <Tool title="Auto Arrange" styles={styles} disabled={!board.nodes.length} onPress={() => openDialog({ kind: 'layout' })} />
+        <Tool title="Select" styles={styles} selected={multi} onPress={() => {
+          setMulti(!multi); setSelectedIds([]); setLinkFrom(null);
+        }} />
+        <Tool title="Search" styles={styles} onPress={() => openDialog({ kind: 'search', text: '' })} />
+      </ScrollView>
+    </View>
     {mode === 'spaces' && !selection.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false}
       style={styles.bar} contentContainerStyle={styles.barContent}>
       <Tool title="+ Space" accessibilityLabel="Add space" styles={styles} onPress={() => editSpace()} />
@@ -1142,6 +1176,8 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
 const createStyles = (colors: AppColors) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.paper },
   bar: { flexGrow: 0, flexShrink: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
+  commandBar: { flexDirection: 'row', alignItems: 'center', minHeight: 50 },
+  commandScroll: { flex: 1 },
   barContent: { minHeight: 50, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 5, gap: 3 },
   tool: { minHeight: 44, minWidth: 42, maxWidth: 156, paddingHorizontal: 10, justifyContent: 'center', alignItems: 'center', borderRadius: 7 },
   compactTool: { maxWidth: 88, paddingHorizontal: 7 },

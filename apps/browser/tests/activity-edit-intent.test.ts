@@ -4,7 +4,7 @@ import { hashValue, validateBatch } from '../shared/sync/codec';
 import type { SyncDocument } from '../shared/sync/types';
 import { cellFormatKey } from '../shared/utils/cell-format';
 import { formatCells, groupSelection, transferCells, ungroupSelection } from '../src/formatting';
-import { applyDocumentValues, editCells, emptyLedger, getMinute, mergeLedger, minuteKey, undoEdit, validateState } from '../src/ledger';
+import { applyBrowserHistoryEdit, applyDocumentValues, editCells, emptyLedger, getMinute, mergeLedger, minuteKey, undoEdit, validateState } from '../src/ledger';
 
 const day = '2026-10-30';
 const blockId = 'activity_coffee';
@@ -100,16 +100,18 @@ test('new Group and local activity Move retain active intent for the final activ
   validateState(moved.state);
 });
 
-test('Undo produces fresh restoring intent and a later reapply produces fresh deletion intent', () => {
+test('Undo and Redo produce fresh guarded restoring and deletion intent', () => {
   const state = initial();
   const ungrouped = ungroupSelection(state, [600, 601, 602, 603].map(point), 2000);
-  const undone = undoEdit(ungrouped.state, ungrouped.undo, 2000);
+  const { state: undone, inverse: redo } = applyBrowserHistoryEdit(ungrouped.state, ungrouped.undo, 2000);
   assert.equal(intent(undone)!.value!.deleted, false);
   assert.equal(intent(undone)!.value!.updatedAt, new Date(2001).toISOString(), 'same-millisecond Undo is a newer user action');
   for (const minute of [600, 601, 602, 603]) assert.deepEqual(getMinute(undone, day, minute)!.value, getMinute(state, day, minute)!.value);
-  const reapplied = applyDocumentValues(undone, ungrouped.undo.after.map((item) => ({ key: item.key, value: item.value })), 2000);
+  const reapplied = applyBrowserHistoryEdit(undone, redo, 2000);
   assert.equal(intent(reapplied.state)!.value!.deleted, true);
   assert.equal(intent(reapplied.state)!.value!.updatedAt, new Date(2002).toISOString());
+  const changed = editCells(undone, [{ ...point(601), text: 'A later edit' }], 3000).state;
+  assert.throws(() => applyBrowserHistoryEdit(changed, redo, 4000), /changed since this edit/);
 });
 
 test('remote imports and projection acknowledgements preserve user intent without promoting its timestamp', () => {

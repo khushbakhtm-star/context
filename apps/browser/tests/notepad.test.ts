@@ -13,11 +13,11 @@ function account(device: string) {
   };
 }
 
-function fixture() {
+function fixture(onHistoryChange?: () => void) {
   const input = { value: '', disabled: true } as HTMLTextAreaElement;
   const message = { textContent: '' } as HTMLElement;
   const retry = { hidden: true } as HTMLButtonElement;
-  return { input, message, retry, pad: new BrowserNotepad(input, message, retry) };
+  return { input, message, retry, pad: new BrowserNotepad(input, message, retry, onHistoryChange) };
 }
 
 test('the browser notepad saves exact plain text in the local encrypted cache shape without creating sync documents', async () => {
@@ -95,4 +95,47 @@ test('Notepad and Canvas edit the same linked text and rebase across separate un
   assert.deepEqual(active.state.pending, {});
   pad.bind(account('different_canvas_account'));
   assert.equal(input.value, '');
+});
+
+test('Notepad Undo and Redo also restore or detach the exact linked Canvas range', async () => {
+  let notices = 0;
+  const { input, pad } = fixture(() => { notices++; });
+  const active = account('browser_pad_history');
+  active.state.notepad = 'Before words after';
+  const { document, nodeId } = addLinkedCanvasNode(browserCanvas(active.state), { start: 7, end: 12 });
+  await active.update((state) => setBrowserCanvas(state, document));
+  const card = () => activeCanvasBoard(browserCanvas(active.state)).nodes.find((node) => node.id === nodeId)!;
+  pad.bind(active);
+  assert.equal(notices, 0);
+  input.value = 'Before  after';
+  input.oninput!(new Event('input'));
+  assert.deepEqual(pad.historyState(), { undo: true, redo: false });
+  assert.equal(notices, 1);
+  await pad.undo();
+  assert.equal(input.value, 'Before words after');
+  assert.deepEqual(card().source, { start: 7, end: 12 });
+  assert.deepEqual(pad.historyState(), { undo: false, redo: true });
+  await pad.redo();
+  assert.equal(input.value, 'Before  after');
+  assert.equal(card().source, undefined);
+  assert.equal(card().text, 'words');
+  assert.deepEqual(pad.historyState(), { undo: true, redo: false });
+  pad.bind(null);
+  assert.deepEqual(pad.historyState(), { undo: false, redo: false });
+});
+
+test('Notepad history cannot replace a newer Canvas document', async () => {
+  const { input, pad } = fixture();
+  const active = account('browser_pad_history_guard');
+  active.state.notepad = 'Before words after';
+  const { document, nodeId } = addLinkedCanvasNode(browserCanvas(active.state), { start: 7, end: 12 });
+  await active.update((state) => setBrowserCanvas(state, document));
+  pad.bind(active);
+  input.value = 'Before changed after';
+  input.oninput!(new Event('input'));
+  await pad.flush();
+  await active.update((state) => setBrowserCanvas(state, updateCanvasNode(browserCanvas(state), nodeId, { x: 400 })));
+  await assert.rejects(pad.undo(), /changed elsewhere/);
+  assert.equal(activeCanvasBoard(browserCanvas(active.state)).nodes[0]?.x, 400);
+  assert.equal(input.value, 'Before changed after');
 });

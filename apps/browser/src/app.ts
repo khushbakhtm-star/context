@@ -3,7 +3,7 @@ import { cellEventLabel, formatFromDocument, cellFormatKey } from '../shared/uti
 import { calendarCellColor } from '../shared/utils/calendar-cell-color';
 import { BrowserStore } from './store';
 import { GoogleConnection, type BrowserPlan } from './google';
-import { browserCanvas, setBrowserCanvas, editCells, getMinute, minuteKey, pastedChanges, undoEdit, type CellChange, type UndoEdit } from './ledger';
+import { applyBrowserHistoryEdit, browserCanvas, setBrowserCanvas, editCells, getMinute, minuteKey, pastedChanges, type CellChange, type UndoEdit } from './ledger';
 import { flushBrowserText } from './editor';
 import { serializeSpreadsheetCells } from '../shared/utils/spreadsheet-paste';
 import { eventSelectionFingerprint, formatCells, groupSelection, ungroupSelection, resetCellsSelection,
@@ -15,6 +15,7 @@ import { effectiveTextColor, noteColorOnFill } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
 import { bindChecklistSwipe, bindViewSwipe, stepBrowserView, type BrowserView } from './view-swipe';
+import { bindHistorySwipe, type HistoryDirection } from './history-swipe';
 import { BrowserNotepad } from './notepad';
 import { BrowserCanvas } from './canvas-workspace';
 import { addLinkedCanvasNode } from '../shared/utils/canvas';
@@ -37,6 +38,8 @@ let unlockRequest = 0;
 let day = dateKey(new Date()); let days = 1; let clock12 = true; let plans: BrowserPlan[] = [];
 let calendars: { id: string; title: string; color: string; primary: boolean }[] = []; let selectedCalendars = new Set<string>();
 let selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; let undo: UndoEdit | null = null;
+let redo: UndoEdit | null = null;
+let historyRunning = false;
 let selectionActivated = false;
 let selectedTapTimer: ReturnType<typeof setTimeout> | undefined;
 let cellMenuRequest = 0;
@@ -64,11 +67,17 @@ let notepadVisible = false;
 let canvasVisible = false;
 let calendarScrollBeforeOtherView = 0;
 const notepadInput = element<HTMLTextAreaElement>('notepad-input');
-const notepad = new BrowserNotepad(notepadInput, element('notepad-status'), element('notepad-retry'));
-const canvas = new BrowserCanvas(element('canvas-workspace'));
+const notepad = new BrowserNotepad(notepadInput, element('notepad-status'), element('notepad-retry'), updateHistoryControl);
+const canvas = new BrowserCanvas(element('canvas-workspace'), updateHistoryControl);
 let activeChecklistId = DEFAULT_CHECKLIST_LIST_ID;
 let priorityScope: { store: BrowserStore | null; listId: string } = { store: null, listId: activeChecklistId };
 const priorityUndos = new Map<string, { store: BrowserStore; edit: UndoEdit }>();
+const priorityRedos = new Map<string, { store: BrowserStore; edit: UndoEdit }>();
+function rememberCalendarEdit(edit: UndoEdit) { undo = edit; redo = null; }
+function rememberPriorityEdit(listId: string, active: BrowserStore, edit: UndoEdit) {
+  priorityUndos.set(listId, { store: active, edit });
+  priorityRedos.delete(listId);
+}
 let priorityNavigation = 0;
 function bindPriorityList(active: BrowserStore | null, listId = DEFAULT_CHECKLIST_LIST_ID) {
   activeChecklistId = listId; priorityScope = { store: active, listId };
@@ -89,7 +98,7 @@ const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
     await active.update((state) => { if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Your draft stays in its original list.');
       const result = changeBrowserChecklist(state, expected, command, Date.now(), listId); acknowledgedRevision = browserChecklist(result.state, listId).revision; changedUndo = result.undo; return result.state; });
     if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Reopen Priority.');
-    if (changedUndo?.after.length) priorityUndos.set(listId, { store: active, edit: changedUndo });
+    if (changedUndo?.after.length) rememberPriorityEdit(listId, active, changedUndo);
     updateHeader(); void synchronize(false); return acknowledgedRevision;
   },
   restore: async (flow: ChecklistFlow, expected: string | undefined, scope: object) => {
@@ -97,7 +106,7 @@ const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
     await active.update((state) => { if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Reopen Priority.');
       const result = replaceBrowserChecklistList(state, expected, listId, flow); changedUndo = result.undo; return result.state; });
     if (store !== active || priorityScope !== scope) return;
-    if (changedUndo?.after.length) priorityUndos.set(listId, { store: active, edit: changedUndo });
+    if (changedUndo?.after.length) rememberPriorityEdit(listId, active, changedUndo);
     updateHeader(); void synchronize(false);
   },
   moveToList: movePriorityTaskToList,
@@ -188,7 +197,7 @@ async function movePriorityTaskToList(taskId: string, expected: string | undefin
     return moved.state;
   });
   if (store !== active || priorityScope !== scope) return;
-  if (moved?.undo.after.length) priorityUndos.set(sourceListId, { store: active, edit: moved.undo });
+  if (moved?.undo.after.length) rememberPriorityEdit(sourceListId, active, moved.undo);
   updateHeader();
   void synchronize(false);
 }
@@ -204,7 +213,7 @@ async function createChecklistTask(snapshot: MinuteTaskSnapshot) {
   await active.update((state) => { if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Select the task text again.');
     const result = changeBrowserChecklist(state, expected, { type: 'add', item: newBrowserTask(snapshot.text, snapshot.source) }, Date.now(), listId); changedUndo = result.undo; return result.state; });
   if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Reopen Priority.');
-  if (changedUndo?.after.length) priorityUndos.set(listId, { store: active, edit: changedUndo });
+  if (changedUndo?.after.length) rememberPriorityEdit(listId, active, changedUndo);
   void synchronize(false);
   if (listId === activeChecklistId) await showChecklistView();
   else await choosePriorityList(listId);
@@ -354,6 +363,7 @@ function updateBars() {
   element('entry-bar').hidden = !store || entryBarMode !== 'entry'; element('cell-format-menu').hidden = !store || entryBarMode !== 'format';
   document.body.classList.toggle('has-entry-bar', Boolean(store && entryBarMode === 'entry'));
   composerViewport.refresh();
+  updateHistoryControl();
   updateCellMenuAvailability();
   for (const id of ['save-text', 'format-bold', 'format-italic', 'format-underline', 'format-text-color', 'format-fill', 'finish-format']) element<HTMLButtonElement>(id).disabled = commandBusy;
   if (!store || entryBarMode !== 'format') return;
@@ -371,7 +381,7 @@ function mirrorDraft() {
   if (!editor) return; const node = cell(editor.day, editor.minute);
   if (node) { setCellNote(node, editor.input.value); node.dataset.defaultFill = String(node.dataset.defaultFillEligible === 'true' && Boolean(editor.input.value.trim()));
     node.classList.remove('planned'); node.setAttribute('aria-label', `${editor.day}, ${minuteLabel(editor.minute, clock12)}, ${editor.input.value}`); }
-  updateCellMenuAvailability();
+  updateCellMenuAvailability(); updateHistoryControl();
 }
 function setCellNote(node: HTMLElement, text: string) {
   const note = node.querySelector<HTMLElement>('.cell-note');
@@ -450,7 +460,7 @@ async function writeSelectedText(changes: CellChange[], source?: { stamp: string
   await active.update((state) => { if (store !== active || selectionStamp() !== stamp) throw new Error('The selection changed. Try again.');
     for (const point of changes) if (getMinute(state, point.day, point.minute)?.revision !== expected.get(minuteKey(point.day, point.minute))) throw new Error('These cells changed. Select them again and retry.');
     result = editCells(state, changes); return result.state; });
-  if (result!.undo.after.length) undo = result!.undo; render(); void synchronize(false);
+  if (result!.undo.after.length) rememberCalendarEdit(result!.undo); render(); void synchronize(false);
 }
 async function showCellMenu(x: number, y: number) {
   if (!store || commandBusy || checklistVisible) return;
@@ -540,7 +550,7 @@ async function mutateSelection(make: (state: BrowserStore['state'], coords: { da
     if (eventSelectionFingerprint(state, coords) !== eventRevision) throw new Error('This activity changed. Select its cells again.');
     const map = new Map(state.documents.map((doc) => [doc.key, doc.revision])); for (const [key, revision] of expected) if (map.get(key) !== revision) throw new Error('These cells changed. Select them again.');
     result = make(state, coords); return result.state; });
-  if (result!.undo.after.length) undo = result!.undo; render(); void synchronize(false);
+  if (result!.undo.after.length) rememberCalendarEdit(result!.undo); render(); void synchronize(false);
 }
 function importedFillOptions() {
   if (!store) return [] as { categoryId: string; color: string; name: string; providerColorId?: string; accountId?: string }[];
@@ -566,7 +576,7 @@ async function formatSelection(patch: BrowserFormatPatch) {
     for (const [key, revision] of expected) if (map.get(key) !== revision) throw new Error('These cells changed. Select them again before formatting.');
     result = formatCells(state, coords, patch, allowed); return result.state;
   });
-  if (result!.undo.after.length) undo = result!.undo; render(); void synchronize(false);
+  if (result!.undo.after.length) rememberCalendarEdit(result!.undo); render(); void synchronize(false);
 }
 function toggleFormat(key: 'bold' | 'italic' | 'underline') {
   if (!store) return; const all = selectionCells().every((point) => formatFromDocument(store!.state.documents.find((doc) => doc.key === cellFormatKey(point.day, point.minute))?.value)[key] === true);
@@ -590,11 +600,27 @@ function planForMinute(date: string, minute: number) {
   return plans.find((event) => !event.allDay && instant >= new Date(event.start) && instant < new Date(event.end));
 }
 function cell(day: string, minute: number) { return grid.querySelector<HTMLElement>(`[data-day="${day}"][data-minute="${minute}"]`); }
+function updateHistoryControl() {
+  let history = { undo: false, redo: false };
+  if (store) {
+    const view = currentBrowserView();
+    if (view === 'canvas') history = canvas.historyState();
+    else if (view === 'notepad') history = notepad.historyState();
+    else if (view === 'priority') history = {
+      undo: priorityUndos.get(activeChecklistId)?.store === store, redo: priorityRedos.get(activeChecklistId)?.store === store,
+    };
+    else history = { undo: Boolean(undo || editor?.input.value !== editor?.original), redo: Boolean(redo) };
+  }
+  for (const direction of ['undo', 'redo'] as const) {
+    const button = element<HTMLButtonElement>(direction);
+    button.setAttribute('aria-disabled', String(historyRunning || commandBusy || !history[direction]));
+    button.hidden = direction === 'redo' ? !history.redo : !history.undo && history.redo;
+  }
+}
 function updateHeader() {
   const now = new Date(); element('month').textContent = now.toLocaleDateString(undefined, { month: 'short' }); element('date').textContent = String(now.getDate());
   dayInput.value = day; daysInput.value = String(days);
-  const availableUndo = checklistVisible ? priorityUndos.get(activeChecklistId)?.store === store : Boolean(undo);
-  element<HTMLButtonElement>('undo').disabled = notepadVisible || canvasVisible || !availableUndo || !store;
+  updateHistoryControl();
   element<HTMLButtonElement>('search').disabled = notepadVisible;
   element('identity').textContent = connection?.identity?.email ?? 'No Google account connected';
   element<HTMLButtonElement>('unlock').disabled = !connection?.isAuthorized() || busy;
@@ -670,7 +696,7 @@ async function completeMove(point: GridPoint, copy: boolean) {
       if (store !== draft.store || selectionStamp() !== draft.stamp) throw new Error('The selection changed. Try moving again.');
       result = transferCells(state, draft.coords, destination, { copy, expectedFingerprint: fingerprint }); return result.state;
     });
-    if (result!.undo.after.length) undo = result!.undo;
+    if (result!.undo.after.length) rememberCalendarEdit(result!.undo);
     const target = result!.destinationCoords; selected = { ...target[0]! }; rangeEnd = null;
     const uniqueDays = new Set(target.map((value) => value.day)), uniqueMinutes = new Set(target.map((value) => value.minute));
     if (target.length > 1 && uniqueDays.size * uniqueMinutes.size === target.length) rangeEnd = { ...target.at(-1)! };
@@ -759,7 +785,7 @@ async function saveEditor() {
         const activityEditGuards = [...new Map([...(sessionUndo?.activityEditGuards ?? []),
           ...(result!.undo.activityEditGuards ?? [])].map((guard) => [guard.key, guard])).values()];
         sessionUndo = { before: sessionUndo?.before ?? result!.undo.before, after: result!.undo.after,
-          ...(activityEditGuards.length ? { activityEditGuards } : {}) }; undo = sessionUndo;
+          ...(activityEditGuards.length ? { activityEditGuards } : {}) }; rememberCalendarEdit(sessionUndo);
       }
       status('Saved on this browser. Synchronization will send this note to your phone.');
       return getMinute(result!.state, current.day, current.minute)?.revision;
@@ -793,13 +819,30 @@ function beginEdit(date: string, minute: number, initial?: string, focus = false
   if (!keepSelection) node?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   if (focus || initial !== undefined) { entryInput.focus(); entryInput.setSelectionRange(entryInput.value.length, entryInput.value.length); }
 }
+function focusCalendarCell(target: GridPoint) {
+  let node = cell(target.day, target.minute);
+  if (!node) {
+    scrollMinute(target.minute);
+    node = cell(target.day, target.minute);
+  }
+  if (!node) return;
+  const viewport = main.getBoundingClientRect();
+  const header = grid.querySelector('.grid-heading')?.getBoundingClientRect();
+  const top = Math.max(viewport.top, header?.bottom ?? viewport.top);
+  const row = node.getBoundingClientRect();
+  // Native focus can center a virtual row that is just beyond the sticky header.
+  // Advance only enough to make the newly selected row visible.
+  if (row.top < top) main.scrollTop += row.top - top;
+  else if (row.bottom > viewport.bottom) main.scrollTop += row.bottom - viewport.bottom;
+  node.focus({ preventScroll: true });
+}
 function cellKey(event: KeyboardEvent, date: string, minute: number) {
   if (commandBusy) { event.preventDefault(); return; }
   if (event.key === 'Enter' || event.key === 'F2') { event.preventDefault(); beginEdit(date, minute, undefined, true); }
   else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); beginEdit(date, minute, event.key); }
   else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
     event.preventDefault(); const target = { day: dateKey(addDays(date, event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0)), minute: Math.max(0, Math.min(1439, minute + (event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0))) };
-    closeCleanEditor(); select(target, event.shiftKey); if (!cell(target.day, target.minute)) scrollMinute(target.minute); cell(target.day, target.minute)?.focus();
+    closeCleanEditor(); select(target, event.shiftKey); focusCalendarCell(target);
   }
 }
 async function paste(text: string) {
@@ -816,7 +859,7 @@ async function paste(text: string) {
     if (store !== active || selectionStamp() !== stamp) throw new Error('The paste destination changed. Select it again and retry.');
     for (const change of changes) if (getMinute(state, change.day, change.minute)?.revision !== expected.get(minuteKey(change.day, change.minute))) throw new Error('The paste destination changed. Select it again and retry.');
     result = editCells(state, changes); return result.state;
-  }); if (result!.undo.after.length) undo = result!.undo; render(); status(`Saved ${result!.undo.after.length.toLocaleString()} changed cells. ${changes[0]!.day} through ${changes.at(-1)!.day}.`); void synchronize(false);
+  }); if (result!.undo.after.length) rememberCalendarEdit(result!.undo); render(); status(`Saved ${result!.undo.after.length.toLocaleString()} changed cells. ${changes[0]!.day} through ${changes.at(-1)!.day}.`); void synchronize(false);
 }
 async function pasteInternalCells(clip: CellClipboard) {
   const active = store, stamp = selectionStamp(); if (!active || clip.store !== active || cellClipboard !== clip) throw new Error('Copy or Cut the cells again in this unlocked ledger.');
@@ -828,7 +871,7 @@ async function pasteInternalCells(clip: CellClipboard) {
     if (store !== active || cellClipboard !== clip || selectionStamp() !== stamp) throw new Error('The clipboard or destination changed. Copy or Cut the cells again.');
     result = transferClipboardCells(state, clip.coords, destinations, { copy, expectedSourceFingerprint: clip.fingerprint, expectedFingerprint: fingerprint }); return result.state;
   });
-  if (result!.undo.after.length) undo = result!.undo;
+  if (result!.undo.after.length) rememberCalendarEdit(result!.undo);
   if (clip.cut) cellClipboard = null;
   entryBarMode = null; render(); void synchronize(false);
 }
@@ -854,8 +897,8 @@ async function connect(calendarRead = false) {
   try { await saveEditor(); await checklistUI.flush(); await notepad.flush(); await canvas.flush(); if (store !== active || priorityScope !== scope) return;
     const identity = await connection.authorize(calendarRead);
     if (active && identity.subject !== active.subject && store === active) {
-      active.lock(); store = null; bindPriorityList(null); checklistUI.clear(); priorityUndos.clear(); prioritySettingsSession = null; searchSession = null;
-      element<HTMLInputElement>('priority-new-name').value = ''; passphrase = ''; passInput.value = ''; undo = null; plans = []; render();
+      active.lock(); store = null; bindPriorityList(null); checklistUI.clear(); priorityUndos.clear(); priorityRedos.clear(); prioritySettingsSession = null; searchSession = null;
+      element<HTMLInputElement>('priority-new-name').value = ''; passphrase = ''; passInput.value = ''; undo = null; redo = null; plans = []; render();
     }
     updateHeader(); status(`Connected ${identity.email}. Unlock the same ledger as your phone.`);
     if (calendarRead) { calendars = await connection.calendars(); selectedCalendars = new Set(calendars.filter((value) => value.primary).map((value) => value.id)); renderCalendarChoices(); await refreshPlans(); }
@@ -869,6 +912,79 @@ function renderCalendarChoices() {
 function scrollMinute(minute: number) { main.scrollTop = Math.max(0, 50 + minute * 32 - main.clientHeight / 2); render(); }
 function goNow() { setChecklistVisible(false); selectionActivated = false; day = dateKey(new Date()); selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); }
 async function navigation(action: () => void) { if (commandBusy) return; const active = store, scope = priorityScope; cancelSelectedTap(); mouseSelection.cancel(false); try { await saveEditor(); await checklistUI.flush(); await notepad.flush(); await canvas.flush(); if (store !== active || priorityScope !== scope) return; entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
+function calendarAddPoint(): GridPoint {
+  const visibleDays = dates();
+  if (selectionActivated && visibleDays.includes(selected.day)) return { ...selected };
+  const now = new Date();
+  const today = dateKey(now);
+  return visibleDays.includes(today)
+    ? { day: today, minute: now.getHours() * 60 + now.getMinutes() }
+    : { day, minute: Math.max(0, Math.min(1439, Math.floor((main.scrollTop - 50) / 32))) };
+}
+type HeaderAddAction = { label: string; run: () => unknown; disabled?: boolean; title?: string };
+function headerAddActions(view: BrowserView): HeaderAddAction[] {
+  if (!store) return [{ label: 'Unlock Context', run: () => element('settings').click() }];
+  if (view === 'priority') return [
+    { label: 'Add task', run: () => checklistUI.openComposer() },
+    { label: 'Add subtask', run: () => checklistUI.openSubtaskComposer(), disabled: !checklistUI.hasSelectedTask(),
+      title: 'Select a task first' },
+  ];
+  if (view === 'notepad') return [
+    { label: 'Write a note', run: () => notepad.focusEnd() },
+    { label: 'Add selection to Canvas', run: () => element('notepad-to-canvas').click(),
+      disabled: notepadInput.selectionStart === notepadInput.selectionEnd, title: 'Select text first' },
+  ];
+  if (view === 'canvas') return [
+    { label: 'Add card', run: () => canvas.openCreate('card') },
+    { label: 'Add family', run: () => canvas.openCreate('family') },
+    { label: 'Add space', run: () => canvas.openCreate('space') },
+    { label: 'New board', run: () => canvas.openCreate('board') },
+  ];
+  const point = calendarAddPoint();
+  return [
+    { label: 'Write a minute', run: () => {
+      if (!cell(point.day, point.minute)) scrollMinute(point.minute);
+      beginEdit(point.day, point.minute, undefined, true);
+    } },
+    { label: 'Group minutes', run: () => cellCommand(async () => {
+      const active = store;
+      await saveEditor();
+      if (store !== active || currentBrowserView() !== view) return;
+      if (!selectionActivated || !dates().includes(selected.day)) select(point);
+      openGroup();
+    }) },
+  ];
+}
+function prepareHeaderAdd(event: MouseEvent) {
+  const menu = element('add-menu');
+  const trigger = element('header-add');
+  if (menu.matches(':popover-open')) return;
+  if (commandBusy) { event.preventDefault(); return; }
+  const view = currentBrowserView(), active = store, scope = priorityScope;
+  const actions = headerAddActions(view);
+  menu.style.top = Math.round(trigger.getBoundingClientRect().bottom + 6) + 'px';
+  menu.replaceChildren(...actions.map(({ label, run, disabled, title }) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.disabled = Boolean(disabled);
+    if (disabled && title) button.title = title;
+    button.onclick = () => {
+      menu.hidePopover();
+      if (store === active && priorityScope === scope && currentBrowserView() === view) {
+        void Promise.resolve().then(run).catch(report);
+      }
+    };
+    return button;
+  }));
+}
+element('header-add').onclick = prepareHeaderAdd;
+element('add-menu').addEventListener('toggle', () => {
+  const menu = element('add-menu');
+  const open = menu.matches(':popover-open');
+  element('header-add').setAttribute('aria-expanded', String(open));
+  if (open) menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
+});
 element('menu').onclick = () => { element<HTMLDialogElement>('menu-dialog').showModal(); };
 element('open-checklist').onclick = element('view-checklist').onclick = () => { void showChecklistView().catch(report); };
 element('open-notepad').onclick = element('view-notepad').onclick = () => {
@@ -938,12 +1054,37 @@ element('calendar-info').onclick = () => { info('Calendar access', 'Calendar acc
 element('start').onclick = () => { options.showModal(); void connect(); };
 element('connect').onclick = () => { void connect(); };
 element('connect-calendars').onclick = () => { void connect(true); };
-let syncHold: ReturnType<typeof setTimeout> | undefined; let syncHeld = false;
-element('sync').onpointerdown = () => { syncHeld = false; syncHold = setTimeout(() => { syncHeld = true; info('Synchronization', lastStatus); }, 550); };
-element('sync').onpointerup = element('sync').onpointerleave = () => { if (syncHold) clearTimeout(syncHold); };
-element('sync').oncontextmenu = (event) => { event.preventDefault(); syncHeld = true; info('Synchronization', lastStatus); };
-element('sync').onkeydown = (event) => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); info('Synchronization', lastStatus); } };
-element('sync').onclick = () => { if (syncHeld) { syncHeld = false; return; } if (!store) { options.showModal(); return; } void synchronize(); };
+const settingsSync = element<HTMLButtonElement>('sync');
+let syncHold: ReturnType<typeof setTimeout> | undefined;
+let syncHeld = false;
+function clearSyncHold() { clearTimeout(syncHold); syncHold = undefined; }
+settingsSync.onpointerdown = (event) => {
+  clearSyncHold();
+  syncHeld = false;
+  if (event.button !== 0) return;
+  syncHold = setTimeout(() => { syncHeld = true; info('Synchronization', lastStatus); }, 550);
+};
+settingsSync.onpointerup = settingsSync.onpointerleave = settingsSync.onpointercancel = clearSyncHold;
+settingsSync.oncontextmenu = (event) => {
+  event.preventDefault();
+  if (syncHeld) return;
+  syncHeld = syncHold !== undefined;
+  clearSyncHold();
+  info('Synchronization', lastStatus);
+};
+settingsSync.onkeydown = (event) => {
+  if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+    event.preventDefault();
+    info('Synchronization', lastStatus);
+  }
+};
+settingsSync.onclick = (event) => {
+  if (syncHeld && event.detail !== 0) { syncHeld = false; return; }
+  syncHeld = false;
+  if (!store) { element(connection.identity ? 'passphrase' : 'connect').focus(); return; }
+  void synchronize();
+};
+options.addEventListener('close', () => { clearSyncHold(); syncHeld = false; });
 bindViewSwipe(element<HTMLButtonElement>('now'), {
   tap: () => {
     if (checklistVisible || notepadVisible || canvasVisible) element<HTMLDialogElement>('view-dialog').showModal();
@@ -970,24 +1111,51 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-days]')
 element('apply-dates').onclick = () => { if (!dayInput.value) return; void navigation(() => { day = dayInput.value; days = Number(daysInput.value); plans = []; element<HTMLDialogElement>('date-dialog').close(); render(); void refreshPlans(); }); };
 element('previous').onclick = () => { if (!checklistVisible && !notepadVisible && !canvasVisible) void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
 element('next').onclick = () => { if (!checklistVisible && !notepadVisible && !canvasVisible) void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
-async function undoCurrentView() {
-  const active = store, scope = priorityScope, listId = activeChecklistId, priority = checklistVisible; if (!active) return;
-  await saveEditor(); await checklistUI.flush();
-  if (store !== active || priorityScope !== scope || checklistVisible !== priority) return;
-  const target = priority ? priorityUndos.get(listId) : null; const edit = priority ? target?.store === active ? target.edit : null : undo;
-  if (!edit) return;
-  await active.update((state) => { if (store !== active || priorityScope !== scope || checklistVisible !== priority) throw new Error('The account or view changed. Reopen Undo.'); return undoEdit(state, edit); });
-  if (store !== active || priorityScope !== scope || checklistVisible !== priority) return;
-  if (priority) { if (priorityUndos.get(listId) === target) priorityUndos.delete(listId); } else if (undo === edit) undo = null;
-  render(); status('Edit undone.'); void synchronize(false);
+async function undoCurrentView(direction: HistoryDirection = 'undo') {
+  const active = store, scope = priorityScope, listId = activeChecklistId, view = currentBrowserView();
+  if (!active || historyRunning || commandBusy) return;
+  historyRunning = true; updateHistoryControl();
+  try {
+    if (view === 'canvas' || view === 'notepad') {
+      await (view === 'canvas' ? canvas : notepad)[direction]();
+      return;
+    }
+    await saveEditor(); await checklistUI.flush();
+    const current = () => store === active && priorityScope === scope && currentBrowserView() === view;
+    if (!current()) return;
+    const priority = view === 'priority';
+    const source = direction === 'undo' ? priorityUndos : priorityRedos;
+    const destination = direction === 'undo' ? priorityRedos : priorityUndos;
+    const target = priority ? source.get(listId) : null;
+    const edit = priority ? target?.store === active ? target.edit : null : direction === 'undo' ? undo : redo;
+    if (!edit) return;
+    let inverse: UndoEdit | undefined;
+    await active.update((state) => {
+      if (!current()) throw new Error('The account or view changed. Try again.');
+      const changed = applyBrowserHistoryEdit(state, edit);
+      inverse = changed.inverse;
+      return changed.state;
+    });
+    if (!current() || !inverse) return;
+    if (priority) {
+      if (source.get(listId) === target) { source.delete(listId); destination.set(listId, { store: active, edit: inverse }); }
+    } else if (direction === 'undo' && undo === edit) { undo = null; redo = inverse; }
+    else if (direction === 'redo' && redo === edit) { redo = null; undo = inverse; }
+    render(); status(direction === 'undo' ? 'Edit undone.' : 'Edit redone.'); void synchronize(false);
+  } finally { historyRunning = false; updateHistoryControl(); }
 }
-element('undo').onclick = () => { void undoCurrentView().catch(report); };
-element('lock').onclick = () => { void navigation(() => { unlockRequest++; priorityNavigation++; cellClipboard = null; store?.lock(); store = null; bindPriorityList(null); checklistUI.clear(); priorityUndos.clear(); prioritySettingsSession = null; searchSession = null; element<HTMLInputElement>('priority-new-name').value = ''; passphrase = ''; passInput.value = ''; connection.lock(); plans = []; liveFillColors = []; undo = null; entryBarMode = null; busy = false; viewGeneration++; render(); status('Context is locked.'); }); };
+function runHeaderHistory(direction: HistoryDirection) {
+  if (element(direction).getAttribute('aria-disabled') !== 'true') void undoCurrentView(direction).catch(report);
+}
+element('undo').onclick = () => runHeaderHistory('undo');
+element('redo').onclick = () => runHeaderHistory('redo');
+bindHistorySwipe(element('history-control'), runHeaderHistory);
+element('lock').onclick = () => { void navigation(() => { unlockRequest++; priorityNavigation++; cellClipboard = null; store?.lock(); store = null; bindPriorityList(null); checklistUI.clear(); priorityUndos.clear(); priorityRedos.clear(); prioritySettingsSession = null; searchSession = null; element<HTMLInputElement>('priority-new-name').value = ''; passphrase = ''; passInput.value = ''; connection.lock(); plans = []; liveFillColors = []; undo = null; redo = null; entryBarMode = null; busy = false; viewGeneration++; render(); status('Context is locked.'); }); };
 element<HTMLFormElement>('unlock-form').onsubmit = (event) => { event.preventDefault(); if (busy || !connection.identity) return;
   const request = ++unlockRequest; busy = true; updateHeader();
   const entered = passInput.value; passInput.value = ''; const subject = connection.identity.subject; status('Unlocking the private ledger…');
   void (async () => { const unlocked = await BrowserStore.unlock(subject, entered); if (request !== unlockRequest || connection.identity?.subject !== subject) { unlocked.lock(); return; }
-    cellClipboard = null; store?.lock(); store = unlocked; bindPriorityList(unlocked); checklistUI.clear(); priorityUndos.clear(); prioritySettingsSession = null; searchSession = null; element<HTMLInputElement>('priority-new-name').value = ''; passphrase = entered;
+    cellClipboard = null; store?.lock(); store = unlocked; bindPriorityList(unlocked); checklistUI.clear(); priorityUndos.clear(); priorityRedos.clear(); prioritySettingsSession = null; searchSession = null; element<HTMLInputElement>('priority-new-name').value = ''; undo = null; redo = null; passphrase = entered;
     // A new browser must discover and decrypt the phone ledger before enabling new entries.
     if (!unlocked.hasSavedLedger()) { try { await connection.sync(unlocked, entered); } catch (error) { unlocked.lock(); if (store === unlocked) { store = null; passphrase = ''; } throw error; } }
     if (request !== unlockRequest || store !== unlocked) return;
@@ -1004,7 +1172,7 @@ element('conflicts').onclick = () => {
   for (const version of versions) { const node = document.createElement('section'); node.className = 'conflict'; const title = document.createElement('strong'); title.textContent = version.key;
     const text = document.createElement('p'); text.textContent = version.value === null ? '(Deleted note)' : String(version.value.text ?? ''); const restore = document.createElement('button'); restore.textContent = 'Restore this text'; restore.disabled = version.value === null;
     restore.onclick = () => { const [, date, minute] = version.key.split(':'); if (!store || version.value === null) return;
-      void store.update((state) => { const result = editCells(state, [{ day: date!, minute: Number(minute), text: String(version.value!.text ?? '') }]); undo = result.undo; return result.state; }).then(() => { render(); status('Note text restored as a new version.'); }).catch(report); };
+      void store.update((state) => { const result = editCells(state, [{ day: date!, minute: Number(minute), text: String(version.value!.text ?? '') }]); rememberCalendarEdit(result.undo); return result.state; }).then(() => { render(); status('Note text restored as a new version.'); }).catch(report); };
     node.append(title, text, restore); list.append(node);
   }
   element<HTMLDialogElement>('conflict-dialog').showModal();
@@ -1076,7 +1244,15 @@ document.addEventListener('paste', (event) => { if (checklistVisible || notepadV
   event.preventDefault(); const text = event.clipboardData?.getData('text/plain'); if (text === undefined) return;
   if (cellMenuDraftPending()) { report(new Error('Save the minute before pasting into cells.')); return; }
   closeCleanEditor(); void cellCommand(() => paste(text)); });
-document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && !canvasVisible && event.key.toLowerCase() === 'z' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); element('undo').click(); } });
+document.addEventListener('keydown', (event) => {
+  if ((!event.ctrlKey && !event.metaKey) || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement ||
+    document.querySelector('dialog[open]')) return;
+  const key = event.key.toLowerCase();
+  if (key === 'z' || key === 'y') {
+    event.preventDefault();
+    runHeaderHistory(key === 'y' || event.shiftKey ? 'redo' : 'undo');
+  }
+});
 window.addEventListener('beforeunload', (event) => { if (editor?.input.value !== editor?.original || checklistUI.hasDraft() || notepad.hasDraft() || canvas.hasDraft() || (store && Object.keys(store.state.pending).length)) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('visibilitychange', () => { if (document.hidden) { void Promise.all([notepad.flush(), canvas.flush()]).catch(report); } else { updateHeader(); void synchronize(false); } });
 setInterval(() => { updateHeader(); if (!document.hidden && !editor) { if (!checklistVisible && !notepadVisible && !canvasVisible) { const minute = new Date().getHours() * 60 + new Date().getMinutes(); const current = grid.querySelector('.minute-row.current'); if (current?.getAttribute('data-row') !== String(minute)) render(); } void synchronize(false); } }, 15_000);

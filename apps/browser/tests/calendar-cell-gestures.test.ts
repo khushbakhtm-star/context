@@ -15,15 +15,18 @@ function fixture() {
   const win = { ...hub(), requestAnimationFrame: () => 1, cancelAnimationFrame() {} }; const doc = { ...hub(), defaultView: win, querySelector: () => null };
   class Cell {
     dataset: Record<string, string>; style: Record<string, string> = { backgroundColor: '#0B8043', color: '#FFFFFF' }; attrs: Record<string, string> = {}; classes = new Set(['cell']);
+    focusOptions: FocusOptions | undefined;
     classList = { contains: (value: string) => this.classes.has(value), add: (...values: string[]) => values.forEach((value) => this.classes.add(value)), remove: (...values: string[]) => values.forEach((value) => this.classes.delete(value)), toggle: (value: string, force: boolean) => force ? this.classes.add(value) : this.classes.delete(value) };
     constructor(minute: number) { this.dataset = { day, minute: String(minute) }; }
     closest(selector: string) { return selector === '.cell.selected' && !this.classes.has('selected') ? null : this; }
     setAttribute(name: string, value: string) { this.attrs[name] = value; }
-    focus() {}
-    getBoundingClientRect() { return { top: 50 + Number(this.dataset.minute) * 32, bottom: 82 + Number(this.dataset.minute) * 32, left: 51, right: 400, width: 349, height: 32 }; }
+    focus(options?: FocusOptions) { this.focusOptions = options; }
+    getBoundingClientRect() { const top = 50 + Number(this.dataset.minute) * 32 - main.scrollTop;
+      return { top, bottom: top + 32, left: 51, right: 400, width: 349, height: 32 }; }
   }
   const cells = [new Cell(0), new Cell(1), new Cell(2), new Cell(3)]; const captures = new Set<number>();
-  const grid = { ...hub(), ownerDocument: doc, querySelectorAll: () => cells, querySelector: () => null,
+  const grid = { ...hub(), ownerDocument: doc, querySelectorAll: () => cells,
+    querySelector: (selector: string) => selector === '.grid-heading' ? { getBoundingClientRect: () => ({ bottom: 50 }) } : null,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 400 }), classList: { add() {}, remove() {} },
     setPointerCapture: (id: number) => captures.add(id), hasPointerCapture: (id: number) => captures.has(id), releasePointerCapture: (id: number) => captures.delete(id),
   };
@@ -33,7 +36,8 @@ function fixture() {
     grid, main, document: doc, Element: Cell, editor: null, entryInput: input, entryBarMode: null, commandBusy: false, checklistVisible: false, notepadVisible: false, canvasVisible: false, store: { state: { documents: [] } },
     selected: { day, minute: 0 }, rangeEnd: null, selectionActivated: false, selectedTapTimer: undefined, cellMenuRequest: 0,
     movePreview: [], moveDraft: null, clock12: false,
-    bindMouseSelection, dates: () => [day], minuteKey: (date: string, minute: number) => `minute:${date}:${minute}`,
+    bindMouseSelection, dates: () => [day], dateKey: (date: string) => date, addDays: (date: string) => date,
+    minuteKey: (date: string, minute: number) => `minute:${date}:${minute}`,
     element: () => menu, cell: (_date: string, minute: number) => cells[minute], updateBars() {}, report(error: Error) { throw error; },
     beginEdit(date: string, minute: number) { entries.push({ date, minute }); context.editor = { input, original: input.value, saving: null }; context.entryBarMode = 'entry'; },
     async showCellMenu(x: number, y: number) {
@@ -45,11 +49,11 @@ function fixture() {
   };
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8'); const parsed = ts.createSourceFile('app.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const functions = ['select', 'paintSelection', 'selectedRegion', 'cancelSelectedTap', 'tapCalendarCell',
-    'closeCellMenu', 'closeCleanEditor', 'cellMenuDraftPending', 'clearMovePreview'];
+    'closeCellMenu', 'closeCleanEditor', 'cellMenuDraftPending', 'clearMovePreview', 'cellKey', 'focusCalendarCell'];
   const nodes = parsed.statements.filter((node: any) => functions.includes(node.name?.text) || ts.isVariableStatement(node) && node.declarationList.declarations.some((item) => item.name.getText(parsed) === 'mouseSelection'));
   vm.runInNewContext(ts.transpileModule(nodes.map((node) => node.getText(parsed)).join('\n') + '\nthis.controller = mouseSelection;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   const pointer = (minute: number, overrides: Record<string, any> = {}) => ({ target: cells[minute], pointerId: 1, button: 0, buttons: 1, isPrimary: true, pointerType: 'mouse', clientX: 100, clientY: 66 + minute * 32, shiftKey: false, altKey: false, preventDefault() {}, ...overrides });
-  return { cells, context, entries, actions, moves, menu, timers, controller: context.controller,
+  return { cells, main, context, entries, actions, moves, menu, timers, controller: context.controller,
     down: (minute: number, options = {}) => grid.emit('pointerdown', pointer(minute, options)), move: (minute: number, options = {}) => doc.emit('pointermove', pointer(minute, options)), up: (minute: number, options = {}) => doc.emit('pointerup', pointer(minute, options)),
     finishTimers() { for (const callback of [...timers.values()]) callback(); timers.clear(); } };
 }
@@ -63,6 +67,18 @@ test('range selection release stays unobstructed, and a later tap inside the sel
   const h = fixture(); h.down(0); h.move(2); h.up(2); h.finishTimers(); assert.equal(h.actions.length, 0); assert.equal(h.context.rangeEnd.minute, 2); assert.equal(h.entries.length, 0);
   h.down(1); h.up(1); h.finishTimers(); assert.equal(h.actions.length, 1); assert.equal(h.context.selected.minute, 0); assert.equal(h.context.rangeEnd.minute, 2);
   assert.equal(h.entries.at(-1).minute, 0); h.controller.destroy();
+});
+
+test('keyboard range selection reveals the next minute by the sticky heading without browser focus scrolling', () => {
+  const h = fixture();
+  h.context.select({ day, minute: 2 });
+  h.main.scrollTop = 50;
+  h.context.cellKey({ key: 'ArrowUp', shiftKey: true, preventDefault() {} }, day, 2);
+  assert.equal(h.context.selected.minute, 2);
+  assert.equal(h.context.rangeEnd.minute, 1);
+  assert.equal(h.main.scrollTop, 32, 'only reveal the portion of the row behind the heading');
+  assert.equal(h.cells[1]?.focusOptions?.preventScroll, true);
+  h.controller.destroy();
 });
 
 test('finishing a range drag leaves an existing unsaved composer visible', () => {

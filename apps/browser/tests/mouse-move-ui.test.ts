@@ -9,17 +9,17 @@ import { cellTransferDestination, cellTransferFingerprint, transferCells } from 
 function fixture() {
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('app.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const declaration = parsed.statements.find((node: any) => node.name?.text === 'completeMove')!;
+  const declarations = parsed.statements.filter((node: any) => ['completeMove', 'rememberCalendarEdit'].includes(node.name?.text));
   const coords = [{ day: '2026-10-30', minute: 100 }, { day: '2026-10-30', minute: 101 }];
   let stamp = 'same-selection', writes = 0, beforeWrite: (() => void) | null = null; const errors: string[] = [];
   const store = { state: editCells(emptyLedger('browser_move_fixture'), coords.map((point, index) => ({ ...point, text: `Minute ${index + 1}` })), 1000).state,
     async update(change: any) { writes++; beforeWrite?.(); beforeWrite = null; this.state = change(this.state); return this.state; } };
   const context: any = { store, moveDraft: { store, coords, origin: coords[0], grabbed: coords[1], fingerprint: cellTransferFingerprint(store.state, coords, coords[0]!), stamp },
-    selected: coords[0], rangeEnd: coords[1], undo: null, entryBarMode: null,
+    selected: coords[0], rangeEnd: coords[1], undo: null, redo: null, entryBarMode: null,
     clearMovePreview() { context.moveDraft = null; }, selectionStamp: () => stamp,
     cellCommand: async (work: () => Promise<void>) => { try { await work(); } catch (error) { errors.push((error as Error).message); } },
     cellTransferDestination, cellTransferFingerprint, transferCells, render() {}, synchronize() {}, info() {} };
-  vm.runInNewContext(ts.transpileModule(declaration.getText(parsed), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  vm.runInNewContext(ts.transpileModule(declarations.map((node) => node.getText(parsed)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return { context, store, coords, errors, get writes() { return writes; }, set beforeWrite(value: (() => void) | null) { beforeWrite = value; },
     changeSelection() { stamp = 'different-selection'; }, drop(copy = false) { return context.completeMove({ day: '2026-10-31', minute: 201 }, copy); } };
 }

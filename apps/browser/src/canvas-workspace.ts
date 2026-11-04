@@ -135,6 +135,8 @@ export class BrowserCanvas {
   private turn: CanvasWorkplaneTurn = 0;
   private undoStack: CanvasDocument[] = [];
   private redoStack: CanvasDocument[] = [];
+  private historyOperation: object | null = null;
+  private lastHistoryState = { undo: false, redo: false };
   private selected = new Set<string>();
   private selectedSpace: string | undefined;
   private tool: Tool = 'select';
@@ -169,8 +171,8 @@ export class BrowserCanvas {
   private layout = html('select');
   private arrange = action('Auto Arrange', () => { void this.autoArrange(); });
   private search = action('Search', () => this.focusSearch());
-  private undoButton = action('Undo', () => { void this.history(this.undoStack, this.redoStack); });
-  private redoButton = action('Redo', () => { void this.history(this.redoStack, this.undoStack); });
+  private undoButton = action('↶', () => { void this.undo(); });
+  private redoButton = action('↷', () => { void this.redo(); });
   private zoomOut = action('−', () => this.zoomBy(0.8));
   private zoomIn = action('+', () => this.zoomBy(1.25));
   private fit = action('Fit board', () => this.fitBoard());
@@ -203,7 +205,7 @@ export class BrowserCanvas {
   private dialogError = html('p');
   private dialogActions = html('div');
 
-  constructor(private host: HTMLElement) {
+  constructor(private host: HTMLElement, private onHistoryChange?: () => void) {
     const toolbar = html('div');
     toolbar.className = 'canvas-toolbar';
     this.boards.setAttribute('aria-label', 'Canvas board');
@@ -233,8 +235,20 @@ export class BrowserCanvas {
     this.planeView.title = 'View the same board on the angled Workplane.';
     this.rotateView.title = 'Rotate the Workplane by a quarter turn.';
     views.append(this.flatView, this.planeView, this.rotateView);
-    toolbar.append(this.boards, views, this.newBoard, this.rename, tools, this.add, this.addFamily, this.families, this.edit, this.editSpace, this.multi, this.group,
-      this.connect, this.layout, this.arrange, this.search, this.undoButton, this.redoButton, this.zoomOut, this.zoomIn, this.fit);
+    for (const [button, name] of [[this.undoButton, 'Undo'], [this.redoButton, 'Redo']] as const) {
+      button.className = 'canvas-history-icon';
+      button.setAttribute('aria-label', name);
+      button.title = name + ' Canvas edit';
+    }
+    const history = html('div');
+    history.className = 'canvas-tools';
+    history.setAttribute('role', 'group');
+    history.setAttribute('aria-label', 'Canvas edit history');
+    history.append(this.undoButton, this.redoButton);
+    toolbar.append(this.boards, views);
+    if (!this.onHistoryChange) toolbar.append(history);
+    toolbar.append(this.newBoard, this.rename, tools, this.add, this.addFamily, this.families, this.edit,
+      this.editSpace, this.multi, this.group, this.connect, this.layout, this.arrange, this.search, this.zoomOut, this.zoomIn, this.fit);
     this.status.className = 'canvas-status';
     this.status.setAttribute('role', 'status');
     this.surface.className = 'canvas-surface';
@@ -282,6 +296,7 @@ export class BrowserCanvas {
     clearTimeout(this.viewTimer);
     this.undoStack = [];
     this.redoStack = [];
+    this.historyOperation = null;
     this.selected.clear();
     this.selectedSpace = undefined;
     this.tool = 'select';
@@ -301,6 +316,25 @@ export class BrowserCanvas {
   }
 
   hasDraft() { return Boolean(this.pending || this.viewportDraft || this.inlineDraft?.input.value.trim()); }
+
+  historyState() {
+    const ready = Boolean(this.store && !this.pending && !this.historyOperation);
+    const inline = Boolean(this.inlineDraft?.input.value.trim());
+    return { undo: ready && (inline || this.undoStack.length > 0), redo: ready && !inline && this.redoStack.length > 0 };
+  }
+
+  async undo() { await this.history('undo'); }
+  async redo() { await this.history('redo'); }
+
+  openCreate(kind: 'card' | 'family' | 'space' | 'board') {
+    if (!this.store || this.pending) return;
+    switch (kind) {
+      case 'card': this.cardDialog(); break;
+      case 'family': this.familyDialog(); break;
+      case 'space': this.changeTool('space'); break;
+      case 'board': this.boardDialog(false); break;
+    }
+  }
 
   async flush() {
     await this.flushViewport();
@@ -371,6 +405,7 @@ export class BrowserCanvas {
     input.rows = 2;
     input.placeholder = 'Write here';
     input.setAttribute('aria-label', 'Canvas note');
+    input.oninput = () => this.updateHistoryControls();
     const finish = () => { void this.flush().catch((error: unknown) => this.error(error)); };
     const save = action('✓', finish);
     save.setAttribute('aria-label', 'Save Canvas note');
@@ -400,6 +435,7 @@ export class BrowserCanvas {
   private closeInline() {
     this.inlineDraft?.form.remove();
     this.inlineDraft = undefined;
+    this.updateHistoryControls();
   }
 
   private commit(edit: Edit, remember = true): Promise<boolean> {
@@ -441,17 +477,44 @@ export class BrowserCanvas {
     return pending;
   }
 
-  private async history(source: CanvasDocument[], destination: CanvasDocument[]) {
-    const next = source.at(-1);
-    if (!next || !this.document) return;
-    const original = this.document;
-    try { await this.flush(); } catch (error) { this.error(error); return; }
-    if (await this.commit(() => next, false)) {
-      source.pop();
-      destination.push(original);
-      this.selected.clear();
-      this.updateSelection();
+  private async history(direction: 'undo' | 'redo') {
+    if (!this.historyState()[direction]) return;
+    const operation = {};
+    this.historyOperation = operation;
+    this.updateSelection();
+    try {
+      await this.flush();
+      if (this.historyOperation !== operation || !this.document) return;
+      const source = direction === 'undo' ? this.undoStack : this.redoStack;
+      const destination = direction === 'undo' ? this.redoStack : this.undoStack;
+      const next = source.at(-1);
+      if (!next) return;
+      const original = this.document;
+      if (await this.commit((current) => {
+        if (JSON.stringify(current) !== JSON.stringify(original)) throw new Error('Canvas changed before the history action could be applied.');
+        return next;
+      }, false) && this.historyOperation === operation) {
+        source.pop();
+        destination.push(original);
+        this.selected.clear();
+      }
+    } catch (error) {
+      if (this.historyOperation === operation) this.error(error);
+    } finally {
+      if (this.historyOperation === operation) {
+        this.historyOperation = null;
+        this.updateSelection();
+      }
     }
+  }
+
+  private updateHistoryControls() {
+    const next = this.historyState();
+    this.undoButton.disabled = !next.undo;
+    this.redoButton.disabled = !next.redo;
+    if (next.undo === this.lastHistoryState.undo && next.redo === this.lastHistoryState.redo) return;
+    this.lastHistoryState = next;
+    this.onHistoryChange?.();
   }
 
   private error(error: unknown) {
@@ -468,7 +531,7 @@ export class BrowserCanvas {
       space.title.setAttribute('aria-pressed', String(selected));
       space.resize.hidden = !selected;
     }
-    const disabled = !board || Boolean(this.pending);
+    const disabled = !board || Boolean(this.pending || this.historyOperation);
     for (const control of [this.boards, this.newBoard, this.rename, this.add, this.addFamily, this.multi, this.layout, this.search,
       this.selectTool, this.drawTool, this.spaceTool, this.zoomOut, this.zoomIn, this.fit, this.flatView, this.planeView]) control.disabled = disabled;
     this.flatView.setAttribute('aria-pressed', String(!this.workplane));
@@ -486,8 +549,7 @@ export class BrowserCanvas {
     this.group.disabled = disabled || this.selected.size < 2;
     this.connect.disabled = disabled || this.selected.size !== 2;
     this.arrange.disabled = disabled || !board?.nodes.length;
-    this.undoButton.disabled = disabled || !this.undoStack.length;
-    this.redoButton.disabled = disabled || !this.redoStack.length;
+    this.updateHistoryControls();
     this.multi.setAttribute('aria-pressed', String(this.multiple));
   }
 

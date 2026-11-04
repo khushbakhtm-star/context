@@ -10,7 +10,7 @@ import { contiguousMinuteSpan, eventSelectionFingerprint, groupSelection } from 
 function fixture() {
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('app.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const nodes = parsed.statements.filter((node: any) => ['readGroupRange', 'changeGroupRange', 'mutateSelection'].includes(node.name?.text) ||
+  const nodes = parsed.statements.filter((node: any) => ['readGroupRange', 'changeGroupRange', 'mutateSelection', 'rememberCalendarEdit'].includes(node.name?.text) ||
     ts.isExpressionStatement(node) && /element<HTMLFormElement>\('group-form'\)\.onsubmit/.test(node.getText(parsed)));
   const fields: Record<string, any> = {}; let pending = Promise.resolve(); const errors: string[] = []; let writes = 0; let beforeWrite: (() => void) | null = null;
   const field = (id: string) => fields[id] ??= { value: '', textContent: '', closes: 0, close() { this.closes++; } };
@@ -21,7 +21,7 @@ function fixture() {
   const store = { state: start, async update(change: any) { writes++; beforeWrite?.(); beforeWrite = null; this.state = change(this.state); return this.state; } };
   const rectangle = [{ day: '2026-10-30', minute: 0 }, { day: '2026-10-31', minute: 0 }];
   const context: any = { store, groupCoordinates: [], groupSelectionStamp: 'selected-rectangle', groupSelectionRevision: null, groupRangeConfirmed: false,
-    groupFillOptions: [{ color: '#5A6986', name: 'Muted' }], entryBarMode: null, undo: null,
+    groupFillOptions: [{ color: '#5A6986', name: 'Muted' }], entryBarMode: null, undo: null, redo: null,
     element: field, contiguousMinuteSpan, eventSelectionFingerprint, groupSelection, minuteKey, getMinute, cellFormatKey,
     selectionStamp: () => 'selected-rectangle', selectionCells: () => rectangle, render() {}, synchronize() {}, updateBars() {},
     cellCommand(work: () => Promise<void>) { pending = work().catch((error: Error) => { errors.push(error.message); }); return pending; } };

@@ -46,6 +46,8 @@ import { ReportsScreen } from './src/screens/ReportsScreen';
 import { ChecklistFlowScreen, type PriorityHistoryState, type PriorityScreenControls } from './src/screens/ChecklistFlowScreen';
 import { NotepadScreen } from './src/screens/NotepadScreen';
 import { CanvasWorkspace } from './src/screens/CanvasWorkspace';
+import type { ViewAddAction, ViewAddActionsRef } from './src/screens/view-add-actions';
+import { EMPTY_VIEW_HISTORY, type ViewHistoryControls, type ViewHistoryState } from './src/screens/view-history';
 import { createChecklistList, getChecklistFlow, renameChecklistList } from './src/data/checklist-flow';
 import type { ChecklistListSummary } from './src/utils/checklist-flow';
 import { SettingsScreen } from './src/screens/SettingsScreen';
@@ -176,6 +178,15 @@ function AppController() {
   const canvasBeforeLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const [canvasFocusNodeId, setCanvasFocusNodeId] = useState<string | null>(null);
   const priorityControlsRef = useRef<PriorityScreenControls | null>(null);
+  const todayAddActions = useRef<ViewAddActionsRef['current']>(null);
+  const checklistAddActions = useRef<ViewAddActionsRef['current']>(null);
+  const notepadAddActions = useRef<ViewAddActionsRef['current']>(null);
+  const canvasAddActions = useRef<ViewAddActionsRef['current']>(null);
+  const notepadHistoryControls = useRef<ViewHistoryControls | null>(null);
+  const canvasHistoryControls = useRef<ViewHistoryControls | null>(null);
+  const [notepadHistory, setNotepadHistory] = useState(EMPTY_VIEW_HISTORY);
+  const [canvasHistory, setCanvasHistory] = useState(EMPTY_VIEW_HISTORY);
+  const [addMenu, setAddMenu] = useState<{ tab: PrimaryTab; actions: ViewAddAction[] } | null>(null);
   const [priorityHistory, setPriorityHistory] = useState<PriorityHistoryState>({ canUndo: false, canRedo: false, busy: false });
   const [selectedPriorityListId, setSelectedPriorityListId] = useState('main');
   const selectedPriorityListIdRef = useRef(selectedPriorityListId); selectedPriorityListIdRef.current = selectedPriorityListId;
@@ -766,12 +777,31 @@ function AppController() {
     resolvePriorityList(result.listId); setPriorityFocusTaskId(result.taskId); setTab('checklist');
   }
 
-  function openCalendarMinute(day: string, minute: number) {
+  function openCalendarMinute(day: string, minute: number, openEditor = false) {
     calendarFocusRef.current = { dateKey: day, minuteIndex: minute };
     changeDayCount(1);
     setActiveDate(day);
-    setFocusRequest({ dateKey: day, minuteIndex: minute, token: ++focusSequence.current, openEditor: false });
+    setFocusRequest({ dateKey: day, minuteIndex: minute, token: ++focusSequence.current, openEditor });
     setTab('today');
+  }
+
+  function openAddMenu() {
+    if (viewChangingRef.current || AppState.currentState !== 'active') return;
+    const current = tabRef.current;
+    let actions: ViewAddAction[];
+    if (current === 'today') {
+      actions = viewKind === 'minutes' ? todayAddActions.current?.() ?? [] : [
+        { label: 'Add minute entry', run: () => {
+          const focus = calendarFocusRef.current;
+          const minute = focus.dateKey === activeDate ? focus.minuteIndex : minuteIndexForDate(new Date());
+          void transitionFromCalendar(() => openCalendarMinute(activeDate, minute, true), 'Could not open minute');
+        } },
+      ];
+    } else if (current === 'checklist') actions = checklistAddActions.current?.() ?? [];
+    else if (current === 'notepad') actions = notepadAddActions.current?.() ?? [];
+    else if (current === 'canvas') actions = canvasAddActions.current?.() ?? [];
+    else return;
+    if (actions.length) setAddMenu({ tab: current, actions });
   }
 
   function jumpToCurrentMinute() {
@@ -862,8 +892,9 @@ function AppController() {
     setCalendarLoadWarning((previous) => previous?.scope === syncWarningScope && previous.message === message
       ? previous : { scope: syncWarningScope, message });
   }, [syncWarningScope]);
+  const calendarWarningScope = JSON.stringify(['today', viewKind, activeDate, selectedDateKeys]);
   const calendarSyncError = [...new Set([manualSyncError, accountSyncFailure(accountSyncStatus),
-    calendarLoadWarning?.scope === syncWarningScope ? calendarLoadWarning.message : null].filter(Boolean))].join('\n\n') || null;
+    calendarLoadWarning?.scope === calendarWarningScope ? calendarLoadWarning.message : null].filter(Boolean))].join('\n\n') || null;
   const overviewDates = useMemo(() => calendarViewDates(viewMode, activeDate, selectedDateKeys),
     [viewMode, activeDate, selectedDateKeys]);
   calendarColorContextRef.current = { dates: overviewDates, calendars, preferences };
@@ -1102,6 +1133,9 @@ function AppController() {
         tab={tab}
         returnView={primaryTabRef.current}
         onReturnToCalendar={returnToCalendar}
+        settingsAction={tab === 'settings' ? <SettingsSyncButton onSync={() => void synchronizeCalendar()}
+          syncing={manualSyncing || accountSyncStatus.running} syncError={calendarSyncError}
+          syncDetails={calendarSyncDetails} syncTimingDetails={calendarSyncTimingDetails} disabled={viewChanging} /> : null}
       >
         {!ready ? (
           <LoadingState
@@ -1117,8 +1151,11 @@ function AppController() {
                 <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void openSearch()}
                   onOpenGlobalSearch={() => void openSearch(true)}
                   onPrint={() => void openPrintOptions()}
-                  onSync={() => void synchronizeCalendar()} syncing={manualSyncing || accountSyncStatus.running} syncError={calendarSyncError}
-                  syncDetails={calendarSyncDetails} syncTimingDetails={calendarSyncTimingDetails}
+                  onOpenAdd={openAddMenu} addOpen={addMenu?.tab === tab}
+                  viewHistory={tab === 'canvas' ? { ...canvasHistory, busy: false,
+                    undo: () => canvasHistoryControls.current?.undo(), redo: () => canvasHistoryControls.current?.redo() }
+                    : tab === 'notepad' ? { ...notepadHistory, busy: false,
+                      undo: () => notepadHistoryControls.current?.undo(), redo: () => notepadHistoryControls.current?.redo() } : undefined}
                   onOpenReports={() => void navigate('reports')} onJumpToNow={tab === 'notepad'
                     ? () => notepadInputRef.current?.focus()
                     : tab === 'checklist' ? () => {
@@ -1182,6 +1219,7 @@ function AppController() {
                   onZoomChange={changeCalendarZoom}
                   clockFormat={clockFormat}
                   onPeriodSwipe={(direction) => void swipeCalendarPeriod(direction)}
+                  addActionsRef={todayAddActions}
                 />
                 }
                 </CalendarPeriodSwipe>
@@ -1194,11 +1232,18 @@ function AppController() {
                 controlsRef={priorityControlsRef} onHistoryChange={setPriorityHistory} onListResolved={resolvePriorityList}
                 focusTaskId={priorityFocusTaskId} onFocusConsumed={consumePriorityFocus}
                 onSwipeList={(direction) => void switchPriorityList(direction)}
-                beforeLeaveRef={checklistBeforeLeaveRef} /> : null}
+                beforeLeaveRef={checklistBeforeLeaveRef} addActionsRef={checklistAddActions} /> : null}
               {tab === 'notepad' ? <NotepadScreen beforeLeaveRef={notepadBeforeLeaveRef} inputRef={notepadInputRef}
-                onOpenCanvas={(nodeId) => void openCanvasFromNotepad(nodeId)} /> : null}
+                onOpenCanvas={(nodeId) => void openCanvasFromNotepad(nodeId)} addActionsRef={notepadAddActions}
+                historyControlsRef={notepadHistoryControls} onHistoryStateChange={setNotepadHistory} /> : null}
               {tab === 'canvas' ? <CanvasWorkspace beforeLeaveRef={canvasBeforeLeaveRef} focusNodeId={canvasFocusNodeId}
-                onFocusConsumed={() => setCanvasFocusNodeId(null)} /> : null}
+                onFocusConsumed={() => setCanvasFocusNodeId(null)} addActionsRef={canvasAddActions}
+                historyControlsRef={canvasHistoryControls} onHistoryStateChange={setCanvasHistory} /> : null}
+              {addMenu?.tab === tab ? <ViewAddMenu actions={addMenu.actions} onClose={() => setAddMenu(null)}
+                onChoose={(action) => {
+                  setAddMenu(null);
+                  if (tabRef.current === addMenu.tab && !viewChangingRef.current && AppState.currentState === 'active') action.run();
+                }} /> : null}
               {tab === 'search' ? (
                 <SearchScreen dataVersion={dataVersion} scope={searchScope} onOpenResult={openSearchResult} onOpenTask={openPriorityResult} />
               ) : null}
@@ -1250,8 +1295,8 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
 ];
 
 function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSearch, onOpenReports, onOpenChecklist, onOpenNotepad, onOpenCanvas, onReturnToCalendar,
-  onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
-  viewMode, hasSelectedDates, viewChanging, onViewModeChange, priority, notepad = false, canvas = false }: {
+  onOpenAdd, addOpen = false, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+  viewMode, hasSelectedDates, viewChanging, onViewModeChange, priority, viewHistory, notepad = false, canvas = false }: {
   onOpenSettings: () => void;
   onPrint: () => void;
   onOpenSearch: () => void;
@@ -1263,11 +1308,8 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   onReturnToCalendar: () => void;
   notepad?: boolean;
   canvas?: boolean;
-  onSync: () => void;
-  syncing: boolean;
-  syncError: string | null;
-  syncDetails?: string | (() => string) | null;
-  syncTimingDetails?: () => string;
+  onOpenAdd: () => void;
+  addOpen?: boolean;
   onJumpToNow: () => void;
   onOpenDatePicker: () => void;
   canGoPrevious: boolean;
@@ -1279,6 +1321,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   viewChanging: boolean;
   onViewModeChange: (mode: CalendarViewMode) => Promise<void>;
   priority?: PriorityHistoryState & { listId: string; undo: () => Promise<boolean>; redo: () => Promise<boolean>; beforeLeave: () => Promise<boolean> };
+  viewHistory?: ViewHistoryState & ViewHistoryControls & { busy: boolean };
 }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -1286,7 +1329,6 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   const [history, setHistory] = useState(() => spreadsheetEditor.snapshot());
   const [historyPending, setHistoryPending] = useState(false);
   const historyOperation = useRef(false);
-  const syncLongPress = useRef(false);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [viewMenuTop, setViewMenuTop] = useState(48);
   const [viewMenuRight, setViewMenuRight] = useState(8);
@@ -1297,7 +1339,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   const [gearMenuTop, setGearMenuTop] = useState(48);
   const [gearMenuLeft, setGearMenuLeft] = useState(8);
   const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
-  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates' | 'checklist' | 'notepad' | 'canvas' | 'search'; sequence: number } | null>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'reports' | 'dates' | 'checklist' | 'notepad' | 'canvas' | 'search'; sequence: number } | null>(null);
   const gearVisibleRef = useRef(false);
   const gearClosingRef = useRef(false);
   const headerMountedRef = useRef(true);
@@ -1311,25 +1353,8 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   const controlCount = isCalendar ? 7 : 5;
   const controlWidth = Math.max(40, Math.min(44, availableWidth / controlCount));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
-  const headerHistory = notepad || canvas ? { canUndo: false, canRedo: false, busy: false } : priority ?? history;
+  const headerHistory = priority ?? viewHistory ?? (isCalendar ? history : { ...EMPTY_VIEW_HISTORY, busy: false });
   const navigationBusy = viewChanging || historyPending || headerHistory.busy;
-  const hasSyncDetails = Boolean(syncDetails || syncError || syncing);
-  const showSyncDetails = () => {
-    const detail = typeof syncDetails === 'function' ? syncDetails() : syncDetails;
-    const message = [...new Set([detail, syncError].filter(Boolean))].join('\n\n');
-    if (message) {
-      if (syncTimingDetails) Alert.alert('Calendar synchronization', message, [
-        { text: 'Copy timings', onPress: () => {
-          const timing = syncTimingDetails();
-          if (timing) void Clipboard.setStringAsync(timing).catch(() => {
-            Alert.alert('Could not copy timings', 'Try Copy timings again.');
-          });
-        } },
-        { text: 'OK', style: 'cancel' },
-      ]);
-      else Alert.alert('Calendar synchronization', message);
-    }
-  };
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
   const calendarModeRef = useRef(isCalendar); calendarModeRef.current = isCalendar;
@@ -1453,16 +1478,17 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   }, []);
 
   async function changeHistory(action: 'undo' | 'redo') {
-    if (notepad || canvas) return;
-    if (priority) {
-      if (viewChanging || historyOperation.current || priority.busy || !(action === 'undo' ? priority.canUndo : priority.canRedo)) return;
-      binderPress.cancel(); historyOperation.current = true; setHistoryPending(true); Keyboard.dismiss();
-      try { await (action === 'undo' ? priority.undo() : priority.redo()); }
+    const localHistory = priority ?? viewHistory;
+    if (!isCalendar) {
+      if (!localHistory || !headerMayNavigate() || !(action === 'undo' ? localHistory.canUndo : localHistory.canRedo)) return;
+      binderPress.cancel(); historyOperation.current = true; setHistoryPending(true);
+      if (priority) Keyboard.dismiss();
+      try { await localHistory[action](); }
       finally { historyOperation.current = false; if (headerMountedRef.current) setHistoryPending(false); }
       return;
     }
     const snapshot = spreadsheetEditor.snapshot();
-    if (viewChanging || historyOperation.current || snapshot.busy || !(action === 'undo' ? snapshot.canUndo : snapshot.canRedo)) return;
+    if (!headerMayNavigate() || snapshot.busy || !(action === 'undo' ? snapshot.canUndo : snapshot.canRedo)) return;
     binderPress.cancel();
     historyOperation.current = true;
     setHistoryPending(true);
@@ -1557,7 +1583,6 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
     dispatchingGearAction.current = true;
     if (pending.action === 'settings') onOpenSettings();
     else if (pending.action === 'print') onPrint();
-    else if (pending.action === 'redo') void changeHistory('redo');
     else if (pending.action === 'dates') onOpenDatePicker();
     else if (pending.action === 'checklist') onOpenChecklist();
     else if (pending.action === 'notepad') onOpenNotepad();
@@ -1570,9 +1595,8 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       if (headerMountedRef.current && !navigationBusyRef.current) dispatchingGearAction.current = false;
     });
   };
-  const chooseGearAction = (action: 'settings' | 'print' | 'redo' | 'reports' | 'search') => {
+  const chooseGearAction = (action: 'settings' | 'print' | 'reports' | 'search') => {
     if (!headerMayNavigate() || !gearVisibleRef.current || gearClosingRef.current || pendingGearAction.current) return;
-    if (action === 'redo' && !headerHistory.canRedo) return;
     const sequence = ++menuRequestSequence.current;
     pendingGearAction.current = { action, sequence };
     gearVisibleRef.current = false;
@@ -1667,12 +1691,8 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       style={[controlStyle, (!canGoNext || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>›</Text>
     </Pressable> : null}
-    <Pressable accessibilityRole="button" accessibilityLabel="Undo Context edit"
-      accessibilityState={{ disabled: !headerHistory.canUndo || navigationBusy }}
-      disabled={!headerHistory.canUndo || navigationBusy} onPressIn={() => binderPress.cancel()} onPress={() => void changeHistory('undo')}
-      style={[controlStyle, (!headerHistory.canUndo || navigationBusy) && styles.disabledCalendarNavigation]}>
-      <Text allowFontScaling={false} style={styles.historyArrow}>↶</Text>
-    </Pressable>
+    <ViewHistoryButton key={viewIndex} width={controlWidth} canUndo={headerHistory.canUndo} canRedo={headerHistory.canRedo}
+      disabled={navigationBusy} onTouch={() => binderPress.cancel()} onAction={(action) => void changeHistory(action)} />
     <Pressable accessibilityRole="button" accessibilityLabel="Open Search"
       accessibilityState={{ disabled: navigationBusy }} disabled={navigationBusy}
       onPressIn={() => binderPress.cancel()} onPress={() => {
@@ -1680,15 +1700,14 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       }} style={controlStyle}>
       <CalendarHeaderIcon name="search" />
     </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel={syncing ? 'Synchronizing calendars' : syncError ? 'Calendar sync needs attention. Tap to retry' : 'Sync attached calendars'}
-      accessibilityHint={hasSyncDetails ? 'Touch and hold for sync details' : undefined}
-      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, busy: syncing }}
-      onPressIn={() => { syncLongPress.current = false; binderPress.cancel(); }}
-      onLongPress={() => { syncLongPress.current = true; showSyncDetails(); }}
-      accessibilityActions={hasSyncDetails ? [{ name: 'longpress', label: 'Show sync details' }] : []}
-      onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') showSyncDetails(); }}
-      onPress={() => { binderPress.cancel(); if (syncLongPress.current) { syncLongPress.current = false; return; } if (!syncing) onSync(); }} style={controlStyle}>
-      <CalendarHeaderIcon name="sync" active={syncing && !syncError} issue={Boolean(syncError)} />
+    <Pressable accessibilityRole="button" accessibilityLabel="Add in this view"
+      disabled={navigationBusy} accessibilityState={{ disabled: navigationBusy, expanded: addOpen }}
+      onPressIn={() => binderPress.cancel()} onPress={() => {
+        if (!headerMayNavigate()) return;
+        invalidateMenus();
+        onOpenAdd();
+      }} style={controlStyle}>
+      <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>+</Text>
     </Pressable>
     </View>
   </ScrollView>
@@ -1712,14 +1731,6 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
               onPress={() => chooseGearAction('print')} style={styles.viewOption}>
               <CalendarHeaderIcon name="print" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Print</Text>
-            </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Redo Context edit"
-              accessibilityState={{ disabled: !headerHistory.canRedo || navigationBusy }} disabled={!headerHistory.canRedo || navigationBusy}
-              onPress={() => chooseGearAction('redo')} style={[styles.viewOption,
-                (!headerHistory.canRedo || navigationBusy) && styles.disabledCalendarNavigation]}>
-              <Text accessible={false} importantForAccessibility="no" allowFontScaling={false}
-                style={[styles.historyArrow, { width: 24, textAlign: 'center' }]}>↷</Text>
-              <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Redo</Text>
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Search all Context"
               onPress={() => chooseGearAction('search')} style={styles.viewOption}>
@@ -1783,19 +1794,153 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   </>;
 }
 
+function ViewHistoryButton({ width, canUndo, canRedo, disabled, onTouch, onAction }: ViewHistoryState & {
+  width: number;
+  disabled: boolean;
+  onTouch: () => void;
+  onAction: (action: 'undo' | 'redo') => void;
+}) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const live = useRef({ canUndo, canRedo, disabled, onAction });
+  live.current = { canUndo, canRedo, disabled, onAction };
+  const responder = useMemo(() => {
+    const swipe = createCalendarPeriodSwipe({ claimDistance: 8, commitDistance: 24 });
+    let start: { x: number; y: number } | null = null;
+    const clear = () => { start = null; swipe.cancel(); };
+    const delta = ({ nativeEvent }: GestureResponderEvent) => {
+      const touch = nativeEvent.touches[0] ?? nativeEvent.changedTouches[0];
+      return start && touch ? { dx: touch.pageX - start.x, dy: touch.pageY - start.y,
+        numberActiveTouches: nativeEvent.touches.length } : null;
+    };
+    const move = (event: GestureResponderEvent) => {
+      const change = delta(event);
+      return change ? swipe.move(change, live.current.disabled) : false;
+    };
+    return PanResponder.create({
+      onStartShouldSetPanResponderCapture: ({ nativeEvent }) => {
+        clear();
+        const [touch] = nativeEvent.touches;
+        if (nativeEvent.touches.length === 1 && touch && (live.current.canUndo || live.current.canRedo) && !live.current.disabled) {
+          start = { x: touch.pageX, y: touch.pageY };
+          swipe.start(1);
+        }
+        return false;
+      },
+      onMoveShouldSetPanResponderCapture: move,
+      onPanResponderMove: move,
+      onPanResponderStart: (event) => { if (event.nativeEvent.touches.length !== 1) clear(); },
+      onPanResponderRelease: (event) => {
+        const change = delta(event);
+        const direction = change && swipe.finish(change, live.current.disabled);
+        clear();
+        if (direction === 1 && live.current.canUndo) live.current.onAction('undo');
+        else if (direction === -1 && live.current.canRedo) live.current.onAction('redo');
+      },
+      onPanResponderTerminate: clear,
+      onPanResponderReject: clear,
+    });
+  }, []);
+  const paired = canUndo && canRedo;
+  const actions = canRedo ? (canUndo ? ['undo', 'redo'] as const : ['redo'] as const) : ['undo'] as const;
+  return <View testID="view-history" {...responder.panHandlers} style={[styles.historySlot, { width }]}>
+    {actions.map((action) => {
+      const unavailable = disabled || !(action === 'undo' ? canUndo : canRedo);
+      return <Pressable key={action} accessibilityRole="button"
+        accessibilityLabel={action === 'undo' ? 'Undo Context edit' : 'Redo Context edit'}
+        accessibilityHint="Swipe left to undo or right to redo"
+        accessibilityState={{ disabled: unavailable }} disabled={unavailable}
+        onPressIn={onTouch} onPress={() => { if (!unavailable) onAction(action); }}
+        style={[styles.menuButton, { width: paired ? width / 2 : width }, unavailable && styles.disabledCalendarNavigation]}>
+        <Text pointerEvents="none" allowFontScaling={false} style={[styles.historyArrow, paired && styles.pairedHistoryArrow]}>
+          {action === 'undo' ? '↶' : '↷'}
+        </Text>
+      </Pressable>;
+    })}
+  </View>;
+}
+
+function SettingsSyncButton({ onSync, syncing, syncError, syncDetails, syncTimingDetails, disabled = false }: {
+  onSync: () => void;
+  syncing: boolean;
+  syncError: string | null;
+  syncDetails?: string | (() => string) | null;
+  syncTimingDetails?: () => string;
+  disabled?: boolean;
+}) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const held = useRef(false);
+  const hasSyncDetails = Boolean(syncDetails || syncError || syncing);
+  const showSyncDetails = () => {
+    const detail = typeof syncDetails === 'function' ? syncDetails() : syncDetails;
+    const message = [...new Set([detail, syncError].filter(Boolean))].join('\n\n');
+    if (!message) return;
+    if (syncTimingDetails) Alert.alert('Calendar synchronization', message, [
+      { text: 'Copy timings', onPress: () => {
+        const timing = syncTimingDetails();
+        if (timing) void Clipboard.setStringAsync(timing).catch(() => {
+          Alert.alert('Could not copy timings', 'Try Copy timings again.');
+        });
+      } },
+      { text: 'OK', style: 'cancel' },
+    ]);
+    else Alert.alert('Calendar synchronization', message);
+  };
+  return <Pressable accessibilityRole="button"
+    accessibilityLabel={syncing ? 'Synchronizing calendars' : syncError ? 'Calendar sync needs attention. Tap to retry' : 'Sync attached calendars'}
+    accessibilityHint={hasSyncDetails ? 'Touch and hold for sync details' : undefined}
+    disabled={disabled} accessibilityState={{ disabled, busy: syncing }}
+    onPressIn={() => { held.current = false; }}
+    onLongPress={() => { held.current = true; showSyncDetails(); }}
+    accessibilityActions={hasSyncDetails ? [{ name: 'longpress', label: 'Show sync details' }] : []}
+    onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === 'longpress') showSyncDetails(); }}
+    onPress={() => {
+      if (held.current) { held.current = false; return; }
+      if (!disabled && !syncing) onSync();
+    }} style={styles.menuButton}>
+    <CalendarHeaderIcon name="sync" active={syncing && !syncError} issue={Boolean(syncError)} />
+  </Pressable>;
+}
+
+function ViewAddMenu({ actions, onClose, onChoose }: {
+  actions: ViewAddAction[];
+  onClose: () => void;
+  onChoose: (action: ViewAddAction) => void;
+}) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const close = useRef(onClose); close.current = onClose;
+  useEffect(() => {
+    const back = BackHandler.addEventListener('hardwareBackPress', () => { close.current(); return true; });
+    const state = AppState.addEventListener('change', (next) => { if (next !== 'active') close.current(); });
+    return () => { back.remove(); state.remove(); };
+  }, []);
+  return <View style={[StyleSheet.absoluteFill, styles.addMenuLayer]}>
+    <Pressable accessibilityRole="button" accessibilityLabel="Close add options" style={StyleSheet.absoluteFill} onPress={onClose} />
+    <View accessibilityViewIsModal style={[styles.viewMenu, styles.addMenu]}>
+      {actions.map((action) => <Pressable key={action.label} accessibilityRole="button"
+        onPress={() => onChoose(action)} style={styles.viewOption}>
+        <Text style={styles.viewOptionText}>{action.label}</Text>
+      </Pressable>)}
+    </View>
+  </View>;
+}
+
 const SCREEN_TITLES: Record<Tab, string> = {
   today: 'Day', reports: 'Dashboard', search: 'Search', settings: 'Settings',
   accounts: 'Calendar accounts', categories: 'Activity colors', checklist: 'Priority', notepad: 'Notepad', canvas: 'Canvas',
 };
 
 function ApplicationFrame({
-  ready, tab, onReturnToCalendar, children, returnView = 'today',
+  ready, tab, onReturnToCalendar, children, returnView = 'today', settingsAction,
 }: {
   ready: boolean;
   tab: Tab;
   onReturnToCalendar: () => void;
   children: ReactNode;
   returnView?: PrimaryTab;
+  settingsAction?: ReactNode;
 }) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -1820,6 +1965,7 @@ function ApplicationFrame({
                 <CalendarHeaderIcon name="back" />
               </Pressable>
               <Text accessibilityRole="header" style={styles.screenTitle}>{SCREEN_TITLES[tab]}</Text>
+              {tab === 'settings' ? settingsAction : null}
             </View>
           ) : null}
           {children}
@@ -1879,8 +2025,12 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     justifyContent: 'space-between', backgroundColor: colors.paper },
   calendarNavigationArrow: { color: colors.graphite, fontSize: 29, lineHeight: 34 },
   historyArrow: { color: colors.graphite, fontSize: 27, lineHeight: 34 },
+  historySlot: { height: 44, flexDirection: 'row', alignItems: 'center' },
+  pairedHistoryArrow: { fontSize: 21 },
   disabledCalendarNavigation: { opacity: 0.3 },
   viewMenuBackdrop: { flex: 1 },
+  addMenuLayer: { zIndex: 12 },
+  addMenu: { right: 8, top: 44, width: 224 },
   viewMenu: { position: 'absolute', width: 208, paddingVertical: 8, borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.hairline, borderRadius: 12, backgroundColor: colors.paper,
     shadowColor: '#000000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.18, shadowRadius: 12, elevation: 8 },

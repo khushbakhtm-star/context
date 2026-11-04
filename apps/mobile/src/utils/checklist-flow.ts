@@ -24,6 +24,7 @@ export type ChecklistChange =
   | { type: 'edit'; id: string; text?: string; format?: ChecklistTaskFormat }
   | { type: 'check'; id: string; checked: boolean }
   | { type: 'delete'; id: string }
+  | { type: 'deleteRow'; id: string }
   | { type: 'reset' }
   | { type: 'move'; id: string; parentId: string | null; beforeId?: string | null }
   | { type: 'moveRelative'; id: string; direction: 'up' | 'down' }
@@ -210,6 +211,13 @@ export function applyChecklistChange(value: ChecklistFlow, change: ChecklistChan
       if (change.format !== undefined) item.format = change.format;
     } else if (change.type === 'delete') {
       flow.items.splice(index, endIndex(flow, index) - index);
+    } else if (change.type === 'deleteRow') {
+      const end = endIndex(flow, index);
+      for (let child = index + 1; child < end; child++) {
+        const descendant = flow.items[child]!;
+        if (descendant.parentId === item.id) descendant.parentId = item.parentId;
+      }
+      flow.items.splice(index, 1);
     } else if (change.type === 'check') {
       if (typeof change.checked !== 'boolean') throw invalid();
       item.checked = change.checked;

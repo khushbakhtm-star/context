@@ -5,12 +5,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-function header(props) {
+function settingsSync(props) {
   const file = path.join(__dirname, 'calendar-header.test.cjs');
   const source = fs.readFileSync(file, 'utf8'); const module = { exports: {} };
   vm.runInNewContext(source.slice(0, source.indexOf('\ntest(')) + '\nmodule.exports = headerHarness;',
     { module, require, __dirname, console }, { filename: file });
-  return module.exports(props);
+  return module.exports(props, {}, true);
 }
 const syncButton = (h) => h.nodes().find((node) => node.type === 'Pressable' &&
   /^(Synchronizing calendars|Calendar sync needs attention|Sync attached calendars)/.test(node.props.accessibilityLabel ?? ''));
@@ -104,9 +104,9 @@ test('the issue mark is centered inside one muted closed circle and remains enti
   for (const active of [false, true]) assert.equal(nodes(icon(active, '#171817', '#6E706C')).some((node) => node.props.testID === 'sync-issue-mark'), false);
 });
 
-test('the header never animates Sync and retains real busy state, retry, error and long-press actions', () => {
+test('Settings never animates Sync and retains real busy state, retry, error and long-press actions', () => {
   const props = { syncing: false, syncError: null, syncDetails: () => 'Current sync details' };
-  const h = header(props);
+  const h = settingsSync(props);
   let button = syncButton(h);
   assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.active, false);
   assert.equal(h.nodes(button).find((node) => node.type === 'CalendarHeaderIcon').props.issue, false);

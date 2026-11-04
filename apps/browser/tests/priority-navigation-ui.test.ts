@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { setImmediate } from 'node:timers/promises';
 import ts from 'typescript';
-import { emptyLedger, editCells, getMinute, undoEdit, type BrowserLedgerState } from '../src/ledger';
+import { applyBrowserHistoryEdit, emptyLedger, editCells, getMinute, type BrowserLedgerState } from '../src/ledger';
 import { browserChecklist, changeBrowserChecklist, createBrowserChecklistList, minuteTaskSnapshot, newBrowserTask, renameBrowserChecklistList } from '../src/checklist-flow';
 import { DEFAULT_CHECKLIST_LIST_ID, CHECKLIST_FLOW_KEY, checklistRows, type ChecklistTask } from '../shared/utils/checklist-flow';
 
@@ -40,8 +40,8 @@ function destinationFixture(state: BrowserLedgerState, checklistDestination = ''
     close(value = '') { this.returnValue = value; onClose(); } };
   const active = { state, writes: 0, async update(change: (state: BrowserLedgerState) => BrowserLedgerState) { this.writes++; this.state = change(this.state); } };
   const visited: string[] = [];
-  const context = functions(['addEditorTextToChecklist', 'createChecklistTask', 'pickChecklistDestination'], { store: active, priorityScope: { store: active },
-    browserChecklist, changeBrowserChecklist, minuteTaskSnapshot, newBrowserTask, activeChecklistId: 'main', priorityUndos: new Map(), synchronize() {},
+  const context = functions(['addEditorTextToChecklist', 'createChecklistTask', 'pickChecklistDestination', 'rememberPriorityEdit'], { store: active, priorityScope: { store: active },
+    browserChecklist, changeBrowserChecklist, minuteTaskSnapshot, newBrowserTask, activeChecklistId: 'main', priorityUndos: new Map(), priorityRedos: new Map(), synchronize() {},
     settings: { checklistDestination },
     element: (id: string) => id === 'checklist-destination' ? dialog : choices, document: { createElement: () => ({}) },
     async choosePriorityList(id: string) { visited.push(id); }, async showChecklistView() { visited.push('main'); } });
@@ -147,11 +147,14 @@ test('a missing selected list is resolved only by explicit list navigation, usin
   assert.equal(context.activeChecklistId, 'list_removed_by_peer', 'the edit identity itself remains owned by guarded navigation');
 });
 
-test('Priority Undo flushes the newest task draft and undoes that list while leaving the calendar and other list intact', async () => {
+test('Priority Undo and Redo apply the newest task draft while leaving the calendar and other list intact', async () => {
   const state = sample(); const active = { state, async update(change: (state: BrowserLedgerState) => BrowserLedgerState) { this.state = change(this.state); } };
   const map = new Map(); const scope = {}; let renders = 0;
-  const context = functions(['undoCurrentView'], { store: active, priorityScope: scope, activeChecklistId: 'main', checklistVisible: true,
-    priorityUndos: map, undo: null, undoEdit, async saveEditor() {}, checklistUI: { async flush() {
+  let draft = true;
+  const context = functions(['undoCurrentView'], { store: active, priorityScope: scope, activeChecklistId: 'main',
+    currentBrowserView: () => 'priority', historyRunning: false, commandBusy: false, updateHistoryControl(){},
+    priorityUndos: map, priorityRedos: new Map(), undo: null, redo: null, applyBrowserHistoryEdit, async saveEditor() {}, checklistUI: { async flush() {
+      if (!draft) return; draft = false;
       const result = changeBrowserChecklist(active.state, browserChecklist(active.state).revision,
         { type: 'edit', id: 'task_dental_main', text: 'Newest draft before Undo' }, 1500);
       active.state = result.state; map.set('main', { store: active, edit: result.undo });
@@ -161,6 +164,10 @@ test('Priority Undo flushes the newest task draft and undoes that list while lea
   assert.equal(browserChecklist(active.state, 'list_other').flow.items[0]!.text, 'Dentist second list');
   assert.equal(getMinute(active.state, '2026-11-02', 510)!.value!.text, 'Dentist drive');
   assert.equal(map.size, 0); assert.equal(renders, 1);
+  await context.undoCurrentView('redo');
+  assert.equal(browserChecklist(active.state).flow.items[0]!.text, 'Newest draft before Undo');
+  assert.equal(browserChecklist(active.state, 'list_other').flow.items[0]!.text, 'Dentist second list');
+  assert.equal(map.size, 1);
 });
 
 test('an old Undo acknowledgement cannot clear the newly selected account undo or render its view', async () => {
@@ -168,8 +175,10 @@ test('an old Undo acknowledgement cannot clear the newly selected account undo o
     { type: 'edit', id: 'task_dental_main', text: 'Old account edit' }, 1600);
   const active = { state: edited.state, async update(change: any) { this.state = change(this.state); pending.reached(); await pending.promise; } };
   const map = new Map([['main', { store: active, edit: edited.undo }]]); let renders = 0;
-  const context = functions(['undoCurrentView'], { store: active, priorityScope: {}, activeChecklistId: 'main', checklistVisible: true,
-    priorityUndos: map, undo: null, undoEdit, async saveEditor() {}, checklistUI: { async flush() {} }, render() { renders++; }, status() {}, synchronize() {} });
+  const context = functions(['undoCurrentView'], { store: active, priorityScope: {}, activeChecklistId: 'main',
+    currentBrowserView: () => 'priority', historyRunning: false, commandBusy: false, updateHistoryControl(){},
+    priorityUndos: map, priorityRedos: new Map(), undo: null, redo: null, applyBrowserHistoryEdit,
+    async saveEditor() {}, checklistUI: { async flush() {} }, render() { renders++; }, status() {}, synchronize() {} });
   const work = context.undoCurrentView(); await pending.started;
   const replacement = { store: {}, edit: edited.undo }; context.store = replacement.store; context.priorityScope = {}; map.set('main', replacement as any);
   pending.release(); await work; assert.equal(map.get('main'), replacement); assert.equal(renders, 0);
@@ -219,7 +228,8 @@ test('Priority uses the shared header, clipboard binder, scoped Search and setti
   const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const css = fs.readFileSync(new URL('../app.css', import.meta.url), 'utf8');
   const header = /<header>[\s\S]*?<\/header>/.exec(html)![0];
-  for (const id of ['menu', 'previous', 'now', 'next', 'undo', 'search', 'sync']) assert.match(header, new RegExp(`id="${id}"`));
+  for (const id of ['menu', 'previous', 'now', 'next', 'history-control', 'undo', 'redo', 'search']) assert.match(header, new RegExp(`id="${id}"`));
+  assert.doesNotMatch(header, /id="sync"/);
   assert.match(header, /class="priority-binder"/); assert.match(html, /id="view-checklist"><svg/);
   assert.match(html, /id="priority-options"[\s\S]*id="hide-completed"[\s\S]*id="priority-hide-info"/);
   assert.doesNotMatch(css, /view-checklist[^{}]*header[^{}]*\{[^}]*display:none/);

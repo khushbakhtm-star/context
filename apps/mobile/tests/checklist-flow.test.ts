@@ -77,6 +77,25 @@ test('adding or moving an unfinished subtask reopens a completed parent, deletin
   assert.equal(moved.items[0]!.checked, false);
 });
 
+test('deleting an erased row promotes only its direct subtasks without changing their order or content', () => {
+  const source = { ranges: [{ dateKey: '2026-11-02', startMinute: 22, endMinute: 25 }] };
+  const initial = flow(item('a'), item('before', 'a'), item('erase', 'a'),
+    { ...item('first', 'erase'), checked: true, format: { bold: true }, source },
+    item('nested', 'first'), item('second', 'erase'), item('after', 'a'), item('b'));
+  const deleted = applyChecklistChange(initial, { type: 'deleteRow', id: 'erase' });
+  assert.deepEqual(ids(deleted), ['a', 'before', 'first', 'nested', 'second', 'after', 'b']);
+  assert.deepEqual(deleted.items[2], { ...initial.items[3], parentId: 'a' });
+  assert.deepEqual(deleted.items[3], initial.items[4]);
+  assert.equal(deleted.items[4]!.parentId, 'a');
+  assert.equal(initial.items[3]!.parentId, 'erase');
+
+  const promoted = applyChecklistChange(deleted, { type: 'deleteRow', id: 'a' });
+  assert.deepEqual(checklistRows(promoted).map(({ depth }) => depth), [0, 0, 1, 0, 0, 0]);
+  assert.deepEqual(ids(applyChecklistChange(promoted, { type: 'deleteRow', id: 'b' })), ['before', 'first', 'nested', 'second', 'after']);
+  assert.throws(() => applyChecklistChange(deleted, { type: 'deleteRow', id: 'erase' }), /changed or was deleted/);
+  assert.deepEqual(ids(applyChecklistChange(initial, { type: 'delete', id: 'erase' })), ['a', 'before', 'after', 'b']);
+});
+
 test('blank editable rows and boundary moves are stable; adding after a sibling skips its whole subtree', () => {
   const initial = flow(item('a'), item('a1', 'a'), item('b'));
   const added = applyChecklistChange(initial, { type: 'add', item: item('new_row', null, ''), afterId: 'a' });

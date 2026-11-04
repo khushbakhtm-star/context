@@ -379,6 +379,28 @@ export function undoEdit(state: BrowserLedgerState, undo: UndoEdit, now = Date.n
   recordActivityEdits(next, original, map, undo.before.map((document) => document.key), now);
   next.documents = [...map.values()].sort((a, b) => a.key.localeCompare(b.key)); return next;
 }
+
+export function applyBrowserHistoryEdit(state: BrowserLedgerState, edit: UndoEdit, now = Date.now()) {
+  const next = undoEdit(state, edit, now);
+  const documents = new Map(next.documents.map((document) => [document.key, document]));
+  const revisions = (prefix: string, blockId: string) => next.documents
+    .filter(({ key, value }) => key.startsWith(prefix) && value?.blockId === blockId)
+    .map(({ key, revision }) => ({ key, revision }));
+  const inverse: UndoEdit = {
+    before: edit.after,
+    after: edit.before.map(({ key }) => documents.get(key)!),
+    ...(edit.documentGuards?.length ? { documentGuards: edit.documentGuards.map(({ key }) => ({ key,
+      revision: documents.get(key)?.revision ?? null })) } : {}),
+    ...(edit.activityEditGuards?.length ? { activityEditGuards: edit.activityEditGuards.map(({ key }) => ({ key,
+      revision: documents.get(key)!.revision })) } : {}),
+    ...(edit.blockGuards?.length ? { blockGuards: edit.blockGuards.map(({ blockId }) => ({ blockId,
+      members: revisions('minute:', blockId) })) } : {}),
+    ...(edit.projectionGuards?.length ? { projectionGuards: edit.projectionGuards.map(({ blockId }) => ({ blockId,
+      documents: revisions('projection:', blockId) })) } : {}),
+  };
+  return { state: next, inverse };
+}
+
 export function pastedChanges(text: string, day: string, minute: number, selectedEnd?: { day: string; minute: number }): CellChange[] {
   const matrix = parseSpreadsheetCells(text);
   if (matrix.rows === 1 && matrix.columns === 1 && selectedEnd) {

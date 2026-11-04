@@ -9,7 +9,7 @@ const ts = require('typescript');
 // Native views are inert elements; state/effects advance deterministically between events.
 function screen(t, options = {}) {
   const day = '2026-10-25'; let now = 10000; let hook = 0; let dirty = true; let tree; let renders = 0;
-  const slots = []; const effects = []; const timers = new Map(); const animationFrames = new Map(); let timerId = 0;
+  const slots = []; const effects = []; const timers = new Map(); const intervals = new Map(); const animationFrames = new Map(); let timerId = 0;
   const calls = []; const pastePreviews = []; const externalPreviews = []; const spanPreviews = []; const alerts = [];
   const listeners = new Set(); const appStateListeners = new Set(); const keyboardListeners = new Map(); const rows = new Map(); const modules = new Map();
   let systemReads = 0; let systemCopies = 0;
@@ -124,7 +124,8 @@ function screen(t, options = {}) {
       module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
     vm.runInContext(code, vm.createContext({ module, exports: module.exports, console, Date: ClockDate, Intl, Math, Map, Set,
       Promise, Error, Number, JSON, setTimeout: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, at: now + delay }); return id; },
-      clearTimeout: (id) => timers.delete(id), setInterval: () => ++timerId, clearInterval() {},
+      clearTimeout: (id) => timers.delete(id), setInterval: (fn) => { const id = ++timerId; intervals.set(id, fn); return id; },
+      clearInterval: (id) => intervals.delete(id),
       requestAnimationFrame: (callback) => { const id = ++timerId; animationFrames.set(id, callback); return id; },
       cancelAnimationFrame: (id) => animationFrames.delete(id),
       require(name) {
@@ -234,7 +235,7 @@ function screen(t, options = {}) {
     await settle(); target.props.onTouchEnd(event()); target.props.onPress(event()); await settle(); }
   let disposed = false;
   function unmount() { if (disposed) return; disposed = true;
-    for (const slot of slots) slot?.cleanup?.(); timers.clear(); animationFrames.clear(); }
+    for (const slot of slots) slot?.cleanup?.(); timers.clear(); intervals.clear(); animationFrames.clear(); }
   t.after(unmount);
   async function selectThrough(minute, openMenu = true) {
     function handle(node) { if (!node || typeof node !== 'object') return null;
@@ -280,6 +281,7 @@ function screen(t, options = {}) {
     },
     async flushAnimationFrames() { const pending = [...animationFrames.values()]; animationFrames.clear();
       pending.forEach((callback) => callback()); await settle(); },
+    async tickIntervals() { for (const tick of [...intervals.values()]) tick(); await settle(); },
     text: (minute, date = day) => find(cell(minute, date), 'Text')?.props.children,
     async refresh() { const pending = find(tree, 'FlatList').props.refreshControl.props.onRefresh(); await settle(); return pending; },
     async navigate(date) { props.activeDate = date; dirty = true; await settle(); },
@@ -442,6 +444,46 @@ test('releasing the native selection handle leaves a plain range for an adjacent
   assert.equal(h.cell(605).props.accessibilityState.selected, true); assert.equal(h.cell(600).props.accessibilityState.selected, false);
 });
 
+test('range edge scrolling survives release, layout and a queued editor reveal', async (t) => {
+  const h = screen(t);
+  await h.start(); await h.flushAnimationFrames(); await h.tap(600);
+  h.measureViewport(); await h.settle(); await h.flushAnimationFrames();
+  const scrolls = [];
+  h.list().ref.current = {
+    scrollToIndex: (value) => scrolls.push(['index', value.index]),
+    scrollToOffset: (value) => scrolls.push(['offset', value.offset]),
+  };
+  const rowHeight = h.list().getItemLayout(null, 600).length;
+  const initialOffset = (600 + 0.5) * rowHeight - (400 - 146);
+  h.list().onScroll({ nativeEvent: { contentOffset: { x: 0, y: initialOffset } } });
+
+  const input = h.input();
+  input.ref.current = { isFocused: () => true, focus() {} };
+  input.onFocus(); await h.settle(); await h.flushAnimationFrames();
+  assert.deepEqual(scrolls, [['index', 600]], 'focusing a minute input still reveals the editor cell');
+  scrolls.length = 0;
+  h.list().onLayout(); // Queue a valid editor reveal before grabbing the handle.
+  const handle = h.action('Drag to select minutes for Auto fill');
+  const pointer = (y) => ({ nativeEvent: { pageX: 150, pageY: y, touches: [{ pageX: 150, pageY: y }] } });
+  handle.onPanResponderGrant(pointer(400));
+  handle.onPanResponderMove(pointer(643));
+  await h.settle();
+  assert.equal(h.bar('entry').pointerEvents, 'none', 'the entry bar keeps its footprint without receiving touches');
+  assert.equal(h.bar('entry').style[1].opacity, 0);
+  await h.tickIntervals();
+  const afterEdge = scrolls.at(-1);
+  assert.equal(afterEdge[0], 'offset');
+  assert.ok(afterEdge[1] > initialOffset, 'holding the bottom edge deliberately scrolls down');
+  handle.onPanResponderRelease(pointer(643)); await h.settle();
+  h.list().onLayout();
+  await h.keyboard('keyboardDidShow', {});
+  await h.flushAnimationFrames();
+  assert.equal(h.bar('entry').pointerEvents, 'auto');
+  assert.equal(h.cell(606).props.accessibilityState.selected, true);
+  assert.equal(scrolls.at(-1), afterEdge, 'only the deliberate edge scroll sets the final offset');
+  assert.equal(scrolls.some(([method]) => method === 'index'), false, 'layout and the queued input reveal cannot recenter the range anchor');
+});
+
 test('the compact overview also opens actions only on a selected-minute tap', async (t) => {
   const h = screen(t, { props: { zoom: 500 / (1440 * 34) } }); await h.start();
   h.overview().onSelect(h.day, 600); await h.settle(); assert.equal(h.menu(), undefined); assert.ok(h.input());
@@ -538,6 +580,28 @@ test('calendar plus opens the Context minute editor at the current minute and Ca
   assert.equal(await h.details().onSave(span, { text: 'Updated minute' }), true);
   assert.equal(h.spanPreviews[0].input.event, undefined);
   assert.equal(h.calls.filter((call) => call.action === 'span-fill').length, 1);
+});
+
+test('Calendar header Add exposes the minute editor and groups only the current selected range', async (t) => {
+  const actionsRef = { current: null };
+  const h = screen(t, { props: { addActionsRef: actionsRef } }); await h.start();
+  const labels = () => actionsRef.current().map(({ label }) => label).join(', ');
+  assert.equal(labels(), 'Add minute entry');
+  await h.tap(600); await h.selectPlainThrough(604);
+  assert.equal(labels(), 'Add minute entry, Group selected minutes');
+  const staleGroup = actionsRef.current()[1];
+  await h.tap(610);
+  staleGroup.run(); await h.settle();
+  assert.equal(h.action('Activity title for selected minutes'), undefined);
+  await h.selectPlainThrough(613);
+  actionsRef.current()[1].run(); await h.settle();
+  assert.ok(h.action('Activity title for selected minutes'));
+  assert.equal(labels(), '', 'an open editor owns the UI');
+  h.action('Cancel grouping').onPress(); await h.settle();
+  actionsRef.current()[0].run(); await h.settle();
+  const now = new Date('2026-10-25T12:00:00-04:00');
+  assert.equal(h.details().session.span.startMinute, now.getHours() * 60 + now.getMinutes());
+  h.unmount(); assert.equal(actionsRef.current, null);
 });
 
 test('one Categorize tap waits for saving, applies the captured range once and preserves independent minute text', async (t) => {

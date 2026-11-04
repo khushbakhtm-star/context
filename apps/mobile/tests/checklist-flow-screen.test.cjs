@@ -18,7 +18,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 function harness(items, options = {}) {
   let snapshot = { flow: model.readChecklistFlow({ kind: 'checklistFlow', version: 1, items }), revision: 'initial' };
   let revision = 0; let dataVersion = 0; let changed = 0; let failRead = Boolean(options.failRead);
-  let conflicts = options.conflicts ?? []; const commands = []; const timers = new Map(); let nextTimer = 0;
+  let conflicts = options.conflicts ?? []; const commands = []; const timers = new Map(); const frames = new Map(); let nextTimer = 0;
   let pendingDelete;
   const beforeLeaveRef = { current: null };
   const controlsRef = { current: null }; let historyState; let hideCompleted = Boolean(options.hideCompleted);
@@ -107,7 +107,9 @@ function harness(items, options = {}) {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText, { module, exports: module.exports, Error, setInterval: (callback) => { timers.set(++nextTimer, callback); return nextTimer; },
-    clearInterval: (id) => timers.delete(id), requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+    clearInterval: (id) => timers.delete(id),
+    requestAnimationFrame: (callback) => { frames.set(++nextTimer, callback); return nextTimer; },
+    cancelAnimationFrame: (id) => frames.delete(id),
     require(name) {
       if (name === 'react') return react;
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
@@ -125,7 +127,8 @@ function harness(items, options = {}) {
   function render() { let iterations = 0;
     do { assert.ok(iterations++ < 12); active = root; root.cursor = 0; root.dirty = false;
       root.tree = module.exports.ChecklistFlowScreen({ dataVersion, onDataChanged: () => { changed++; }, beforeLeaveRef,
-        listId, hideCompleted, controlsRef, onHistoryChange: receiveHistory, onSwipeList: options.onSwipeList });
+        listId, hideCompleted, controlsRef, addActionsRef: options.addActionsRef,
+        onHistoryChange: receiveHistory, onSwipeList: options.onSwipeList });
       for (const effect of root.effects.splice(0)) effect();
     } while (root.dirty); return root.tree;
   }
@@ -138,7 +141,8 @@ function harness(items, options = {}) {
     async ready() { await settle(); render(); },
     async press(label) { const node = find(label); assert.ok(node, label); assert.equal(Boolean(node.props.disabled), false, label + ' enabled');
       node.props.onPress(); render(); await settle(); render(); },
-    setDraft(text) { find('Task text').props.onChangeText(text); render(); },
+    setDraft(text, label = 'Task text') { find(label).props.onChangeText(text); render(); },
+    async flushFrames() { const pending = [...frames.values()]; frames.clear(); pending.forEach((callback) => callback()); render(); await settle(); render(); },
     remote(items) { snapshot = { flow: model.readChecklistFlow({ kind: 'checklistFlow', version: 1, items }), revision: 'remote' }; },
     async refresh() { dataVersion++; render(); await settle(); render(); },
     async leave() { const result = await beforeLeaveRef.current(); await settle(); render(); return result; },
@@ -273,6 +277,24 @@ test('Priority history stays unavailable during a text draft and becomes availab
   assert.equal(h.snapshot.flow.items[0].text, 'Before'); h.unmount();
 });
 
+test('Priority header Add follows the active task and opens the existing task and subtask editors', async () => {
+  const actionsRef = { current: null };
+  const h = harness([task('first', 'First'), task('second', 'Second')], { addActionsRef: actionsRef }); await h.ready();
+  const labels = () => actionsRef.current().map(({ label }) => label).join(', ');
+  assert.equal(labels(), 'Add task');
+  actionsRef.current()[0].run(); h.render();
+  assert.ok(h.find('Task text')); assert.equal(labels(), '');
+  await h.press('Cancel task edit');
+  await h.press('Actions for First'); assert.equal(labels(), 'Add task, Add subtask');
+  const stale = actionsRef.current()[1];
+  await h.press('Actions for Second'); stale.run(); h.render();
+  assert.equal(h.find('Subtask text'), undefined);
+  actionsRef.current()[1].run(); h.render();
+  h.setDraft('A new child', 'Subtask text'); await h.press('Save task');
+  assert.equal(h.snapshot.flow.items.at(-1).parentId, 'second');
+  h.unmount(); assert.equal(actionsRef.current, null);
+});
+
 test('a retained deletion prompt cannot write after backgrounding or unmounting Priority', async () => {
   for (const lifecycle of ['background', 'unmount']) {
     const h = harness([task('parent', 'Parent'), task('child', 'Child', 'parent')], { holdDelete: true }); await h.ready();
@@ -374,6 +396,49 @@ test('leaving an empty new task cancels only the blank draft', async () => {
   const h = harness([task('note', 'Keep this')]); await h.ready(); await h.press('Add task');
   assert.equal(await h.leave(), true); assert.equal(h.commands.length, 0); assert.equal(h.find('Task text'), undefined);
   assert.equal(h.snapshot.flow.items[0].text, 'Keep this'); h.unmount();
+});
+
+test('erasing a saved task waits for editor blur and removes only that row with Undo and Redo', async () => {
+  const original = [task('root', 'Root'), task('first', 'First', 'root'), task('remove', 'Erase this', 'root'),
+    { ...task('child1', 'Child one', 'remove', true), format: { bold: true } },
+    task('grandchild', 'Grandchild', 'child1', true), task('child2', 'Child two', 'remove'), task('last', 'Last', 'root')];
+  const h = harness(original); await h.ready();
+  await h.press('Edit task: Erase this'); h.setDraft('  \n\t ', 'Subtask text');
+  assert.equal(h.commands.length, 0, 'erasing text while still editing does not write');
+  const text = h.find('Subtask text'), color = h.find('Task text color hex');
+  text.props.onFocus(); text.props.onBlur(); color.props.onFocus();
+  await h.flushFrames(); assert.equal(h.commands.length, 0, 'moving between fields stays in the same editor');
+  color.props.onBlur(); await h.flushFrames();
+  const promoted = original.filter(({ id }) => id !== 'remove').map((item) => item.parentId === 'remove' ? { ...item, parentId: 'root' } : item);
+  assert.deepEqual(h.commands, [{ type: 'deleteRow', id: 'remove' }]);
+  assert.deepEqual(h.snapshot.flow.items, promoted);
+  assert.equal(h.find('Subtask text'), undefined); assert.equal(h.historyState.canUndo, true);
+  await h.refresh(); assert.deepEqual(h.snapshot.flow.items, promoted);
+  assert.equal(await h.history('undo'), true); assert.deepEqual(h.snapshot.flow.items, original);
+  assert.equal(await h.history('redo'), true); assert.deepEqual(h.snapshot.flow.items, promoted);
+  h.unmount();
+});
+
+test('Save and leaving commit an erased existing task, while Cancel and blank new tasks do not write', async () => {
+  for (const completion of ['save', 'leave', 'cancel']) {
+    const h = harness([task('note', 'Original')]); await h.ready(); await h.press('Edit task: Original'); h.setDraft('');
+    if (completion === 'save') await h.press('Save task');
+    if (completion === 'leave') assert.equal(await h.leave(), true);
+    if (completion === 'cancel') {
+      const cancel = h.find('Cancel task edit');
+      cancel.props.onPressIn(); h.find('Task text').props.onBlur(); await h.flushFrames();
+      cancel.props.onPressOut(); await h.press('Cancel task edit');
+    }
+    assert.equal(h.find('Task text'), undefined, completion);
+    assert.equal(h.commands.length, completion === 'cancel' ? 0 : 1, completion);
+    assert.equal(h.snapshot.flow.items.length, completion === 'cancel' ? 1 : 0, completion);
+    await h.press('Add task'); h.setDraft('  '); await h.press('Save task');
+    assert.equal(h.find('Task text'), undefined, 'Save dismisses a blank new draft');
+    await h.press('Add task'); h.find('Task text').props.onBlur(); await h.flushFrames();
+    assert.equal(h.find('Task text'), undefined, 'Blur dismisses a blank new draft');
+    assert.equal(h.commands.length, completion === 'cancel' ? 0 : 1, 'new blank drafts never persist');
+    h.unmount();
+  }
 });
 
 test('Save and Back autosave lock draft controls until their exact acknowledgement', async () => {

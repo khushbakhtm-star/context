@@ -17,9 +17,11 @@ const compiledHook = ts.transpileModule(fs.readFileSync(hookFile, 'utf8'), { com
 } }).outputText;
 
 function mount({ read = async () => '', write = async () => {} } = {}) {
-  const slots = [], effects = [], writes = [], links = [], opened = [];
-  let cursor = 0, stateListener, timeout;
+  const slots = [], effects = [], writes = [], documents = [], links = [], opened = [];
+  let cursor = 0, stateListener, timeout, frame, historyState;
   const beforeLeaveRef = { current: null };
+  const inputRef = { current: null }, addActionsRef = { current: null }, historyControlsRef = { current: null };
+  const onHistoryStateChange = (value) => { historyState = value; };
   const appState = { currentState: 'active', addEventListener(_event, listener) {
     stateListener = listener;
     return { remove() { stateListener = undefined; } };
@@ -50,6 +52,8 @@ function mount({ read = async () => '', write = async () => {} } = {}) {
   const environment = {
     setTimeout(callback) { timeout = callback; return 1; },
     clearTimeout() { timeout = undefined; },
+    requestAnimationFrame(callback) { frame = callback; return 1; },
+    cancelAnimationFrame() { frame = undefined; },
     require(name) {
       if (name === 'react') return react;
       if (name === 'react/jsx-runtime') return { jsx: element, jsxs: element };
@@ -65,8 +69,8 @@ function mount({ read = async () => '', write = async () => {} } = {}) {
         },
       };
       if (name === '../data/canvas') return {
-        async loadCanvasDocument() { return model.createCanvasDocument(await read()); },
-        async saveCanvasDocument(previous, value) { writes.push(value.text); await write(value.text, previous.text); },
+        async loadCanvasDocument() { const value = await read(); return typeof value === 'string' ? model.createCanvasDocument(value) : model.readCanvasDocument(value); },
+        async saveCanvasDocument(previous, value) { writes.push(value.text); documents.push(value); await write(value.text, previous.text); },
       };
       throw new Error(`Unexpected Notepad import ${name}`);
     },
@@ -78,13 +82,18 @@ function mount({ read = async () => '', write = async () => {} } = {}) {
   }
   function render() {
     cursor = 0;
-    const tree = module.exports.NotepadScreen({ beforeLeaveRef, onOpenCanvas: (id) => opened.push(id) });
+    const tree = module.exports.NotepadScreen({ beforeLeaveRef, inputRef, addActionsRef, historyControlsRef,
+      onHistoryStateChange, onOpenCanvas: (id) => opened.push(id) });
     for (const run of effects.splice(0)) run();
     return walk(tree);
   }
   render();
   return {
-    writes, links, opened, input: () => render().find((node) => node.type === 'TextInput')?.props,
+    writes, documents, links, opened, inputRef, addActionsRef, historyControlsRef,
+    input: () => render().find((node) => node.type === 'TextInput')?.props,
+    history() { render(); return historyState; },
+    options() { render(); return addActionsRef.current(); },
+    frame() { const run = frame; frame = undefined; run?.(); },
     addButton: () => render().find((node) => node.type === 'Pressable' && node.props.children?.props.children === 'Add to Canvas')?.props,
     error: () => render().find((node) => node.props.accessibilityRole === 'alert')?.props.children,
     tick() { const run = timeout; timeout = undefined; run?.(); },
@@ -153,4 +162,42 @@ test('Notepad flushes when backgrounded and retains a failed save for retry', as
   assert.equal(h.error(), undefined);
   assert.deepEqual(h.writes, ['Keep this draft', 'Keep this draft', 'Keep this draft']);
   h.unmount();
+});
+
+test('Notepad header Add focuses a new paragraph and preserves a captured Canvas selection after keyboard dismissal', async () => {
+  const initial = model.addLinkedCanvasNode(model.createCanvasDocument('A note'), { start: 2, end: 6 }).document;
+  const h = mount({ read: async () => initial }); await settle();
+  const native = []; h.inputRef.current = { focus: () => native.push('focus'), setSelection: (start, end) => native.push([start, end]) };
+  assert.equal(h.options().map(({ label }) => label).join(), 'Add note');
+  h.input().onSelectionChange({ nativeEvent: { selection: { start: 2, end: 6 } } });
+  h.options()[0].run(); h.frame();
+  assert.equal(h.input().value, 'A note\n\n'); assert.deepEqual(native, ['focus', [8, 8]]);
+  h.input().onSelectionChange({ nativeEvent: { selection: { start: 2, end: 6 } } });
+  const link = h.options().find(({ label }) => label === 'Add selection to Canvas');
+  h.input().onSelectionChange({ nativeEvent: { selection: { start: 6, end: 6 } } });
+  link.run(); await settle();
+  assert.equal(h.documents.at(-1).boards[0].nodes[0].text, 'note', 'appending a paragraph does not extend a linked tail selection');
+  assert.equal(h.links[0].text.slice(h.links[0].range.start, h.links[0].range.end), 'note');
+  assert.equal(h.opened[0], h.links[0].id);
+  h.unmount(); assert.equal(h.addActionsRef.current, null);
+});
+
+test('Notepad header Undo and Redo persist the text and restore a detached Canvas link', async () => {
+  const initial = model.addLinkedCanvasNode(model.createCanvasDocument('A linked phrase'), { start: 2, end: 8 }).document;
+  const h = mount({ read: async () => initial }); await settle();
+  assert.equal(h.history().canUndo, false);
+  h.input().onSelectionChange({ nativeEvent: { selection: { start: 2, end: 8 } } });
+  h.input().onChangeText('A  phrase'); await h.leave();
+  assert.equal(h.documents.at(-1).boards[0].nodes[0].source, undefined);
+  assert.equal(h.history().canUndo, true);
+  h.historyControlsRef.current.undo(); await h.leave();
+  assert.equal(h.input().value, 'A linked phrase');
+  assert.equal(h.documents.at(-1).boards[0].nodes[0].source.start, 2);
+  assert.equal(h.documents.at(-1).boards[0].nodes[0].source.end, 8);
+  assert.equal(h.history().canRedo, true);
+  h.historyControlsRef.current.redo(); await h.leave();
+  assert.equal(h.input().value, 'A  phrase');
+  assert.equal(h.documents.at(-1).boards[0].nodes[0].source, undefined);
+  h.historyControlsRef.current.undo(); h.input().onChangeText('A new note'); assert.equal(h.history().canRedo, false);
+  h.unmount(); assert.equal(h.historyControlsRef.current, null);
 });
