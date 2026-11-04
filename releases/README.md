@@ -1,6 +1,12 @@
 # Installed-app update notices
 
-Current phone availability is **0.1.42/code43** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+Current phone availability is **0.1.43/code44** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+
+## Published 0.1.43 Wear-enabled phone update
+
+The [0.1.43 phone preview](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.43) was published at **2026-11-04T23:24:42Z**. The top-right plus offers add actions for the current view, and manual sync lives in Settings. Swipe left on the history control to undo or right to redo. Canvas adds a rotatable 3D Workplane and family pedigrees with centered names, ordered siblings, and an optional double line for biologically related parents. Calendar keeps its place during range selection. Saving an erased checklist item removes its row and keeps its subtasks.
+
+The [publisher-signed APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.43/context-0.1.43-wear-phone-preview.apk) has SHA-256 `47104ddeca19334f344c359604e1b4316bc8743dcf45759e2e61ef8a900e7e45`. [Application source](https://github.com/khushbakhtm-star/context/commit/0e0a790f8b8ac54c4df551002c30ec5467462b73) and [Android build](https://github.com/khushbakhtm-star/context/actions/runs/41932006901).
 
 ## Published 0.1.42 Wear-enabled phone update
 
