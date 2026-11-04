@@ -1,11 +1,12 @@
 import {
-  activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCanvasSpace, addCanvasStroke, canvasSpacesAtPoint,
-  groupCanvasNodes, removeCanvasEdge, removeCanvasNode, removeCanvasSpace, renameCanvasBoard, searchCanvas,
+  activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCanvasSpace, addCanvasStroke, canvasFamilyPositionIds, canvasSpacesAtPoint,
+  groupCanvasNodes, isCanvasPerson, removeCanvasEdge, removeCanvasFamily, removeCanvasNode, removeCanvasSpace, renameCanvasBoard,
+  saveCanvasFamily, searchCanvas,
   selectCanvasBoard, setCanvasNodeSpaces, updateCanvasBoard, updateCanvasEdge, updateCanvasNode, updateCanvasSpace, updateCanvasViewport,
-  CANVAS_NODE_KINDS, CANVAS_EDGE_KINDS, CANVAS_STROKE_POINT_LIMIT, type CanvasBoard, type CanvasDocument, type CanvasEdgeKind, type CanvasNode,
-  type CanvasNodeKind, type CanvasPoint, type CanvasSpace, type CanvasStroke, type CanvasViewport,
+  CANVAS_NODE_KINDS, CANVAS_EDGE_KINDS, CANVAS_FAMILY_LABEL_LIMIT, CANVAS_STROKE_POINT_LIMIT, type CanvasBoard, type CanvasDocument, type CanvasEdgeKind, type CanvasNode,
+  type CanvasFamilyPersonInput, type CanvasNodeKind, type CanvasPoint, type CanvasSpace, type CanvasStroke, type CanvasViewport,
 } from '../shared/utils/canvas';
-import { arrangeCanvas, routeCanvasEdges, type CanvasLayoutMode } from '../shared/utils/canvas-layout';
+import { arrangeCanvas, canvasPersonSymbol, routeCanvasEdges, routeCanvasFamilies, type CanvasLayoutMode } from '../shared/utils/canvas-layout';
 import { browserCanvas, setBrowserCanvas } from './ledger';
 import type { BrowserStore } from './store';
 
@@ -13,14 +14,15 @@ type Store = Pick<BrowserStore, 'state' | 'update'>;
 type Tool = 'select' | 'draw' | 'space';
 type SpaceBounds = Pick<CanvasSpace, 'x' | 'y' | 'width' | 'height'>;
 type Gesture = { id: number; start: CanvasPoint; viewport: CanvasViewport; dx: number; dy: number; moved: boolean } &
-  ({ kind: 'pan'; captureText: boolean } | { kind: 'card'; node: CanvasNode } | { kind: 'draw'; points: CanvasPoint[] } |
+  ({ kind: 'pan'; captureText: boolean } | { kind: 'card'; node: CanvasNode; fixed: boolean } | { kind: 'draw'; points: CanvasPoint[] } |
     { kind: 'create-space' } | { kind: 'move-space' | 'resize-space'; space: CanvasSpace });
 type SpaceElements = { shape: SVGEllipseElement; title: HTMLButtonElement; resize: HTMLButtonElement };
 type Pinch = { distance: number; center: CanvasPoint; viewport: CanvasViewport };
 type Edit = (document: CanvasDocument) => CanvasDocument;
 const NODE_LABELS: Record<CanvasNodeKind, string> = {
   sticky: 'Sticky note', note: 'Text card', task: 'Task', heading: 'Heading', link: 'Link',
-  image: 'Image', checklist: 'Checklist', 'person-circle': 'Person · Circle', 'person-square': 'Person · Square',
+  image: 'Image', checklist: 'Checklist', 'person-circle': 'Female · Circle', 'person-square': 'Male · Square',
+  'person-diamond': 'Unknown · Diamond',
   partnership: 'Partnership', group: 'Group',
 };
 const EDGE_LABELS: Record<CanvasEdgeKind, string> = {
@@ -52,6 +54,31 @@ function option(value: string, title: string) {
   const result = html('option', title);
   result.value = value;
   return result;
+}
+
+const PERSON_KINDS = ['person-square', 'person-circle', 'person-diamond'] as const;
+type PersonKind = typeof PERSON_KINDS[number];
+
+function familyPersonField(people: CanvasNode[], kind: PersonKind, id?: string) {
+  const field = html('fieldset');
+  field.className = 'canvas-family-person';
+  const legend = html('legend');
+  const person = html('select');
+  person.append(option('', 'New person'), ...people.map((node) => option(node.id, node.text || NODE_LABELS[node.kind])));
+  person.value = id ?? '';
+  const name = html('input');
+  name.placeholder = 'Name';
+  const symbol = html('select');
+  symbol.append(...PERSON_KINDS.map((value) => option(value, NODE_LABELS[value])));
+  symbol.value = kind;
+  const entry = html('div');
+  entry.className = 'canvas-family-entry';
+  entry.hidden = Boolean(person.value);
+  person.onchange = () => { entry.hidden = Boolean(person.value); };
+  entry.append(label('Name', name), label('Symbol', symbol));
+  field.append(legend, label('Person', person), entry);
+  const read = (): CanvasFamilyPersonInput => person.value ? { id: person.value } : { name: name.value, kind: symbol.value as PersonKind };
+  return { field, legend, read };
 }
 function safeUrl(text: string | undefined): string | undefined {
   try {
@@ -110,6 +137,7 @@ export class BrowserCanvas {
   private pointers = new Map<number, CanvasPoint>();
   private lastTap: { id: string; time: number } | undefined;
   private cards = new Map<string, HTMLButtonElement>();
+  private fixedFamilyCards = new Set<string>();
   private spaces = new Map<string, SpaceElements>();
   private inlineDraft: { boardId: string; point: CanvasPoint; input: HTMLTextAreaElement; form: HTMLFormElement } | undefined;
   private inlineSave: Promise<void> | undefined;
@@ -118,6 +146,8 @@ export class BrowserCanvas {
   private newBoard = action('New board', () => this.boardDialog(false));
   private rename = action('Rename board', () => this.boardDialog(true));
   private add = action('Add card', () => this.cardDialog());
+  private addFamily = action('Add family', () => this.familyDialog());
+  private families = action('Families', () => this.familyList());
   private edit = action('Edit card', () => this.cardDialog([...this.selected][0]));
   private selectTool = action('Select', () => this.changeTool('select'));
   private drawTool = action('Draw', () => this.changeTool('draw'));
@@ -176,7 +206,7 @@ export class BrowserCanvas {
     this.selectTool.title = 'Select and move cards. Click empty space to write.';
     this.drawTool.title = 'Draw freehand on the board.';
     this.spaceTool.title = 'Click or drag to create an overlapping space.';
-    toolbar.append(this.boards, this.newBoard, this.rename, tools, this.add, this.edit, this.editSpace, this.multi, this.group, this.connect,
+    toolbar.append(this.boards, this.newBoard, this.rename, tools, this.add, this.addFamily, this.families, this.edit, this.editSpace, this.multi, this.group, this.connect,
       this.layout, this.arrange, this.search, this.undoButton, this.redoButton, this.zoomOut, this.zoomIn, this.fit);
     this.status.className = 'canvas-status';
     this.status.setAttribute('role', 'status');
@@ -397,13 +427,15 @@ export class BrowserCanvas {
       space.resize.hidden = !selected;
     }
     const disabled = !board || Boolean(this.pending);
-    for (const control of [this.boards, this.newBoard, this.rename, this.add, this.multi, this.layout, this.search,
+    for (const control of [this.boards, this.newBoard, this.rename, this.add, this.addFamily, this.multi, this.layout, this.search,
       this.selectTool, this.drawTool, this.spaceTool, this.zoomOut, this.zoomIn, this.fit]) control.disabled = disabled;
     this.surface.dataset.tool = this.tool;
     this.selectTool.setAttribute('aria-pressed', String(this.tool === 'select'));
     this.drawTool.setAttribute('aria-pressed', String(this.tool === 'draw'));
     this.spaceTool.setAttribute('aria-pressed', String(this.tool === 'space'));
     this.edit.disabled = disabled || this.selected.size !== 1;
+    this.families.hidden = !board?.families?.length;
+    this.families.disabled = disabled;
     this.editSpace.hidden = !this.selectedSpace;
     this.editSpace.disabled = disabled;
     this.group.disabled = disabled || this.selected.size < 2;
@@ -419,6 +451,7 @@ export class BrowserCanvas {
     this.boards.replaceChildren(...(this.document?.boards.map((item) => option(item.id, item.title)) ?? []));
     if (board) this.boards.value = board.id;
     this.cards.clear();
+    this.fixedFamilyCards.clear();
     this.spaces.clear();
     this.spaceShapes.replaceChildren();
     this.spaceControls.replaceChildren();
@@ -430,6 +463,7 @@ export class BrowserCanvas {
       for (const space of board.spaces ?? []) this.renderSpace(space);
       for (const stroke of board.strokes ?? []) this.renderStroke(stroke);
       const byId = new Map(board.nodes.map((node) => [node.id, node]));
+      this.fixedFamilyCards = canvasFamilyPositionIds(board);
       const hierarchy = new Map(board.nodes.map((node) => [node.id, groupAncestors(node, byId)]));
       const visible = board.nodes.filter((node) => !hierarchy.get(node.id)!.some((group) => group.collapsed));
       const visibleIds = new Set(visible.map((node) => node.id));
@@ -439,7 +473,8 @@ export class BrowserCanvas {
         hierarchy.get(a.id)!.length - hierarchy.get(b.id)!.length);
       for (const node of ordered) {
         const card = action('', () => {});
-        card.className = 'canvas-card canvas-' + node.kind;
+        const person = isCanvasPerson(node.kind);
+        card.className = 'canvas-card canvas-' + node.kind + (person ? ' canvas-person' : '');
         card.dataset.node = node.id;
         card.style.left = node.x + 'px';
         card.style.top = node.y + 'px';
@@ -448,6 +483,10 @@ export class BrowserCanvas {
         if (node.color) card.style.setProperty('--card-color', node.color);
         if (node.collapsed) card.classList.add('is-collapsed');
         if (node.checked) card.classList.add('is-checked');
+        if (this.fixedFamilyCards.has(node.id)) {
+          card.classList.add('canvas-family-fixed');
+          card.title = 'Position follows the pedigree layout.';
+        }
         card.setAttribute('aria-label', NODE_LABELS[node.kind] + ': ' + (node.text || node.url || 'Untitled'));
         if (node.source) {
           const linked = html('small', 'Linked to Notepad');
@@ -462,6 +501,18 @@ export class BrowserCanvas {
           image.referrerPolicy = 'no-referrer';
           image.alt = '';
           card.append(image);
+        }
+        if (person) {
+          const geometry = canvasPersonSymbol(node);
+          const symbol = html('span');
+          symbol.className = 'canvas-person-symbol';
+          symbol.setAttribute('aria-hidden', 'true');
+          symbol.style.left = (geometry.x - node.x) + 'px';
+          symbol.style.top = (geometry.y - node.y) + 'px';
+          symbol.style.width = geometry.width + 'px';
+          symbol.style.height = geometry.height + 'px';
+          card.style.setProperty('--canvas-person-label-top', (geometry.y - node.y + geometry.height + 4) + 'px');
+          card.append(symbol);
         }
         const content = html('span', node.text || node.url || NODE_LABELS[node.kind]);
         content.className = 'canvas-card-text';
@@ -495,6 +546,25 @@ export class BrowserCanvas {
     marker.append(arrow);
     defs.append(marker);
     this.wires.append(defs);
+    const byId = new Map(board.nodes.map((node) => [node.id, node]));
+    const people = board.nodes.filter((node) => isCanvasPerson(node.kind) && !groupAncestors(node, byId).some((group) => group.collapsed));
+    for (const { familyId, points, label: caption } of routeCanvasFamilies({ ...board, nodes: people })) {
+      const wire = document.createElementNS(SVG, 'polyline');
+      wire.setAttribute('points', points.map(({ x, y }) => x + ',' + y).join(' '));
+      wire.setAttribute('class', 'canvas-wire canvas-family-wire');
+      wire.dataset.family = familyId;
+      wire.onclick = () => this.familyDialog(familyId);
+      this.wires.append(wire);
+      if (caption) {
+        const note = document.createElementNS(SVG, 'text');
+        note.textContent = caption.text;
+        note.setAttribute('x', String(caption.x));
+        note.setAttribute('y', String(caption.y));
+        note.setAttribute('text-anchor', 'middle');
+        note.setAttribute('class', 'canvas-wire-label');
+        this.wires.append(note);
+      }
+    }
     for (const { edge, points } of routeCanvasEdges(board)) {
       if (points.length < 2) continue;
       const wire = document.createElementNS(SVG, 'polyline');
@@ -694,7 +764,7 @@ export class BrowserCanvas {
         const spaceId = target.closest<HTMLElement | SVGElement>('[data-space]')?.dataset.space;
         const node = board?.nodes.find((item) => item.id === nodeId);
         const space = board?.spaces?.find((item) => item.id === spaceId);
-        if (node) this.gesture = { ...base, kind: 'card', node };
+        if (node) this.gesture = { ...base, kind: 'card', node, fixed: this.fixedFamilyCards.has(node.id) };
         else if (space) this.gesture = { ...base, kind: target.closest('.canvas-space-resize') ? 'resize-space' : 'move-space', space };
         else this.gesture = { ...base, kind: 'pan', captureText: true };
       }
@@ -722,7 +792,9 @@ export class BrowserCanvas {
       gesture.moved = true;
       gesture.dx = dx / gesture.viewport.zoom;
       gesture.dy = dy / gesture.viewport.zoom;
-      if (gesture.kind === 'card') this.previewCardMove(gesture);
+      if (gesture.kind === 'card') {
+        if (!gesture.fixed) this.previewCardMove(gesture);
+      }
       else if (gesture.kind === 'create-space') {
         this.positionSpace(placedSpace(gesture), { shape: this.spacePreview });
         if (!this.spacePreview.parentNode) this.spaceShapes.append(this.spacePreview);
@@ -775,6 +847,7 @@ export class BrowserCanvas {
       }
       if (gesture.kind !== 'card') return;
       if (!gesture.moved) { this.pickCard(gesture.node.id, event.shiftKey, event.timeStamp); return; }
+      if (gesture.fixed) return;
       const node = gesture.node;
       this.selectedSpace = undefined;
       this.selected = new Set([node.id]);
@@ -874,7 +947,7 @@ export class BrowserCanvas {
     }
     // Keep attached lines aligned while dragging manageable boards. The final
     // save reroutes the complete graph regardless of its size.
-    if (board.edges.length <= 100) {
+    if (board.edges.length + (board.families?.length ?? 0) <= 100) {
       const preview = { ...board, nodes: board.nodes.map((node) => moving.has(node.id)
         ? { ...node, x: node.x + gesture.dx, y: node.y + gesture.dy } : node) };
       this.wires.replaceChildren();
@@ -961,6 +1034,100 @@ export class BrowserCanvas {
     name.select();
   }
 
+  private familyList() {
+    const board = this.board();
+    if (!board) return;
+    const names = new Map(board.nodes.map((node) => [node.id, node.text || NODE_LABELS[node.kind]]));
+    const list = html('div');
+    list.className = 'canvas-results';
+    for (const family of board.families ?? []) {
+      const title = family.parents.map((id) => names.get(id)).join(' + ');
+      list.append(action(title, () => this.familyDialog(family.id)));
+    }
+    this.openDialog('Families', [list], [action('Add family', () => this.familyDialog())]);
+  }
+
+  private familyDialog(id?: string) {
+    const board = this.board();
+    if (!board) return;
+    const family = board.families?.find((item) => item.id === id);
+    if (id && !family) return;
+    const people = board.nodes.filter((node) => isCanvasPerson(node.kind));
+    const selected = [...this.selected].filter((nodeId) => people.some((node) => node.id === nodeId));
+    const [firstId, secondId] = family?.parents ?? selected;
+    const first = familyPersonField(people, 'person-square', firstId);
+    const second = familyPersonField(people, 'person-circle', secondId);
+    first.legend.textContent = 'Parent 1';
+    second.legend.textContent = 'Parent 2';
+    const parents = html('div');
+    parents.className = 'canvas-family-parents';
+    parents.append(first.field, second.field);
+    const related = html('input');
+    related.type = 'checkbox';
+    related.checked = Boolean(family?.consanguineous);
+    const relatedLabel = label('Parents are biologically related (double line)', related);
+    relatedLabel.className = 'canvas-family-related';
+    const relationship = html('input');
+    relationship.maxLength = CANVAS_FAMILY_LABEL_LIMIT;
+    relationship.value = family?.relationshipLabel ?? '';
+    relationship.placeholder = 'For example, second cousins';
+    const relationshipField = label('Relationship note (optional)', relationship);
+
+    const rows = html('div');
+    rows.className = 'canvas-family-children';
+    const children: ReturnType<typeof familyPersonField>[] = [];
+    function renderChildren() {
+      for (const [index, child] of children.entries()) {
+        child.legend.textContent = 'Child ' + (index + 1);
+        const up = action('↑', () => shiftChild(index, -1));
+        up.setAttribute('aria-label', `Move child ${index + 1} earlier`);
+        up.disabled = index === 0;
+        const down = action('↓', () => shiftChild(index, 1));
+        down.setAttribute('aria-label', `Move child ${index + 1} later`);
+        down.disabled = index === children.length - 1;
+        const remove = action('Remove', () => {
+          children.splice(index, 1);
+          child.field.remove();
+          renderChildren();
+        });
+        remove.setAttribute('aria-label', `Remove child ${index + 1}`);
+        const actions = html('div');
+        actions.className = 'canvas-family-order';
+        actions.append(up, down, remove);
+        child.field.querySelector('.canvas-family-order')?.remove();
+        child.field.append(actions);
+        rows.append(child.field);
+      }
+    }
+    function shiftChild(index: number, delta: number) {
+      const next = index + delta;
+      if (next < 0 || next >= children.length) return;
+      const [child] = children.splice(index, 1);
+      children.splice(next, 0, child!);
+      renderChildren();
+      child!.field.querySelector<HTMLSelectElement>('select')?.focus();
+    }
+    for (const child of family?.children ?? []) children.push(familyPersonField(people, 'person-diamond', child));
+    renderChildren();
+    const addChild = action('Add child', () => {
+      const child = familyPersonField(people, 'person-diamond');
+      children.push(child);
+      renderChildren();
+      child.field.querySelector<HTMLInputElement>('input')?.focus();
+    });
+    const save = action('Save family', () => this.saveDialog((doc) => {
+      const result = saveCanvasFamily(doc, { id, parents: [first.read(), second.read()],
+        children: children.map((child) => child.read()), consanguineous: related.checked,
+        relationshipLabel: relationship.value }, board.id);
+      return updateCanvasBoard(result.document, board.id, (current) => arrangeCanvas(current, 'pedigree'));
+    }, () => { this.layout.value = 'pedigree'; this.fitBoard(); }));
+    const actions = [save];
+    if (id) actions.push(action('Remove family link', () => this.saveDialog((doc) => removeCanvasFamily(doc, id, board.id))));
+    const note = html('p', 'Add children from oldest to youngest. This order stays left to right in the chart.');
+    note.className = 'canvas-family-note';
+    this.openDialog(id ? 'Edit family' : 'Add family', [parents, relatedLabel, relationshipField, note, rows, addChild], actions);
+  }
+
   private cardDialog(id?: string) {
     const board = this.board();
     if (!board) return;
@@ -1041,9 +1208,14 @@ export class BrowserCanvas {
         const spaceIds = spaceOptions.filter(({ checkbox }) => checkbox.checked).map(({ space }) => space.id);
         if (nodeId) {
           const updated = updateCanvasNode(doc, nodeId, fields, board.id);
-          return spaceIds.length !== (existing?.spaceIds?.length ?? 0) ||
+          const withSpaces = spaceIds.length !== (existing?.spaceIds?.length ?? 0) ||
             spaceIds.some((spaceId) => !existing?.spaceIds?.includes(spaceId))
             ? setCanvasNodeSpaces(updated, nodeId, spaceIds, board.id) : updated;
+          const symbolOrSizeChanged = existing && isCanvasPerson(existing.kind) && (chosen !== existing.kind ||
+            (fields.width !== undefined && fields.width !== existing.width) ||
+            (fields.height !== undefined && fields.height !== existing.height));
+          return this.fixedFamilyCards.has(nodeId) && symbolOrSizeChanged
+            ? updateCanvasBoard(withSpaces, board.id, (current) => arrangeCanvas(current, 'pedigree')) : withSpaces;
         }
         const added = addCanvasNode(doc, fields, board.id);
         nodeId = added.nodeId;

@@ -233,7 +233,18 @@ body.view-checklist main { touch-action: pan-y pinch-zoom; }
 .canvas-sticky { --card-color: #d5b970; }
 .canvas-heading { font-size: 19px; font-weight: 650; }
 .canvas-card img { max-width: 100%; max-height: 75%; object-fit: contain; }
-.canvas-person-circle { border-radius: 50%; justify-content: center; align-items: center; text-align: center; }
+.canvas-person { padding: 0; border: 0; background: transparent; box-shadow: none; text-align: center; }
+.canvas-person .canvas-card-text {
+  position: absolute; top: var(--canvas-person-label-top); left: 0; right: 0; padding: 0 4px; font-size: 14px;
+}
+.canvas-person-symbol { position: absolute; box-sizing: border-box; }
+.canvas-person-symbol::before {
+  position: absolute; inset: 0; content: ''; background: var(--surface); border: 2px solid var(--card-color,var(--ink));
+}
+.canvas-person-circle .canvas-person-symbol::before { border-radius: 50%; }
+.canvas-person-diamond .canvas-person-symbol::before { inset: 14.645%; transform: rotate(45deg); }
+.canvas-family-wire { color: var(--ink); }
+.canvas-family-fixed,.canvas-family-fixed:active { cursor: pointer; }
 .canvas-partnership { border-radius: 18px; }
 .canvas-group { background: color-mix(in srgb,var(--card-color,var(--line)) 30%,transparent); border-style: dashed; box-shadow: none; font-weight: 600; }
 .canvas-group.is-collapsed { background: var(--surface); }
@@ -250,12 +261,22 @@ body.view-checklist main { touch-action: pan-y pinch-zoom; }
 .canvas-dialog-error:empty { display: none; }
 .canvas-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .canvas-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.canvas-family-parents { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.canvas-family-entry[hidden] { display: none; }
+.canvas-family-person { min-width: 0; padding: 8px; margin: 0; border: 1px solid var(--line); border-radius: 6px; }
+.canvas-family-person select,.canvas-family-person input { width: 100%; }
+.canvas-family-person legend { padding: 0 5px; font-size: 13px; }
+.canvas-family-order { display: flex; flex-wrap: wrap; gap: 5px; }
+.canvas-family-related { display: flex; flex-direction: row-reverse; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 10px; }
+.canvas-family-note { color: var(--muted); font-size: 13px; }
+.canvas-family-children { display: grid; gap: 8px; max-height: 42vh; overflow: auto; margin-bottom: 8px; }
 .canvas-memberships { max-height: 160px; margin: 0 0 14px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
 .canvas-memberships label { display: flex; align-items: center; gap: 7px; margin: 8px 0; }
 .canvas-space-swatch { width: 10px; height: 10px; flex: 0 0 10px; border-radius: 50%; }
 .canvas-results { display: grid; gap: 6px; max-height: 36vh; overflow: auto; }
 .canvas-results button { text-align: left; overflow-wrap: anywhere; }
 @media(max-width:600px) { .canvas-toolbar { flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; } }
+@media(max-width:480px) { .canvas-family-parents { grid-template-columns: 1fr; } }
 #priority-settings-error:empty{display:none}
 #priority-settings-error{font-size:13px;color:var(--muted);line-height:1.5}
 .search-result{display:block;text-align:left;width:100%;padding:12px 0;border:0;border-bottom:1px solid var(--line);background:transparent;border-radius:0}

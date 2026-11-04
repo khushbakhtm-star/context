@@ -1,10 +1,11 @@
 export const CANVAS_NODE_KINDS = [
   'note', 'sticky', 'task', 'heading', 'link', 'image', 'checklist',
-  'person-circle', 'person-square', 'partnership', 'group',
+  'person-circle', 'person-square', 'person-diamond', 'partnership', 'group',
 ] as const;
 export const CANVAS_EDGE_KINDS = ['related', 'dependency', 'partnership', 'parent'] as const;
 
 export type CanvasNodeKind = typeof CANVAS_NODE_KINDS[number];
+export type CanvasPersonKind = Extract<CanvasNodeKind, `person-${string}`>;
 export type CanvasEdgeKind = typeof CANVAS_EDGE_KINDS[number];
 export type CanvasPoint = { x: number; y: number };
 export type CanvasViewport = CanvasPoint & { zoom: number };
@@ -33,6 +34,14 @@ export type CanvasEdge = {
   directed: boolean;
   label?: string;
 };
+export type CanvasFamily = {
+  id: string;
+  parents: [string, string];
+  /** The editor records biological children from oldest to youngest. */
+  children: string[];
+  consanguineous?: boolean;
+  relationshipLabel?: string;
+};
 /** An elliptical region positioned by the top left of its bounding box. */
 export type CanvasSpace = CanvasPoint & {
   id: string;
@@ -50,12 +59,21 @@ export type CanvasBoard = {
   viewport: CanvasViewport;
   spaces?: CanvasSpace[];
   strokes?: CanvasStroke[];
+  families?: CanvasFamily[];
 };
 export type CanvasDocument = { version: 1; text: string; activeBoardId: string; boards: CanvasBoard[] };
 export type CanvasNodeInput = Pick<CanvasNode, 'kind'> &
   Partial<Omit<CanvasNode, 'id' | 'kind' | 'source'>>;
 export type CanvasNodePatch = Partial<Omit<CanvasNode, 'id' | 'source' | 'groupId'>> & { groupId?: string | null };
 export type CanvasEdgeInput = Pick<CanvasEdge, 'from' | 'to'> & Partial<Omit<CanvasEdge, 'id' | 'from' | 'to'>>;
+export type CanvasFamilyPersonInput = { id: string } | { name: string; kind: CanvasPersonKind };
+export type CanvasFamilyInput = {
+  id?: string;
+  parents: [CanvasFamilyPersonInput, CanvasFamilyPersonInput];
+  children: readonly CanvasFamilyPersonInput[];
+  consanguineous?: boolean;
+  relationshipLabel?: string;
+};
 export type CanvasSpaceInput = Pick<CanvasSpace, 'title'> & Partial<Omit<CanvasSpace, 'id' | 'title'>>;
 export type CanvasSpacePatch = Partial<Omit<CanvasSpace, 'id' | 'color'>> & { color?: string | null };
 export type CanvasStrokeInput = { points: readonly CanvasPoint[]; color?: string; width?: number };
@@ -68,6 +86,7 @@ const INVALID = 'The saved Canvas document is invalid. Your data has not been re
 export const CANVAS_WORLD_LIMIT = 1_000_000_000;
 const SPACE_LIMIT = 500;
 const STROKE_LIMIT = 2_000;
+export const CANVAS_FAMILY_LABEL_LIMIT = 120;
 export const CANVAS_STROKE_POINT_LIMIT = 2_000;
 let sequence = 0;
 
@@ -96,6 +115,10 @@ function hexColor(value: unknown): value is string {
 
 function oneOf<T extends string>(values: readonly T[], value: unknown): value is T {
   return typeof value === 'string' && values.some((item) => item === value);
+}
+
+export function isCanvasPerson(kind: CanvasNodeKind): kind is CanvasPersonKind {
+  return kind === 'person-circle' || kind === 'person-square' || kind === 'person-diamond';
 }
 
 function validRange(range: CanvasTextRange, text: string) {
@@ -164,6 +187,68 @@ function readEdge(value: unknown, nodes: Map<string, CanvasNode>): CanvasEdge {
     ...(edge.label !== undefined ? { label: edge.label } : {}) };
 }
 
+function readFamily(value: unknown): CanvasFamily {
+  const family = record(value);
+  if (!identifier(family.id) || !Array.isArray(family.parents) || family.parents.length !== 2 ||
+    !identifier(family.parents[0]) || !identifier(family.parents[1]) || !Array.isArray(family.children) ||
+    (family.consanguineous !== undefined && typeof family.consanguineous !== 'boolean') ||
+    (family.relationshipLabel !== undefined && (typeof family.relationshipLabel !== 'string' ||
+      family.relationshipLabel.length > CANVAS_FAMILY_LABEL_LIMIT || !family.relationshipLabel.trim()))) invalid();
+  const children = Array.from(family.children, (id: unknown) => identifier(id) ? id : invalid());
+  return { id: family.id, parents: [family.parents[0], family.parents[1]], children,
+    ...(family.consanguineous !== undefined ? { consanguineous: family.consanguineous } : {}),
+    ...(family.relationshipLabel !== undefined ? { relationshipLabel: family.relationshipLabel.trim() } : {}) };
+}
+
+function validateFamilies(families: readonly CanvasFamily[], nodes: Map<string, CanvasNode>,
+  fail: (message: string) => never) {
+  const pairs = new Set<string>();
+  const parentCounts = new Map<string, number>();
+  const childrenByParent = new Map<string, string[]>();
+  const people = new Set<string>();
+  function requirePerson(id: string) {
+    const node = nodes.get(id);
+    if (!node || !isCanvasPerson(node.kind)) fail('Choose a person from this Canvas board.');
+    people.add(id);
+  }
+  for (const family of families) {
+    const [first, second] = family.parents;
+    if (first === second) fail('Choose two different parents.');
+    requirePerson(first);
+    requirePerson(second);
+    const pair = first < second ? first + ':' + second : second + ':' + first;
+    if (pairs.has(pair)) fail('These two people already have a family together.');
+    pairs.add(pair);
+    const siblings = new Set<string>();
+    for (const child of family.children) {
+      requirePerson(child);
+      if (child === first || child === second) fail('A person cannot be their own parent.');
+      if (siblings.has(child)) fail('Each child can appear only once in a family.');
+      if (parentCounts.has(child)) fail('A child can belong to only one biological parent family.');
+      siblings.add(child);
+      parentCounts.set(child, 2);
+    }
+    if (!family.children.length) continue;
+    for (const parent of family.parents) {
+      const children = childrenByParent.get(parent);
+      if (children) {
+        for (const child of family.children) children.push(child);
+      } else childrenByParent.set(parent, [...family.children]);
+    }
+  }
+  // Traverse only parent → child links. Related partners are permitted as long
+  // as the directed ancestry stays acyclic.
+  const ready = [...people].filter((id) => !parentCounts.has(id));
+  for (let index = 0; index < ready.length; index++) {
+    for (const child of childrenByParent.get(ready[index]!) ?? []) {
+      const remaining = parentCounts.get(child)! - 1;
+      parentCounts.set(child, remaining);
+      if (remaining === 0) ready.push(child);
+    }
+  }
+  if (ready.length !== people.size) fail('This family would create a cycle in the ancestry.');
+}
+
 function readSpace(value: unknown): CanvasSpace {
   const space = record(value);
   if (!identifier(space.id) || typeof space.title !== 'string' || !space.title.trim() ||
@@ -186,7 +271,7 @@ function readStroke(value: unknown): CanvasStroke {
   return { id: stroke.id, width: stroke.width, points, ...(stroke.color !== undefined ? { color: stroke.color } : {}) };
 }
 
-function readBoardItems<T extends { id: string }>(value: unknown, limit: number, read: (item: unknown) => T) {
+function readBoardItems<T extends { id: string }>(value: unknown, read: (item: unknown) => T, limit = Infinity) {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length > limit) invalid();
   const items = Array.from(value, read);
@@ -225,14 +310,16 @@ function readBoard(value: unknown, text: string): CanvasBoard {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   if (nodesById.size !== nodes.length) invalid();
   validateMembership(nodesById);
-  const spaces = readBoardItems(board.spaces, SPACE_LIMIT, readSpace);
-  const strokes = readBoardItems(board.strokes, STROKE_LIMIT, readStroke);
+  const spaces = readBoardItems(board.spaces, readSpace, SPACE_LIMIT);
+  const strokes = readBoardItems(board.strokes, readStroke, STROKE_LIMIT);
+  const families = readBoardItems(board.families, readFamily);
+  if (families) validateFamilies(families, nodesById, invalid);
   const spaceIds = new Set(spaces?.map((space) => space.id));
   if (nodes.some((node) => node.spaceIds?.some((id) => !spaceIds.has(id)))) invalid();
   const edges = board.edges.map((edge) => readEdge(edge, nodesById));
   if (new Set(edges.map((edge) => edge.id)).size !== edges.length) invalid();
   return { id: board.id, title: board.title, nodes, edges, viewport: readViewport(board.viewport),
-    ...(spaces ? { spaces } : {}), ...(strokes ? { strokes } : {}) };
+    ...(spaces ? { spaces } : {}), ...(strokes ? { strokes } : {}), ...(families ? { families } : {}) };
 }
 
 function emptyBoard(id: string, title: string): CanvasBoard {
@@ -272,6 +359,23 @@ function requireBoard(document: CanvasDocument, boardId: string) {
 
 export function activeCanvasBoard(document: CanvasDocument): CanvasBoard {
   return requireBoard(document, document.activeBoardId);
+}
+
+/** Generated pedigree layout owns these people and the groups that move them. */
+export function canvasFamilyPositionIds(board: CanvasBoard): Set<string> {
+  const locked = new Set<string>();
+  for (const family of board.families ?? []) {
+    for (const id of family.parents) locked.add(id);
+    for (const id of family.children) locked.add(id);
+  }
+  if (locked.size) {
+    const parents = new Map(board.nodes.map((node) => [node.id, node.groupId]));
+    for (const id of locked) {
+      const parent = parents.get(id);
+      if (parent) locked.add(parent);
+    }
+  }
+  return locked;
 }
 
 function boardTitle(title: string) {
@@ -500,7 +604,7 @@ export function setCanvasNodeSpaces(document: CanvasDocument, nodeId: string, sp
     return space;
   });
   const point = center(node);
-  const target = spaces.every((space) => containsSpacePoint(space, point))
+  const target = spaces.every((space) => containsSpacePoint(space, point)) || canvasFamilyPositionIds(board).has(nodeId)
     ? undefined : canvasSpaceOverlapPoint(spaces, board, nodeId);
   const x = target && target.x - node.width / 2, y = target && target.y - node.height / 2;
   if (!target && ids.length === (node.spaceIds?.length ?? 0) &&
@@ -590,7 +694,7 @@ export function setCanvasText(document: CanvasDocument, text: string, previousSe
 function nodeDimensions(kind: CanvasNodeKind) {
   if (kind === 'group') return { width: 240, height: 160 };
   if (kind === 'partnership') return { width: 120, height: 64 };
-  if (kind === 'person-circle' || kind === 'person-square') return { width: 120, height: 76 };
+  if (isCanvasPerson(kind)) return { width: 120, height: 76 };
   return { width: 180, height: 92 };
 }
 
@@ -621,6 +725,52 @@ export function addLinkedCanvasNode(document: CanvasDocument, range: CanvasTextR
   return addNode(document, { kind: 'sticky', text: document.text.slice(range.start, range.end), ...position }, boardId, range);
 }
 
+/** Creates the requested people and the relationship in one document update.
+ * Editing a family keeps the same ID and leaves its former members on the board. */
+export function saveCanvasFamily(document: CanvasDocument, input: CanvasFamilyInput,
+  boardId = document.activeBoardId): { document: CanvasDocument; familyId: string } {
+  const board = requireBoard(document, boardId);
+  const families = board.families ?? [];
+  const previous = families.find(({ id }) => id === input.id);
+  if (input.id !== undefined && !previous) throw new Error('This Canvas family is unavailable.');
+  if (input.parents.length !== 2) throw new Error('Choose two parents.');
+  if (input.consanguineous !== undefined && typeof input.consanguineous !== 'boolean') invalid();
+  const relationshipLabel = input.relationshipLabel === undefined ? previous?.relationshipLabel : input.relationshipLabel.trim();
+  if (relationshipLabel && relationshipLabel.length > CANVAS_FAMILY_LABEL_LIMIT) {
+    throw new Error('Keep the relationship label to ' + CANVAS_FAMILY_LABEL_LIMIT + ' characters.');
+  }
+
+  let draft = document;
+  function resolve(person: CanvasFamilyPersonInput): string {
+    if ('id' in person) return person.id;
+    const name = person.name.trim();
+    if (!name) throw new Error('Give each new person a name.');
+    if (!isCanvasPerson(person.kind)) throw new Error('Choose a person symbol.');
+    const result = addCanvasNode(draft, { kind: person.kind, text: name }, boardId);
+    draft = result.document;
+    return result.nodeId;
+  }
+  const parents: CanvasFamily['parents'] = [resolve(input.parents[0]), resolve(input.parents[1])];
+  const children = Array.from(input.children, resolve);
+  const familyId = previous?.id ?? nextId('family', (id) => families.some((family) => family.id === id));
+  const consanguineous = input.consanguineous ?? previous?.consanguineous;
+  const family: CanvasFamily = { id: familyId, parents, children,
+    ...(consanguineous !== undefined ? { consanguineous } : {}), ...(relationshipLabel ? { relationshipLabel } : {}) };
+  const next = previous ? families.map((item) => item === previous ? family : item) : [...families, family];
+  return { familyId, document: updateCanvasBoard(draft, boardId, (current) => {
+    validateFamilies(next, new Map(current.nodes.map((node) => [node.id, node])), (message) => { throw new Error(message); });
+    return { ...current, families: next };
+  }) };
+}
+
+export function removeCanvasFamily(document: CanvasDocument, familyId: string,
+  boardId = document.activeBoardId): CanvasDocument {
+  return updateCanvasBoard(document, boardId, (board) => {
+    if (!board.families?.some(({ id }) => id === familyId)) return board;
+    return { ...board, families: board.families.filter(({ id }) => id !== familyId) };
+  });
+}
+
 function descendantsOf(nodes: CanvasNode[], root: string) {
   const children = new Map<string, string[]>();
   for (const node of nodes) {
@@ -641,6 +791,10 @@ export function updateCanvasNode(document: CanvasDocument, nodeId: string, patch
   const board = requireBoard(document, boardId);
   const old = board.nodes.find((node) => node.id === nodeId);
   if (!old) throw new Error('This Canvas card is unavailable.');
+  if (isCanvasPerson(old.kind) && patch.kind && !isCanvasPerson(patch.kind) &&
+    board.families?.some((family) => family.parents.includes(nodeId) || family.children.includes(nodeId))) {
+    throw new Error('Remove this person from their families before changing the card type.');
+  }
   const descendants = old.kind === 'group' ? descendantsOf(board.nodes, nodeId) : new Set([nodeId]);
   const groupId = patch.groupId === null ? undefined : patch.groupId ?? old.groupId;
   if (groupId && (descendants.has(groupId) || !board.nodes.some((node) => node.id === groupId && node.kind === 'group'))) {
@@ -682,9 +836,15 @@ export function removeCanvasNode(document: CanvasDocument, nodeId: string,
   return updateCanvasBoard(document, boardId, (board) => {
     const removed = board.nodes.find((node) => node.id === nodeId);
     if (!removed) return board;
+    const families = isCanvasPerson(removed.kind) ? board.families?.flatMap((family) => {
+      if (family.parents.includes(nodeId)) return [];
+      return [family.children.includes(nodeId)
+        ? { ...family, children: family.children.filter((child) => child !== nodeId) } : family];
+    }) : undefined;
     return { ...board, edges: board.edges.filter((edge) => edge.from !== nodeId && edge.to !== nodeId),
       nodes: board.nodes.filter((node) => node.id !== nodeId).map((node) =>
-        node.groupId === nodeId ? { ...node, groupId: removed.groupId } : node) };
+        node.groupId === nodeId ? { ...node, groupId: removed.groupId } : node),
+      ...(families ? { families } : {}) };
   });
 }
 
