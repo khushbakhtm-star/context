@@ -1122,6 +1122,8 @@ test('an untouched blank closes with one bottom check without recording a minute
   assert.equal(h.bar('format'), undefined); assert.equal(h.bar('entry'), undefined); assert.equal(h.rows.size, 0);
   assert.equal(h.cell(600).props.accessibilityState.selected, true);
   await h.tap(600); assert.ok(h.menu(), 'a selected-cell tap opens actions after saving');
+  assert.equal(h.input().value, '', 'reopening the popup also reopens the selected minute input');
+  assert.equal(h.input().autoFocus, undefined);
   h.menu().onClose(); await h.settle(); await h.edit(600); assert.ok(h.bar('entry'), 'explicit Edit keeps keyboard entry accessible');
 });
 
@@ -1133,9 +1135,17 @@ test('popup format callbacks apply to the captured range while Group uses the ex
     assert.equal(typeof h.menu()[key], 'function', `${key} is available to the popup formatting panel`);
   assert.equal(h.menu().onEvent, undefined, 'unlinked notes do not advertise source event details');
   assert.equal(typeof h.menu().onAutoFill, 'function'); assert.equal(typeof h.menu().onGroup, 'function');
-  assert.equal(h.bar('entry'), undefined, 'the popup does not compete with the bottom input');
+  assert.ok(h.bar('entry'), 'the popup and minute text box are visible together');
+  assert.equal(h.input().value, 'Read Codex');
+  h.input().onFocus();
+  h.input().onChangeText('Read and annotate Codex');
+  await h.settle();
+  assert.ok(h.menu(), 'typing leaves the cell actions available');
+  assert.equal(h.cell(602).props.accessibilityState.selected, true);
   h.menu().onToggleBold(); await h.settle();
   assert.deepEqual(JSON.parse(JSON.stringify(h.calls.at(-1))), { action: 'format', dateKey: h.day, startMinute: 600, endMinute: 602, patch: { bold: true } });
+  assert.equal(h.rows.get(`${h.day}:600`).text, 'Read and annotate Codex');
+  assert.equal(h.rows.get(`${h.day}:601`), undefined, 'typing edits only the starting minute of the range');
   h.menu().onToggleItalic(); await h.settle(); assert.equal(h.calls.at(-1).patch.italic, true);
   h.menu().onToggleUnderline(); await h.settle(); assert.equal(h.calls.at(-1).patch.underline, true);
   h.menu().onTextColor('#123456'); await h.settle();

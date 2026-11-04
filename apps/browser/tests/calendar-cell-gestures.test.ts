@@ -31,17 +31,21 @@ function fixture() {
   const timers = new Map<number, () => void>(); let timer = 0; const menu = { hidden: true }; const entries: any[] = [], actions: any[] = [], moves: any[] = [];
   const input = { value: 'Saved cell note', blur() {} }; const context: any = {
     grid, main, document: doc, Element: Cell, editor: null, entryInput: input, entryBarMode: null, commandBusy: false, checklistVisible: false, store: { state: { documents: [] } },
-    selected: { day, minute: 0 }, rangeEnd: null, selectionActivated: false, selectedTapTimer: undefined, movePreview: [], moveDraft: null, clock12: false,
+    selected: { day, minute: 0 }, rangeEnd: null, selectionActivated: false, selectedTapTimer: undefined, cellMenuRequest: 0,
+    movePreview: [], moveDraft: null, clock12: false,
     bindMouseSelection, dates: () => [day], minuteKey: (date: string, minute: number) => `minute:${date}:${minute}`,
     element: () => menu, cell: (_date: string, minute: number) => cells[minute], updateBars() {}, report(error: Error) { throw error; },
     beginEdit(date: string, minute: number) { entries.push({ date, minute }); context.editor = { input, original: input.value, saving: null }; context.entryBarMode = 'entry'; },
-    async showCellMenu(x: number, y: number) { actions.push([x, y]); menu.hidden = false; },
+    async showCellMenu(x: number, y: number) {
+      actions.push([x, y]); context.beginEdit(context.selected.day, context.selected.minute); menu.hidden = false;
+    },
     setTimeout(callback: () => void) { timers.set(++timer, callback); return timer; }, clearTimeout(id: number) { timers.delete(id); },
     selectionCells() { const end = context.rangeEnd ?? context.selected; return Array.from({ length: Math.abs(end.minute - context.selected.minute) + 1 }, (_, i) => ({ day, minute: Math.min(end.minute, context.selected.minute) + i })); },
     selectionStamp: () => JSON.stringify([context.selected, context.rangeEnd]), cellTransferFingerprint: () => 'unchanged_fingerprint', previewMove() {}, completeMove(point: any, copy: boolean) { moves.push({ point, copy }); return Promise.resolve(); },
   };
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8'); const parsed = ts.createSourceFile('app.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const functions = ['select', 'paintSelection', 'selectedRegion', 'cancelSelectedTap', 'tapCalendarCell', 'closeCellMenu', 'clearMovePreview'];
+  const functions = ['select', 'paintSelection', 'selectedRegion', 'cancelSelectedTap', 'tapCalendarCell',
+    'closeCellMenu', 'closeCleanEditor', 'cellMenuDraftPending', 'clearMovePreview'];
   const nodes = parsed.statements.filter((node: any) => functions.includes(node.name?.text) || ts.isVariableStatement(node) && node.declarationList.declarations.some((item) => item.name.getText(parsed) === 'mouseSelection'));
   vm.runInNewContext(ts.transpileModule(nodes.map((node) => node.getText(parsed)).join('\n') + '\nthis.controller = mouseSelection;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   const pointer = (minute: number, overrides: Record<string, any> = {}) => ({ target: cells[minute], pointerId: 1, button: 0, buttons: 1, isPrimary: true, pointerType: 'mouse', clientX: 100, clientY: 66 + minute * 32, shiftKey: false, altKey: false, preventDefault() {}, ...overrides });
@@ -50,14 +54,26 @@ function fixture() {
     finishTimers() { for (const callback of [...timers.values()]) callback(); timers.clear(); } };
 }
 
-test('the actual calendar binding first selects with only bottom entry, then a quick selected-cell tap opens its actions', () => {
+test('the actual calendar binding first selects with bottom entry, then a quick selected-cell tap requests both surfaces', () => {
   const h = fixture(); h.down(0); h.up(0); h.finishTimers(); assert.equal(h.entries.length, 1); assert.equal(h.context.entryBarMode, 'entry'); assert.equal(h.actions.length, 0);
-  h.down(0); h.up(0); h.finishTimers(); assert.equal(h.actions.length, 1); assert.equal(h.context.entryBarMode, null); assert.equal(h.moves.length, 0); h.controller.destroy();
+  h.down(0); h.up(0); h.finishTimers(); assert.equal(h.actions.length, 1); assert.equal(h.context.entryBarMode, 'entry'); assert.equal(h.moves.length, 0); h.controller.destroy();
 });
 
 test('range selection release stays unobstructed, and a later tap inside the selection opens actions without collapsing it', () => {
   const h = fixture(); h.down(0); h.move(2); h.up(2); h.finishTimers(); assert.equal(h.actions.length, 0); assert.equal(h.context.rangeEnd.minute, 2); assert.equal(h.entries.length, 0);
-  h.down(1); h.up(1); h.finishTimers(); assert.equal(h.actions.length, 1); assert.equal(h.context.selected.minute, 0); assert.equal(h.context.rangeEnd.minute, 2); h.controller.destroy();
+  h.down(1); h.up(1); h.finishTimers(); assert.equal(h.actions.length, 1); assert.equal(h.context.selected.minute, 0); assert.equal(h.context.rangeEnd.minute, 2);
+  assert.equal(h.entries.at(-1).minute, 0); h.controller.destroy();
+});
+
+test('finishing a range drag leaves an existing unsaved composer visible', () => {
+  const h = fixture(); h.down(0); h.up(0);
+  h.context.entryInput.value = 'A note still in progress';
+  h.down(0); h.move(2); h.up(2); h.finishTimers();
+  assert.equal(h.context.entryBarMode, 'entry');
+  assert.equal(h.context.editor.input.value, 'A note still in progress');
+  assert.equal(h.context.rangeEnd.minute, 2);
+  assert.equal(h.actions.length, 0);
+  h.controller.destroy();
 });
 
 test('a short drag from the selected cell body moves it without showing the menu or waiting for a long hold', () => {

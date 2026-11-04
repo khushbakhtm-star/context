@@ -617,7 +617,7 @@ export function TodayScreen({
     const end = rangeEndRef.current ?? selection?.minuteIndex ?? -1;
     if (selection?.dateKey === day && minute >= Math.min(start, end) && minute <= Math.max(start, end)) {
       if (!await prepareOptions(selection) || groupDragRef.current) return;
-      setGroupComposerOpen(false); setCellMenuOpen(true); setToolbarError(null);
+      setGroupComposerOpen(false); setEntryBarMode('entry'); setCellMenuOpen(true); setToolbarError(null);
       Keyboard.dismiss(); positionFillHandle();
     } else await openInlineMinute(day, minute, false, undefined, true, true);
   }
@@ -1505,7 +1505,7 @@ export function TodayScreen({
 
   async function finishInlineEditing() {
     const selection = inlineSelectionRef.current;
-    if (!selection || inlineDoneBusyRef.current) return;
+    if (!selection || inlineDoneBusyRef.current || menuCommandPendingRef.current) return;
     const token = selectionTokenRef.current;
     const generation = navigationGenerationRef.current;
     inlineDoneBusyRef.current = true;
@@ -1824,7 +1824,7 @@ export function TodayScreen({
   }
 
   async function dispatchCellCommand(action: (scope: CellCommandSelection) => Promise<unknown>) {
-    if (menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
+    if (inlineDoneBusyRef.current || menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
     const selection = inlineSelectionRef.current;
     const range = parsedRange();
     if (!selection || !range) return;
@@ -2638,7 +2638,7 @@ export function TodayScreen({
           left: cellMenuLeft,
           transform: [{ translateX: cellMenuOriginX }, { translateY: Animated.add(cellMenuOriginY, cellMenuTop) }],
         }]}>
-          <CellActionMenu busy={menuCommandPending || toolBusy || spreadsheetState.busy}
+          <CellActionMenu busy={entrySaving || menuCommandPending || toolBusy || spreadsheetState.busy}
             onCategorize={() => void dispatchCellCommand(openCategories)}
             onTask={() => void dispatchCellCommand(captureChecklistTask)}
             onEdit={() => void dispatchCellCommand(openSpanDetails)}
@@ -2671,11 +2671,12 @@ export function TodayScreen({
         </View>
       ) : null}
 
-      {inlineSelection && entryBarMode === 'entry' && !categoryPicker && !cellMenuOpen && !groupDragging && !rangeDragging && !groupComposerOpen && !editor ? (
+      {inlineSelection && entryBarMode === 'entry' && !categoryPicker && !groupDragging && !rangeDragging && !groupComposerOpen && !editor ? (
         <View accessibilityLabel="Minute text entry bar" style={styles.bottomBar}>
           <View style={styles.entryBarRow}>
             <TextInput ref={inlineInputRef} value={selectedDraft?.text ?? inlineSelection.entry?.text ?? ''}
-              editable={!spreadsheetState.busy && !toolBusy} contextMenuHidden={false} rejectResponderTermination={false}
+              editable={!spreadsheetState.busy && !toolBusy && !menuCommandPending}
+              contextMenuHidden={false} rejectResponderTermination={false}
               multiline scrollEnabled maxLength={50000} returnKeyType="done" submitBehavior="submit"
               accessibilityLabel={dayLabels.get(inlineSelection.dateKey) + ', ' + timeLabel(inlineSelection.minuteIndex) + ', minute text'}
               accessibilityHint="Tap to type. Hold text to select part of it and use Cut, Copy or Paste. The checkmark saves and closes the keyboard."
@@ -2684,7 +2685,7 @@ export function TodayScreen({
               onChangeText={(text) => {
                 const { dateKey: day, minuteIndex: minute } = inlineSelection;
                 const active = inlineSelectionRef.current;
-                if (active?.dateKey !== day || active.minuteIndex !== minute) return;
+                if (menuCommandPendingRef.current || active?.dateKey !== day || active.minuteIndex !== minute) return;
                 markLocalChange([day]);
                 const current = inlineMinuteDrafts.get(day, minute);
                 editInlineMinute(day, minute, { text, keepColor: text.trim() ? false : current?.keepColor ?? false });
@@ -2703,11 +2704,11 @@ export function TodayScreen({
               onSubmitEditing={() => void finishInlineEditing()}
               style={styles.bottomTextInput} />
             <Pressable accessibilityRole="button" accessibilityLabel="Edit selected minutes and time range"
-              disabled={entrySaving || toolBusy || spreadsheetState.busy} onPress={() => void dispatchCellCommand(openSpanDetails)} style={styles.bottomTool}>
+              disabled={entrySaving || menuCommandPending || toolBusy || spreadsheetState.busy} onPress={() => void dispatchCellCommand(openSpanDetails)} style={styles.bottomTool}>
               <CellActionIcon name="edit" color={colors.ink} />
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Add minute or highlighted text to checklist"
-              disabled={entrySaving || toolBusy || spreadsheetState.busy}
+              disabled={entrySaving || menuCommandPending || toolBusy || spreadsheetState.busy}
               onPress={() => {
                 const point = inlineSelectionRef.current;
                 const raw = point ? inlineMinuteDrafts.get(point.dateKey, point.minuteIndex)?.text ?? point.entry?.text ?? '' : '';
@@ -2718,12 +2719,12 @@ export function TodayScreen({
               <CellActionIcon name="task" color={colors.ink} />
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Categorize minute"
-              disabled={entrySaving || toolBusy || spreadsheetState.busy}
+              disabled={entrySaving || menuCommandPending || toolBusy || spreadsheetState.busy}
               onPress={() => void dispatchCellCommand(openCategories)} style={styles.bottomTool}>
               <CellActionIcon name="categorize" color={colors.ink} />
             </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Save minute text and close keyboard"
-              disabled={entrySaving || toolBusy || spreadsheetState.busy}
+              disabled={entrySaving || menuCommandPending || toolBusy || spreadsheetState.busy}
               onPress={() => void finishInlineEditing()} style={styles.bottomTool}>
               <Text allowFontScaling={false} style={styles.bottomCheck}>✓</Text>
             </Pressable>

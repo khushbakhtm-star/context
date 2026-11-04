@@ -9,10 +9,10 @@ const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.Scrip
 const controller = source.statements.find((node) => node.name?.text === 'AppController');
 const names = ['CalendarTransitionCancelled', 'awaitCalendarTransition'];
 const declarations = names.map((name) => source.statements.find((node) => node.name?.text === name).getText(source));
-for (const name of ['transitionFromCalendar', 'switchPriorityList', 'openSearch', 'createPriorityList', 'renamePriorityList']) {
+for (const name of ['transitionFromCalendar', 'returnToCalendar', 'switchPriorityList', 'openSearch', 'createPriorityList', 'renamePriorityList']) {
   const declaration = controller.body.statements.find((node) => node.name?.text === name); assert.ok(declaration, name); declarations.push(declaration.getText(source));
 }
-const code = ts.transpileModule(declarations.join('\n') + '\nexport { switchPriorityList, openSearch, createPriorityList, renamePriorityList };', {
+const code = ts.transpileModule(declarations.join('\n') + '\nexport { returnToCalendar, switchPriorityList, openSearch, createPriorityList, renamePriorityList };', {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -24,6 +24,8 @@ function harness(options = {}) {
     priorityCatalog: { revision: 'fresh-catalog', lists: [{ id: 'main', name: 'Priority' }, { id: 'family', name: 'Family' }] }, selectedPriorityListId: options.listId ?? 'main',
     tabRef: { current: options.tab ?? 'checklist' }, priorityMutationSequence: { current: 0 }, priorityCatalogRequest: { current: 0 },
     overviewDates: ['2026-11-01', '2026-11-03'],
+    primaryTabRef: { current: 'checklist' },
+    calendarFocusRef: { current: { dateKey: '2026-11-03', minuteIndex: 778 } }, focusSequence: { current: 6 },
     viewChangingRef: { current: false }, controllerMountedRef: { current: true }, lifecycleEpochRef: { current: 0 },
     transitionSequenceRef: { current: 0 }, activeTransitionRef: { current: null }, AppState: { currentState: 'active' },
     checklistBeforeLeaveRef: { current: async () => { events.push('save-task'); return options.saveGate ? options.saveGate : options.save !== false; } },
@@ -33,6 +35,7 @@ function harness(options = {}) {
     setSetting: async (key, value) => events.push(['setting', key, value]),
     setSelectedPriorityListId: (value) => events.push(['list', value]), setPriorityFocusTaskId: (value) => events.push(['focus', value]),
     setSearchScope: (value) => scopeValues.push(value), setTab: (value) => events.push(['tab', value]),
+    setFocusRequest: (value) => events.push(['calendar-focus', value]),
     createChecklistList: async (name, expected) => { events.push(['create', name, expected]); if (options.mutationGate) await options.mutationGate;
       return { revision: 'own-create', listId: 'new-list', lists: [{ id: 'new-list', name }] }; },
     renameChecklistList: async (id, name, expected) => { events.push(['rename', id, name, expected]); if (options.mutationGate) await options.mutationGate;
@@ -43,6 +46,23 @@ function harness(options = {}) {
   vm.runInNewContext(code, context);
   return { ...module.exports, context, events, scopeValues };
 }
+
+test('returning from Priority waits for the task save and restores the saved calendar focus', async () => {
+  let release;
+  const h = harness({ saveGate: new Promise((resolve) => { release = resolve; }) });
+  const transition = h.returnToCalendar();
+  await settle();
+  assert.equal(h.events.includes('save-task'), true);
+  assert.equal(h.events.some((event) => event[0] === 'calendar-focus' || event[0] === 'tab'), false);
+  release(true);
+  await transition;
+  assert.equal(JSON.stringify(h.events.find((event) => event[0] === 'calendar-focus')[1]),
+    JSON.stringify({ dateKey: '2026-11-03', minuteIndex: 778, token: 7, openEditor: false }));
+  assert.deepEqual(h.events.find((event) => event[0] === 'tab'), ['tab', 'today']);
+  const blocked = harness({ save: false });
+  await blocked.returnToCalendar();
+  assert.equal(blocked.events.some((event) => event[0] === 'calendar-focus' || event[0] === 'tab'), false);
+});
 
 test('native checklist arrows wait for the original task draft, publish one selection, and clamp at list ends', async () => {
   let release; const saveGate = new Promise((resolve) => release = resolve); const h = harness({ saveGate });

@@ -14,6 +14,7 @@ import { minuteCellPresentation, MINUTE_NOTE_STYLE, MINUTE_TIME_STYLE } from './
 import { effectiveTextColor, noteColorOnFill } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
+import { bindViewSwipe } from './view-swipe';
 import { applySyncGlyphState } from './sync-glyph';
 import { ChecklistFlowUI } from './checklist-flow-ui';
 import { browserChecklist, browserChecklistVersions, changeBrowserChecklist, replaceBrowserChecklistList,
@@ -35,6 +36,7 @@ let calendars: { id: string; title: string; color: string; primary: boolean }[] 
 let selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; let undo: UndoEdit | null = null;
 let selectionActivated = false;
 let selectedTapTimer: ReturnType<typeof setTimeout> | undefined;
+let cellMenuRequest = 0;
 let editor: { input: HTMLTextAreaElement; day: string; minute: number; revision: string | undefined; original: string; saving: Promise<void> | null } | null = null;
 let entryBarMode: 'entry' | 'format' | null = null;
 let commandBusy = false;
@@ -90,7 +92,7 @@ const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
   },
   source: (source) => { const point = source.ranges[0]; if (!point) return; setChecklistVisible(false);
     day = point.dateKey; selected = { day, minute: point.startMinute }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); },
-  back: () => { setChecklistVisible(false); render(); main.scrollTop = calendarScrollBeforeChecklist; },
+  back: restoreCalendarView,
   error: report,
 });
 function setChecklistVisible(visible: boolean) {
@@ -99,6 +101,11 @@ function setChecklistVisible(visible: boolean) {
   document.body.classList.toggle('view-checklist', visible);
   if (visible) { entryBarMode = null; updateBars(); main.scrollTop = 0; checklistUI.refresh(true); }
   updateHeader();
+}
+function restoreCalendarView() {
+  setChecklistVisible(false);
+  main.scrollTop = calendarScrollBeforeChecklist;
+  render();
 }
 async function showChecklistView() {
   const active = store; const scope = priorityScope;
@@ -250,6 +257,7 @@ function updateBars() {
   element('entry-bar').hidden = !store || entryBarMode !== 'entry'; element('cell-format-menu').hidden = !store || entryBarMode !== 'format';
   document.body.classList.toggle('has-entry-bar', Boolean(store && entryBarMode === 'entry'));
   composerViewport.refresh();
+  updateCellMenuAvailability();
   for (const id of ['save-text', 'format-bold', 'format-italic', 'format-underline', 'format-text-color', 'format-fill', 'finish-format']) element<HTMLButtonElement>(id).disabled = commandBusy;
   if (!store || entryBarMode !== 'format') return;
   const map = new Map(store.state.documents.map((doc) => [doc.key, doc])); let coords;
@@ -266,6 +274,7 @@ function mirrorDraft() {
   if (!editor) return; const node = cell(editor.day, editor.minute);
   if (node) { setCellNote(node, editor.input.value); node.dataset.defaultFill = String(node.dataset.defaultFillEligible === 'true' && Boolean(editor.input.value.trim()));
     node.classList.remove('planned'); node.setAttribute('aria-label', `${editor.day}, ${minuteLabel(editor.minute, clock12)}, ${editor.input.value}`); }
+  updateCellMenuAvailability();
 }
 function setCellNote(node: HTMLElement, text: string) {
   const note = node.querySelector<HTMLElement>('.cell-note');
@@ -306,7 +315,26 @@ function changeGroupRange() {
     groupSelectionRevision = eventSelectionFingerprint(store.state, groupCoordinates); element('group-range-error').textContent = ''; }
   catch (error) { groupRangeConfirmed = false; element('group-range-error').textContent = error instanceof Error ? error.message : 'Choose a valid activity range.'; }
 }
-function closeCellMenu() { element('cell-menu').hidden = true; }
+function cellMenuDraftPending() {
+  return Boolean(editor && (editor.saving || editor.input.value !== editor.original));
+}
+function updateCellMenuAvailability() {
+  const menu = element('cell-menu');
+  if (menu.hidden) return;
+  const disabled = commandBusy || cellMenuDraftPending();
+  for (const button of menu.querySelectorAll<HTMLButtonElement>('button')) button.disabled = disabled;
+}
+function closeCellMenu() {
+  cellMenuRequest++;
+  element('cell-menu').hidden = true;
+}
+function closeCleanEditor() {
+  if (!editor || cellMenuDraftPending()) return;
+  editor = null;
+  entryBarMode = null;
+  entryInput.blur();
+  updateBars();
+}
 function showCellFormatting(x: number, y: number) {
   if (!store) return; entryBarMode = 'format'; updateBars(); const popup = element('cell-format-menu');
   popup.style.left = `${Math.max(6, Math.min(x, innerWidth - popup.offsetWidth - 6))}px`;
@@ -328,16 +356,35 @@ async function writeSelectedText(changes: CellChange[], source?: { stamp: string
   if (result!.undo.after.length) undo = result!.undo; render(); void synchronize(false);
 }
 async function showCellMenu(x: number, y: number) {
-  if (!store || commandBusy) return; const stamp = selectionStamp(); await saveEditor(); if (!store || selectionStamp() !== stamp) return;
-  entryBarMode = null; updateBars(); const menu = element('cell-menu'); menu.replaceChildren();
-  const active = store; const coords = selectionCells(); const documents = new Map(store.state.documents.map((doc) => [doc.key, doc]));
+  if (!store || commandBusy || checklistVisible) return;
+  const active = store, stamp = selectionStamp(), anchor = selected;
+  closeCellMenu();
+  const request = cellMenuRequest;
+  if (editor && (editor.day !== anchor.day || editor.minute !== anchor.minute || editor.saving)) await saveEditor();
+  if (request !== cellMenuRequest || store !== active || selectionStamp() !== stamp || commandBusy || checklistVisible) return;
+  const menu = element('cell-menu'); menu.replaceChildren();
+  const coords = selectionCells(); const documents = new Map(active.state.documents.map((doc) => [doc.key, doc]));
   const menuRevision = eventSelectionFingerprint(active.state, coords), origin = coords[0]!;
   const clipboardRevision = cellTransferFingerprint(active.state, coords, origin);
   const textValues = coords.map((point) => String(documents.get(minuteKey(point.day, point.minute))?.value?.text ?? ''));
   const source = { stamp, expected: new Map(coords.map((point) => [minuteKey(point.day, point.minute), documents.get(minuteKey(point.day, point.minute))?.revision])) };
   const copiedText = new Map(coords.map((point, index) => [minuteKey(point.day, point.minute), textValues[index]!]));
   const distinct = [...new Set(textValues.filter((text) => text.length))];
-  const add = (label: string, action: () => Promise<void>) => { const button = document.createElement('button'); button.textContent = label; button.setAttribute('role', 'menuitem'); button.onclick = () => { void cellCommand(action); }; menu.append(button); return button; };
+  const add = (label: string, action: () => Promise<void>) => {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.setAttribute('role', 'menuitem');
+    button.onclick = () => {
+      if (menu.hidden || request !== cellMenuRequest || store !== active || selectionStamp() !== stamp ||
+          commandBusy || cellMenuDraftPending()) return;
+      // Clipboard access must start inside this click. An untouched editor
+      // can close immediately, while a draft stays available for Save.
+      closeCleanEditor();
+      void cellCommand(action);
+    };
+    menu.append(button);
+    return button;
+  };
   const copy = async (cut = false) => { const first = Math.min(...coords.map((point) => point.minute)), last = Math.max(...coords.map((point) => point.minute)); const days = [...new Set(coords.map((point) => point.day))];
     const matrix = Array.from({ length: last - first + 1 }, (_, r) => days.map((date) => copiedText.get(minuteKey(date, first + r)) ?? ''));
     if (!navigator.clipboard?.writeText) throw new Error('Use the browser’s Copy command or keyboard shortcut.'); const text = serializeSpreadsheetCells(matrix);
@@ -373,7 +420,14 @@ async function showCellMenu(x: number, y: number) {
   if (sameDay && resettable) add('Reset cells', () => menuMutation((state, points) => resetCellsSelection(state, points)));
   const formatButton = add('Format cells', async () => { showCellFormatting(x, y); }); formatButton.setAttribute('aria-label', 'Format cells'); formatButton.title = 'Format cells';
   const mark = document.createElement('span'); mark.className = 'format-trigger'; mark.textContent = 'A'; mark.setAttribute('aria-hidden', 'true'); formatButton.replaceChildren(mark);
-  menu.hidden = false; menu.style.left = `${Math.max(6, Math.min(x, innerWidth - menu.offsetWidth - 6))}px`; menu.style.top = `${Math.max(6, Math.min(y, innerHeight - menu.offsetHeight - 6))}px`;
+  beginEdit(anchor.day, anchor.minute, undefined, false, true);
+  menu.hidden = false;
+  updateCellMenuAvailability();
+  const mainTop = main.getBoundingClientRect().top;
+  const composerTop = `calc(var(--context-main-height, ${innerHeight - mainTop}px) + ${mainTop}px)`;
+  menu.style.maxHeight = `max(0px, calc(${composerTop} - 12px))`;
+  menu.style.left = `${Math.max(6, Math.min(x, innerWidth - menu.offsetWidth - 6))}px`;
+  menu.style.top = `clamp(6px, ${y}px, calc(${composerTop} - ${menu.offsetHeight + 6}px))`;
 }
 async function mutateSelection(make: (state: BrowserStore['state'], coords: { day: string; minute: number }[]) => { state: BrowserStore['state']; undo: UndoEdit }, coordinates = selectionCells()) {
   if (!store) throw new Error('Unlock your ledger first.'); const active = store; const stamp = selectionStamp(); const coords = coordinates;
@@ -443,7 +497,11 @@ function updateHeader() {
   element<HTMLButtonElement>('unlock').disabled = !connection?.isAuthorized() || busy;
   applySyncGlyphState(element('sync'), busy, element('status').dataset.error === 'true');
   element('now').dataset.view = checklistVisible ? 'priority' : 'calendar';
-  element('now').setAttribute('aria-label', checklistVisible ? 'Priority. Double-click or hold to choose a view.' : 'Go to the current minute. Double-click for views; hold to choose dates.');
+  element('now').dataset.calendarSpan = String(days);
+  const calendarView = days === 7 ? 'Week' : days === 3 ? '3 days' : 'Day';
+  element('now').setAttribute('aria-label', checklistVisible
+    ? 'Priority. Tap to choose a view. Swipe or use the arrow keys to return to your calendar.'
+    : `${calendarView}. Tap for the current minute, double-click for views or hold to choose dates. Swipe or use the arrow keys for Priority.`);
   let listNavigationDisabled = false;
   if (checklistVisible) {
     try { const lists = store ? browserChecklist(store.state).lists : [];
@@ -456,6 +514,7 @@ function updateHeader() {
   if (checklistVisible) checklistUI.refresh();
 }
 function select(target: { day: string; minute: number }, extend = false) {
+  closeCellMenu();
   selectionActivated = true;
   if (!extend) { selected = target; rangeEnd = null; } else rangeEnd = target;
   paintSelection(); updateBars();
@@ -596,17 +655,33 @@ async function saveEditor() {
       status('Saved on this browser. Synchronization will send this note to your phone.');
       return getMinute(result!.state, current.day, current.minute)?.revision;
     });
-    if (complete && editor === current) { editor = null; entryBarMode = null; entryInput.blur(); render(); }
+    if (complete && editor === current) {
+      if (element('cell-menu').hidden === false) closeCellMenu();
+      editor = null; entryBarMode = null; entryInput.blur(); render();
+    }
   })().catch((error) => { current.saving = null; if (editor === current) current.input.focus(); throw error; });
   return current.saving;
 }
-function beginEdit(date: string, minute: number, initial?: string, focus = false) {
+function beginEdit(date: string, minute: number, initial?: string, focus = false, keepSelection = false) {
   if (!store) { options.showModal(); return; }
-  if (editor) { if (editor.day === date && editor.minute === minute) { if (initial !== undefined) { editor.input.value = initial; mirrorDraft(); } if (focus || initial !== undefined) editor.input.focus(); return; } void saveEditor().then(() => beginEdit(date, minute, initial, focus)).catch(report); return; }
-  const node = cell(date, minute); if (!node) return; select({ day: date, minute }); const document = getMinute(store.state, date, minute); const original = String(document?.value?.text ?? '');
+  if (editor) {
+    if (editor.day === date && editor.minute === minute) {
+      if (entryBarMode !== 'entry') { entryBarMode = 'entry'; updateBars(); }
+      if (initial !== undefined) { editor.input.value = initial; mirrorDraft(); }
+      if (focus || initial !== undefined) editor.input.focus();
+      return;
+    }
+    void saveEditor().then(() => beginEdit(date, minute, initial, focus, keepSelection)).catch(report);
+    return;
+  }
+  const node = cell(date, minute);
+  if (!keepSelection && !node) return;
+  if (!keepSelection) select({ day: date, minute });
+  const document = getMinute(store.state, date, minute); const original = String(document?.value?.text ?? '');
   entryInput.value = initial ?? original; entryInput.setAttribute('aria-label', `Minute text for ${minuteLabel(minute, clock12)} on ${date}`);
-  editor = { input: entryInput, day: date, minute, revision: document?.revision, original, saving: null }; entryBarMode = 'entry'; updateBars(); mirrorDraft();
-  node.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  editor = { input: entryInput, day: date, minute, revision: document?.revision, original, saving: null }; entryBarMode = 'entry'; updateBars();
+  if (!keepSelection || initial !== undefined) mirrorDraft();
+  if (!keepSelection) node?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   if (focus || initial !== undefined) { entryInput.focus(); entryInput.setSelectionRange(entryInput.value.length, entryInput.value.length); }
 }
 function cellKey(event: KeyboardEvent, date: string, minute: number) {
@@ -615,7 +690,7 @@ function cellKey(event: KeyboardEvent, date: string, minute: number) {
   else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); beginEdit(date, minute, event.key); }
   else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
     event.preventDefault(); const target = { day: dateKey(addDays(date, event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0)), minute: Math.max(0, Math.min(1439, minute + (event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0))) };
-    select(target, event.shiftKey); if (!cell(target.day, target.minute)) scrollMinute(target.minute); cell(target.day, target.minute)?.focus();
+    closeCleanEditor(); select(target, event.shiftKey); if (!cell(target.day, target.minute)) scrollMinute(target.minute); cell(target.day, target.minute)?.focus();
   }
 }
 async function paste(text: string) {
@@ -707,11 +782,25 @@ element('sync').onpointerup = element('sync').onpointerleave = () => { if (syncH
 element('sync').oncontextmenu = (event) => { event.preventDefault(); syncHeld = true; info('Synchronization', lastStatus); };
 element('sync').onkeydown = (event) => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); info('Synchronization', lastStatus); } };
 element('sync').onclick = () => { if (syncHeld) { syncHeld = false; return; } if (!store) { options.showModal(); return; } void synchronize(); };
-let binderSingle: ReturnType<typeof setTimeout> | undefined; let binderHold: ReturnType<typeof setTimeout> | undefined; let held = false;
-element('now').onpointerdown = () => { held = false; binderHold = setTimeout(() => { held = true; if (binderSingle) clearTimeout(binderSingle); updateHeader(); element<HTMLDialogElement>(checklistVisible ? 'view-dialog' : 'date-dialog').showModal(); }, 550); };
-element('now').onpointerup = element('now').onpointerleave = () => { if (binderHold) clearTimeout(binderHold); };
-element('now').onclick = () => { if (held) return; if (binderSingle) clearTimeout(binderSingle); binderSingle = setTimeout(() => { if (checklistVisible) element<HTMLDialogElement>('view-dialog').showModal(); else void navigation(goNow); }, 260); };
-element('now').ondblclick = () => { if (binderSingle) clearTimeout(binderSingle); element<HTMLDialogElement>('view-dialog').showModal(); };
+bindViewSwipe(element<HTMLButtonElement>('now'), {
+  tap: () => {
+    if (checklistVisible) element<HTMLDialogElement>('view-dialog').showModal();
+    else void navigation(goNow);
+  },
+  hold: () => {
+    updateHeader();
+    element<HTMLDialogElement>(checklistVisible ? 'view-dialog' : 'date-dialog').showModal();
+  },
+  picker: () => element<HTMLDialogElement>('view-dialog').showModal(),
+  toggle: () => {
+    const fromChecklist = checklistVisible;
+    void navigation(() => {
+      if (checklistVisible !== fromChecklist) return;
+      if (fromChecklist) restoreCalendarView();
+      else setChecklistVisible(true);
+    });
+  },
+});
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-days]')) button.onclick = () => { void navigation(() => { setChecklistVisible(false); days = Number(button.dataset.days); element<HTMLDialogElement>('view-dialog').close(); render(); void refreshPlans(); }); };
 element('apply-dates').onclick = () => { if (!dayInput.value) return; void navigation(() => { day = dayInput.value; days = Number(daysInput.value); plans = []; element<HTMLDialogElement>('date-dialog').close(); render(); void refreshPlans(); }); };
 element('previous').onclick = () => { if (checklistVisible) void stepPriorityList(-1).catch(report); else void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
@@ -754,7 +843,7 @@ element('conflicts').onclick = () => {
   element<HTMLDialogElement>('conflict-dialog').showModal();
 };
 entryInput.addEventListener('input', mirrorDraft);
-entryInput.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); editor = null; entryBarMode = null; entryInput.blur(); render(); }
+entryInput.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); closeCellMenu(); editor = null; entryBarMode = null; entryInput.blur(); render(); }
   else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void saveEditor().catch(report); } });
 element('save-text').onclick = () => { void saveEditor().catch(report); };
 element('minute-to-task').onpointerdown = (event) => { event.preventDefault(); };
@@ -794,9 +883,9 @@ const mouseSelection = bindMouseSelection(grid, main, {
   },
   viewport: () => { const bounds = main.getBoundingClientRect(); return { top: bounds.top + 50, bottom: bounds.bottom, left: bounds.left, right: bounds.right }; },
   onStart: () => { cancelSelectedTap(); closeCellMenu();
-    if (editor && !editor.saving && editor.input.value === editor.original) { editor = null; entryBarMode = null; entryInput.blur(); updateBars(); }
+    closeCleanEditor();
     if (entryBarMode === 'format') { entryBarMode = null; updateBars(); } },
-  onComplete: () => { entryBarMode = null; updateBars(); },
+  onComplete: () => { if (!editor) entryBarMode = null; updateBars(); },
   onTap: tapCalendarCell,
   moveFromTarget: selectedRegion,
   onMoveStart: (grabbed) => {
@@ -811,13 +900,15 @@ const mouseSelection = bindMouseSelection(grid, main, {
 document.addEventListener('pointerdown', (event) => {
   cancelSelectedTap();
   if (!(event.target instanceof Node)) return;
-  if (!element('cell-menu').contains(event.target)) closeCellMenu();
+  if (!element('cell-menu').contains(event.target) && !element('entry-bar').contains(event.target)) closeCellMenu();
   if (entryBarMode === 'format' && !element('cell-format-menu').contains(event.target) && !element('cell-menu').contains(event.target) && !document.querySelector('dialog[open]')) { entryBarMode = null; updateBars(); }
 });
 main.addEventListener('scroll', () => { if (checklistVisible) return; const next = Math.max(0, Math.floor((main.scrollTop - 50) / 32) - 12); if (Math.abs(next - firstRendered) > 5) render(); }, { passive: true });
 document.addEventListener('paste', (event) => { if (checklistVisible || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || document.querySelector('dialog[open]')) return;
   if (commandBusy) { event.preventDefault(); return; }
-  event.preventDefault(); const text = event.clipboardData?.getData('text/plain'); if (text === undefined) return; void cellCommand(() => paste(text)); });
+  event.preventDefault(); const text = event.clipboardData?.getData('text/plain'); if (text === undefined) return;
+  if (cellMenuDraftPending()) { report(new Error('Save the minute before pasting into cells.')); return; }
+  closeCleanEditor(); void cellCommand(() => paste(text)); });
 document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); element('undo').click(); } });
 window.addEventListener('beforeunload', (event) => { if (editor?.input.value !== editor?.original || checklistUI.hasDraft() || (store && Object.keys(store.state.pending).length)) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { updateHeader(); void synchronize(false); } });

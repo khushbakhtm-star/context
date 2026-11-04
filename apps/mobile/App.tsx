@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef, t
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   AppState,
   BackHandler,
   Keyboard,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -13,6 +15,7 @@ import {
   Text,
   View,
   useWindowDimensions,
+  type GestureResponderEvent,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationBar as AndroidNavigationBar } from 'expo-navigation-bar';
@@ -77,6 +80,7 @@ import { useWearBridge } from './src/wear/useWearBridge';
 import { calendarColorDraftObserver } from './src/utils/calendar-color-drafts';
 import { createCoalescedDateWork } from './src/utils/coalesced-date-work';
 import { createCalendarBinderPress } from './src/utils/calendar-binder-press';
+import { createCalendarPeriodSwipe } from './src/utils/calendar-period-swipe';
 import { advanceManualSyncTiming, createManualSyncTiming, finishManualSyncTiming,
   manualSyncDiagnosticsText, type ManualSyncStage, type ManualSyncTiming } from './src/utils/manual-sync-diagnostics';
 import { nativeSyncDiagnosticsText } from './src/utils/native-sync-diagnostics';
@@ -1129,7 +1133,9 @@ function AppController() {
                   onOpenReports={() => void navigate('reports')} onJumpToNow={tab === 'checklist'
                     ? () => { void transitionFromCalendar(() => priorityControlsRef.current?.jumpToTop(), 'Could not finish task'); } : jumpToCurrentMinute}
                   onOpenChecklist={() => void navigate('checklist')}
-                  viewMode={viewMode} viewChanging={viewChanging} onViewModeChange={changeViewMode}
+                  onReturnToCalendar={() => void returnToCalendar()}
+                  viewMode={viewMode} hasSelectedDates={Boolean(selectedDateKeys?.length)}
+                  viewChanging={viewChanging} onViewModeChange={changeViewMode}
                   canGoPrevious={tab === 'checklist' ? Boolean(priorityCatalog && priorityCatalog.lists.findIndex((list) => list.id === selectedPriorityListId) > 0) : previousView != null}
                   canGoNext={tab === 'checklist' ? Boolean(priorityCatalog && priorityCatalog.lists.length > 0 &&
                     (priorityCatalog.lists.every((list) => list.id !== selectedPriorityListId) ||
@@ -1247,14 +1253,16 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSearch, onOpenReports, onOpenChecklist, onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
-  viewMode, viewChanging, onViewModeChange, priority }: {
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSearch, onOpenReports, onOpenChecklist, onReturnToCalendar,
+  onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
+  viewMode, hasSelectedDates, viewChanging, onViewModeChange, priority }: {
   onOpenSettings: () => void;
   onPrint: () => void;
   onOpenSearch: () => void;
   onOpenGlobalSearch: () => void;
   onOpenReports: () => void;
   onOpenChecklist: () => void;
+  onReturnToCalendar: () => void;
   onSync: () => void;
   syncing: boolean;
   syncError: string | null;
@@ -1267,6 +1275,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   onPrevious: () => void;
   onNext: () => void;
   viewMode: CalendarViewMode;
+  hasSelectedDates: boolean;
   viewChanging: boolean;
   onViewModeChange: (mode: CalendarViewMode) => Promise<void>;
   priority?: PriorityHistoryState & { listId: string; undo: () => Promise<boolean>; redo: () => Promise<boolean>; beforeLeave: () => Promise<boolean> };
@@ -1322,13 +1331,79 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
   const priorityModeRef = useRef(Boolean(priority)); priorityModeRef.current = Boolean(priority);
-  const binderActions = useRef({ single: () => {}, long: () => {} });
+  const binderActions = useRef({ single: () => {}, long: () => {}, toggle: () => {} });
   const binderPress = useMemo(() => createCalendarBinderPress({ allowed: () => headerMayNavigate(),
     single: () => binderActions.current.single(),
     long: () => binderActions.current.long() }), []);
+  const [viewIconOffset] = useState(() => new Animated.Value(0));
+  const [viewSwipe] = useState(() => createCalendarPeriodSwipe({ claimDistance: 8, commitDistance: 24 }));
+  const viewSwipeOrigin = useRef<{ x: number; y: number } | null>(null);
+
+  function cancelViewSwipe() {
+    viewSwipe.cancel();
+    viewSwipeOrigin.current = null;
+    viewIconOffset.setValue(0);
+  }
+
+  function viewMaySwitch() {
+    return headerMayNavigate() && !gearVisibleRef.current && !viewVisibleRef.current &&
+      !gearClosingRef.current && !viewClosingRef.current && !pendingGearAction.current;
+  }
+
+  function switchViewFamily() {
+    if (!viewMaySwitch()) return;
+    binderPress.cancel();
+    binderActions.current.toggle();
+  }
+
+  const viewSwipeResponder = useMemo(() => {
+    // PanResponder resets dx/dy when it takes ownership from the button.
+    // Use the original contact point so the icon tracks the full drag.
+    const displacement = ({ nativeEvent }: GestureResponderEvent) => {
+      const start = viewSwipeOrigin.current;
+      const touch = nativeEvent.touches[0] ?? nativeEvent.changedTouches[0];
+      if (!start || !touch) return null;
+      return { dx: touch.pageX - start.x, dy: touch.pageY - start.y, numberActiveTouches: nativeEvent.touches.length };
+    };
+    const preview = (event: GestureResponderEvent) => {
+      const gesture = displacement(event);
+      if (!gesture || !viewSwipe.move(gesture, !viewMaySwitch())) { cancelViewSwipe(); return; }
+      viewIconOffset.setValue(Math.max(-controlWidth, Math.min(controlWidth, gesture.dx)));
+    };
+    return PanResponder.create({
+      onStartShouldSetPanResponderCapture: ({ nativeEvent }) => {
+        cancelViewSwipe();
+        const [touch] = nativeEvent.touches;
+        if (nativeEvent.touches.length === 1 && touch && viewMaySwitch()) {
+          viewSwipeOrigin.current = { x: touch.pageX, y: touch.pageY };
+          viewSwipe.start(1);
+        } else binderPress.cancel();
+        return false;
+      },
+      onMoveShouldSetPanResponderCapture: (event) => {
+        const gesture = displacement(event);
+        if (!gesture) return false;
+        if (gesture.numberActiveTouches !== 1 || Math.hypot(gesture.dx, gesture.dy) >= 8) binderPress.cancel();
+        return viewSwipe.move(gesture, !viewMaySwitch());
+      },
+      onPanResponderGrant: preview,
+      onPanResponderMove: preview,
+      onPanResponderStart: (event) => { if (event.nativeEvent.touches.length !== 1) cancelViewSwipe(); },
+      onPanResponderRelease: (event) => {
+        const gesture = displacement(event);
+        const direction = gesture && viewSwipe.finish(gesture, !viewMaySwitch());
+        cancelViewSwipe();
+        if (direction) switchViewFamily();
+      },
+      onPanResponderTerminate: cancelViewSwipe,
+      onPanResponderReject: cancelViewSwipe,
+      onPanResponderTerminationRequest: () => false,
+    });
+  }, [controlWidth, viewSwipe, viewIconOffset, binderPress]);
 
   function invalidateMenus(render = true) {
     binderPress.cancel();
+    cancelViewSwipe();
     menuRequestSequence.current += 1;
     pendingGearAction.current = null;
     if (gearActionFrame.current != null) { cancelAnimationFrame(gearActionFrame.current); gearActionFrame.current = null; }
@@ -1361,12 +1436,12 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
     return () => { headerMountedRef.current = false; invalidateMenus(false); };
   }, []);
 
-  useEffect(() => { invalidateMenus(); }, [width, viewMode, priority?.listId]);
+  useEffect(() => { invalidateMenus(); }, [width, controlWidth, viewMode, hasSelectedDates, priority?.listId]);
   // Dismissing an open keyboard can change only the window height. Cancel a
   // pending tap, but keep the dropdown the user just requested visible.
-  useEffect(() => { binderPress.cancel(); }, [height]);
+  useEffect(() => { binderPress.cancel(); cancelViewSwipe(); }, [height]);
   useEffect(() => {
-    if (navigationBusy) binderPress.cancel();
+    if (navigationBusy) { binderPress.cancel(); cancelViewSwipe(); }
     if (!navigationBusy) dispatchingGearAction.current = false;
   }, [navigationBusy]);
 
@@ -1516,11 +1591,18 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       gearActionFrame.current = null; viewClosingRef.current = false; finishGearAction(sequence);
     });
   };
-  binderActions.current = { single: onJumpToNow, long: openViews };
-  const viewLabel = priority ? 'Priority' : CALENDAR_VIEW_OPTIONS.find((option) => option.mode === viewMode)?.label ?? 'Day';
+  binderActions.current = { single: onJumpToNow, long: openViews, toggle: priority ? onReturnToCalendar : onOpenChecklist };
+  const viewLabel = hasSelectedDates ? 'Pick / Range' :
+    CALENDAR_VIEW_OPTIONS.find((option) => option.mode === viewMode)?.label ?? 'Day';
+  const calendarIcon = <CalendarViewIcon mode={hasSelectedDates ? 'month' : viewMode} currentDate={current} />;
+  const checklistIcon = <CalendarHeaderIcon name="checklist" />;
+  const activeIcon = priority ? checklistIcon : calendarIcon;
+  const alternateIcon = priority ? calendarIcon : checklistIcon;
+  const switchLabel = `Switch to ${priority ? viewLabel : 'Priority'} view`;
 
   return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
-    keyboardShouldPersistTaps="always" keyboardDismissMode="none" onScrollBeginDrag={() => binderPress.cancelPress()}
+    keyboardShouldPersistTaps="always" keyboardDismissMode="none"
+    onScrollBeginDrag={() => { binderPress.cancelPress(); cancelViewSwipe(); }}
     contentContainerStyle={styles.calendarHeaderContent} scrollEnabled={availableWidth < controlWidth * 7 - 0.5}
     onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}>
     <View style={[styles.calendarHeader, { minWidth: controlWidth * 7 }]}>
@@ -1537,21 +1619,33 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       style={[controlStyle, (!canGoPrevious || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
     </Pressable>
-    <View ref={viewMenuAnchor} collapsable={false}>
+    <View ref={viewMenuAnchor} collapsable={false} {...viewSwipeResponder.panHandlers}>
       <Pressable accessibilityRole="button" accessibilityLabel={priority ? 'Priority view. Go to top' : `${viewLabel} view. Go to now`}
-        accessibilityHint={priority ? 'Tap to go to the top of this checklist. Press and hold to choose a view.' : 'Tap to go to the current minute. Press and hold to choose a view.'}
+        accessibilityHint={`Tap to go to ${priority ? 'the top of this checklist' : 'the current minute'}. Swipe sideways to switch views. Press and hold to choose a view.`}
         accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy, busy: viewChanging }} disabled={navigationBusy}
-        accessibilityActions={[{ name: 'showViews', label: 'Choose calendar view' }, { name: 'goToNow', label: 'Go to the current minute' }]}
+        accessibilityActions={[{ name: 'showViews', label: 'Choose view' },
+          { name: 'goToNow', label: priority ? 'Go to the top of the checklist' : 'Go to the current minute' },
+          { name: 'switchView', label: switchLabel }]}
         onAccessibilityAction={(event) => {
           if (event.nativeEvent.actionName === 'showViews') { binderPress.cancel(); openViews(); }
           else if (event.nativeEvent.actionName === 'goToNow' && headerMayNavigate()) { binderPress.cancel(); onJumpToNow(); }
+          else if (event.nativeEvent.actionName === 'switchView') switchViewFamily();
         }}
         onPressIn={(event) => { if (event.nativeEvent.touches?.length > 1) binderPress.cancelPress(); else binderPress.pressIn(); }}
         onTouchStart={(event) => { if (event.nativeEvent.touches?.length > 1) binderPress.cancelPress(); }}
         onLongPress={() => binderPress.longPress()} delayLongPress={450}
         onTouchEnd={() => binderPress.touchEnd()} onTouchCancel={() => binderPress.cancelPress()}
         onPress={() => binderPress.press()} style={controlStyle}>
-        {priority ? <CalendarHeaderIcon name="checklist" /> : <CalendarViewIcon mode={viewMode} currentDate={current} />}
+        <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+          style={styles.viewIconViewport}>
+          <Animated.View style={[styles.viewIconTrack, {
+            width: controlWidth * 3, left: -controlWidth, transform: [{ translateX: viewIconOffset }],
+          }]}>
+            <View style={controlStyle}>{alternateIcon}</View>
+            <View style={controlStyle}>{activeIcon}</View>
+            <View style={controlStyle}>{alternateIcon}</View>
+          </Animated.View>
+        </View>
       </Pressable>
     </View>
     <Pressable accessibilityRole="button" accessibilityLabel={priority ? 'Next checklist' : 'Next calendar view'}
@@ -1776,6 +1870,8 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     borderBottomColor: colors.hairline, backgroundColor: colors.paper,
   },
   menuButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  viewIconViewport: { width: '100%', height: '100%', overflow: 'hidden' },
+  viewIconTrack: { position: 'absolute', top: 0, flexDirection: 'row' },
   screenTitle: { flex: 1, marginLeft: 8, color: colors.ink, fontSize: 17, fontWeight: '600' },
   backButton: { minHeight: 44, paddingHorizontal: 10, justifyContent: 'center' },
   backText: { color: colors.muted, fontSize: 12, fontWeight: '600' },

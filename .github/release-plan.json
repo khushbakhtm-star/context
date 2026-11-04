@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.36",
-  "sourceAndroidVersionCode": 37,
-  "sourceIosBuildNumber": "37",
+  "version": "0.1.37",
+  "sourceAndroidVersionCode": 38,
+  "sourceIosBuildNumber": "38",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare Context phone 0.1.36/code37 and independent Watch0.1.16/code100017 from a shared reviewed source. Priority uses the existing top bar with a clipboard view icon, checklist navigation, revision-guarded Undo/Redo, current-view Search and always-visible static Sync. Hide completed and checklist creation/rename move to Settings; menu Search covers all minute history and Priority lists. Existing tasks migrate in memory into a bounded encrypted collection and writes preserve all other lists under exact revision checks. Sync arrowheads lie at opposite points on the circle with congruent arms. The watch receives spacious minute cards, curved scrolling, icon-only Settings/Now/Add, inclusive guarded range entry and a lighter automatic dictation startup. Existing privacy, source-event/LWW, encryption, draft preservation, calendar, native-module, original-signature and FOSS source-removal protections remain required. The owner-private browser preview receives Priority without changing audience, account connection or the Google origin hold. Fresh phone/FOSS/watch builds, signing and exact-source CI are required before availability changes; source preparation does not assert catalog inclusion or physical-device performance."
+  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.37. Swipe the header view icon to switch between Priority and the previous calendar view. Opening cell actions also opens the bottom minute text box. A range keeps its selected cells while typing edits its anchor. Publish only the verified APK signed with the existing publisher key."
 }

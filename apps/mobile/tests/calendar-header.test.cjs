@@ -31,11 +31,14 @@ function headerHarness(props = {}, options = {}) {
   const binderModule = { exports: {} };
   vm.runInNewContext(transpile(fs.readFileSync(path.join(mobile, 'src/utils/calendar-binder-press.ts'), 'utf8')),
     { module: binderModule, exports: binderModule.exports, Date: ClockDate, setTimeout: setTimer, clearTimeout: clearTimer });
+  const swipeModule = { exports: {} };
+  vm.runInNewContext(transpile(fs.readFileSync(path.join(mobile, 'src/utils/calendar-period-swipe.ts'), 'utf8')),
+    { module: swipeModule, exports: swipeModule.exports });
   const slots = []; let cursor = 0; let pendingEffects = []; const cleanups = [];
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => value === b[index]);
   const listeners = new Set(); const state = { currentState: 'active', addEventListener: (_name, callback) => { listeners.add(callback); return { remove: () => listeners.delete(callback) }; } };
   const dimensions = { width: 360, height: 500 };
-  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, globalSearch: 0, settings: 0, checklist: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
+  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, globalSearch: 0, settings: 0, checklist: 0, calendar: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
   const history = { canUndo: true, canRedo: true, busy: false, ...options.history };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   const module = { exports: {} };
@@ -49,6 +52,12 @@ function headerHarness(props = {}, options = {}) {
     useAppTheme: () => ({ colors: { paper: '#FFFFFF', graphite: '#333333', muted: '#777777' } }),
     useWindowDimensions: () => dimensions,
     createCalendarBinderPress: binderModule.exports.createCalendarBinderPress,
+    createCalendarPeriodSwipe: swipeModule.exports.createCalendarPeriodSwipe,
+    PanResponder: { create: (panHandlers) => ({ panHandlers }) },
+    Animated: { View: 'AnimatedView', Value: class {
+      constructor(value) { this.value = value; }
+      setValue(value) { this.value = value; }
+    } },
     spreadsheetEditor: { snapshot: () => history, subscribe: () => () => {} }, flushInlineMinutes: options.flush ?? (async () => {}),
     inlineMinuteDrafts: { snapshot: () => options.drafts ?? [] },
     undoSpreadsheetEdit: async () => { calls.undo++; }, redoSpreadsheetEdit: async () => { calls.redo++; },
@@ -63,9 +72,11 @@ function headerHarness(props = {}, options = {}) {
   vm.runInNewContext(transpile([declaration('CALENDAR_VIEW_OPTIONS'), declaration('createStyles'), declaration('CalendarHeader'), 'export { CalendarHeader };'].join('\n')), context);
   const defaults = { onOpenSettings: () => calls.settings++, onPrint: () => calls.print++, onOpenSearch: () => calls.search++,
     onOpenGlobalSearch: () => calls.globalSearch++,
-    onOpenReports: () => calls.dashboard++, onOpenChecklist: () => calls.checklist++, onSync: () => calls.sync++, syncing: false, syncError: null,
+    onOpenReports: () => calls.dashboard++, onOpenChecklist: () => calls.checklist++,
+    onReturnToCalendar: () => calls.calendar++, onSync: () => calls.sync++, syncing: false, syncError: null,
     onJumpToNow: () => calls.now++, onOpenDatePicker: () => calls.picker++, canGoPrevious: true, canGoNext: true,
-    onPrevious() {}, onNext() {}, viewMode: 'day', viewChanging: false, onViewModeChange: async (mode) => { calls.modes.push(mode); } };
+    onPrevious() {}, onNext() {}, viewMode: 'day', hasSelectedDates: false,
+    viewChanging: false, onViewModeChange: async (mode) => { calls.modes.push(mode); } };
   let tree;
   function nodes(node = tree, into = []) {
     if (!node || typeof node !== 'object') return into;
@@ -80,7 +91,11 @@ function headerHarness(props = {}, options = {}) {
   render();
   const hold = (button) => { button.props.onPressIn?.({ nativeEvent: { touches: [{}] } }); advance(450);
     button.props.onLongPress(); button.props.onPress(); };
-  return { calls, history, advance, render, nodes, press, hold, binder: () => nodes().find((node) => /^.* view\. Go to (now|top)/.test(node.props.accessibilityLabel ?? '')),
+  const binder = () => nodes().find((node) => /^.* view\. Go to (now|top)/.test(node.props.accessibilityLabel ?? ''));
+  const iconTrack = () => nodes(binder()).find((node) => node.type === 'AnimatedView').props;
+  return { calls, history, advance, render, nodes, press, hold, binder, iconTrack,
+    centerIcon: () => iconTrack().children[1].props.children,
+    swipeHandlers: () => nodes().find((node) => node.props.onPanResponderRelease).props,
     async settle() { for (let i = 0; i < 25; i++) await Promise.resolve(); render(); },
     changeHeight: (height) => { dimensions.height = height; render(); },
     background: () => { state.currentState = 'background'; for (const listener of listeners) listener('background'); },
@@ -90,10 +105,87 @@ function headerHarness(props = {}, options = {}) {
 
 test('one released view-icon tap goes immediately to Now in every current view without opening choices', async () => {
   for (const viewMode of ['day', 'week', 'month', 'year', 'schedule']) {
-    const h = headerHarness({ viewMode }); assert.equal(h.binder().props.children.props.mode, viewMode);
+    const h = headerHarness({ viewMode }); assert.equal(h.centerIcon().props.mode, viewMode);
     h.press(h.binder()); assert.equal(h.calls.now, 1, 'Now does not wait for a second-tap timer');
     h.advance(600); await h.settle();
     assert.equal(h.nodes().some((node) => node.type === 'Modal' && node.props.visible), false);
+  }
+});
+
+function swipeEvent(x, y = 0, fingers = 1) {
+  const contact = { pageX: 110 + x, pageY: 35 + y };
+  return { nativeEvent: { touches: Array.from({ length: fingers }, () => contact), changedTouches: [contact] } };
+}
+
+function beginBinderSwipe(h) {
+  const swipe = h.swipeHandlers();
+  assert.equal(swipe.onStartShouldSetPanResponderCapture(swipeEvent(0)), false);
+  h.binder().props.onPressIn(swipeEvent(0));
+  return swipe;
+}
+
+test('view icon previews the other view in either direction and a release switches once without a tap', () => {
+  for (const direction of [-1, 1]) {
+    const h = headerHarness({ viewMode: 'week' });
+    const track = h.iconTrack();
+    const viewport = h.binder().props.children;
+    const offset = track.style[1].transform[0].translateX;
+    assert.equal(viewport.props.style.overflow, 'hidden');
+    assert.equal(track.style[1].left, -44);
+    assert.equal(offset.value, 0);
+    assert.equal(h.centerIcon().props.mode, 'week');
+    const swipe = beginBinderSwipe(h);
+    assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(12 * direction)), true);
+    swipe.onPanResponderGrant(swipeEvent(12 * direction));
+    swipe.onPanResponderMove(swipeEvent(20 * direction));
+    assert.equal(offset.value, 20 * direction);
+    assert.equal(track.children[direction === -1 ? 2 : 0].props.children.props.name, 'checklist');
+    assert.equal(h.calls.checklist, 0);
+    swipe.onPanResponderRelease(swipeEvent(29 * direction, 2, 0));
+    swipe.onPanResponderRelease(swipeEvent(29 * direction, 2, 0));
+    h.binder().props.onPress();
+    assert.equal(offset.value, 0);
+    assert.equal(h.calls.checklist, 1);
+    assert.equal(h.calls.now, 0);
+  }
+});
+
+test('Priority swipes back to Pick / Range without selecting a new calendar mode', () => {
+  const priority = { listId: 'family', busy: false, canUndo: false, canRedo: false };
+  const h = headerHarness({ viewMode: 'day', hasSelectedDates: true, priority });
+  const swipe = beginBinderSwipe(h);
+  assert.equal(h.centerIcon().props.name, 'checklist');
+  assert.equal(h.iconTrack().children[0].props.children.props.mode, 'month');
+  assert.equal(h.binder().props.accessibilityActions.find((action) => action.name === 'switchView').label,
+    'Switch to Pick / Range view');
+  assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(15)), true);
+  swipe.onPanResponderGrant(swipeEvent(15));
+  swipe.onPanResponderRelease(swipeEvent(30, 0, 0));
+  assert.equal(h.calls.calendar, 1);
+  assert.deepEqual(h.calls.modes, []);
+  h.binder().props.onAccessibilityAction({ nativeEvent: { actionName: 'switchView' } });
+  assert.equal(h.calls.calendar, 2);
+});
+
+test('short, vertical, interrupted and multi-finger icon gestures do not change view or jump to Now', () => {
+  for (const cancel of ['short', 'vertical', 'multitouch', 'background', 'terminate']) {
+    const h = headerHarness();
+    const swipe = beginBinderSwipe(h);
+    if (cancel === 'vertical') {
+      assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(4, 30)), false);
+      assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(32)), false);
+    } else {
+      assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(14)), true);
+      swipe.onPanResponderGrant(swipeEvent(14));
+      if (cancel === 'multitouch') swipe.onPanResponderStart(swipeEvent(14, 0, 2));
+      if (cancel === 'background') h.background();
+      if (cancel === 'terminate') swipe.onPanResponderTerminate();
+      swipe.onPanResponderRelease(swipeEvent(cancel === 'short' ? 18 : 35, 0, 0));
+    }
+    h.binder().props.onPress();
+    assert.equal(h.iconTrack().style[1].transform[0].translateX.value, 0, cancel);
+    assert.equal(h.calls.checklist, 0, cancel);
+    assert.equal(h.calls.now, 0, cancel);
   }
 });
 
@@ -196,7 +288,7 @@ test('Priority keeps the complete toolbar, uses a clipboard, and never borrows c
   const buttons = h.nodes(toolbar).filter((node) => node.type === 'Pressable');
   assert.deepEqual(buttons.map((node) => node.props.accessibilityLabel), ['Open menu', 'Previous checklist', 'Priority view. Go to top',
     'Next checklist', 'Undo Context edit', 'Open Search', 'Sync attached calendars']);
-  assert.equal(buttons[2].props.children.props.name, 'checklist'); assert.equal(buttons[1].props.disabled, true);
+  assert.equal(h.centerIcon().props.name, 'checklist'); assert.equal(buttons[1].props.disabled, true);
   assert.equal(buttons[4].props.disabled, false); h.press(buttons[4]); await h.settle(); assert.equal(undo, 1); assert.equal(h.calls.undo, 0);
   h.nodes().find((node) => node.props.accessibilityLabel === 'Open menu').props.onPress(); h.render();
   h.nodes().find((node) => node.props.accessibilityLabel === 'Redo Context edit').props.onPress(); h.advance(0); await h.settle();

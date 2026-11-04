@@ -6,27 +6,34 @@ import ts from 'typescript';
 import { cellEventLabel, cellFormatKey, formatFromDocument } from '../shared/utils/cell-format';
 import { serializeSpreadsheetCells } from '../shared/utils/spreadsheet-paste';
 import { emptyLedger, editCells, getMinute, minuteKey, pastedChanges, undoEdit } from '../src/ledger';
+import { flushBrowserText } from '../src/editor';
 import { cellTransferFingerprint, clipboardTransferFingerprint, eventSelectionFingerprint, formatCells,
   groupSelection, resetCellsSelection, transferClipboardCells, ungroupSelection } from '../src/formatting';
 
 function fixture() {
   const source = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('app.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const names = ['showCellMenu', 'cellCommand', 'closeCellMenu', 'writeSelectedText', 'mutateSelection', 'paste', 'pasteInternalCells'];
-  const nodes = parsed.statements.filter((node: any) => names.includes(node.name?.text));
+  const names = ['showCellMenu', 'cellCommand', 'closeCellMenu', 'closeCleanEditor', 'cellMenuDraftPending',
+    'updateCellMenuAvailability', 'beginEdit', 'mirrorDraft', 'saveEditor', 'writeSelectedText', 'mutateSelection', 'paste', 'pasteInternalCells'];
+  const nodes = parsed.statements.filter((node: any) => names.includes(node.name?.text) ||
+    ts.isExpressionStatement(node) && /element\('save-text'\)\.onclick/.test(node.getText(parsed)));
   class Node {
-    textContent = ''; hidden = true; style = {}; className = ''; title = ''; children: Node[] = []; attrs = new Map<string, string>();
+    textContent = ''; hidden = true; disabled = false; style = {}; className = ''; title = ''; children: Node[] = []; attrs = new Map<string, string>();
     offsetWidth = 500; offsetHeight = 50; onclick: () => void = () => {};
     append(node: Node) { this.children.push(node); }
     replaceChildren(...nodes: Node[]) { this.children = nodes; }
     setAttribute(name: string, value: string) { this.attrs.set(name, value); }
+    querySelectorAll() { return this.children; }
   }
   const elements = new Map<string, Node>(); const element = (id: string) => { if (!elements.has(id)) elements.set(id, new Node()); return elements.get(id)!; };
   const point = { day: '2026-10-30', minute: 100 }; let clipboardText = '', writes = 0, pending = Promise.resolve(); const errors: string[] = [];
   const initial = editCells(emptyLedger('browser_clipboard_fixture'), [{ ...point, text: 'Keep my exact words' }], 1000).state;
   const store = { state: formatCells(initial, [point], { bold: true, underline: true, textColor: '#112233', fill: { color: '#51B749' } }, ['#51B749'], 1100).state,
     async update(change: any) { writes++; this.state = change(this.state); return this.state; } };
-  const context: any = { store, selected: { ...point }, rangeEnd: null, cellClipboard: null, entryBarMode: null, commandBusy: false, undo: null,
+  const input = { value: '', focused: 0, focus() { this.focused++; }, blur() {}, setAttribute() {} };
+  const context: any = { store, selected: { ...point }, rangeEnd: null, cellClipboard: null, cellMenuRequest: 0, checklistVisible: false,
+    entryBarMode: null, editor: null, entryInput: input, commandBusy: false, undo: null,
+    main: { getBoundingClientRect: () => ({ top: 72 }) }, cell: () => null, minuteLabel: String, clock12: false, flushBrowserText,
     document: { createElement: () => new Node() }, navigator: { clipboard: { async writeText(text: string) { clipboardText = text; }, async readText() { return clipboardText; } } },
     innerWidth: 1200, innerHeight: 800, element, getMinute, minuteKey, cellFormatKey, cellEventLabel, formatFromDocument,
     cellTransferFingerprint, clipboardTransferFingerprint, transferClipboardCells, eventSelectionFingerprint, serializeSpreadsheetCells,
@@ -34,11 +41,12 @@ function fixture() {
     selectionCells() { const end = context.rangeEnd ?? context.selected; const result = [];
       for (let minute = Math.min(context.selected.minute, end.minute); minute <= Math.max(context.selected.minute, end.minute); minute++) result.push({ day: context.selected.day, minute }); return result; },
     selectionStamp: () => JSON.stringify([context.selected, context.rangeEnd]),
-    saveEditor: async () => {}, updateBars() {}, render() {}, synchronize() {}, status() {}, planForMinute() {}, showCellFormatting() {},
+    updateBars() { element('entry-bar').hidden = context.entryBarMode !== 'entry'; context.updateCellMenuAvailability(); },
+    render() { context.updateBars(); }, synchronize() {}, status() {}, planForMinute() {}, showCellFormatting() {},
     report: (error: Error) => errors.push(error.message), info() {}, openGroup() {} };
   vm.runInNewContext(ts.transpileModule(nodes.map((node) => node.getText(parsed)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   const command = context.cellCommand; context.cellCommand = (work: () => Promise<void>) => pending = command(work);
-  return { context, store, errors, element, get writes() { return writes; },
+  return { context, store, errors, element, input, get writes() { return writes; },
     setClipboard(text: string) { clipboardText = text; },
     select(minute: number, through?: number) { context.selected = { day: point.day, minute }; context.rangeEnd = through === undefined ? null : { day: point.day, minute: through }; },
     menu: () => context.showCellMenu(100, 100),
@@ -46,8 +54,49 @@ function fixture() {
       assert.ok(button, `Expected menu action ${label}`); button.onclick(); await pending; } };
 }
 
+test('the cell popup opens an unfocused composer for the range anchor and keeps the full selection', async () => {
+  const h = fixture(); h.select(100, 103); await h.menu();
+  assert.equal(h.element('cell-menu').hidden, false);
+  assert.equal(h.element('entry-bar').hidden, false);
+  assert.equal(h.context.selected.minute, 100);
+  assert.equal(h.context.rangeEnd.minute, 103);
+  assert.equal(h.context.editor.minute, 100);
+  assert.equal(h.input.value, 'Keep my exact words');
+  assert.equal(h.input.focused, 0);
+  assert.equal(h.writes, 0);
+});
+
+test('typing keeps both surfaces visible and prevents a stale menu command from overwriting the draft', async () => {
+  const h = fixture(); h.select(100, 103); await h.menu();
+  h.input.value = 'New anchor note'; h.context.mirrorDraft();
+  assert.equal(h.element('cell-menu').hidden, false);
+  assert.equal(h.element('entry-bar').hidden, false);
+  assert.ok(h.element('cell-menu').children.every((button) => button.disabled));
+  await h.click('Clear'); assert.equal(h.writes, 0);
+  await h.menu(); assert.equal(h.input.value, 'New anchor note'); assert.equal(h.writes, 0);
+  h.element('save-text').onclick();
+  await h.context.saveEditor();
+  assert.equal(h.element('cell-menu').hidden, true);
+  assert.equal(h.element('entry-bar').hidden, true);
+  assert.equal(h.writes, 1);
+  assert.equal(getMinute(h.store.state, '2026-10-30', 100)!.value!.text, 'New anchor note');
+  assert.equal(getMinute(h.store.state, '2026-10-30', 101), undefined);
+});
+
+test('a delayed popup does not reopen after dismissal while the prior minute saves', async () => {
+  const h = fixture(); await h.menu(); h.input.value = 'Draft in the previous minute';
+  h.select(200);
+  const pending = h.menu();
+  h.context.closeCellMenu();
+  await pending;
+  assert.equal(h.element('cell-menu').hidden, true);
+  assert.equal(h.element('entry-bar').hidden, true);
+  assert.equal(getMinute(h.store.state, '2026-10-30', 100)!.value!.text, 'Draft in the previous minute');
+});
+
 test('one Copy click followed by one Paste click copies the full cell text, fill and formatting', async () => {
   const h = fixture(); await h.menu(); await h.click('Copy'); assert.equal(h.writes, 0); assert.ok(h.context.cellClipboard);
+  assert.equal(h.element('entry-bar').hidden, true);
   h.select(200); await h.menu(); await h.click('Paste'); assert.deepEqual(h.errors, []); assert.equal(h.writes, 1);
   assert.equal(getMinute(h.store.state, '2026-10-30', 200)!.value!.text, 'Keep my exact words');
   assert.equal(getMinute(h.store.state, '2026-10-30', 200)!.value!.categoryId, getMinute(h.store.state, '2026-10-30', 100)!.value!.categoryId);

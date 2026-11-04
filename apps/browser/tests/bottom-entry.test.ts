@@ -18,7 +18,8 @@ function fixture() {
   const module = { exports: {} as any }; const context: any = { module, exports: module.exports, store, editor: null, undo: null,
     entryBarMode: null, commandBusy: false, entryInput: input, selected: { day: '2026-10-27', minute: 800 },
     editCells, getMinute, flushBrowserText, minuteLabel: (minute: number) => String(minute), clock12: true, planForMinute: () => undefined,
-    element: (id: string) => buttons[id] ??= {}, cell: () => node, updateBars() {}, render() {}, status() {}, report() {}, options: { showModal() {} },
+    element: (id: string) => buttons[id] ??= {}, cell: () => node, updateBars() {}, updateCellMenuAvailability() {},
+    render() {}, status() {}, report() {}, options: { showModal() {} },
     select: (point: any) => { context.selected = point; },
   };
   const code = ts.transpileModule(`${nodes.map((value) => value.getText(parsed)).join('\n')}\nexport { beginEdit, saveEditor, mirrorDraft };`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
