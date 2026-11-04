@@ -1,6 +1,12 @@
 # Installed-app update notices
 
-Current phone availability is **0.1.37/code38** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+Current phone availability is **0.1.38/code39** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+
+## Published 0.1.38 Wear-enabled phone update
+
+The [0.1.38 phone preview](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.38) was published at **2026-11-04T19:04:19Z**. Moving a single minute note to a different range clears the original cell. Adding minute text to Priority lets you choose the destination when you have multiple checklists.
+
+The [publisher-signed APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.38/context-0.1.38-wear-phone-preview.apk) has SHA-256 `1a7a4913779e3653d2e62709ae9c3d59da7e240ba837daa5ad7e8d5471f00764`. [Application source](https://github.com/khushbakhtm-star/context/commit/d71a1a8a92afe06a34679fa4f1822b21b3602728) and [Android build](https://github.com/khushbakhtm-star/context/actions/runs/41891222093).
 
 ## Published 0.1.37 Wear-enabled phone update
 
