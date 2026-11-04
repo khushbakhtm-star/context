@@ -1,8 +1,15 @@
+export type BrowserView = 'calendar' | 'priority' | 'notepad';
+const BROWSER_VIEWS = ['calendar', 'priority', 'notepad'] as const;
+
+export function stepBrowserView(view: BrowserView, direction: -1 | 1): BrowserView {
+  return BROWSER_VIEWS[(BROWSER_VIEWS.indexOf(view) + direction + BROWSER_VIEWS.length) % BROWSER_VIEWS.length]!;
+}
+
 type ViewActions = {
   tap: () => void;
   hold: () => void;
   picker: () => void;
-  toggle: () => void;
+  step: (direction: -1 | 1) => void;
 };
 
 type ViewPointer = {
@@ -62,7 +69,7 @@ export function bindViewSwipe(button: HTMLButtonElement, actions: ViewActions) {
     clearTimeout(holdTimer);
     suppressPointerClick = !released || gesture.held || Boolean(gesture.axis);
     if (released && !gesture.held && gesture.axis === 'horizontal' &&
-        Math.abs(dx) >= 24 && Math.abs(dx) > Math.abs(dy) * 1.7) actions.toggle();
+        Math.abs(dx) >= 24 && Math.abs(dx) > Math.abs(dy) * 1.7) actions.step(dx < 0 ? 1 : -1);
   }
 
   button.onpointerup = (event) => finish(event, true);
@@ -83,7 +90,7 @@ export function bindViewSwipe(button: HTMLButtonElement, actions: ViewActions) {
     event.preventDefault();
     if (event.repeat) return;
     clearTimeout(tapTimer);
-    actions.toggle();
+    actions.step(event.key === 'ArrowRight' ? 1 : -1);
   };
 }
 

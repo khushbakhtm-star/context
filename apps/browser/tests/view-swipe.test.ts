@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bindChecklistSwipe, bindViewSwipe } from '../src/view-swipe';
+import { bindChecklistSwipe, bindViewSwipe, stepBrowserView } from '../src/view-swipe';
 
 function fixture() {
   const actions: string[] = [];
@@ -15,7 +15,7 @@ function fixture() {
     tap: () => actions.push('tap'),
     hold: () => actions.push('hold'),
     picker: () => actions.push('picker'),
-    toggle: () => actions.push('toggle'),
+    step: (direction) => actions.push(`step:${direction}`),
   });
   const point = (clientX = 100, clientY = 30) => ({
     isPrimary: true, button: 0, pointerId: 1, clientX, clientY,
@@ -37,10 +37,19 @@ test('a horizontal swipe keeps the current icon still until release and consumes
     button.onpointerup!(point(100 + direction * 30));
     button.onclick!(click);
     t.mock.timers.tick(600);
-    assert.deepEqual(actions, ['toggle']);
+    assert.deepEqual(actions, [`step:${-direction}`]);
     assert.equal(button.dataset.swipe, undefined);
     assert.equal(style.has('--view-swipe-offset'), false);
   }
+});
+
+test('the view selector cycles Calendar, Priority, and Notepad in either direction', () => {
+  assert.equal(stepBrowserView('calendar', 1), 'priority');
+  assert.equal(stepBrowserView('priority', 1), 'notepad');
+  assert.equal(stepBrowserView('notepad', 1), 'calendar');
+  assert.equal(stepBrowserView('calendar', -1), 'notepad');
+  assert.equal(stepBrowserView('notepad', -1), 'priority');
+  assert.equal(stepBrowserView('priority', -1), 'calendar');
 });
 
 test('short, vertical, cancelled and multi-pointer drags leave the view and picker alone', (t) => {

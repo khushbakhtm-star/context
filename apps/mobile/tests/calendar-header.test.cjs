@@ -38,7 +38,7 @@ function headerHarness(props = {}, options = {}) {
   const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => value === b[index]);
   const listeners = new Set(); const state = { currentState: 'active', addEventListener: (_name, callback) => { listeners.add(callback); return { remove: () => listeners.delete(callback) }; } };
   const dimensions = { width: 360, height: 500 };
-  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, globalSearch: 0, settings: 0, checklist: 0, calendar: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
+  const calls = { now: 0, picker: 0, dashboard: 0, print: 0, search: 0, globalSearch: 0, settings: 0, checklist: 0, notepad: 0, calendar: 0, sync: 0, undo: 0, redo: 0, modes: [], errors: [], copies: [] };
   const history = { canUndo: true, canRedo: true, busy: false, ...options.history };
   const jsx = (type, props) => ({ type, props: props ?? {} });
   const module = { exports: {} };
@@ -73,6 +73,7 @@ function headerHarness(props = {}, options = {}) {
   const defaults = { onOpenSettings: () => calls.settings++, onPrint: () => calls.print++, onOpenSearch: () => calls.search++,
     onOpenGlobalSearch: () => calls.globalSearch++,
     onOpenReports: () => calls.dashboard++, onOpenChecklist: () => calls.checklist++,
+    onOpenNotepad: () => calls.notepad++,
     onReturnToCalendar: () => calls.calendar++, onSync: () => calls.sync++, syncing: false, syncError: null,
     onJumpToNow: () => calls.now++, onOpenDatePicker: () => calls.picker++, canGoPrevious: true, canGoNext: true,
     onPrevious() {}, onNext() {}, viewMode: 'day', hasSelectedDates: false,
@@ -91,10 +92,10 @@ function headerHarness(props = {}, options = {}) {
   render();
   const hold = (button) => { button.props.onPressIn?.({ nativeEvent: { touches: [{}] } }); advance(450);
     button.props.onLongPress(); button.props.onPress(); };
-  const binder = () => nodes().find((node) => /^.* view\. Go to (now|top)/.test(node.props.accessibilityLabel ?? ''));
+  const binder = () => nodes().find((node) => /^.* view\. (Go to (now|top)|Focus editor)/.test(node.props.accessibilityLabel ?? ''));
   return { calls, history, advance, render, nodes, press, hold, binder,
     centerIcon: () => nodes(binder()).find((node) => node.type === 'CalendarViewIcon' || node.type === 'CalendarHeaderIcon'),
-    dots: () => nodes(binder()).filter((node) => /^(calendar|priority)-view-dot$/.test(node.props.testID ?? ''))
+    dots: () => nodes(binder()).filter((node) => /^(calendar|priority|notepad)-view-dot$/.test(node.props.testID ?? ''))
       .map((node) => Boolean(node.props.style[1]?.backgroundColor)),
     swipeHandlers: () => nodes().find((node) => node.props.onPanResponderRelease).props,
     async settle() { for (let i = 0; i < 25; i++) await Promise.resolve(); render(); },
@@ -129,18 +130,19 @@ test('the view switch keeps one complete icon and changes views once on release'
   for (const direction of [-1, 1]) {
     const h = headerHarness({ viewMode: 'week' });
     assert.equal(h.centerIcon().props.mode, 'week');
-    assert.deepEqual(h.dots(), [true, false]);
+    assert.deepEqual(h.dots(), [true, false, false]);
     const swipe = beginBinderSwipe(h);
     assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(12 * direction)), true);
     swipe.onPanResponderGrant(swipeEvent(12 * direction));
     swipe.onPanResponderMove(swipeEvent(20 * direction));
     assert.equal(h.nodes(h.binder()).filter((node) => node.type === 'CalendarViewIcon' || node.type === 'CalendarHeaderIcon').length, 1);
-    assert.deepEqual(h.dots(), [true, false]);
+    assert.deepEqual(h.dots(), [true, false, false]);
     assert.equal(h.calls.checklist, 0);
     swipe.onPanResponderRelease(swipeEvent(29 * direction, 2, 0));
     swipe.onPanResponderRelease(swipeEvent(29 * direction, 2, 0));
     h.binder().props.onPress();
-    assert.equal(h.calls.checklist, 1);
+    assert.equal(h.calls.checklist, direction === -1 ? 1 : 0);
+    assert.equal(h.calls.notepad, direction === 1 ? 1 : 0);
     assert.equal(h.calls.now, 0);
   }
 });
@@ -150,16 +152,28 @@ test('Priority swipes back to Pick / Range without selecting a new calendar mode
   const h = headerHarness({ viewMode: 'day', hasSelectedDates: true, priority });
   const swipe = beginBinderSwipe(h);
   assert.equal(h.centerIcon().props.name, 'checklist');
-  assert.deepEqual(h.dots(), [false, true]);
-  assert.equal(h.binder().props.accessibilityActions.find((action) => action.name === 'switchView').label,
+  assert.deepEqual(h.dots(), [false, true, false]);
+  assert.equal(h.binder().props.accessibilityActions.find((action) => action.name === 'previousView').label,
     'Switch to Pick / Range view');
   assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(15)), true);
   swipe.onPanResponderGrant(swipeEvent(15));
   swipe.onPanResponderRelease(swipeEvent(30, 0, 0));
   assert.equal(h.calls.calendar, 1);
   assert.deepEqual(h.calls.modes, []);
-  h.binder().props.onAccessibilityAction({ nativeEvent: { actionName: 'switchView' } });
+  h.binder().props.onAccessibilityAction({ nativeEvent: { actionName: 'previousView' } });
   assert.equal(h.calls.calendar, 2);
+});
+
+test('Notepad owns the third dot and its swipe targets wrap around the view order', () => {
+  const h = headerHarness({ notepad: true });
+  assert.equal(h.centerIcon().props.name, 'notepad');
+  assert.deepEqual(h.dots(), [false, false, true]);
+  h.press(h.binder());
+  assert.equal(h.calls.now, 1, 'a tap uses the Notepad editor focus callback');
+  h.binder().props.onAccessibilityAction({ nativeEvent: { actionName: 'switchView' } });
+  h.binder().props.onAccessibilityAction({ nativeEvent: { actionName: 'previousView' } });
+  assert.equal(h.calls.calendar, 1);
+  assert.equal(h.calls.checklist, 1);
 });
 
 test('short, vertical, interrupted and multi-finger icon gestures do not change view or jump to Now', () => {
@@ -179,6 +193,7 @@ test('short, vertical, interrupted and multi-finger icon gestures do not change 
     }
     h.binder().props.onPress();
     assert.equal(h.calls.checklist, 0, cancel);
+    assert.equal(h.calls.notepad, 0, cancel);
     assert.equal(h.calls.now, 0, cancel);
   }
 });
@@ -187,9 +202,22 @@ test('holding the current-view icon opens choices after saving and consumes its 
   const h = headerHarness({ viewMode: 'week' }); h.hold(h.binder()); await h.settle();
   const menu = h.nodes().find((node) => node.type === 'Modal' && node.props.visible); assert.ok(menu);
   assert.deepEqual(h.nodes(menu).filter((node) => node.type === 'Pressable' && / view$/.test(node.props.accessibilityLabel ?? ''))
-    .map((node) => node.props.accessibilityLabel), ['Day view', 'Week view', 'Month view', 'Year view', 'Schedule view', 'Priority view']);
+    .map((node) => node.props.accessibilityLabel), ['Day view', 'Week view', 'Month view', 'Year view', 'Schedule view', 'Priority view', 'Notepad view']);
   h.nodes(menu).find((node) => node.props.accessibilityLabel === 'Month view').props.onPress();
   assert.deepEqual(h.calls.modes, ['month']); assert.equal(h.calls.now, 0);
+});
+
+test('the view chooser opens Notepad once after the menu closes', async () => {
+  const h = headerHarness();
+  h.hold(h.binder());
+  await h.settle();
+  const button = h.nodes().find((node) => node.props.accessibilityLabel === 'Notepad view');
+  button.props.onPress();
+  button.props.onPress();
+  h.advance(0);
+  await h.settle();
+  assert.equal(h.calls.notepad, 1);
+  assert.equal(h.calls.calendar, 0);
 });
 
 test('checklist view dispatches once after the view picker closes and retains calendar focus', async () => {

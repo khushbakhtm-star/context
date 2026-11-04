@@ -6,7 +6,7 @@ import type { AppColors } from '../theme';
 
 /** Decorative monochrome symbols; the containing button provides its accessible name. */
 export function CalendarHeaderIcon({ name, active = false, issue = false }: {
-  name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings' | 'checklist'; active?: boolean; issue?: boolean;
+  name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings' | 'checklist' | 'notepad'; active?: boolean; issue?: boolean;
 }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -36,6 +36,9 @@ export function CalendarHeaderIcon({ name, active = false, issue = false }: {
         <View style={[styles.clipboardCheck, { top }]} />
         <View style={[styles.clipboardLine, { top: top + 1.5 }]} />
       </View>)}
+    </> : name === 'notepad' ? <>
+      <View style={styles.notePage} />
+      {[7, 12, 17].map((top) => <View key={top} style={[styles.noteRule, { top }]} />)}
     </> : name === 'print' ? <>
       <View style={styles.printPaperTop} /><View style={styles.printBody} />
       <View style={styles.printPaperBottom} /><View style={styles.printIndicator} />
@@ -72,6 +75,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     borderColor: colors.graphite, backgroundColor: colors.paper, borderRadius: 1.5 },
   clipboardCheck: { position: 'absolute', left: 6.5, width: 3, height: 3, borderWidth: 1.5, borderColor: colors.graphite, borderRadius: 0.5 },
   clipboardLine: { position: 'absolute', left: 12, width: 6, height: 1.5, backgroundColor: colors.graphite, borderRadius: 0.75 },
+  notePage: { position: 'absolute', left: 3, top: 1, width: 18, height: 22, borderWidth: 1.5,
+    borderColor: colors.graphite, borderRadius: 2.5 },
+  noteRule: { position: 'absolute', left: 7, width: 10, height: 1.5, backgroundColor: colors.graphite, borderRadius: 0.75 },
   syncRing: { position: 'absolute', left: 1, top: 1, width: 22, height: 22,
     borderWidth: 1.5, borderRadius: 11 },
   syncOpen: { borderLeftColor: 'transparent', borderRightColor: 'transparent' },

@@ -12,6 +12,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
   useWindowDimensions,
   type GestureResponderEvent,
@@ -43,6 +44,7 @@ import { AccountsScreen } from './src/screens/AccountsScreen';
 import { CategoriesScreen } from './src/screens/CategoriesScreen';
 import { ReportsScreen } from './src/screens/ReportsScreen';
 import { ChecklistFlowScreen, type PriorityHistoryState, type PriorityScreenControls } from './src/screens/ChecklistFlowScreen';
+import { NotepadScreen } from './src/screens/NotepadScreen';
 import { createChecklistList, getChecklistFlow, renameChecklistList } from './src/data/checklist-flow';
 import type { ChecklistListSummary } from './src/utils/checklist-flow';
 import { SettingsScreen } from './src/screens/SettingsScreen';
@@ -83,7 +85,8 @@ import { advanceManualSyncTiming, createManualSyncTiming, finishManualSyncTiming
 import { nativeSyncDiagnosticsText } from './src/utils/native-sync-diagnostics';
 import { accountSyncDiagnosticsText } from './src/utils/account-sync-diagnostics-text';
 
-type Tab = 'today' | 'reports' | 'search' | 'settings' | 'accounts' | 'categories' | 'checklist';
+type PrimaryTab = 'today' | 'checklist' | 'notepad';
+type Tab = PrimaryTab | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
 type DayCount = 1 | 3 | 7;
 type NavigationAction = Exclude<Tab, 'today'>;
 
@@ -164,9 +167,11 @@ function AppController() {
   const [initializationAttempt, setInitializationAttempt] = useState(0);
   const [tab, setTab] = useState<Tab>('today');
   const tabRef = useRef(tab); tabRef.current = tab;
-  const primaryTabRef = useRef<'today' | 'checklist'>('today');
-  if (tab === 'today' || tab === 'checklist') primaryTabRef.current = tab;
+  const primaryTabRef = useRef<PrimaryTab>('today');
+  if (tab === 'today' || tab === 'checklist' || tab === 'notepad') primaryTabRef.current = tab;
   const checklistBeforeLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
+  const notepadBeforeLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
+  const notepadInputRef = useRef<ComponentRef<typeof TextInput>>(null);
   const priorityControlsRef = useRef<PriorityScreenControls | null>(null);
   const [priorityHistory, setPriorityHistory] = useState<PriorityHistoryState>({ canUndo: false, canRedo: false, busy: false });
   const [selectedPriorityListId, setSelectedPriorityListId] = useState('main');
@@ -623,8 +628,10 @@ function AppController() {
       // Navigation can unmount the minute editor. Keep its draft in place if saving fails.
       await awaitCalendarTransition(flushInlineMinutes(), controller.signal);
       if (!current()) throw new CalendarTransitionCancelled();
-      if (tab === 'checklist' && checklistBeforeLeaveRef.current) {
-        if (!await awaitCalendarTransition(checklistBeforeLeaveRef.current(), controller.signal)) return;
+      const beforeLeave = tab === 'checklist' ? checklistBeforeLeaveRef.current :
+        tab === 'notepad' ? notepadBeforeLeaveRef.current : null;
+      if (beforeLeave) {
+        if (!await awaitCalendarTransition(beforeLeave(), controller.signal)) return;
         if (!current()) throw new CalendarTransitionCancelled();
       }
       if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
@@ -695,7 +702,7 @@ function AppController() {
 
   async function returnToCalendar() {
     return transitionFromCalendar(() => {
-      const target = tab === 'checklist' ? 'today' : primaryTabRef.current;
+      const target = tab === 'checklist' || tab === 'notepad' ? 'today' : primaryTabRef.current;
       if (target === 'today') setFocusRequest({ ...calendarFocusRef.current, token: ++focusSequence.current, openEditor: false });
       setTab(target);
     }, 'Could not return to calendar');
@@ -1096,15 +1103,19 @@ function AppController() {
             <ReleaseUpdateNotice updates={releaseUpdates} />
             {printPreparing ? <PrintPreparationNotice action={printPreparationAction} onCancel={() => printAbortRef.current?.abort()} /> : null}
             <View style={{ flex: 1 }} pointerEvents={viewChanging ? 'none' : 'auto'}>
-              {tab === 'today' || tab === 'checklist' ?
+              {tab === 'today' || tab === 'checklist' || tab === 'notepad' ?
                 <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void openSearch()}
                   onOpenGlobalSearch={() => void openSearch(true)}
                   onPrint={() => void openPrintOptions()}
                   onSync={() => void synchronizeCalendar()} syncing={manualSyncing || accountSyncStatus.running} syncError={calendarSyncError}
                   syncDetails={calendarSyncDetails} syncTimingDetails={calendarSyncTimingDetails}
-                  onOpenReports={() => void navigate('reports')} onJumpToNow={tab === 'checklist'
-                    ? () => { void transitionFromCalendar(() => priorityControlsRef.current?.jumpToTop(), 'Could not finish task'); } : jumpToCurrentMinute}
+                  onOpenReports={() => void navigate('reports')} onJumpToNow={tab === 'notepad'
+                    ? () => notepadInputRef.current?.focus()
+                    : tab === 'checklist' ? () => {
+                      void transitionFromCalendar(() => priorityControlsRef.current?.jumpToTop(), 'Could not finish task');
+                    } : jumpToCurrentMinute}
                   onOpenChecklist={() => void navigate('checklist')}
+                  onOpenNotepad={() => void navigate('notepad')} notepad={tab === 'notepad'}
                   onReturnToCalendar={() => void returnToCalendar()}
                   viewMode={viewMode} hasSelectedDates={Boolean(selectedDateKeys?.length)}
                   viewChanging={viewChanging} onViewModeChange={changeViewMode}
@@ -1173,6 +1184,7 @@ function AppController() {
                 focusTaskId={priorityFocusTaskId} onFocusConsumed={consumePriorityFocus}
                 onSwipeList={(direction) => void switchPriorityList(direction)}
                 beforeLeaveRef={checklistBeforeLeaveRef} /> : null}
+              {tab === 'notepad' ? <NotepadScreen beforeLeaveRef={notepadBeforeLeaveRef} inputRef={notepadInputRef} /> : null}
               {tab === 'search' ? (
                 <SearchScreen dataVersion={dataVersion} scope={searchScope} onOpenResult={openSearchResult} onOpenTask={openPriorityResult} />
               ) : null}
@@ -1223,16 +1235,18 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSearch, onOpenReports, onOpenChecklist, onReturnToCalendar,
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSearch, onOpenReports, onOpenChecklist, onOpenNotepad, onReturnToCalendar,
   onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
-  viewMode, hasSelectedDates, viewChanging, onViewModeChange, priority }: {
+  viewMode, hasSelectedDates, viewChanging, onViewModeChange, priority, notepad = false }: {
   onOpenSettings: () => void;
   onPrint: () => void;
   onOpenSearch: () => void;
   onOpenGlobalSearch: () => void;
   onOpenReports: () => void;
   onOpenChecklist: () => void;
+  onOpenNotepad: () => void;
   onReturnToCalendar: () => void;
+  notepad?: boolean;
   onSync: () => void;
   syncing: boolean;
   syncError: string | null;
@@ -1267,7 +1281,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   const [gearMenuTop, setGearMenuTop] = useState(48);
   const [gearMenuLeft, setGearMenuLeft] = useState(8);
   const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
-  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates' | 'checklist' | 'search'; sequence: number } | null>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates' | 'checklist' | 'notepad' | 'search'; sequence: number } | null>(null);
   const gearVisibleRef = useRef(false);
   const gearClosingRef = useRef(false);
   const headerMountedRef = useRef(true);
@@ -1277,10 +1291,11 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   const preparingViews = useRef(false);
   const { width, height } = useWindowDimensions();
   const [availableWidth, setAvailableWidth] = useState(width);
-  const controlCount = priority ? 5 : 7;
+  const isCalendar = !priority && !notepad;
+  const controlCount = isCalendar ? 7 : 5;
   const controlWidth = Math.max(40, Math.min(44, availableWidth / controlCount));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
-  const headerHistory = priority ?? history;
+  const headerHistory = notepad ? { canUndo: false, canRedo: false, busy: false } : priority ?? history;
   const navigationBusy = viewChanging || historyPending || headerHistory.busy;
   const hasSyncDetails = Boolean(syncDetails || syncError || syncing);
   const showSyncDetails = () => {
@@ -1301,8 +1316,8 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   };
   const navigationBusyRef = useRef(navigationBusy);
   navigationBusyRef.current = navigationBusy;
-  const priorityModeRef = useRef(Boolean(priority)); priorityModeRef.current = Boolean(priority);
-  const binderActions = useRef({ single: () => {}, long: () => {}, toggle: () => {} });
+  const calendarModeRef = useRef(isCalendar); calendarModeRef.current = isCalendar;
+  const binderActions = useRef({ single: () => {}, long: () => {}, next: () => {}, previous: () => {} });
   const binderPress = useMemo(() => createCalendarBinderPress({ allowed: () => headerMayNavigate(),
     single: () => binderActions.current.single(),
     long: () => binderActions.current.long() }), []);
@@ -1319,10 +1334,11 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       !gearClosingRef.current && !viewClosingRef.current && !pendingGearAction.current;
   }
 
-  function switchViewFamily() {
+  function switchViewFamily(direction: -1 | 1) {
     if (!viewMaySwitch()) return;
     binderPress.cancel();
-    binderActions.current.toggle();
+    const change = direction === 1 ? binderActions.current.next : binderActions.current.previous;
+    change();
   }
 
   const viewSwipeResponder = useMemo(() => {
@@ -1361,7 +1377,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
         const gesture = displacement(event);
         const direction = gesture && viewSwipe.finish(gesture, !viewMaySwitch());
         cancelViewSwipe();
-        if (direction) switchViewFamily();
+        if (direction) switchViewFamily(direction);
       },
       onPanResponderTerminate: cancelViewSwipe,
       onPanResponderReject: cancelViewSwipe,
@@ -1396,7 +1412,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
 
   function headerMayNavigate() {
     return headerMountedRef.current && AppState.currentState === 'active' && !navigationBusyRef.current &&
-      !historyOperation.current && (priorityModeRef.current || !spreadsheetEditor.snapshot().busy) && !dispatchingGearAction.current && !preparingViews.current;
+      !historyOperation.current && (!calendarModeRef.current || !spreadsheetEditor.snapshot().busy) && !dispatchingGearAction.current && !preparingViews.current;
   }
 
   useEffect(() => {
@@ -1421,6 +1437,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   }, []);
 
   async function changeHistory(action: 'undo' | 'redo') {
+    if (notepad) return;
     if (priority) {
       if (viewChanging || historyOperation.current || priority.busy || !(action === 'undo' ? priority.canUndo : priority.canRedo)) return;
       binderPress.cancel(); historyOperation.current = true; setHistoryPending(true); Keyboard.dismiss();
@@ -1480,7 +1497,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
     Keyboard.dismiss(); preparingViews.current = true;
     try {
       if (priority) { if (!await priority.beforeLeave()) return; }
-      else {
+      else if (isCalendar) {
         await flushInlineMinutes();
         if (inlineMinuteDrafts.snapshot().some((draft) => draft.error || draft.revision !== draft.savedRevision)) {
           throw new Error('Your current minute could not be saved. Try again.');
@@ -1527,6 +1544,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
     else if (pending.action === 'redo') void changeHistory('redo');
     else if (pending.action === 'dates') onOpenDatePicker();
     else if (pending.action === 'checklist') onOpenChecklist();
+    else if (pending.action === 'notepad') onOpenNotepad();
     else if (pending.action === 'search') onOpenGlobalSearch();
     else onOpenReports();
     // Also release the local lock when a transition finishes within the same React batch.
@@ -1537,7 +1555,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   };
   const chooseGearAction = (action: 'settings' | 'print' | 'redo' | 'reports' | 'search') => {
     if (!headerMayNavigate() || !gearVisibleRef.current || gearClosingRef.current || pendingGearAction.current) return;
-    if (action === 'redo' && !(priority ? priority.canRedo : spreadsheetEditor.snapshot().canRedo)) return;
+    if (action === 'redo' && !headerHistory.canRedo) return;
     const sequence = ++menuRequestSequence.current;
     pendingGearAction.current = { action, sequence };
     gearVisibleRef.current = false;
@@ -1550,7 +1568,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       finishGearAction(sequence);
     });
   };
-  const chooseDateSelection = (action: 'dates' | 'checklist' = 'dates') => {
+  const chooseDateSelection = (action: 'dates' | 'checklist' | 'notepad' = 'dates') => {
     if (!headerMayNavigate() || !viewVisibleRef.current || viewClosingRef.current || pendingGearAction.current) return;
     const sequence = ++menuRequestSequence.current;
     pendingGearAction.current = { action, sequence };
@@ -1559,13 +1577,20 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       gearActionFrame.current = null; viewClosingRef.current = false; finishGearAction(sequence);
     });
   };
-  binderActions.current = { single: onJumpToNow, long: openViews, toggle: priority ? onReturnToCalendar : onOpenChecklist };
   const viewLabel = hasSelectedDates ? 'Pick / Range' :
     CALENDAR_VIEW_OPTIONS.find((option) => option.mode === viewMode)?.label ?? 'Day';
+  const views = [
+    { label: viewLabel, open: onReturnToCalendar },
+    { label: 'Priority', open: onOpenChecklist },
+    { label: 'Notepad', open: onOpenNotepad },
+  ] as const;
+  const viewIndex = notepad ? 2 : priority ? 1 : 0;
+  const nextView = views[(viewIndex + 1) % views.length]!;
+  const previousView = views[(viewIndex + views.length - 1) % views.length]!;
+  binderActions.current = { single: onJumpToNow, long: openViews, next: nextView.open, previous: previousView.open };
   const calendarIcon = <CalendarViewIcon mode={hasSelectedDates ? 'month' : viewMode} currentDate={current} />;
-  const checklistIcon = <CalendarHeaderIcon name="checklist" />;
-  const activeIcon = priority ? checklistIcon : calendarIcon;
-  const switchLabel = `Switch to ${priority ? viewLabel : 'Priority'} view`;
+  const activeIcon = isCalendar ? calendarIcon : <CalendarHeaderIcon name={notepad ? 'notepad' : 'checklist'} />;
+  const binderTapLabel = notepad ? 'Focus editor' : priority ? 'Go to top' : 'Go to now';
 
   return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
     keyboardShouldPersistTaps="always" keyboardDismissMode="none"
@@ -1580,23 +1605,25 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       <CalendarHeaderIcon name="menu" />
     </Pressable>
     </View>
-    {!priority ? <Pressable accessibilityRole="button" accessibilityLabel="Previous calendar view"
+    {isCalendar ? <Pressable accessibilityRole="button" accessibilityLabel="Previous calendar view"
       accessibilityState={{ disabled: !canGoPrevious || navigationBusy }} disabled={!canGoPrevious || navigationBusy}
       onPressIn={() => binderPress.cancel()} onPress={() => { binderPress.cancel(); onPrevious(); }}
       style={[controlStyle, (!canGoPrevious || navigationBusy) && styles.disabledCalendarNavigation]}>
       <Text allowFontScaling={false} style={styles.calendarNavigationArrow}>‹</Text>
     </Pressable> : null}
     <View ref={viewMenuAnchor} collapsable={false} {...viewSwipeResponder.panHandlers}>
-      <Pressable accessibilityRole="button" accessibilityLabel={priority ? 'Priority view. Go to top' : `${viewLabel} view. Go to now`}
-        accessibilityHint={`Tap to go to ${priority ? 'the top of this checklist' : 'the current minute'}. Swipe sideways to switch views. Press and hold to choose a view.`}
+      <Pressable accessibilityRole="button" accessibilityLabel={`${views[viewIndex].label} view. ${binderTapLabel}`}
+        accessibilityHint="Swipe sideways to switch views. Press and hold to choose a view."
         accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy, busy: viewChanging }} disabled={navigationBusy}
         accessibilityActions={[{ name: 'showViews', label: 'Choose view' },
-          { name: 'goToNow', label: priority ? 'Go to the top of the checklist' : 'Go to the current minute' },
-          { name: 'switchView', label: switchLabel }]}
+          { name: 'goToNow', label: notepad ? 'Focus the note editor' : priority ? 'Go to the top of the checklist' : 'Go to the current minute' },
+          { name: 'switchView', label: `Switch to ${nextView.label} view` },
+          { name: 'previousView', label: `Switch to ${previousView.label} view` }]}
         onAccessibilityAction={(event) => {
           if (event.nativeEvent.actionName === 'showViews') { binderPress.cancel(); openViews(); }
           else if (event.nativeEvent.actionName === 'goToNow' && headerMayNavigate()) { binderPress.cancel(); onJumpToNow(); }
-          else if (event.nativeEvent.actionName === 'switchView') switchViewFamily();
+          else if (event.nativeEvent.actionName === 'switchView') switchViewFamily(1);
+          else if (event.nativeEvent.actionName === 'previousView') switchViewFamily(-1);
         }}
         onPressIn={(event) => { if (event.nativeEvent.touches?.length > 1) binderPress.cancelPress(); else binderPress.pressIn(); }}
         onTouchStart={(event) => { if (event.nativeEvent.touches?.length > 1) binderPress.cancelPress(); }}
@@ -1607,13 +1634,14 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
           style={styles.viewIconContent}>
           {activeIcon}
           <View style={styles.viewIndicator}>
-            <View testID="calendar-view-dot" style={[styles.viewDot, !priority && styles.viewDotActive]} />
+            <View testID="calendar-view-dot" style={[styles.viewDot, isCalendar && styles.viewDotActive]} />
             <View testID="priority-view-dot" style={[styles.viewDot, Boolean(priority) && styles.viewDotActive]} />
+            <View testID="notepad-view-dot" style={[styles.viewDot, notepad && styles.viewDotActive]} />
           </View>
         </View>
       </Pressable>
     </View>
-    {!priority ? <Pressable accessibilityRole="button" accessibilityLabel="Next calendar view"
+    {isCalendar ? <Pressable accessibilityRole="button" accessibilityLabel="Next calendar view"
       accessibilityState={{ disabled: !canGoNext || navigationBusy }} disabled={!canGoNext || navigationBusy}
       onPressIn={() => binderPress.cancel()} onPress={() => { binderPress.cancel(); onNext(); }}
       style={[controlStyle, (!canGoNext || navigationBusy) && styles.disabledCalendarNavigation]}>
@@ -1696,7 +1724,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
           maxHeight: Math.max(44, height - viewMenuTop - 8) }]}>
           <ScrollView keyboardShouldPersistTaps="always" keyboardDismissMode="none">
             {CALENDAR_VIEW_OPTIONS.map((option) => {
-              const selected = !priority && (viewMode === option.mode || (viewMode === 'three-days' && option.mode === 'day'));
+              const selected = isCalendar && (viewMode === option.mode || (viewMode === 'three-days' && option.mode === 'day'));
               return <Pressable key={option.mode} accessibilityRole="button" accessibilityLabel={`${option.label} view`}
                 accessibilityState={{ selected }} onPress={() => {
                   if (!headerMayNavigate()) return;
@@ -1714,6 +1742,11 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
               <CalendarHeaderIcon name="checklist" />
               <Text maxFontSizeMultiplier={1.5} style={[styles.viewOptionText, priority && styles.viewOptionTextSelected]}>Priority</Text>
             </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Notepad view" accessibilityState={{ selected: notepad }}
+              onPress={() => chooseDateSelection('notepad')} style={[styles.viewOption, notepad && styles.viewOptionSelected]}>
+              <CalendarHeaderIcon name="notepad" />
+              <Text maxFontSizeMultiplier={1.5} style={[styles.viewOptionText, notepad && styles.viewOptionTextSelected]}>Notepad</Text>
+            </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Pick or range dates" onPress={() => chooseDateSelection()} style={styles.viewOption}>
               <CalendarViewIcon mode="month" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Pick / Range</Text>
@@ -1727,7 +1760,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
 
 const SCREEN_TITLES: Record<Tab, string> = {
   today: 'Day', reports: 'Dashboard', search: 'Search', settings: 'Settings',
-  accounts: 'Calendar accounts', categories: 'Activity colors', checklist: 'Priority',
+  accounts: 'Calendar accounts', categories: 'Activity colors', checklist: 'Priority', notepad: 'Notepad',
 };
 
 function ApplicationFrame({
@@ -1737,7 +1770,7 @@ function ApplicationFrame({
   tab: Tab;
   onReturnToCalendar: () => void;
   children: ReactNode;
-  returnView?: 'today' | 'checklist';
+  returnView?: PrimaryTab;
 }) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -1754,9 +1787,10 @@ function ApplicationFrame({
       ) : null}
       <SafeAreaView edges={['top', 'right', 'bottom', 'left']} style={styles.safeArea}>
         <View style={styles.screen}>
-          {ready && tab !== 'today' && tab !== 'checklist' ? (
+          {ready && tab !== 'today' && tab !== 'checklist' && tab !== 'notepad' ? (
             <View style={styles.screenHeader}>
-              <Pressable accessibilityRole="button" accessibilityLabel={returnView === 'checklist' ? 'Back to Priority' : 'Back to calendar'}
+              <Pressable accessibilityRole="button" accessibilityLabel={returnView === 'notepad' ? 'Back to Notepad' :
+                returnView === 'checklist' ? 'Back to Priority' : 'Back to calendar'}
                 onPress={onReturnToCalendar} style={styles.menuButton}>
                 <CalendarHeaderIcon name="back" />
               </Pressable>
@@ -1835,7 +1869,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     borderBottomColor: colors.hairline, backgroundColor: colors.paper,
   },
   menuButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  viewIconContent: { alignItems: 'center', justifyContent: 'center', gap: 3 },
+  viewIconContent: { alignItems: 'center', justifyContent: 'center', gap: 2 },
   viewIndicator: { flexDirection: 'row', gap: 4 },
   viewDot: { width: 5, height: 5, borderRadius: 2.5, borderWidth: 1, borderColor: colors.graphite },
   viewDotActive: { backgroundColor: colors.graphite },

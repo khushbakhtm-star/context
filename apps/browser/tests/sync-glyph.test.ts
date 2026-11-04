@@ -8,7 +8,7 @@ import { applySyncGlyphState } from '../src/sync-glyph';
 function fixture(fail = false) {
   const text=fs.readFileSync(new URL('../src/app.ts',import.meta.url),'utf8');
   const source=ts.createSourceFile('app.ts',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
-  const nodes=source.statements.filter((node:any)=>['updateHeader','synchronize','report'].includes(node.name?.text)||
+  const nodes=source.statements.filter((node:any)=>['updateHeader','synchronize','report','currentBrowserView'].includes(node.name?.text)||
     ts.isVariableStatement(node)&&node.declarationList.declarations.some((item)=>item.name.getText(source)==='status'));
   const elements:Record<string,any>={};
   const element=(id:string)=>elements[id]??={dataset:{},attributes:{},setAttribute(name:string,value:string){this.attributes[name]=value;}};
@@ -16,6 +16,7 @@ function fixture(fail = false) {
   const started=new Promise<void>((resolve)=>{reached=resolve;}),gate=new Promise((resolve)=>{release=resolve;});
   const context:any={Error,busy:false,lastStatus:'Initial status',element,applySyncGlyphState,
     checklistVisible:false,checklistUI:{hasDraft:()=>false,async flush(){},refresh(){},clear(){}},
+    notepadVisible:false,notepad:{hasDraft:()=>false,bind(){},async flush(){}},
     dayInput:{value:''},daysInput:{value:''},day:'2026-10-31',days:1,undo:null,
     store:{state:{conflicts:[]},async drain(){}},passphrase:'fixture',editor:null,render(){},
     connection:{identity:{email:'fixture@example.test'},isAuthorized:()=>true,async sync(){reached();if(fail)throw new Error('Synthetic connection error');return gate;}}};

@@ -3,7 +3,8 @@ import type { SyncBatch, SyncDocument } from '../shared/sync/types';
 import { parseSpreadsheetCells, spreadsheetPasteRanges } from '../shared/utils/spreadsheet-paste';
 import { cellEventLabel, cellFormatKey, formatFromDocument, isActivityGroupId } from '../shared/utils/cell-format';
 
-export type BrowserLedgerState = { version: 1; device: string; wall: number; counter: number;
+export const NOTEPAD_LIMIT = 100_000;
+export type BrowserLedgerState = { version: 1; device: string; wall: number; counter: number; notepad?: string;
   documents: SyncDocument[]; conflicts: SyncDocument[]; pending: Record<string, string>; seen: string[];
   upload: null | { name: string; ciphertext: string; batch: SyncBatch; driveId?: string } };
 export type CellChange = { day: string; minute: number; text: string };
@@ -22,6 +23,7 @@ export function validateState(state: BrowserLedgerState): BrowserLedgerState {
   if (state?.version !== 1 || !/^[A-Za-z0-9_-]{8,128}$/.test(state.device) ||
       !Number.isSafeInteger(state.wall) || state.wall < 0 || !Number.isInteger(state.counter) || state.counter < 0 ||
       state.counter > 99_999_999 || !Array.isArray(state.documents) || !Array.isArray(state.conflicts) ||
+      (state.notepad !== undefined && (typeof state.notepad !== 'string' || state.notepad.length > NOTEPAD_LIMIT)) ||
       !Array.isArray(state.seen) || state.seen.some((id) => typeof id !== 'string') ||
       !state.pending || typeof state.pending !== 'object') throw new Error('The browser ledger cache is invalid.');
   for (let i = 0; i < state.documents.length; i += 500) validateBatch({ version: 1, id: 'browser_validation', documents: state.documents.slice(i, i + 500) });

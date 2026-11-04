@@ -29,6 +29,7 @@ function harness(options = {}) {
     viewChangingRef: { current: false }, controllerMountedRef: { current: true }, lifecycleEpochRef: { current: 0 },
     transitionSequenceRef: { current: 0 }, activeTransitionRef: { current: null }, AppState: { currentState: 'active' },
     checklistBeforeLeaveRef: { current: async () => { events.push('save-task'); return options.saveGate ? options.saveGate : options.save !== false; } },
+    notepadBeforeLeaveRef: { current: async () => { events.push('save-note'); return options.saveGate ? options.saveGate : options.save !== false; } },
     Keyboard: { dismiss() {} }, setViewChanging: (value) => events.push(['busy', value]),
     flushInlineMinutes: async () => { events.push('save-minutes'); }, inlineMinuteDrafts: { snapshot: () => [] },
     Alert: { alert: (...value) => events.push(['error', ...value]) },
@@ -64,7 +65,7 @@ test('returning from Priority waits for the task save and restores the saved cal
   assert.equal(blocked.events.some((event) => event[0] === 'calendar-focus' || event[0] === 'tab'), false);
 });
 
-test('native checklist arrows wait for the original task draft, publish one selection, and clamp at list ends', async () => {
+test('native checklist switching waits for the original task draft, publishes one selection, and clamps at list ends', async () => {
   let release; const saveGate = new Promise((resolve) => release = resolve); const h = harness({ saveGate });
   const change = h.switchPriorityList(1); await settle();
   assert.equal(h.events.filter((event) => event === 'save-task').length, 1);
@@ -75,6 +76,22 @@ test('native checklist arrows wait for the original task draft, publish one sele
   assert.deepEqual(h.events.filter((event) => event[0] === 'setting'), [['setting', 'priority.selected-list-id', 'family']]);
   const first = harness(); await first.switchPriorityList(-1); assert.deepEqual(first.events, []);
   const last = harness({ listId: 'family' }); await last.switchPriorityList(1); assert.deepEqual(last.events, []);
+});
+
+test('returning from Notepad waits for the note to save and keeps the editor open on a failed save', async () => {
+  let release;
+  const h = harness({ tab: 'notepad', saveGate: new Promise((resolve) => { release = resolve; }) });
+  const transition = h.returnToCalendar();
+  await settle();
+  assert.ok(h.events.includes('save-note'));
+  assert.equal(h.events.some((event) => event[0] === 'tab'), false);
+  release(true);
+  await transition;
+  assert.deepEqual(h.events.find((event) => event[0] === 'tab'), ['tab', 'today']);
+
+  const blocked = harness({ tab: 'notepad', save: false });
+  await blocked.returnToCalendar();
+  assert.equal(blocked.events.some((event) => event[0] === 'tab'), false);
 });
 
 test('a rejected draft or backgrounded continuation cannot change the selected checklist', async () => {
