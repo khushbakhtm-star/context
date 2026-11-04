@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.37",
-  "sourceAndroidVersionCode": 38,
-  "sourceIosBuildNumber": "38",
+  "version": "0.1.38",
+  "sourceAndroidVersionCode": 39,
+  "sourceIosBuildNumber": "39",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.37. Swipe the header view icon to switch between Priority and the previous calendar view. Opening cell actions also opens the bottom minute text box. A range keeps its selected cells while typing edits its anchor. Publish only the verified APK signed with the existing publisher key."
+  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.38. Moving a standalone minute note in the time editor clears its original cell in the same undoable edit. Adding text to Priority lets you pick a checklist if there is more than one. Publish only the verified APK signed with the existing publisher key."
 }

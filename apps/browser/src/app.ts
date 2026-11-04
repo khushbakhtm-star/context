@@ -113,19 +113,41 @@ async function showChecklistView() {
   if (store !== active || priorityScope !== scope) return; closeCellMenu();
   element<HTMLDialogElement>('menu-dialog').close(); element<HTMLDialogElement>('view-dialog').close(); setChecklistVisible(true);
 }
+function pickChecklistDestination(lists: { id: string; name: string }[]): Promise<string | undefined> {
+  const dialog = element<HTMLDialogElement>('checklist-destination');
+  const choices = element('checklist-destination-lists');
+  choices.replaceChildren();
+  for (const list of lists) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = list.name;
+    button.onclick = () => dialog.close(list.id);
+    choices.append(button);
+  }
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise((resolve) => dialog.addEventListener('close', () => {
+    resolve(lists.find((list) => list.id === dialog.returnValue)?.id);
+  }, { once: true }));
+}
 async function createChecklistTask(snapshot: MinuteTaskSnapshot) {
-  if (!store || priorityScope.store !== store) throw new Error('Unlock your private ledger first.'); const active = store; const scope = priorityScope; const listId = activeChecklistId;
-  const expected = browserChecklist(active.state, listId).revision; let changedUndo: UndoEdit | undefined;
+  if (!store || priorityScope.store !== store) throw new Error('Unlock your private ledger first.'); const active = store; const scope = priorityScope;
+  const { lists, revision: expected } = browserChecklist(active.state);
+  const listId = lists.length > 1 ? await pickChecklistDestination(lists) : lists[0]?.id;
+  if (!listId) return;
+  if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Select the task text again.');
+  let changedUndo: UndoEdit | undefined;
   await active.update((state) => { if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Select the task text again.');
     const result = changeBrowserChecklist(state, expected, { type: 'add', item: newBrowserTask(snapshot.text, snapshot.source) }, Date.now(), listId); changedUndo = result.undo; return result.state; });
   if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Reopen Priority.');
   if (changedUndo?.after.length) priorityUndos.set(listId, { store: active, edit: changedUndo });
   void synchronize(false);
+  if (listId === activeChecklistId) await showChecklistView();
+  else await choosePriorityList(listId);
 }
 async function addEditorTextToChecklist() {
   if (!editor || !store) return; const current = editor; const active = store; const start = current.input.selectionStart, end = current.input.selectionEnd;
   const snapshot = minuteTaskSnapshot([{ day: current.day, minute: current.minute, text: current.input.value }], end > start ? { start, end } : undefined);
-  await saveEditor(); if (store !== active) throw new Error('The connected account changed. Select the task text again.'); await createChecklistTask(snapshot); await showChecklistView();
+  await saveEditor(); if (store !== active) throw new Error('The connected account changed. Select the task text again.'); await createChecklistTask(snapshot);
 }
 async function choosePriorityList(listId: string) {
   const active = store, scope = priorityScope, request = ++priorityNavigation;
@@ -398,7 +420,7 @@ async function showCellMenu(x: number, y: number) {
   if (coords.length > 1 && distinct.length === 1) add('AutoFill', () => writeSelectedText(coords.map((point) => ({ ...point, text: distinct[0]! })), source));
   if (distinct.some((text) => text.trim())) add('Add to Priority', async () => {
     if (store !== active || selectionStamp() !== stamp) throw new Error('The selection changed. Choose your task text again.');
-    await createChecklistTask(minuteTaskSnapshot(coords.map((point, index) => ({ ...point, text: textValues[index]! })))); await showChecklistView();
+    await createChecklistTask(minuteTaskSnapshot(coords.map((point, index) => ({ ...point, text: textValues[index]! }))));
   });
   const sameDay = coords.every((point) => point.day === coords[0]!.day);
   const hasGroup = coords.some((point) => {

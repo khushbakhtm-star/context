@@ -16,6 +16,7 @@ export type MinuteSpanFillInput = { text?: string; categoryId?: string; event?: 
 export type MinuteSpanFillPreview = { token: string; span: MinuteSpan; ranges: MinuteCellRange[];
   cellCount: number; occupiedCount: number };
 export type MinuteSpanFillResult = { affectedDates: string[]; blockId: string | null };
+export type MinuteSpanSource = { dateKey: string; cell: SpreadsheetCellState };
 export type CellFormatPatch = { bold?: boolean; italic?: boolean; underline?: boolean; textColor?: string | null };
 export type MinuteDisplayedColorFallback = { minuteIndex: number; categoryId: string };
 export type SpreadsheetCommit = { affectedDates: string[]; textChanged: boolean };
@@ -74,6 +75,7 @@ type RangeMoveContext = { cells: CellState[]; groups: SpreadsheetBlockGuard[] };
 type RangeMoveRecord = MinuteRangeMovePreview & { sourceCells: CellState[]; destinationCells: CellState[];
   sourceContext: RangeMoveContext; destinationContext: RangeMoveContext };
 type SpanFillRecord = MinuteSpanFillPreview & { input: MinuteSpanFillInput; selected: { day: string; cells: CellState[] }[];
+  movedSource?: { day: string; cell: CellState };
   members: { blockId: string; cells: { day: string; cell: CellState }[] }[] };
 type Typing = { key: string; command: Command; lastAt: number };
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -445,8 +447,9 @@ class SpreadsheetEditor {
       throw new Error('Choose a Google Calendar color before filling these minutes.');
     }
   }
-  prepareSpanFill(span: MinuteSpan, input: MinuteSpanFillInput): Promise<MinuteSpanFillPreview> {
+  prepareSpanFill(span: MinuteSpan, input: MinuteSpanFillInput, source?: MinuteSpanSource): Promise<MinuteSpanFillPreview> {
     const ranges = minuteSpanRanges(span); const normalized = this.spanInput(input);
+    const original = source && clone(source);
     const requested = { startDateKey: span.startDateKey, startMinute: span.startMinute,
       endDateKey: span.endDateKey, endMinute: span.endMinute };
     return this.enqueue(async () => {
@@ -462,6 +465,22 @@ class SpreadsheetEditor {
       const selected: SpanFillRecord['selected'] = [];
       for (const range of ranges) selected.push({ day: range.dateKey,
         cells: clone((await readDay(range.dateKey)).slice(range.startMinute, range.endMinute + 1)) });
+      let movedSource: SpanFillRecord['movedSource'];
+      if (original && !ranges.some((range) => range.dateKey === original.dateKey &&
+          original.cell.minuteIndex >= range.startMinute && original.cell.minuteIndex <= range.endMinute)) {
+        const day = original.dateKey, minute = original.cell.minuteIndex;
+        validateMinuteCellRange({ dateKey: day, startMinute: minute, endMinute: minute });
+        const cell = (await readDay(day))[minute]!;
+        if (!cell.entry?.text.trim() || cell.entry.source === 'inherited-plan' || isActivityGroupId(cell.entry.blockId) ||
+            cellEventLabel(cell.format, cell.entry.blockId) || !original.cell.version ||
+            cell.version?.minuteRevision !== original.cell.version.minuteRevision ||
+            cell.version?.formatRevision !== original.cell.version.formatRevision ||
+            cell.entry.id !== original.cell.entry?.id || cell.entry.updatedAt !== original.cell.entry?.updatedAt ||
+            cell.entry.text !== original.cell.entry?.text) {
+          throw new Error('The original minute changed. Reopen its details before moving it.');
+        }
+        movedSource = { day, cell: clone(cell) };
+      }
       const ids = new Set(normalized.event ? selected.flatMap(({ cells }) => cells.flatMap((cell) =>
         cellEventLabel(cell.format, cell.entry?.blockId) || isActivityGroupId(cell.entry?.blockId) ? [cell.entry!.blockId!] : [])) : []);
       if (normalized.event?.blockId) ids.add(normalized.event.blockId);
@@ -483,7 +502,7 @@ class SpreadsheetEditor {
         members.push({ blockId, cells });
       }
       const preview: SpanFillRecord = { token: this.newToken('span-fill'), span: requested, ranges: clone(ranges),
-        input: normalized, selected, members, cellCount: selected.reduce((count, day) => count + day.cells.length, 0),
+        input: normalized, selected, members, movedSource, cellCount: selected.reduce((count, day) => count + day.cells.length, 0),
         occupiedCount: selected.reduce((count, day) => count + day.cells.filter((cell) =>
           Boolean(cell.entry) || Object.keys(cell.format).length > 0).length, 0) };
       this.spanFillPreview = preview;
@@ -513,6 +532,13 @@ class SpreadsheetEditor {
       };
       for (const { day, cells } of preview.selected) for (const cell of cells) include(day, cell);
       for (const member of preview.members) for (const { day, cell } of member.cells) include(day, cell);
+      const movedSource = preview.movedSource;
+      if (movedSource) {
+        const cell = include(movedSource.day, movedSource.cell);
+        cell.entry = null;
+        cell.format = {};
+        if (cell.display) cell.display = { ...cell.display, text: '', categoryId: 'unaccounted', keepColor: false };
+      }
       if ([...changes.values()].reduce((count, day) => count + day.before.size, 0) > 10_000) {
         throw new Error('Select fewer event minutes before changing these borders.');
       }
@@ -561,17 +587,20 @@ class SpreadsheetEditor {
       }
       if (targetId) allIds.add(targetId);
       for (const { day, cells } of preview.selected) for (const original of cells) {
-        const cell = include(day, original); const text = normalized.text ?? cell.entry?.text ?? '';
+        const cell = include(day, original);
+        const text = normalized.text ?? movedSource?.cell.entry?.text ?? cell.entry?.text ?? '';
+        if (movedSource && !cell.entry && !Object.keys(cell.format).length &&
+            (text.trim() || normalized.event || normalized.categoryId !== undefined)) cell.format = clone(movedSource.cell.format);
         if (normalized.event) {
           cell.entry = { ...cell.entry, text, categoryId: normalized.event.categoryId, blockId: targetId! };
           cell.format = withEventLabel({ ...cell.format, noFill: undefined }, targetId!, normalized.event.title);
-        } else if (normalized.text !== undefined || normalized.categoryId !== undefined) {
+        } else if (movedSource || normalized.text !== undefined || normalized.categoryId !== undefined) {
           cell.entry = cell.entry ? { ...cell.entry, text, ...(normalized.categoryId !== undefined ? { categoryId: normalized.categoryId } : {}) }
             : text.trim() || normalized.categoryId !== undefined
-              ? { text, categoryId: normalized.categoryId ?? 'unaccounted', blockId: this.newToken('sheet') } : null;
+              ? { text, categoryId: normalized.categoryId ?? movedSource?.cell.entry?.categoryId ?? 'unaccounted', blockId: this.newToken('sheet') } : null;
           if (normalized.categoryId !== undefined) cell.format = normalizeCellFormat({ ...cell.format, noFill: undefined });
         }
-        if (cell.display && (normalized.event || normalized.text !== undefined || normalized.categoryId !== undefined)) cell.display = { ...cell.display, text: cell.entry?.text ?? '',
+        if (cell.display && (movedSource || normalized.event || normalized.text !== undefined || normalized.categoryId !== undefined)) cell.display = { ...cell.display, text: cell.entry?.text ?? '',
           categoryId: cell.entry?.categoryId ?? 'unaccounted', keepColor: Boolean(cell.entry && !cell.entry.text.trim()) };
       }
       const patches = [...changes].map(([day, change]) => ({ day,
@@ -588,7 +617,7 @@ class SpreadsheetEditor {
         await this.perform({ day: requested.startDateKey, before: Promise.resolve([]), after: [], patches,
           guards: patches.map((patch) => ({ day: patch.day, cells: patch.before })),
           blockGuardsBefore: beforeGuards, blockGuardsAfter: afterGuards,
-          textChanged: true, formatChanged: Boolean(normalized.event || normalized.categoryId !== undefined),
+          textChanged: true, formatChanged: Boolean(movedSource || normalized.event || normalized.categoryId !== undefined),
           canApply: () => this.spanFillPreview?.token === preview.token });
       }
       this.spanFillPreview = null;
@@ -1001,7 +1030,8 @@ export const clearMinuteRange = (range: MinuteCellRange) => spreadsheetEditor.cl
 export const clearTextMinuteRange = (range: MinuteCellRange, displayedColorFallbacks?: readonly MinuteDisplayedColorFallback[]) =>
   spreadsheetEditor.clearText(range, displayedColorFallbacks);
 export const groupMinuteRange = (range: MinuteCellRange, input: { title: string; categoryId: string }) => spreadsheetEditor.group(range, input);
-export const prepareMinuteSpanFill = (span: MinuteSpan, input: MinuteSpanFillInput) => spreadsheetEditor.prepareSpanFill(span, input);
+export const prepareMinuteSpanFill = (span: MinuteSpan, input: MinuteSpanFillInput, source?: MinuteSpanSource) =>
+  spreadsheetEditor.prepareSpanFill(span, input, source);
 export const fillMinuteSpan = (span: MinuteSpan, input: MinuteSpanFillInput, options: { previewToken: string }) =>
   spreadsheetEditor.fillSpan(span, input, options);
 export const colorMinuteRange = (range: MinuteCellRange, categoryId: string) => spreadsheetEditor.color(range, categoryId);

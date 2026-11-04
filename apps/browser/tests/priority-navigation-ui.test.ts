@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { emptyLedger, editCells, getMinute, undoEdit, type BrowserLedgerState } from '../src/ledger';
-import { browserChecklist, changeBrowserChecklist, createBrowserChecklistList, renameBrowserChecklistList } from '../src/checklist-flow';
+import { browserChecklist, changeBrowserChecklist, createBrowserChecklistList, minuteTaskSnapshot, newBrowserTask, renameBrowserChecklistList } from '../src/checklist-flow';
 import { DEFAULT_CHECKLIST_LIST_ID, CHECKLIST_FLOW_KEY, checklistRows, type ChecklistTask } from '../shared/utils/checklist-flow';
 
 const app = fs.readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
@@ -31,6 +31,43 @@ function gate() {
   let release!: () => void, reached!: () => void;
   return { promise: new Promise<void>((resolve) => { release = resolve; }), started: new Promise<void>((resolve) => { reached = resolve; }), release: () => release(), reached: () => reached() };
 }
+
+function destinationFixture(state: BrowserLedgerState) {
+  const choices = { buttons: [] as HTMLButtonElement[], replaceChildren() { this.buttons = []; }, append(button: HTMLButtonElement) { this.buttons.push(button); } };
+  let onClose: () => void = () => {};
+  const dialog = { opens: 0, returnValue: '', showModal() { this.opens++; }, addEventListener(_event: string, listener: () => void) { onClose = listener; },
+    close(value = '') { this.returnValue = value; onClose(); } };
+  const active = { state, writes: 0, async update(change: (state: BrowserLedgerState) => BrowserLedgerState) { this.writes++; this.state = change(this.state); } };
+  const visited: string[] = [];
+  const context = functions(['createChecklistTask', 'pickChecklistDestination'], { store: active, priorityScope: { store: active },
+    browserChecklist, changeBrowserChecklist, newBrowserTask, activeChecklistId: 'main', priorityUndos: new Map(), synchronize() {},
+    element: (id: string) => id === 'checklist-destination' ? dialog : choices, document: { createElement: () => ({}) },
+    async choosePriorityList(id: string) { visited.push(id); }, async showChecklistView() { visited.push('main'); } });
+  const snapshot = minuteTaskSnapshot([{ day: '2026-11-02', minute: 510, text: 'Call dentist' }]);
+  return { active, choices, context, dialog, visited, add: () => context.createChecklistTask(snapshot) as Promise<void> };
+}
+
+test('Add to Priority opens the chosen destination, and a sole list needs no prompt', async () => {
+  const h = destinationFixture(sample()); const pending = h.add();
+  assert.deepEqual(h.choices.buttons.map((button) => button.textContent), ['Priority', 'Later']);
+  assert.equal(h.active.writes, 0);
+  h.choices.buttons[1]!.onclick!(new Event('click') as PointerEvent);
+  await pending;
+  assert.deepEqual(h.visited, ['list_other']);
+  assert.deepEqual(browserChecklist(h.active.state, 'list_other').flow.items.map((item) => item.text), ['Dentist second list', 'Call dentist']);
+  assert.deepEqual(browserChecklist(h.active.state).flow.items.map((item) => item.text), ['Dentist first list']);
+
+  const single = destinationFixture(emptyLedger('browser_priority_single'));
+  await single.add();
+  assert.equal(single.dialog.opens, 0); assert.deepEqual(single.visited, ['main']);
+  assert.equal(browserChecklist(single.active.state).flow.items[0]?.text, 'Call dentist');
+});
+
+test('canceling the destination or changing accounts while it is open cannot add a task', async () => {
+  const h = destinationFixture(sample()); const canceled = h.add(); h.dialog.close(); await canceled;
+  const stale = h.add(); h.context.store = {}; h.dialog.close('list_other'); await assert.rejects(stale, /account or checklist changed/);
+  assert.equal(h.active.writes, 0); assert.deepEqual(h.visited, []);
+});
 
 test('top Search restricts the actual list or exact visible dates, while menu Search includes every list and minute', () => {
   const context = functions(['browserSearch'], { browserChecklist, checklistRows, DEFAULT_CHECKLIST_LIST_ID, settings: { hideCompleted: false } });

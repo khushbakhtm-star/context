@@ -34,7 +34,7 @@ function screen(t, options = {}) {
   class Value { constructor(value, config) { this.value = value; this.nativeDriver = config?.useNativeDriver === true; this.writes = 0; }
     setValue(value) { this.value = value; this.writes++; } }
   const native = { View: 'View', Text: 'Text', Pressable: 'Pressable', ScrollView: 'ScrollView', FlatList: 'FlatList',
-    TextInput: 'TextInput', KeyboardAvoidingView: 'KeyboardAvoidingView', RefreshControl: 'RefreshControl',
+    TextInput: 'TextInput', KeyboardAvoidingView: 'KeyboardAvoidingView', RefreshControl: 'RefreshControl', Modal: 'Modal',
     Platform: { OS: options.platform ?? 'android' }, StyleSheet: { create: (value) => value, hairlineWidth: 0.5 },
     useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
     Animated: { Value, View: 'AnimatedView', ScrollView: 'AnimatedScrollView', event: (_mapping, options) => options.listener,
@@ -66,9 +66,9 @@ function screen(t, options = {}) {
     },
     ungroupMinuteRange: async (range) => command('ungroup', range),
     groupMinuteRange: async (range, group) => command('group', { ...range, ...group }),
-    prepareMinuteSpanFill: async (span, input) => {
+    prepareMinuteSpanFill: async (span, input, moveSource) => {
       const ranges = load(source('utils/minute-span.ts')).minuteSpanRanges(span);
-      spanPreviews.push({ span: { ...span }, input: JSON.parse(JSON.stringify(input)) });
+      spanPreviews.push({ span: { ...span }, input: JSON.parse(JSON.stringify(input)), source: moveSource });
       if (options.prepareSpanGate) await options.prepareSpanGate;
       return { token: 'span-preview', span, ranges, cellCount: ranges.reduce((n, r) => n + r.endMinute - r.startMinute + 1, 0), occupiedCount: options.spanOccupied ?? 0 };
     },
@@ -142,12 +142,19 @@ function screen(t, options = {}) {
         if (resolved.endsWith('/components/MinuteEditor') || resolved.endsWith('\\components\\MinuteEditor')) return { MinuteEditor: 'MinuteEditor' };
         if (resolved === source('data/database')) return { getDayEntries: options.readEntries ?? (async (date) => [...rows.values()].filter((row) => row.dateKey === date).map((row) => ({ ...row }))),
           getEntriesForBlock: async (blockId) => [...rows.values()].filter((row) => row.blockId === blockId).map((row) => ({ ...row })),
+          getSpreadsheetCells: async ({ dateKey, startMinute }) => {
+            const entry = rows.get(`${dateKey}:${startMinute}`);
+            return [{ minuteIndex: startMinute, entry: entry ? { ...entry } : null, format: {}, version: { minuteRevision: 'original', formatRevision: null } }];
+          },
           getMinuteEntry: options.readMinuteEntry ?? (async (date, minute) => rows.get(`${date}:${minute}`) ? { ...rows.get(`${date}:${minute}`) } : null) };
-        if (resolved === source('data/checklist-flow')) return { addChecklistTask: async (text, source, format) => {
-          command('checklist-task', { text, source: JSON.parse(JSON.stringify(source)), format: JSON.parse(JSON.stringify(format)) });
-          if (options.checklistWriteGate) await options.checklistWriteGate;
-          return { taskId: 'task_test_capture' };
-        } };
+        if (resolved === source('data/checklist-flow')) return {
+          getChecklistFlow: async () => ({ lists: options.checklistLists ?? [{ id: 'main', name: 'Priority', taskCount: 0 }] }),
+          addChecklistTask: async (text, source, format, listId) => {
+            command('checklist-task', { text, source: JSON.parse(JSON.stringify(source)), format: JSON.parse(JSON.stringify(format)), listId });
+            if (options.checklistWriteGate) await options.checklistWriteGate;
+            return { taskId: 'task_test_capture' };
+          },
+        };
         if (resolved === source('services/calendar')) return { loadPlannedEventsResult: options.readNative ?? (async () => ({ plans: [], failures: [] })),
           reconcileLinkedNativeColors: options.reconcileColors ?? (async () => []), flushPendingActuals: async () => ({}) };
         if (resolved === source('services/categories')) return {
@@ -241,6 +248,7 @@ function screen(t, options = {}) {
     async edit(minute, date = day) { cell(minute, date).props.onAccessibilityAction({ nativeEvent: { actionName: 'editMinute' } }); await settle(); },
     details: () => find(tree, 'MinuteSpanEditor')?.props, overview: () => find(tree, 'CompactMinuteOverview')?.props,
     categoryPicker: () => { const props = find(tree, 'ActivityCategoryPicker')?.props; return props?.visible ? props : undefined; },
+    checklistPicker: () => find(tree, 'Modal')?.props,
     pinchPreview: () => { const props = find(tree, 'CalendarPinchPreview')?.props; return props?.active ? props : undefined; },
     warmedPinchPreview: () => find(tree, 'CalendarPinchPreview')?.props, list: () => find(tree, 'FlatList')?.props,
     fittedTexts: (minute, date = day) => {
@@ -307,13 +315,13 @@ test('one checklist action captures the committed selected minute range as one t
   const tasks = h.calls.filter((call) => call.action === 'checklist-task');
   assert.equal(tasks.length, 1, 'one action completes once, including a repeated tap during acknowledgement');
   assert.deepEqual(tasks[0], { action: 'checklist-task', text: 'Read the newest instructions\nFollow the instructions',
-    source: { ranges: [{ dateKey: h.day, startMinute: 600, endMinute: 602 }] }, format: { bold: true, textColor: '#123456' } });
+    source: { ranges: [{ dateKey: h.day, startMinute: 600, endMinute: 602 }] }, format: { bold: true, textColor: '#123456' }, listId: 'main' });
   assert.deepEqual([600, 601, 603].map((minute) => h.rows.get(`${h.day}:${minute}`).text),
     ['Read the newest instructions', 'Follow the instructions', 'Outside selected cells']);
   assert.deepEqual([600, 601, 603].map((minute) => h.rows.get(`${h.day}:${minute}`).categoryId), ['study', 'work', 'family']);
   assert.equal(h.rows.has(`${h.day}:602`), false, 'a blank source minute stays blank');
   assert.equal(h.calls.some((call) => call.action !== 'checklist-task'), false, 'no cell formatting, grouping or calendar command is invoked');
-  assert.equal(opened, 1); assert.ok(changed >= 1); assert.equal(h.bar(), undefined);
+  assert.equal(opened, 1); assert.ok(changed >= 1); assert.equal(h.bar(), undefined); assert.equal(h.checklistPicker(), undefined);
 });
 
 test('highlighted minute text creates a task sourced only from that minute and retains exact passage offsets', async (t) => {
@@ -329,8 +337,44 @@ test('highlighted minute text creates a task sourced only from that minute and r
   const task = h.calls.find((call) => call.action === 'checklist-task');
   assert.deepEqual(task, { action: 'checklist-task', text: 'talk to Mum',
     source: { ranges: [{ dateKey: h.day, startMinute: 600, endMinute: 600 }], selection: { start: 13, end: 24 } },
-    format: { italic: true, underline: true } });
+    format: { italic: true, underline: true }, listId: 'main' });
   assert.equal(JSON.stringify([...h.rows]), before); assert.equal(opened, 1);
+});
+
+test('checklist capture asks for a destination and opens the selected list after saving', async (t) => {
+  const checklistLists = [{ id: 'main', name: 'Priority' }, { id: 'list_work', name: 'Work' }, { id: 'list_home', name: 'Home' }];
+  const opened = [];
+  const h = screen(t, { checklistLists, props: { onOpenChecklist(task) { opened.push({ ...task }); } } });
+  h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Review audio', categoryId: 'work', blockId: 'source' });
+  await h.start(); await h.hold(600);
+  h.menu().onTask(); await h.settle();
+  assert.ok(h.checklistPicker());
+  assert.equal(h.calls.length, 0);
+  h.action('Cancel adding to checklist').onPress(); await h.settle();
+  assert.equal(h.checklistPicker(), undefined); assert.equal(h.calls.length, 0); assert.equal(opened.length, 0);
+
+  h.menu().onTask(); await h.settle();
+  for (const { name } of checklistLists) assert.ok(h.action(name));
+  const choose = h.action('Work').onPress;
+  choose(); choose(); await h.settle();
+  assert.equal(h.calls.length, 1); assert.equal(h.calls[0].listId, 'list_work');
+  assert.deepEqual(opened, [{ listId: 'list_work', taskId: 'task_test_capture' }]);
+  assert.equal(h.checklistPicker(), undefined);
+});
+
+test('a checklist picker closes on navigation or backgrounding and ignores its stale actions', async (t) => {
+  const checklistLists = [{ id: 'main', name: 'Priority' }, { id: 'list_work', name: 'Work' }];
+  for (const action of ['navigate', 'background', 'unmount']) {
+    const h = screen(t, { checklistLists });
+    h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Review audio', categoryId: 'work', blockId: 'source' });
+    await h.start(); await h.hold(600); h.menu().onTask(); await h.settle();
+    const choose = h.action('Work').onPress;
+    if (action === 'navigate') await h.navigate('2026-10-26');
+    else if (action === 'background') await h.background(); else h.unmount();
+    choose();
+    if (action !== 'unmount') { await h.settle(); assert.equal(h.checklistPicker(), undefined); }
+    assert.equal(h.calls.length, 0, action);
+  }
 });
 
 test('navigation or backgrounding during a checklist source read cannot create a task from the old selection', async (t) => {
@@ -601,6 +645,9 @@ test('saving a range outside its original anchor selects the new group for the n
   await h.start(); await h.tap(444); h.action('Edit selected minutes and time range').onPress(); await h.settle();
   const span = { startDateKey: h.day, startMinute: 724, endDateKey: '2026-10-26', endMinute: 444 };
   assert.equal(await h.details().onSave(span, { text: 'Sleep', event: { title: 'Sleep', categoryId: 'study' } }), true);
+  assert.equal(h.spanPreviews[0].source.dateKey, h.day);
+  assert.equal(h.spanPreviews[0].source.cell.minuteIndex, 444);
+  assert.equal(h.spanPreviews[0].source.cell.entry.text, 'Asleep');
   h.details().onClose(); await h.settle();
   assert.equal(h.bar('format'), undefined); assert.equal(h.bar('entry'), undefined);
   await h.hold(724); h.menu().onEdit(); await h.settle();

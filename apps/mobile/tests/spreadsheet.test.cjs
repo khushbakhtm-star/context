@@ -10,6 +10,53 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const day = '2026-10-25';
 const { setImmediate } = require('node:timers/promises');
 
+test('retiming one standalone note fills the new range, clears the old cell and can be undone as one edit', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  await save(api, 660, 'Review audio', 'study');
+  await sheet.applyCellFormat(range(660), { bold: true });
+  const [cell] = await api.getSpreadsheetCells(range(660));
+  const source = { dateKey: day, cell };
+  const span = { startDateKey: day, startMinute: 780, endDateKey: day, endMinute: 796 };
+  const input = { text: 'Review audio' };
+  const preview = await sheet.prepareMinuteSpanFill(span, input, source);
+  assert.equal(preview.occupiedCount, 0);
+  await sheet.fillMinuteSpan(span, input, { previewToken: preview.token });
+  assert.equal(await api.getMinuteEntry(day, 660), null);
+  assert.equal((await sheet.getDayCellFormats(day)).get(660), undefined);
+  assert.deepEqual((await api.getDayEntries(day)).map((entry) => [entry.minuteIndex, entry.text, entry.categoryId]),
+    Array.from({ length: 16 }, (_, index) => [780 + index, 'Review audio', 'study']));
+  assert.equal((await sheet.getDayCellFormats(day)).get(795).bold, true);
+  await sheet.undoSpreadsheetEdit();
+  assert.deepEqual((await api.getDayEntries(day)).map((entry) => [entry.minuteIndex, entry.text]), [[660, 'Review audio']]);
+  assert.equal((await sheet.getDayCellFormats(day)).get(660).bold, true);
+  await sheet.redoSpreadsheetEdit();
+  assert.equal(await api.getMinuteEntry(day, 660), null);
+  assert.equal((await api.getMinuteEntry(day, 795)).text, 'Review audio');
+});
+
+test('a changed original minute prevents a cross-date retime before preview or before commit', async (t) => {
+  const { api, sheet } = harness(t); await api.initializeDatabase();
+  const next = '2026-10-26';
+  const source = async () => ({ dateKey: day, cell: (await api.getSpreadsheetCells(range(660)))[0] });
+  const span = { startDateKey: next, startMinute: 780, endDateKey: next, endMinute: 782 };
+  const input = { text: 'Review audio' };
+  await save(api, 660, 'Review audio'); const stale = await source();
+  await save(api, 660, 'Different note');
+  await assert.rejects(sheet.prepareMinuteSpanFill(span, input, stale), /original minute changed/);
+  await save(api, 660, 'Review audio');
+  const preview = await sheet.prepareMinuteSpanFill(span, input, await source());
+  await sheet.applyCellFormat(range(660), { italic: true });
+  await assert.rejects(sheet.fillMinuteSpan(span, input, { previewToken: preview.token }), /changed/);
+  assert.equal((await api.getMinuteEntry(day, 660)).text, 'Review audio');
+  assert.equal((await sheet.getDayCellFormats(day)).get(660).italic, true);
+  assert.equal(await api.getMinuteEntry(next, 780), null);
+  const fresh = await sheet.prepareMinuteSpanFill(span, input, await source());
+  const applied = await sheet.fillMinuteSpan(span, input, { previewToken: fresh.token });
+  assert.deepEqual(plain(applied.affectedDates).sort(), [day, next]);
+  assert.equal(await api.getMinuteEntry(day, 660), null);
+  assert.equal((await api.getMinuteEntry(next, 780)).text, 'Review audio');
+});
+
 test('an overnight pencil fill creates one border with independent notes, styles and one atomic Undo across both dates', async (t) => {
   const { api, sheet } = harness(t); await api.initializeDatabase();
   const next = '2026-10-26';

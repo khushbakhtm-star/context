@@ -1181,7 +1181,7 @@ function AppController() {
                   onFocusConsumed={consumeFocus} onFocusedMinuteChange={reportFocusedMinute}
                   onDataChanged={dataChanged}
                   onOpenSettings={() => void navigate('settings')}
-                  onOpenChecklist={() => void navigate('checklist')}
+                  onOpenChecklist={(task) => void transitionFromCalendar(() => openPriorityResult(task), 'Could not open Priority')}
                   dayCount={dayCount}
                   selectedDates={selectedDateKeys}
                   dateSelectionOpen={datePickerOpen}

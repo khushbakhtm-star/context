@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
 import {
-  Alert, Animated, AppState, FlatList, Keyboard, KeyboardAvoidingView, Linking, PanResponder, Pressable, RefreshControl,
+  Alert, Animated, AppState, FlatList, Keyboard, KeyboardAvoidingView, Linking, Modal, PanResponder, Pressable, RefreshControl,
   ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
   type GestureResponderEvent, type NativeScrollEvent, type NativeSyntheticEvent,
 } from 'react-native';
@@ -17,8 +17,8 @@ import { CalendarPinchPreview } from '../components/CalendarPinchPreview';
 import { CalendarCellText } from '../components/CalendarCellText';
 import { MinuteSpanEditor, type MinuteSpanEditorSession } from '../components/MinuteSpanEditor';
 
-import { deleteMinuteEntry, getDayEntries, getMinuteEntry, getEntriesForBlock, saveMinuteRange } from '../data/database';
-import { addChecklistTask } from '../data/checklist-flow';
+import { deleteMinuteEntry, getDayEntries, getMinuteEntry, getEntriesForBlock, getSpreadsheetCells, saveMinuteRange } from '../data/database';
+import { addChecklistTask, getChecklistFlow } from '../data/checklist-flow';
 import { flushPendingActuals, loadPlannedEventsResult, openPlannedEvent, reconcileLinkedNativeColors } from '../services/calendar';
 import { ensureSourceColorCategory, listSelectableActivityCategories, subscribeWritablePaletteChanges } from '../services/categories';
 import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscribeInlineMinuteCommits,
@@ -26,7 +26,7 @@ import { flushInlineMinutes, inlineMinuteDrafts, retryInlineMinuteLinks, subscri
 import { applyCellFormat, colorMinuteRange, resetMinuteFill, resetMinuteCells, copyMinuteRange, cutMinuteRange, editInlineMinute,
   fillMinuteRange, getDayActivityGroups, getDayCellFormats, getSpreadsheetClipboard, groupMinuteRange, pasteMinuteRange,
   prepareMinutePaste, prepareExternalMinutePaste, pasteExternalMinuteRange,
-  prepareMinuteSpanFill, fillMinuteSpan, type MinuteSpan, type MinuteSpanFillInput,
+  prepareMinuteSpanFill, fillMinuteSpan, type MinuteSpan, type MinuteSpanFillInput, type MinuteSpanSource,
   getMovableActivityGroup, prepareActivityGroupMove, moveActivityGroup, ungroupMinuteRange,
   prepareMinuteRangeMove, moveMinuteRange, cancelMinuteRangeMove,
   spreadsheetEditor, type ActivityGroup, type CellFormat, type MinuteCellRange } from '../services/spreadsheet';
@@ -49,7 +49,9 @@ import { compactCalendarBands, compactCalendarOutlines, type CompactMinute } fro
 import { calendarAnnotationKey, type CalendarCellAnnotation } from '../utils/calendar-cell-text';
 import { calendarTimeRailLabel, calendarTimeRailLabelTop, calendarTimeRailLayout } from '../utils/calendar-time-labels';
 import { minuteDetailsCount } from '../utils/minute-details';
+import { cellEventLabel, isActivityGroupId } from '../utils/cell-format';
 import { createCalendarPeriodSwipe, type CalendarPeriodDirection } from '../utils/calendar-period-swipe';
+import type { ChecklistListSummary } from '../utils/checklist-flow';
 import { getAccounts } from '../sync/accounts';
 import { linkActualsToAccounts, loadCachedAccountPlans, loadAccountPlansResult, synchronizeAccounts } from '../sync/engine';
 import type { CalendarPreferences, DeviceCalendar, MinuteEntry, PlannedEvent } from '../types';
@@ -70,6 +72,7 @@ type DayData = { entries: MinuteEntry[]; plans: PlannedEvent[]; calendarReadErro
   nativeReadError?: boolean; accountReadError?: boolean; colorReadError?: boolean; colorReadCause?: string;
   formats?: Map<number, CellFormat>; formatReadError?: boolean; groups?: ActivityGroup[]; groupReadError?: boolean };
 type CellCommandSelection = { selection: CalendarMinuteSelection; range: MinuteCellRange; generation: number };
+type ChecklistChoice = { lists: ChecklistListSummary[]; resolve: (listId: string | null) => void };
 type PinchPreviewSnapshot = Pick<Parameters<typeof CalendarPinchPreview>[0],
   'days' | 'bands' | 'outlines' | 'annotations' | 'rowHeight' | 'railWidth' | 'dayWidth' | 'colors' | 'current' | 'selection' | 'backgroundColor' | 'gridLineColor' | 'fontScale' | 'viewportHeight'> & { anchor?: CalendarZoomAnchor };
 type PinchHandoff = { generation: number; token: number; rowHeight: number; offset: number;
@@ -94,7 +97,7 @@ type Props = {
   onFocusedMinuteChange?: (point: { dateKey: string; minuteIndex: number }) => void;
   onDataChanged: () => void;
   onOpenSettings: () => void;
-  onOpenChecklist?: () => void;
+  onOpenChecklist?: (task: { listId: string; taskId: string }) => void;
   onSyncWarningChange?: (message: string | null) => void;
   dayCount?: CalendarDayCount;
   onDayCountChange?: (count: CalendarDayCount) => void;
@@ -223,6 +226,8 @@ export function TodayScreen({
   const [inlineSelection, setInlineSelection] = useState<CalendarMinuteSelection | null>(null);
   const [inlineEditing, setInlineEditing] = useState(false);
   const [entryBarMode, setEntryBarMode] = useState<'entry' | null>(null);
+  const [checklistChoice, setChecklistChoice] = useState<ChecklistChoice | null>(null);
+  const checklistChoiceRef = useRef<ChecklistChoice | null>(null);
   const inlineEditingRef = useRef(inlineEditing);
   inlineEditingRef.current = inlineEditing;
   const inlineSelectionRef = useRef(inlineSelection);
@@ -236,7 +241,8 @@ export function TodayScreen({
   const [inlineVersion, setInlineVersion] = useState(0);
   const [spreadsheetState, setSpreadsheetState] = useState(() => spreadsheetEditor.snapshot());
   const [spanEditor, setSpanEditor] = useState<MinuteSpanEditorSession | null>(null);
-  const spanEditorScopeRef = useRef<{ selection: CalendarMinuteSelection; token: number; generation: number; id: number } | null>(null);
+  const spanEditorScopeRef = useRef<{ selection: CalendarMinuteSelection; token: number; generation: number; id: number;
+    source?: MinuteSpanSource } | null>(null);
   const spanEditorIdRef = useRef(0);
   const spanEditorEpochRef = useRef(0);
   const [categoryPicker, setCategoryPicker] = useState<(CellCommandSelection & { token: number }) | null>(null);
@@ -1159,6 +1165,7 @@ export function TodayScreen({
 
   useEffect(() => {
     cancelMenuTouch();
+    finishChecklistChoice(null);
     cancelRangeDrag();
     cancelGroupDrag();
     cancelPinchPreview();
@@ -1240,6 +1247,7 @@ export function TodayScreen({
       const wasAway = appStateRef.current !== 'active';
       appStateRef.current = state;
       if (state !== 'active') {
+        finishChecklistChoice(null);
         cancelPinchPreview();
         cancelMenuTouch();
         cancelRangeDrag();
@@ -1268,6 +1276,7 @@ export function TodayScreen({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      finishChecklistChoice(null);
       cancelMenuTouch();
       loadTokenRef.current += 1;
       selectionTokenRef.current += 1;
@@ -1945,8 +1954,15 @@ export function TodayScreen({
     if (!selectionStillCurrent(selection, token, generation)) return;
     const group = groups.find((value) => value.blockId === selectedEntry?.blockId &&
       selection.minuteIndex >= value.startMinute && selection.minuteIndex <= value.endMinute);
-    const entries = group ? await getEntriesForBlock(group.blockId) : (await getDayEntries(range.dateKey))
-      .filter((entry) => entry.minuteIndex >= range.startMinute && entry.minuteIndex <= range.endMinute);
+    const single = range.startMinute === range.endMinute && range.startMinute === selection.minuteIndex;
+    const sourceCell = !group && single && selectedEntry?.text.trim() && selectedEntry.source !== 'inherited-plan' &&
+      !isActivityGroupId(selectedEntry.blockId) ? (await getSpreadsheetCells(range))[0] : undefined;
+    const source = sourceCell?.entry?.text.trim() && sourceCell.entry.source !== 'inherited-plan' &&
+      !isActivityGroupId(sourceCell.entry.blockId) && !cellEventLabel(sourceCell.format, sourceCell.entry.blockId)
+      ? { dateKey: range.dateKey, cell: sourceCell } : undefined;
+    const entries = group ? await getEntriesForBlock(group.blockId) : single
+      ? (selectedEntry ? [selectedEntry] : []) : (await getDayEntries(range.dateKey))
+        .filter((entry) => entry.minuteIndex >= range.startMinute && entry.minuteIndex <= range.endMinute);
     if (!selectionStillCurrent(selection, token, generation)) return;
     const sorted = [...entries].sort((a, b) => a.dateKey.localeCompare(b.dateKey) || a.minuteIndex - b.minuteIndex);
     const first = group ? sorted[0] : { dateKey: range.dateKey, minuteIndex: range.startMinute };
@@ -1959,10 +1975,10 @@ export function TodayScreen({
     if (group && count !== sorted.length) throw new Error('Choose one continuous event before editing its bounds.');
     const values = group ? sorted.map((entry) => entry.text) : Array.from({ length: count }, (_, offset) =>
       entries.find((entry) => entry.minuteIndex === range.startMinute + offset)?.text ?? '');
-    const text = values.every((value) => value === values[0]) ? values[0] ?? '' : undefined;
+    const text = source ? source.cell.entry!.text : values.every((value) => value === values[0]) ? values[0] ?? '' : undefined;
     const id = ++spanEditorIdRef.current;
-    spanEditorScopeRef.current = { selection: { ...selection }, token, generation, id };
-    setSpanEditor({ id, span, text, categoryId: group?.categoryId ?? entries[0]?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted',
+    spanEditorScopeRef.current = { selection: { ...selection }, token, generation, id, source };
+    setSpanEditor({ id, span, text, categoryId: group?.categoryId ?? source?.cell.entry?.categoryId ?? entries[0]?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted',
       ...(group ? { event: { title: group.title, categoryId: group.categoryId, blockId: group.blockId } } : {}) });
     setCellMenuOpen(false); setGroupComposerOpen(false); setInlineEditing(false); Keyboard.dismiss();
   }
@@ -1976,7 +1992,7 @@ export function TodayScreen({
     toolBusyRef.current = true; setToolBusy(true);
     try {
       if (!await flushDraftsForOptions() || !current()) return false;
-      const preview = await prepareMinuteSpanFill(span, input);
+      const preview = await prepareMinuteSpanFill(span, input, scope.source);
       if (!current()) return false;
       if (preview.occupiedCount) {
         const replace = await new Promise<boolean>((resolve) => Alert.alert('Apply to these minutes?',
@@ -1986,7 +2002,7 @@ export function TodayScreen({
         if (!replace || !current()) return false;
       }
       if (input.event) for (const range of preview.ranges) recordExplicitColor(range.dateKey, range.startMinute, range.endMinute);
-      markLocalChange(preview.ranges.map((range) => range.dateKey));
+      markLocalChange([...preview.ranges.map((range) => range.dateKey), ...(scope.source ? [scope.source.dateKey] : [])]);
       const applied = await fillMinuteSpan(span, input, { previewToken: preview.token });
       markLocalChange(applied.affectedDates);
       await Promise.all(applied.affectedDates.map(refreshLocalEntries));
@@ -2181,7 +2197,7 @@ export function TodayScreen({
     if (!selectionStillCurrent(selection, token, command.generation)) return;
     const range = passage && passage.end > passage.start
       ? { dateKey: selection.dateKey, startMinute: selection.minuteIndex, endMinute: selection.minuteIndex } : command.range;
-    const entries = await getDayEntries(range.dateKey);
+    const [entries, { lists }] = await Promise.all([getDayEntries(range.dateKey), getChecklistFlow()]);
     if (!selectionStillCurrent(selection, token, command.generation)) return;
     const source = { ranges: [{ ...range }], ...(passage && passage.end > passage.start
       ? { selection: { start: passage.start, end: passage.end } } : {}) };
@@ -2190,12 +2206,27 @@ export function TodayScreen({
     const text = passage && passage.end > passage.start ? passage.text : texts.join('\n');
     if (!text.trim()) throw new Error('Enter some text before adding a checklist task.');
     const format = dayData[range.dateKey]?.formats?.get(range.startMinute) ?? {};
-    await addChecklistTask(text, source, { bold: format.bold, italic: format.italic,
-      underline: format.underline, textColor: format.textColor });
+    const listId = lists.length === 1 ? lists[0]!.id : await new Promise<string | null>((resolve) => {
+      const choice = { lists, resolve };
+      checklistChoiceRef.current = choice;
+      Keyboard.dismiss();
+      setChecklistChoice(choice);
+    });
+    if (!listId || !selectionStillCurrent(selection, token, command.generation)) return;
+    const { taskId } = await addChecklistTask(text, source, { bold: format.bold, italic: format.italic,
+      underline: format.underline, textColor: format.textColor }, listId);
     onDataChanged();
     if (selectionStillCurrent(selection, token, command.generation)) {
-      closeRangeOptions(); setEntryBarMode(null); setInlineEditing(false); Keyboard.dismiss(); onOpenChecklist?.();
+      closeRangeOptions(); setEntryBarMode(null); setInlineEditing(false); Keyboard.dismiss(); onOpenChecklist?.({ listId, taskId });
     }
+  }
+
+  function finishChecklistChoice(listId: string | null, expected?: ChecklistChoice) {
+    const choice = checklistChoiceRef.current;
+    if (!choice || (expected && expected !== choice)) return;
+    checklistChoiceRef.current = null;
+    if (mountedRef.current) setChecklistChoice(null);
+    choice.resolve(listId);
   }
 
   async function pasteSelectedCells(command?: CellCommandSelection) {
@@ -2246,6 +2277,7 @@ export function TodayScreen({
   }
 
   function goToCurrentMinute() {
+    finishChecklistChoice(null);
     cancelRangeDrag();
     cancelGroupDrag();
     const current = new Date();
@@ -2741,6 +2773,24 @@ export function TodayScreen({
       ) : null}
 
 
+      {checklistChoice ? <Modal visible transparent animationType="fade" onRequestClose={() => finishChecklistChoice(null, checklistChoice)}>
+        <View style={[styles.checklistOverlay, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]}>
+          <Pressable accessible={false} style={styles.checklistBackdrop} onPress={() => finishChecklistChoice(null, checklistChoice)} />
+          <View accessibilityViewIsModal onAccessibilityEscape={() => finishChecklistChoice(null, checklistChoice)} style={styles.checklistCard}>
+            <Text accessibilityRole="header" style={styles.checklistHeading}>Add to checklist</Text>
+            <ScrollView style={styles.checklistChoices} keyboardShouldPersistTaps="handled">
+              {checklistChoice.lists.map((list) => <Pressable key={list.id} accessibilityRole="button" accessibilityLabel={list.name}
+                onPress={() => finishChecklistChoice(list.id, checklistChoice)} style={styles.checklistChoice}>
+                <Text style={styles.checklistChoiceText}>{list.name}</Text>
+              </Pressable>)}
+            </ScrollView>
+            <Pressable accessibilityRole="button" accessibilityLabel="Cancel adding to checklist"
+              onPress={() => finishChecklistChoice(null, checklistChoice)} style={styles.checklistChoice}>
+              <Text style={styles.checklistChoiceText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal> : null}
       <ActivityCategoryPicker visible={Boolean(categoryPicker)} colorChoices={pickerColors}
         selectedId={selectedDraft?.categoryId ?? inlineSelection?.entry?.categoryId}
         busy={menuCommandPending || toolBusy || spreadsheetState.busy}
@@ -2765,6 +2815,15 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
   const railWidth = layout.railWidth;
   return StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.paper },
+    checklistOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
+    checklistBackdrop: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: '#00000088' },
+    checklistCard: { width: '100%', maxWidth: 480, flexShrink: 1, backgroundColor: colors.panel,
+      borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 12, overflow: 'hidden' },
+    checklistHeading: { color: colors.ink, fontSize: 17, fontWeight: '600', paddingHorizontal: 18, paddingVertical: 14 },
+    checklistChoices: { flexGrow: 0, flexShrink: 1 },
+    checklistChoice: { minHeight: 48, justifyContent: 'center', paddingHorizontal: 18, paddingVertical: 10,
+      borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
+    checklistChoiceText: { color: colors.ink, fontSize: 15 },
     bottomBar: { flexShrink: 0, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline,
       backgroundColor: colors.panel },
     entryBarRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6, paddingVertical: 4, gap: 4 },
