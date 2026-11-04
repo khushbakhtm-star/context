@@ -1,6 +1,12 @@
 # Installed-app update notices
 
-Current phone availability is **0.1.40/code41** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+Current phone availability is **0.1.41/code42** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+
+## Published 0.1.41 Wear-enabled phone update
+
+The [0.1.41 phone preview](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.41) was published at **2026-11-04T21:09:40Z**. Open Canvas from the top view switcher to collect and connect cards on independent boards. Send selected Notepad text to Canvas and edit it from either view. Search, group, move, and arrange cards with relationship, group, or pedigree layouts. Canvas is saved locally.
+
+The [publisher-signed APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.41/context-0.1.41-wear-phone-preview.apk) has SHA-256 `7afbd407c09d218bebb6ba55c9055eddcadfdad8803deb57c7e311c73f50521f`. [Application source](https://github.com/khushbakhtm-star/context/commit/1883334ccf992de45fd8899b8cca98a6c9bff656) and [Android build](https://github.com/khushbakhtm-star/context/actions/runs/41911617241).
 
 ## Published 0.1.40 Wear-enabled phone update
 

@@ -2,7 +2,7 @@
 
 ## Fix “installed 0.1.9, latest 0.1.8”
 
-The original setup followed the FOSS phone edition when its latest APK was 0.1.8 (version code 9). The installed 0.1.9 was the Wear-enabled phone edition (code 10). The **10 → 9** error meant the selected APK would downgrade the app. The Wear-enabled phone edition now offers **0.1.40 (code 41)**. The FOSS phone edition offers **0.1.36 (code 37)**.
+The original setup followed the FOSS phone edition when its latest APK was 0.1.8 (version code 9). The installed 0.1.9 was the Wear-enabled phone edition (code 10). The **10 → 9** error meant the selected APK would downgrade the app. The Wear-enabled phone edition now offers **0.1.41 (code 42)**. The FOSS phone edition offers **0.1.36 (code 37)**.
 
 For an S23 paired with a Galaxy Watch7, or for native Google account sign-in, keep the Wear-enabled phone route and update its existing Obtainium entry using these steps:
 
@@ -15,7 +15,7 @@ For an S23 paired with a Galaxy Watch7, or for native Google account sign-in, ke
    ^context-[0-9]+\.[0-9]+\.[0-9]+-wear-phone-preview\.apk$
    ```
 
-5. Return to Context’s details to apply the options, then refresh and tap **Update**. Dismiss the keyboard first if needed. It should offer **0.1.40**.
+5. Return to Context’s details to apply the options, then refresh and tap **Update**. Dismiss the keyboard first if needed. It should offer **0.1.41**.
 
 Keep Context installed so its ledger stays on the phone. Change the existing entry; do not add a duplicate entry for the same app or uninstall Context.
 
