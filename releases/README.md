@@ -1,6 +1,12 @@
 # Installed-app update notices
 
-Current phone availability: **0.1.36/code37** in both channels, verified at **2026-11-02 at 18:37:37 UTC**. Watch **0.1.16/code100017** remains separate. Only actually published channels enter latest.json. Earlier receipt sections below are preserved unchanged.
+Current phone availability is **0.1.37/code38** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+
+## Published 0.1.37 Wear-enabled phone update
+
+The [0.1.37 phone preview](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.37) was published at **2026-11-04T16:35:08Z**. Swipe the view icon between the calendar and Priority. Opening cell actions also opens the minute text box.
+
+The [publisher-signed APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.37/context-0.1.37-wear-phone-preview.apk) has SHA-256 `f7083f1c98cda1d972d20850f3f56df6c54bb94685254e3f369483d5b688f540`. [Application source](https://github.com/khushbakhtm-star/context/commit/663110fd90f5922be704d9266b59381c35b26c83) and [Android build](https://github.com/khushbakhtm-star/context/actions/runs/41866142196).
 
 
 ## Published 0.1.16 Watch update
