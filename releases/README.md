@@ -1,6 +1,12 @@
 # Installed-app update notices
 
-Current phone availability is **0.1.41/code42** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+Current phone availability is **0.1.42/code43** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+
+## Published 0.1.42 Wear-enabled phone update
+
+The [0.1.42 phone preview](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.42) was published at **2026-11-04T22:21:48Z**. Tap blank Canvas to jot down a thought where it belongs, or use Draw to sketch. Create overlapping Spaces and place a card in their shared area with a single copy of its text. Canvas is saved locally.
+
+The [publisher-signed APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.42/context-0.1.42-wear-phone-preview.apk) has SHA-256 `8aa36a8b6ba8f9612ed577130200791af2cbba3919f3f8eed89928abfe73642e`. [Application source](https://github.com/khushbakhtm-star/context/commit/6fc3e899bb2acb5517c2b533f41a9cd3a973f9c3) and [Android build](https://github.com/khushbakhtm-star/context/actions/runs/41922514528).
 
 ## Published 0.1.41 Wear-enabled phone update
 
