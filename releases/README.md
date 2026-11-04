@@ -1,6 +1,12 @@
 # Installed-app update notices
 
-Current phone availability is **0.1.38/code39** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+Current phone availability is **0.1.40/code41** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+
+## Published 0.1.40 Wear-enabled phone update
+
+The [0.1.40 phone preview](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.40) was published at **2026-11-04T20:34:33Z**. Swipe between Calendar, Priority, and the new Notepad. The view switch shows one full icon and three position dots. Notepad saves one scratch note on the phone. Calendar text can ask for a checklist each time or go to the checklist selected in Settings. Swipe between checklists, open them at the first unfinished task, and move tasks to another checklist. The calendar plus opens the minute editor. The text-color control uses a T.
+
+The [publisher-signed APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.40/context-0.1.40-wear-phone-preview.apk) has SHA-256 `5eeb3b0eb3ae51be9581080137f5e6b699d97a55d7a783a4c5a720960dfbbfb3`. [Application source](https://github.com/khushbakhtm-star/context/commit/e5b9da7beb74e4f67b013ed9f87394b1b6d96541) and [Android build](https://github.com/khushbakhtm-star/context/actions/runs/41905302419).
 
 ## Published 0.1.38 Wear-enabled phone update
 
