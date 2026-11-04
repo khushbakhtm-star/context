@@ -11,8 +11,11 @@ import { activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCan
   setCanvasNodeSpaces, updateCanvasBoard, updateCanvasEdge, updateCanvasNode, updateCanvasSpace, updateCanvasViewport,
   type CanvasDocument, type CanvasEdge, type CanvasFamily, type CanvasNode, type CanvasSpace, type CanvasStroke } from '../utils/canvas';
 import { arrangeCanvas, canvasPersonSymbol, routeCanvasEdges, routeCanvasFamilies, type CanvasLayoutMode } from '../utils/canvas-layout';
+import { canvasWorkplaneGrid, nextCanvasWorkplaneTurn, projectCanvasWorkplane, unprojectCanvasWorkplane,
+  type CanvasWorkplaneTurn } from '../utils/canvas-workplane';
 import { CanvasFamilyEditor, type FamilyForm } from './CanvasFamilyEditor';
-import { canvasDragNodes, centerCanvasNode, fitCanvas, intersectsCanvasViewport, previewCanvasRoutes, screenPoint, visibleCanvasBoard, worldPoint, zoomViewport,
+import { canvasDragNodes, canvasWorkplaneFrame, centerCanvasNode, fitCanvasWorkplane, intersectsCanvasViewport,
+  previewCanvasRoutes, screenPoint, visibleCanvasBoard, worldPoint, zoomViewport,
   type DragPreview, type Point, type Size, type Viewport } from './canvas-viewport';
 
 type Props = {
@@ -207,6 +210,19 @@ const CanvasGrid = memo(function CanvasGrid({ viewport, size, styles }: { viewpo
   </View>;
 });
 
+const WorkplaneGrid = memo(function WorkplaneGrid({ viewport, size, offset, turn, colors }: {
+  viewport: Viewport; size: Size; offset: Point; turn: CanvasWorkplaneTurn; colors: AppColors;
+}) {
+  const lines = canvasWorkplaneGrid(viewport, size, turn);
+  const offsetPoint = ({ x, y }: Point) => ({ x: x - offset.x, y: y - offset.y });
+  return <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+    {lines.map(({ start, end, major, axis }, index) => <Stroke key={index}
+      from={offsetPoint(start)} to={offsetPoint(end)}
+      color={axis ? colors.muted : major ? colors.silver : colors.hairline}
+      thickness={axis ? 1.6 : major ? 1 : StyleSheet.hairlineWidth} />)}
+  </View>;
+});
+
 export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed, beforeLeaveRef }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -219,9 +235,12 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   const [dialogError, setDialogError] = useState('');
   const [preview, setPreview] = useState<Preview | null>(null);
   const [mode, setMode] = useState<BoardMode>('text');
+  const [workplane, setWorkplane] = useState<CanvasWorkplaneTurn | null>(null);
+  const lastWorkplaneTurn = useRef<CanvasWorkplaneTurn>(0);
   const [spaceId, setSpaceId] = useState<string | null>(null);
   const [capture, setCapture] = useState<Capture | null>(null);
   const modeRef = useRef(mode); modeRef.current = mode;
+  const camera = useRef({ workplane, size }); camera.current = { workplane, size };
   const captureRef = useRef<Capture | null>(null);
   const docRef = useRef(document); docRef.current = document;
   const onChangeRef = useRef(onChange); onChangeRef.current = onChange;
@@ -247,6 +266,18 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   const familyRoutes = useMemo(() => routeCanvasFamilies(visualNodes === layout.nodes ? layout : { ...layout, nodes: visualNodes }),
     [layout, visualNodes]);
   const viewport = preview?.viewport ?? board.viewport;
+  const scene = useMemo(() => {
+    if (workplane === null || !size.width || !size.height) return null;
+    const frame = canvasWorkplaneFrame(size, workplane);
+    // Android decomposes a raw affine into view properties. Nested views preserve the exact transform and its hit testing.
+    const style: ViewStyle = { position: 'absolute', left: frame.offset.x, top: frame.offset.y, ...frame.size,
+      transform: [{ scaleY: frame.scaleY }] };
+    const rotation: ViewStyle = { ...StyleSheet.absoluteFillObject, transform: [{ rotate: frame.rotation + 'rad' }] };
+    return { size: frame.size, offset: frame.offset, style, rotation };
+  }, [size, workplane]);
+  const sceneSize = scene?.size ?? size;
+  const sceneViewport = useMemo(() => scene ? { ...viewport, x: viewport.x + scene.offset.x / viewport.zoom,
+    y: viewport.y + scene.offset.y / viewport.zoom } : viewport, [viewport, scene]);
   const selection = board.nodes.filter(({ id }) => selectedIds.includes(id));
   const selected = selection.length === 1 ? selection[0] : undefined;
   const people = useMemo(() => board.nodes.filter(({ kind }) => isCanvasPerson(kind)), [board.nodes]);
@@ -305,10 +336,22 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     setMulti(false);
   }
 
+  function changeWorkplane(next: CanvasWorkplaneTurn | null) {
+    if (!finishCapture(true)) return;
+    activeGesture.current = null;
+    clearPreview();
+    if (next !== null) lastWorkplaneTurn.current = next;
+    setWorkplane(next);
+  }
+
+  function worldFromStage(point: Point) {
+    return worldPoint(workplane === null ? point : unprojectCanvasWorkplane(point, size, workplane), viewport);
+  }
+
   function tapBackdrop(event: GestureResponderEvent) {
     if (captureRef.current) { finishCapture(true); return; }
     if (mode === 'draw') return;
-    const point = worldPoint({ x: event.nativeEvent.locationX, y: event.nativeEvent.locationY }, viewport);
+    const point = worldFromStage({ x: event.nativeEvent.locationX, y: event.nativeEvent.locationY });
     if (mode === 'spaces') {
       setSelectedIds([]);
       setSpaceId(canvasSpacesAtPoint(board.spaces ?? [], point).at(-1) ?? null);
@@ -405,12 +448,17 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   }, [focusNodeId, document, size.width, size.height, onFocusConsumed]);
 
   const responder = useMemo(() => {
-    function stagePoint(touch: Touches[number]): Point {
+    function physicalPoint(touch: Touches[number]): Point {
       return { x: touch.pageX - stageOrigin.current.x, y: touch.pageY - stageOrigin.current.y };
     }
+    function logicalPoint(point: Point): Point {
+      const { workplane, size } = camera.current;
+      return workplane === null ? point : unprojectCanvasWorkplane(point, size, workplane);
+    }
+    function stagePoint(touch: Touches[number]): Point { return logicalPoint(physicalPoint(touch)); }
     function pinch(touches: Touches) {
-      const a = touches[0] && stagePoint(touches[0]), b = touches[1] && stagePoint(touches[1]);
-      return a && b ? { center: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+      const a = touches[0] && physicalPoint(touches[0]), b = touches[1] && physicalPoint(touches[1]);
+      return a && b ? { center: logicalPoint({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }),
         distance: Math.max(12, Math.hypot(a.x - b.x, a.y - b.y)) } : null;
     }
     function update(next: Preview) {
@@ -530,7 +578,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   }
 
   function editNode(node?: CanvasNode) {
-    const point = worldPoint({ x: Math.max(24, size.width * 0.32), y: Math.max(28, size.height * 0.26) }, viewport);
+    const point = worldFromStage({ x: Math.max(24, size.width * 0.32), y: Math.max(28, size.height * 0.26) });
     const stored = node && activeCanvasBoard(docRef.current).nodes.find(({ id }) => id === node.id);
     openDialog({ kind: 'node', draft: nodeDraft(stored, point) });
   }
@@ -564,7 +612,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   function editSpace(space?: CanvasSpace) {
     const count = board.spaces?.length ?? 0;
     const offset = [{ x: 0.12, y: 0.12 }, { x: 0.28, y: 0.12 }, { x: 0.2, y: 0.23 }][count % 3]!;
-    const point = worldPoint({ x: size.width * offset.x, y: size.height * offset.y }, viewport);
+    const point = worldFromStage({ x: size.width * offset.x, y: size.height * offset.y });
     openDialog({ kind: 'space', draft: {
       id: space?.id, title: space?.title ?? '', color: space?.color ?? SPACE_COLORS[count % SPACE_COLORS.length]!.value,
       x: String(Math.round(space?.x ?? point.x)), y: String(Math.round(space?.y ?? point.y)),
@@ -627,7 +675,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     const people = new Set(family ? [...family.parents, ...family.children] : []);
     const familyBounds = visible.filter(({ id }) => people.has(id));
     return updateCanvasBoard(current, active.id, () => ({
-      ...arranged, viewport: fitCanvas(familyBounds.length ? familyBounds : [...visible, ...(arranged.spaces ?? [])], size),
+      ...arranged, viewport: fitCanvasWorkplane(familyBounds.length ? familyBounds : [...visible, ...(arranged.spaces ?? [])], size, workplane),
     }));
   }
 
@@ -690,9 +738,9 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   const ellipses = (board.spaces ?? []).map((stored) => {
     const movingSpace = preview?.space;
     const space = movingSpace?.id === stored.id ? { ...stored, ...spaceGeometry(stored, movingSpace.resize, movingSpace.delta) } : stored;
-    const start = screenPoint(space, viewport);
-    const width = space.width * viewport.zoom, height = space.height * viewport.zoom;
-    if (!intersectsCanvasViewport(start, { x: start.x + width, y: start.y + height }, size)) return null;
+    const start = screenPoint(space, sceneViewport);
+    const width = space.width * sceneViewport.zoom, height = space.height * sceneViewport.zoom;
+    if (!intersectsCanvasViewport(start, { x: start.x + width, y: start.y + height }, sceneSize)) return null;
     const diameter = Math.min(width, height);
     const color = space.color ?? SPACE_COLORS[0]!.value;
     const active = space.id === spaceId && mode === 'spaces';
@@ -717,16 +765,17 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     </View>;
   });
 
-  const capturePoint = capture && screenPoint(capture.point, viewport);
+  const captureLogical = capture && screenPoint(capture.point, viewport);
+  const capturePoint = captureLogical && (workplane === null ? captureLogical : projectCanvasWorkplane(captureLogical, size, workplane));
   const captureWidth = Math.min(290, Math.max(120, size.width - 16));
   const fitBounds = [...visualNodes, ...(board.spaces ?? []), ...ink.map(({ bounds }) => ({ x: bounds.x, y: bounds.y,
     width: Math.max(1, bounds.right - bounds.x), height: Math.max(1, bounds.bottom - bounds.y) }))];
 
   const drawing = visualNodes.map((node) => {
-    const start = screenPoint(node, viewport);
-    const end = screenPoint({ x: node.x + node.width, y: node.y + node.height }, viewport);
-    if (!intersectsCanvasViewport(start, end, size)) return null;
-    const scale = viewport.zoom;
+    const start = screenPoint(node, sceneViewport);
+    const end = screenPoint({ x: node.x + node.width, y: node.y + node.height }, sceneViewport);
+    if (!intersectsCanvasViewport(start, end, sceneSize)) return null;
+    const scale = sceneViewport.zoom;
     const left = start.x, top = start.y, width = Math.max(1, end.x - left), height = Math.max(1, end.y - top);
     const active = selectedIds.includes(node.id) || linkFrom === node.id;
     const expandedGroup = node.kind === 'group' && !node.collapsed;
@@ -778,7 +827,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     }
     return <Pressable key={node.id} {...tapProps}
       accessibilityState={{ selected: active, ...(node.kind === 'group' ? { expanded: false } : {}) }}
-      style={[styles.card, rect, { backgroundColor: cardColor,
+      style={[styles.card, scene && styles.workplaneCard, rect, { backgroundColor: cardColor,
         padding: Math.min(12, 7 * scale), borderColor: active ? colors.accent : colors.hairline,
         borderWidth: active ? 2 : 1 }, node.kind === 'partnership' && styles.partnership]}>
       {node.kind === 'image' && safeWebUrl(node.url) && showText ? <Image source={{ uri: node.url! }}
@@ -858,38 +907,53 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
       <Tool title="Deselect" styles={styles} onPress={() => { setSelectedIds([]); setMulti(false); }} />
     </ScrollView> : null}
 
-    <View ref={stageRef} collapsable={false} onLayout={stageLayout} style={styles.stage} {...responder.panHandlers}>
-      <CanvasGrid viewport={viewport} size={size} styles={styles} />
-      <Pressable accessible={false} style={StyleSheet.absoluteFill} onPress={tapBackdrop} />
-      {ellipses}
-      <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-        {ink.map(({ stroke, bounds }) => intersectsCanvasViewport(screenPoint(bounds, viewport),
-          screenPoint({ x: bounds.right, y: bounds.bottom }, viewport), size) ?
-          <InkDrawing key={stroke.id} stroke={stroke} viewport={viewport} size={size} fallback={colors.ink} /> : null)}
-        {preview?.points ? <InkDrawing stroke={{ points: preview.points, width: 2 }} viewport={viewport} size={size} fallback={colors.ink} /> : null}
-      </View>
-      <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-        {routes.map(({ edge, points }) => <EdgeDrawing key={edge.id} edge={edge} points={points} viewport={viewport}
-          size={size} color={edge.kind === 'dependency' ? colors.warning : colors.muted} styles={styles} />)}
-        {familyRoutes.map(({ familyId, points, label }, index) => <FamilyDrawing key={familyId + ':' + index} points={points}
-          label={label} viewport={viewport} size={size} color={colors.ink} styles={styles} />)}
-      </View>
-      {drawing}
-      {capture && capturePoint ? <View style={[styles.capture, {
-        left: Math.max(8, Math.min(size.width - captureWidth - 8, capturePoint.x)),
-        top: Math.max(8, Math.min(size.height - 116, capturePoint.y)), width: captureWidth,
-      }]}>
-        <TextInput accessibilityLabel="Canvas text" placeholder="Type here" placeholderTextColor={colors.muted} autoFocus multiline
-          defaultValue={capture.text} onChangeText={(value) => { if (captureRef.current) captureRef.current.text = value; }}
-          keyboardAppearance={resolvedMode} style={[styles.field, styles.captureInput]} />
-        <View style={styles.captureActions}>
-          <Tool title="×" accessibilityLabel="Cancel canvas text" styles={styles} onPress={() => finishCapture(false)} />
-          <Tool title="✓" accessibilityLabel="Save canvas text" styles={styles} onPress={() => finishCapture(true)} />
+    <View style={styles.stageHost}>
+      <View ref={stageRef} collapsable={false} onLayout={stageLayout} style={[styles.stage, scene && styles.workplaneStage]}
+        {...responder.panHandlers}>
+        <Pressable accessible={false} style={StyleSheet.absoluteFill} onPress={tapBackdrop} />
+        <View pointerEvents="box-none" collapsable={false} style={scene?.style ?? StyleSheet.absoluteFill}>
+          <View pointerEvents="box-none" collapsable={false} style={scene?.rotation ?? StyleSheet.absoluteFill}>
+            {scene && workplane !== null ? <WorkplaneGrid viewport={viewport} size={size} offset={scene.offset} turn={workplane} colors={colors} /> :
+              <CanvasGrid viewport={viewport} size={size} styles={styles} />}
+            {ellipses}
+            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+              {ink.map(({ stroke, bounds }) => intersectsCanvasViewport(screenPoint(bounds, sceneViewport),
+                screenPoint({ x: bounds.right, y: bounds.bottom }, sceneViewport), sceneSize) ?
+                <InkDrawing key={stroke.id} stroke={stroke} viewport={sceneViewport} size={sceneSize} fallback={colors.ink} /> : null)}
+              {preview?.points ? <InkDrawing stroke={{ points: preview.points, width: 2 }} viewport={sceneViewport}
+                size={sceneSize} fallback={colors.ink} /> : null}
+            </View>
+            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+              {routes.map(({ edge, points }) => <EdgeDrawing key={edge.id} edge={edge} points={points} viewport={sceneViewport}
+                size={sceneSize} color={edge.kind === 'dependency' ? colors.warning : colors.muted} styles={styles} />)}
+              {familyRoutes.map(({ familyId, points, label }, index) => <FamilyDrawing key={familyId + ':' + index} points={points}
+                label={label} viewport={sceneViewport} size={sceneSize} color={colors.ink} styles={styles} />)}
+            </View>
+            {drawing}
+          </View>
         </View>
-      </View> : null}
-      {!board.nodes.length && !board.spaces?.length && !board.strokes?.length && !capture && mode === 'text' ? <View pointerEvents="none" style={styles.empty}>
-        <Text accessibilityRole="header" style={styles.emptyHeading}>Canvas</Text>
-        <Text style={styles.emptyText}>Tap anywhere to type.</Text>
+        {capture && capturePoint ? <View style={[styles.capture, {
+          left: Math.max(8, Math.min(size.width - captureWidth - 8, capturePoint.x)),
+          top: Math.max(8, Math.min(size.height - 116, capturePoint.y)), width: captureWidth,
+        }]}>
+          <TextInput accessibilityLabel="Canvas text" placeholder="Type here" placeholderTextColor={colors.muted} autoFocus multiline
+            defaultValue={capture.text} onChangeText={(value) => { if (captureRef.current) captureRef.current.text = value; }}
+            keyboardAppearance={resolvedMode} style={[styles.field, styles.captureInput]} />
+          <View style={styles.captureActions}>
+            <Tool title="×" accessibilityLabel="Cancel canvas text" styles={styles} onPress={() => finishCapture(false)} />
+            <Tool title="✓" accessibilityLabel="Save canvas text" styles={styles} onPress={() => finishCapture(true)} />
+          </View>
+        </View> : null}
+        {!board.nodes.length && !board.spaces?.length && !board.strokes?.length && !capture && mode === 'text' ? <View pointerEvents="none" style={styles.empty}>
+          <Text accessibilityRole="header" style={styles.emptyHeading}>Canvas</Text>
+          <Text style={styles.emptyText}>Tap anywhere to type.</Text>
+        </View> : null}
+      </View>
+      {!capture ? <View pointerEvents="box-none" style={styles.workplaneActions}>
+        {workplane !== null ? <Tool title="↻" accessibilityLabel="Rotate workplane" styles={styles}
+          onPress={() => changeWorkplane(nextCanvasWorkplaneTurn(workplane))} /> : null}
+        <Tool title={workplane === null ? '3D' : 'Flat'} accessibilityLabel={workplane === null ? '3D Workplane' : 'Flat canvas'}
+          styles={styles} onPress={() => changeWorkplane(workplane === null ? lastWorkplaneTurn.current : null)} />
       </View> : null}
     </View>
     <View style={styles.footer}>
@@ -897,7 +961,8 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
         selected={mode === id} onPress={() => changeMode(id)} />)}</View>
       <View style={styles.footerActions}>
         <Tool title="−" accessibilityLabel="Zoom out" styles={styles} onPress={() => zoomBy(0.8)} />
-        <Tool title="Fit" accessibilityLabel="Fit board to screen" styles={styles} onPress={() => goToViewport(fitCanvas(fitBounds, size))} />
+        <Tool title="Fit" accessibilityLabel="Fit board to screen" styles={styles}
+          onPress={() => goToViewport(fitCanvasWorkplane(fitBounds, size, workplane))} />
         <Tool title="+" accessibilityLabel="Zoom in" styles={styles} onPress={() => zoomBy(1.25)} />
       </View>
     </View>
@@ -1084,7 +1149,12 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   activeTool: { backgroundColor: colors.panel },
   disabled: { opacity: 0.42 },
   selectionLabel: { color: colors.muted, paddingHorizontal: 10, fontSize: 13, maxWidth: 160 },
+  stageHost: { flex: 1 },
   stage: { flex: 1, overflow: 'hidden', backgroundColor: colors.surface },
+  workplaneStage: { backgroundColor: colors.panel },
+  workplaneActions: { position: 'absolute', top: 7, right: 7, flexDirection: 'row', borderRadius: 8,
+    borderColor: colors.hairline, borderWidth: StyleSheet.hairlineWidth, backgroundColor: colors.paper },
+  workplaneCard: { boxShadow: '1px 3px 0px 0px rgba(0, 0, 0, 0.12)' },
   gridVertical: { position: 'absolute', top: 0, bottom: 0, width: StyleSheet.hairlineWidth, backgroundColor: colors.hairline, opacity: 0.65 },
   gridHorizontal: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: colors.hairline, opacity: 0.65 },
   card: { position: 'absolute', overflow: 'hidden', borderWidth: 1, borderRadius: 7, justifyContent: 'center' },

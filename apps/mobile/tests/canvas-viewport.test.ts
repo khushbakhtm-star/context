@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canvasDragNodes, fitCanvas, previewCanvasRoutes, screenPoint, visibleCanvasBoard, worldPoint, zoomViewport } from '../src/screens/canvas-viewport';
+import { canvasDragNodes, canvasWorkplaneFrame, fitCanvas, fitCanvasWorkplane, previewCanvasRoutes, screenPoint,
+  visibleCanvasBoard, worldPoint, zoomViewport } from '../src/screens/canvas-viewport';
 import type { CanvasBoard, CanvasEdge, CanvasNode } from '../src/utils/canvas';
+import { projectCanvasWorkplane, unprojectCanvasWorkplane } from '../src/utils/canvas-workplane';
 
 const node = (id: string, x: number, y: number, options: Partial<CanvasNode> = {}): CanvasNode =>
   ({ id, x, y, width: 150, height: 100, kind: 'note', text: id, ...options });
@@ -19,6 +21,33 @@ test('pinch zoom keeps the world point under the fingers and Fit includes negati
   const viewport = fitCanvas([node('a', -300, -400), node('b', 470, 200)], { width: 360, height: 640 });
   assert.ok(screenPoint({ x: -300, y: -400 }, viewport).x >= 0);
   assert.ok(screenPoint({ x: 620, y: 300 }, viewport).x <= 360);
+});
+
+test('native workplane transforms keep corner touches interactive and fit projected content at every turn', () => {
+  const boards = [{ width: 340, height: 720 }, { width: 720, height: 340 }];
+  const cards = [node('west', -300, -230), node('east', 290, 120), node('north', 190, -270)];
+  for (const size of boards) for (const turn of [0, 1, 2, 3] as const) {
+    const frame = canvasWorkplaneFrame(size, turn);
+    const center = { x: size.width / 2, y: size.height / 2 };
+    for (const x of [0, size.width]) for (const y of [0, size.height]) {
+      const logical = unprojectCanvasWorkplane({ x, y }, size, turn);
+      const local = { x: logical.x - frame.offset.x, y: logical.y - frame.offset.y };
+      assert.ok(local.x >= 0 && local.x <= frame.size.width && local.y >= 0 && local.y <= frame.size.height);
+      const dx = logical.x - center.x, dy = logical.y - center.y;
+      const cosine = Math.cos(frame.rotation), sine = Math.sin(frame.rotation);
+      const rotated = { x: center.x + cosine * dx - sine * dy, y: center.y + sine * dx + cosine * dy };
+      assert.ok(rotated.x >= frame.offset.x && rotated.x <= frame.offset.x + frame.size.width);
+      assert.ok(rotated.y >= frame.offset.y && rotated.y <= frame.offset.y + frame.size.height);
+      assert.ok(Math.abs(rotated.x - x) < 1e-9);
+      assert.ok(Math.abs(center.y + (rotated.y - center.y) * frame.scaleY - y) < 1e-9);
+    }
+    const viewport = fitCanvasWorkplane(cards, size, turn);
+    for (const card of cards) for (const x of [card.x, card.x + card.width]) for (const y of [card.y, card.y + card.height]) {
+      const point = projectCanvasWorkplane(screenPoint({ x, y }, viewport), size, turn);
+      assert.ok(point.x >= 27 && point.x <= size.width - 27);
+      assert.ok(point.y >= 43 && point.y <= size.height - 43);
+    }
+  }
 });
 
 test('a collapsed nested group keeps its external connections and hides internal edges only in the display', () => {

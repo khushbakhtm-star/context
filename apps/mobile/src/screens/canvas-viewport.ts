@@ -1,4 +1,5 @@
 import type { CanvasBoard, CanvasEdge, CanvasNode } from '../utils/canvas';
+import { canvasWorkplaneMatrix, unprojectCanvasWorkplane, type CanvasWorkplaneTurn } from '../utils/canvas-workplane';
 
 export type Point = { x: number; y: number };
 export type Size = { width: number; height: number };
@@ -38,6 +39,36 @@ export function fitCanvas(nodes: (Point & Size)[], size: Size): Viewport {
   const zoom = Math.max(MIN_ZOOM, Math.min(1, Math.max(1, size.width - 56) / (right - left),
     Math.max(1, size.height - 88) / (bottom - top)));
   return { x: (left + right - size.width / zoom) / 2, y: (top + bottom - size.height / zoom) / 2, zoom };
+}
+
+export function fitCanvasWorkplane(bounds: (Point & Size)[], size: Size, turn: CanvasWorkplaneTurn | null): Viewport {
+  if (turn === null || !bounds.length || size.width <= 0 || size.height <= 0) return fitCanvas(bounds, size);
+  const { a, b, c, d } = canvasWorkplaneMatrix(turn);
+  let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+  for (const bound of bounds) {
+    const x = bound.x + bound.width / 2, y = bound.y + bound.height / 2;
+    const projectedX = a * x + c * y, projectedY = b * x + d * y;
+    const radiusX = (Math.abs(a) * bound.width + Math.abs(c) * bound.height) / 2;
+    const radiusY = (Math.abs(b) * bound.width + Math.abs(d) * bound.height) / 2;
+    left = Math.min(left, projectedX - radiusX); right = Math.max(right, projectedX + radiusX);
+    top = Math.min(top, projectedY - radiusY); bottom = Math.max(bottom, projectedY + radiusY);
+  }
+  const midpoint = unprojectCanvasWorkplane({ x: (left + right) / 2, y: (top + bottom) / 2 }, { width: 0, height: 0 }, turn);
+  const zoom = Math.max(MIN_ZOOM, Math.min(1, Math.max(1, size.width - 56) / Math.max(1, right - left),
+    Math.max(1, size.height - 88) / Math.max(1, bottom - top)));
+  return { x: midpoint.x - size.width / (2 * zoom), y: midpoint.y - size.height / (2 * zoom), zoom };
+}
+
+export function canvasWorkplaneFrame(size: Size, turn: CanvasWorkplaneTurn) {
+  const corners = [{ x: 0, y: 0 }, { x: size.width, y: 0 }, { x: 0, y: size.height }, { x: size.width, y: size.height }]
+    .map((point) => unprojectCanvasWorkplane(point, size, turn));
+  const { a, b, c, d } = canvasWorkplaneMatrix(turn);
+  const scaleY = Math.hypot(b, d);
+  // Native hit testing must cover both the inverse viewport and the intermediate frame before foreshortening.
+  const width = Math.max(size.width, 2 * Math.max(...corners.map(({ x }) => Math.abs(x - size.width / 2)))) + 64;
+  const height = Math.max(size.height / scaleY, 2 * Math.max(...corners.map(({ y }) => Math.abs(y - size.height / 2)))) + 64;
+  const offset = { x: (size.width - width) / 2, y: (size.height - height) / 2 };
+  return { size: { width, height }, offset, scaleY, rotation: Math.atan2(-c, a) };
 }
 
 export function visibleCanvasBoard(board: CanvasBoard): CanvasBoard {
