@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCanvasSpace, addCanvasStroke,
-  addLinkedCanvasNode, CANVAS_STROKE_POINT_LIMIT, canvasSpaceOverlapPoint, canvasSpacesAtPoint, createCanvasDocument,
-  groupCanvasNodes, readCanvasDocument, removeCanvasNode, removeCanvasSpace, searchCanvas, selectCanvasBoard,
-  setCanvasNodeSpaces, setCanvasText, updateCanvasEdge, updateCanvasNode, updateCanvasSpace, updateCanvasViewport,
+  addLinkedCanvasNode, CANVAS_FAMILY_LABEL_LIMIT, CANVAS_STROKE_POINT_LIMIT, canvasFamilyPositionIds,
+  canvasSpaceOverlapPoint, canvasSpacesAtPoint, createCanvasDocument,
+  groupCanvasNodes, isCanvasPerson, readCanvasDocument, removeCanvasFamily, removeCanvasNode, removeCanvasSpace,
+  saveCanvasFamily, searchCanvas, selectCanvasBoard, setCanvasNodeSpaces, setCanvasText, updateCanvasEdge,
+  updateCanvasNode, updateCanvasSpace, updateCanvasViewport,
   type CanvasDocument, type CanvasSpace,
 } from '../src/utils/canvas';
 
@@ -156,4 +158,128 @@ test('drawing strokes and Space membership round-trip independently of legacy gr
   assert.throws(() => addCanvasStroke(withDot, { points: Array(CANVAS_STROKE_POINT_LIMIT + 1).fill({ x: 0, y: 0 }) }), /invalid/);
   const other = addCanvasBoard(withDot, 'Other');
   assert.throws(() => addCanvasNode(other, { kind: 'note', spaceIds: [space.spaceId] }), /unavailable/);
+});
+
+const circle = (name: string) => ({ name, kind: 'person-circle' as const });
+const square = (name: string) => ({ name, kind: 'person-square' as const });
+const diamond = (name: string) => ({ name, kind: 'person-diamond' as const });
+const person = (id: string) => ({ id });
+
+test('pedigree family creation and editing preserve child order, person IDs, and pre-existing graph content', () => {
+  const note = addCanvasNode(createCanvasDocument('Original pad'), { kind: 'sticky', text: 'Keep this note' });
+  const known = addCanvasNode(note.document, { kind: 'person-circle', text: 'Existing parent' });
+  const group = groupCanvasNodes(known.document, [note.nodeId, known.nodeId], 'Existing group');
+  const original = addCanvasEdge(group.document, { from: note.nodeId, to: known.nodeId });
+  const saved = saveCanvasFamily(original, {
+    parents: [person(known.nodeId), circle('Second parent')],
+    children: [diamond('Older child'), square(' Younger child ')],
+    consanguineous: true,
+    relationshipLabel: '  Second cousins  ',
+  });
+  const board = activeCanvasBoard(saved.document);
+  const family = board.families![0]!;
+  assert.equal(family.id, saved.familyId);
+  assert.equal(family.parents[0], known.nodeId);
+  assert.equal(family.consanguineous, true);
+  assert.equal(family.relationshipLabel, 'Second cousins');
+  assert.deepEqual(family.children.map((id) => find(saved.document, id).text), ['Older child', 'Younger child']);
+  assert.deepEqual(family.children.map((id) => find(saved.document, id).kind), ['person-diamond', 'person-square']);
+  assert.equal(isCanvasPerson('person-diamond'), true);
+  assert.equal(isCanvasPerson('partnership'), false);
+  assert.equal(find(saved.document, known.nodeId).groupId, group.nodeId);
+  assert.equal(board.edges, activeCanvasBoard(original).edges);
+  assert.equal(activeCanvasBoard(original).families, undefined);
+  assert.equal(saved.document.text, original.text);
+  assert.deepEqual(readCanvasDocument(JSON.parse(JSON.stringify(saved.document))), saved.document);
+
+  const edited = saveCanvasFamily(saved.document, {
+    id: saved.familyId, parents: [person(family.parents[1]), person(family.parents[0])],
+    children: [person(family.children[1]!)], consanguineous: false, relationshipLabel: '',
+  });
+  assert.equal(edited.familyId, saved.familyId);
+  assert.deepEqual(activeCanvasBoard(edited.document).families?.[0]?.children, [family.children[1]]);
+  assert.equal(activeCanvasBoard(edited.document).families?.[0]?.consanguineous, false);
+  assert.equal(activeCanvasBoard(edited.document).families?.[0]?.relationshipLabel, undefined);
+  assert.equal(find(edited.document, family.children[0]!).text, 'Older child');
+  const detached = removeCanvasFamily(edited.document, saved.familyId);
+  assert.deepEqual(activeCanvasBoard(detached).families, []);
+  assert.equal(activeCanvasBoard(detached).nodes, activeCanvasBoard(edited.document).nodes);
+  assert.equal(activeCanvasBoard(detached).edges, board.edges);
+});
+
+test('pedigrees support cousins and multiple partners while rejecting duplicate or cyclic ancestry', () => {
+  const founders = saveCanvasFamily(createCanvasDocument(), {
+    parents: [circle('Founder A'), square('Founder B')], children: [square('Branch A'), circle('Branch B')],
+  });
+  const foundersFamily = activeCanvasBoard(founders.document).families![0]!;
+  const branchA = person(foundersFamily.children[0]!);
+  const branchB = person(foundersFamily.children[1]!);
+  const firstBranch = saveCanvasFamily(founders.document, { parents: [branchA, circle('Partner A')], children: [circle('Cousin A')] });
+  const secondBranch = saveCanvasFamily(firstBranch.document, { parents: [branchB, square('Partner B')], children: [square('Cousin B')] });
+  const families = activeCanvasBoard(secondBranch.document).families!;
+  const cousinA = person(families[1]!.children[0]!);
+  const cousinB = person(families[2]!.children[0]!);
+  const cousins = saveCanvasFamily(secondBranch.document, { parents: [cousinA, cousinB], children: [], consanguineous: true });
+  const another = saveCanvasFamily(cousins.document, { parents: [cousinA, diamond('Another partner')], children: [] });
+  assert.deepEqual(activeCanvasBoard(another.document).families?.map((family) => family.children.length), [2, 1, 1, 0, 0]);
+  assert.throws(() => saveCanvasFamily(another.document, { parents: [cousinB, cousinA], children: [] }), /already have a family/);
+  assert.throws(() => saveCanvasFamily(another.document, { parents: [cousinA, cousinA], children: [] }), /two different/);
+  assert.throws(() => saveCanvasFamily(another.document, {
+    parents: [cousinA, circle('Partner')], children: [], relationshipLabel: 'x'.repeat(CANVAS_FAMILY_LABEL_LIMIT + 1),
+  }), /relationship label/);
+  assert.throws(() => saveCanvasFamily(another.document, { parents: [cousinA, circle('Partner')], children: [cousinA] }), /own parent/);
+  assert.throws(() => saveCanvasFamily(another.document, { parents: [cousinA, circle('Partner')], children: [cousinB] }), /one biological/);
+  const standalone = addCanvasNode(another.document, { kind: 'person-diamond' });
+  assert.throws(() => saveCanvasFamily(standalone.document, {
+    parents: [cousinA, circle('Partner')], children: [person(standalone.nodeId), person(standalone.nodeId)],
+  }), /only once/);
+  assert.throws(() => saveCanvasFamily(another.document, {
+    id: cousins.familyId, parents: [cousinA, cousinB], children: [person(foundersFamily.parents[0])],
+  }), /cycle/);
+  assert.equal(activeCanvasBoard(another.document).nodes.some((node) => node.text === 'Partner'), false);
+});
+
+test('deleting a child keeps its parents paired, deleting a parent removes the union, and import rejects invalid references', () => {
+  const initial = saveCanvasFamily(createCanvasDocument(), {
+    parents: [circle('Parent A'), square('Parent B')], children: [diamond('Child')],
+  });
+  const board = activeCanvasBoard(initial.document);
+  const family = board.families![0]!;
+  const child = family.children[0]!;
+  assert.throws(() => updateCanvasNode(initial.document, child, { kind: 'note' }), /families/);
+  const revised = updateCanvasNode(initial.document, child, { kind: 'person-circle' });
+  assert.equal(find(revised, child).kind, 'person-circle');
+  const childRemoved = removeCanvasNode(revised, child);
+  assert.deepEqual(activeCanvasBoard(childRemoved).families?.[0]?.children, []);
+  assert.deepEqual(activeCanvasBoard(childRemoved).families?.[0]?.parents, family.parents);
+  const parentRemoved = removeCanvasNode(revised, family.parents[1]);
+  assert.deepEqual(activeCanvasBoard(parentRemoved).families, []);
+  assert.equal(find(parentRemoved, child).text, 'Child');
+  assert.doesNotThrow(() => readCanvasDocument(parentRemoved));
+
+  const malformed = { ...board, families: [{ ...family, children: ['missing'] }] };
+  assert.throws(() => readCanvasDocument({ ...initial.document, boards: [malformed] }), /invalid/);
+  const duplicate = { ...board, families: [family, { ...family, id: 'duplicate', parents: [family.parents[1], family.parents[0]] }] };
+  assert.throws(() => readCanvasDocument({ ...initial.document, boards: [duplicate] }), /invalid/);
+  const other = addCanvasBoard(initial.document, 'Other');
+  assert.throws(() => saveCanvasFamily(other, { parents: [person(family.parents[0]), square('Here')], children: [] }), /this Canvas board/);
+});
+
+test('Space assignments keep pedigree people and their enclosing groups in their layout positions', () => {
+  const saved = saveCanvasFamily(createCanvasDocument(), {
+    parents: [circle('Parent A'), square('Parent B')], children: [diamond('Child')],
+  });
+  const family = activeCanvasBoard(saved.document).families![0]!;
+  const child = family.children[0]!;
+  const group = groupCanvasNodes(saved.document, [child], 'Legacy group');
+  const added = addCanvasSpace(group.document, { title: 'Far away', x: 500, y: 500 });
+  assert.deepEqual(canvasFamilyPositionIds(activeCanvasBoard(added.document)), new Set([...family.parents, child, group.nodeId]));
+  const assignedChild = setCanvasNodeSpaces(added.document, child, [added.spaceId]);
+  const assignedGroup = setCanvasNodeSpaces(assignedChild, group.nodeId, [added.spaceId]);
+  for (const id of [child, group.nodeId]) {
+    assert.deepEqual(find(assignedGroup, id), { ...find(added.document, id), spaceIds: [added.spaceId] });
+  }
+  const unlinked = removeCanvasFamily(assignedGroup, saved.familyId);
+  const placed = setCanvasNodeSpaces(unlinked, child, [added.spaceId]);
+  assert.notEqual(find(placed, child).x, find(unlinked, child).x);
 });

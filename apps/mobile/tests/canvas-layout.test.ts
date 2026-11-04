@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { CanvasBoard, CanvasEdge, CanvasNode } from '../src/utils/canvas';
-import { arrangeCanvas, routeCanvasEdge, routeCanvasEdges } from '../src/utils/canvas-layout';
+import { arrangeCanvas, canvasPersonSymbol, routeCanvasEdge, routeCanvasEdges, routeCanvasFamilies } from '../src/utils/canvas-layout';
 
 function node(id: string, kind: CanvasNode['kind'] = 'note', patch: Partial<CanvasNode> = {}): CanvasNode {
   return { id, kind, text: `Text for ${id}`, x: 140, y: -200, width: 110, height: 62, ...patch };
@@ -64,6 +64,95 @@ test('pedigree layout supports rejoining family branches and one person in multi
   assert.ok(at('grand-left') < at('left') && at('left') < at('child'));
   assertNoOverlaps(output.nodes);
   assert.deepEqual(output.edges, input.edges);
+});
+
+test('a family uses one union, a shared descent, a sibling bar, and ordered stems attached to each symbol', () => {
+  const members = [
+    node('Person G', 'person-diamond'), node('Person B', 'person-circle', { height: 82 }), node('Person E', 'person-square'),
+    node('Person A', 'person-square'), node('Person D', 'person-circle'), node('Person F', 'person-diamond'),
+  ];
+  const children = ['Person D', 'Person E', 'Person F', 'Person G'];
+  const manual = [edge('Person E', 'Person D'), edge('Person G', 'Person F', 'dependency')];
+  const input: CanvasBoard = { ...board(members, manual), families: [{ id: 'family', parents: ['Person B', 'Person A'], children }] };
+  const arranged = arrangeCanvas(input, 'pedigree');
+  const byId = new Map(arranged.nodes.map((item) => [item.id, item]));
+  const symbol = (id: string) => canvasPersonSymbol(byId.get(id)!);
+  const a = symbol('Person A'), b = symbol('Person B');
+  const siblings = children.map(symbol);
+  assert.ok(a.center.x < b.center.x);
+  assert.equal(a.center.y, b.center.y);
+  assert.ok(siblings.every((item, i) => i === 0 || siblings[i - 1]!.center.x < item.center.x));
+  assert.ok(siblings.every((item) => item.center.y === siblings[0]!.center.y && item.center.y > a.center.y));
+  assert.equal((siblings[0]!.center.x + siblings.at(-1)!.center.x) / 2, (a.center.x + b.center.x) / 2);
+  assertNoOverlaps(arranged.nodes);
+  assert.deepEqual(arranged.families, input.families);
+  assert.deepEqual(arranged.edges, manual);
+  assert.deepEqual(arranged.nodes.map(withoutPosition), input.nodes.map(withoutPosition));
+  assert.deepEqual(arrangeCanvas(arranged, 'pedigree'), arranged);
+  assert.deepEqual(arrangeCanvas(arranged, 'relationships'), arranged);
+  assert.deepEqual(arrangeCanvas(arranged, 'groups'), arranged);
+
+  const paths = routeCanvasFamilies(arranged).map(({ points }) => points);
+  assert.equal(paths.length, 7);
+  const [union, descent, bar, ...stems] = paths;
+  assert.deepEqual(union, [{ x: a.x + a.width, y: a.center.y }, { x: b.x, y: b.center.y }]);
+  assert.equal(descent![0]!.x, (a.center.x + b.center.x) / 2);
+  assert.equal(descent![0]!.y, a.center.y);
+  assert.equal(bar![0]!.y, descent![1]!.y);
+  assert.equal(bar![1]!.y, descent![1]!.y);
+  assert.deepEqual(stems.map((points) => points[0]!.y), siblings.map(() => bar![0]!.y));
+  assert.deepEqual(stems.map((points) => points.at(-1)), siblings.map(({ center, y }) => ({ x: center.x, y })));
+});
+
+test('related branches can rejoin, one person can have multiple partners, and every sibling row retains birth order', () => {
+  const people = ['rootB', 'rootA', 'younger', 'older', 'partnerL', 'partnerR', 'cousinR', 'cousinL', 'halfSibling', 'other',
+    'youngest', 'oldest'].map((id, index) => node(id, index % 2 ? 'person-square' : 'person-circle'));
+  const input: CanvasBoard = { ...board(people, []), families: [
+    { id: 'roots', parents: ['rootA', 'rootB'], children: ['older', 'younger'] },
+    { id: 'left', parents: ['older', 'partnerL'], children: ['cousinL'] },
+    { id: 'right', parents: ['younger', 'partnerR'], children: ['cousinR'] },
+    { id: 'cousins', parents: ['cousinL', 'cousinR'], children: ['oldest', 'youngest'],
+      consanguineous: true, relationshipLabel: 'First cousins' },
+    { id: 'second-union', parents: ['cousinL', 'other'], children: ['halfSibling'] },
+  ] };
+  const arranged = arrangeCanvas(input, 'pedigree');
+  const map = new Map(arranged.nodes.map((item) => [item.id, canvasPersonSymbol(item)]));
+  for (const family of input.families!) {
+    const [a, b] = family.parents.map((id) => map.get(id)!);
+    assert.equal(a!.center.y, b!.center.y);
+    const symbols = family.children.map((id) => map.get(id)!);
+    assert.ok(symbols.every((item, i) => i === 0 || symbols[i - 1]!.center.x < item.center.x));
+    assert.ok(symbols.every(({ y }) => y > a!.center.y));
+  }
+  assertNoOverlaps(arranged.nodes);
+  assert.deepEqual(arrangeCanvas(arranged, 'pedigree'), arranged);
+  const routes = routeCanvasFamilies(arranged).filter(({ familyId }) => familyId === 'cousins');
+  const [upper, lower, stem] = routes;
+  assert.equal(upper!.label?.text, 'First cousins');
+  assert.equal(lower!.label, undefined);
+  assert.equal(upper!.points[0]!.y + 6, lower!.points[0]!.y);
+  assert.ok(stem!.points[0]!.y > upper!.label!.y);
+  for (const { points } of routes) {
+    for (let i = 1; i < points.length; i++) {
+      assert.ok(points[i - 1]!.x === points[i]!.x || points[i - 1]!.y === points[i]!.y);
+    }
+  }
+});
+
+test('pedigree order takes precedence over a Space-linked family member without editing membership', () => {
+  const members = [
+    node('a', 'person-circle', { spaceIds: ['space'] }), node('b', 'person-square'),
+    node('newer', 'person-circle'), node('older', 'person-square'),
+  ];
+  const input: CanvasBoard = { ...board(members, []),
+    spaces: [{ id: 'space', title: 'Family', x: 0, y: 0, width: 500, height: 320 }],
+    families: [{ id: 'family', parents: ['a', 'b'], children: ['older', 'newer'] }],
+  };
+  const arranged = arrangeCanvas(input, 'groups');
+  assert.ok(center(arranged.nodes[3]!) < center(arranged.nodes[2]!));
+  assert.deepEqual(arranged.nodes.map(withoutPosition), members.map(withoutPosition));
+  assert.deepEqual(arranged.spaces, input.spaces);
+  assert.deepEqual(arrangeCanvas(arranged, 'groups'), arranged);
 });
 
 test('dependency cycles stay on one layer and nested group layouts keep children below their group', () => {

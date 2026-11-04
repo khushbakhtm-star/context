@@ -4,11 +4,14 @@ import { Alert, AppState, Image, KeyboardAvoidingView, Linking, Modal, PanRespon
 
 import { useAppTheme } from '../appearance';
 import type { AppColors } from '../theme';
-import { activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCanvasSpace, addCanvasStroke, CANVAS_STROKE_POINT_LIMIT, canvasSpacesAtPoint,
-  groupCanvasNodes, removeCanvasEdge, removeCanvasNode, removeCanvasSpace, renameCanvasBoard, searchCanvas, selectCanvasBoard,
+import { activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCanvasSpace, addCanvasStroke, CANVAS_STROKE_POINT_LIMIT,
+  canvasFamilyPositionIds, canvasSpacesAtPoint,
+  groupCanvasNodes, isCanvasPerson, removeCanvasEdge, removeCanvasFamily, removeCanvasNode, removeCanvasSpace, renameCanvasBoard,
+  saveCanvasFamily, searchCanvas, selectCanvasBoard,
   setCanvasNodeSpaces, updateCanvasBoard, updateCanvasEdge, updateCanvasNode, updateCanvasSpace, updateCanvasViewport,
-  type CanvasDocument, type CanvasEdge, type CanvasNode, type CanvasSpace, type CanvasStroke } from '../utils/canvas';
-import { arrangeCanvas, routeCanvasEdges, type CanvasLayoutMode } from '../utils/canvas-layout';
+  type CanvasDocument, type CanvasEdge, type CanvasFamily, type CanvasNode, type CanvasSpace, type CanvasStroke } from '../utils/canvas';
+import { arrangeCanvas, canvasPersonSymbol, routeCanvasEdges, routeCanvasFamilies, type CanvasLayoutMode } from '../utils/canvas-layout';
+import { CanvasFamilyEditor, type FamilyForm } from './CanvasFamilyEditor';
 import { canvasDragNodes, centerCanvasNode, fitCanvas, intersectsCanvasViewport, previewCanvasRoutes, screenPoint, visibleCanvasBoard, worldPoint, zoomViewport,
   type DragPreview, type Point, type Size, type Viewport } from './canvas-viewport';
 
@@ -28,7 +31,8 @@ type EdgeDraft = { id?: string; from: string; to: string; kind: CanvasEdge['kind
 type SpaceDraft = { id?: string; title: string; color?: string; x: string; y: string; width: string; height: string };
 type Dialog = { kind: 'boards' | 'group' | 'search'; text: string } | { kind: 'layout' } |
   { kind: 'node'; draft: NodeDraft } | { kind: 'edge'; draft: EdgeDraft } | { kind: 'connections'; nodeId: string } |
-  { kind: 'space'; draft: SpaceDraft } | { kind: 'membership'; nodeId: string; spaceIds: string[] };
+  { kind: 'space'; draft: SpaceDraft } | { kind: 'membership'; nodeId: string; spaceIds: string[] } |
+  { kind: 'family'; familyId?: string; seedPersonId?: string } | { kind: 'families'; personId?: string };
 type BoardMode = 'text' | 'draw' | 'spaces';
 type Capture = { boardId: string; point: Point; text: string };
 type SpaceDrag = { id: string; resize: boolean };
@@ -40,8 +44,9 @@ type Touches = GestureResponderEvent['nativeEvent']['touches'];
 const NODE_KINDS: { id: NodeKind; name: string }[] = [
   { id: 'sticky', name: 'Sticky note' }, { id: 'note', name: 'Text' }, { id: 'task', name: 'Task' },
   { id: 'heading', name: 'Heading' }, { id: 'checklist', name: 'Checklist' }, { id: 'link', name: 'Link' },
-  { id: 'image', name: 'Image' }, { id: 'person-circle', name: 'Person (circle)' },
-  { id: 'person-square', name: 'Person (square)' }, { id: 'partnership', name: 'Partnership' },
+  { id: 'image', name: 'Image' }, { id: 'person-circle', name: 'Female (circle)' },
+  { id: 'person-square', name: 'Male (square)' }, { id: 'person-diamond', name: 'Unknown (diamond)' },
+  { id: 'partnership', name: 'Partnership' },
 ];
 const EDGE_KINDS: { id: CanvasEdge['kind']; name: string }[] = [
   { id: 'related', name: 'Related' }, { id: 'dependency', name: 'Dependency' },
@@ -71,7 +76,7 @@ const edgeName = (kind: CanvasEdge['kind']) => EDGE_KINDS.find(({ id }) => id ==
 const safeWebUrl = (value?: string) => Boolean(value && /^https?:\/\/[^\s]+$/i.test(value));
 
 function dimensions(kind: NodeKind): Size {
-  if (kind === 'person-circle' || kind === 'person-square') return { width: 120, height: 96 };
+  if (isCanvasPerson(kind)) return { width: 120, height: 96 };
   if (kind === 'partnership') return { width: 120, height: 64 };
   if (kind === 'image') return { width: 200, height: 160 };
   return { width: 180, height: 104 };
@@ -85,12 +90,13 @@ function nodeDraft(node: CanvasNode | undefined, point: Point): NodeDraft {
     width: String(size.width), height: String(size.height) };
 }
 
-function Tool({ title, onPress, styles, disabled = false, selected, accessibilityLabel }: {
-  title: string; onPress: () => void; styles: ReturnType<typeof createStyles>; disabled?: boolean; selected?: boolean; accessibilityLabel?: string;
+function Tool({ title, onPress, styles, disabled = false, selected, accessibilityLabel, compact }: {
+  title: string; onPress: () => void; styles: ReturnType<typeof createStyles>; disabled?: boolean; selected?: boolean;
+  accessibilityLabel?: string; compact?: boolean;
 }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? title}
     accessibilityState={{ disabled, selected }} disabled={disabled} onPress={onPress}
-    style={[styles.tool, disabled && styles.disabled, selected && styles.activeTool]}>
+    style={[styles.tool, compact && styles.compactTool, disabled && styles.disabled, selected && styles.activeTool]}>
     <Text numberOfLines={1} style={styles.toolText}>{title}</Text>
   </Pressable>;
 }
@@ -170,6 +176,24 @@ const EdgeDrawing = memo(function EdgeDrawing({ edge, points, viewport, size, co
   </>;
 });
 
+const FamilyDrawing = memo(function FamilyDrawing({ points, viewport, size, color, label, styles }: {
+  points: Point[]; viewport: Viewport; size: Size; color: string; label?: Point & { text: string };
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const projected = points.map((point) => screenPoint(point, viewport));
+  const clip = ({ x, y }: Point): Point => ({ x: Math.max(-24, Math.min(size.width + 24, x)),
+    y: Math.max(-24, Math.min(size.height + 24, y)) });
+  const caption = label && screenPoint(label, viewport);
+  return <>{projected.slice(1).map((point, index) => {
+    const previous = projected[index]!;
+    return intersectsCanvasViewport(previous, point, size) ?
+      <Stroke key={index} from={clip(previous)} to={clip(point)} color={color} /> : null;
+  })}
+    {caption && label && viewport.zoom >= 0.4 && intersectsCanvasViewport(caption, caption, size, 80) ?
+      <Text numberOfLines={1} style={[styles.familyLabel, { left: caption.x - 80, top: caption.y - 14 }]}>{label.text}</Text> : null}
+  </>;
+});
+
 const CanvasGrid = memo(function CanvasGrid({ viewport, size, styles }: { viewport: Viewport; size: Size; styles: ReturnType<typeof createStyles> }) {
   const base = 48 * viewport.zoom;
   const spacing = base * Math.max(1, Math.ceil(24 / base));
@@ -210,7 +234,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   const focusedRequest = useRef<string | null>(null);
   const lastBoardId = useRef(board.id);
 
-  const layout = useMemo(() => visibleCanvasBoard(board), [board.nodes, board.edges]);
+  const layout = useMemo(() => visibleCanvasBoard(board), [board.nodes, board.edges, board.families]);
   const stableRoutes = useMemo(() => routeCanvasEdges(layout), [layout]);
   const movingId = preview?.drag?.nodeId;
   const moving = useMemo(() => movingId ? canvasDragNodes(board.nodes, movingId) : null, [board.nodes, movingId]);
@@ -220,9 +244,13 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     : layout.nodes, [layout.nodes, moving, dragDelta]);
   const routes = useMemo(() => moving && dragDelta ? previewCanvasRoutes(stableRoutes, moving, dragDelta) : stableRoutes,
     [stableRoutes, moving, dragDelta]);
+  const familyRoutes = useMemo(() => routeCanvasFamilies(visualNodes === layout.nodes ? layout : { ...layout, nodes: visualNodes }),
+    [layout, visualNodes]);
   const viewport = preview?.viewport ?? board.viewport;
   const selection = board.nodes.filter(({ id }) => selectedIds.includes(id));
   const selected = selection.length === 1 ? selection[0] : undefined;
+  const people = useMemo(() => board.nodes.filter(({ kind }) => isCanvasPerson(kind)), [board.nodes]);
+  const positionLocked = useMemo(() => canvasFamilyPositionIds(board), [board.families, board.nodes]);
   const selectedSpace = board.spaces?.find(({ id }) => id === spaceId);
   const ink = useMemo(() => board.strokes?.map((stroke) => ({
     stroke, bounds: stroke.points.reduce<Point & { right: number; bottom: number }>(({ x, y, right, bottom }, point) =>
@@ -483,7 +511,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   }, []);
 
   function armNode(id: string) {
-    if (activeGesture.current) activeGesture.current.nodeId = id;
+    if (activeGesture.current && !positionLocked.has(id)) activeGesture.current.nodeId = id;
   }
 
   function armSpace(id: string, resize = false) {
@@ -514,12 +542,14 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     if (width! < 24 || height! < 24) throw new Error('Width and height must be at least 24.');
     const url = draft.url.trim();
     if (url && !safeWebUrl(url)) throw new Error('Enter a web address starting with https:// or http://.');
-    const patch = { text: draft.text, x, y, width, height, color: draft.color, url, checked: draft.checked };
+    const geometry = draft.id && positionLocked.has(draft.id) ? {} : { x, y, width, height };
+    const patch = { ...geometry, kind: draft.kind, text: draft.text, color: draft.color, url, checked: draft.checked };
     if (draft.id) {
       const current = docRef.current;
       const active = activeCanvasBoard(current);
       const original = active.nodes.find(({ id }) => id === draft.id);
-      const moved = original && (original.x !== x || original.y !== y || original.width !== width || original.height !== height);
+      const moved = original && !positionLocked.has(draft.id) &&
+        (original.x !== x || original.y !== y || original.width !== width || original.height !== height);
       const next = updateCanvasNode(current, draft.id, patch);
       apply(moved ? placeCardInSpaces(next, draft.id, active.id) : next);
       setSelectedIds([draft.id]);
@@ -585,11 +615,40 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   }
 
   function runLayout(mode: CanvasLayoutMode) {
-    const current = docRef.current;
+    apply(arrangeAndFit(docRef.current, mode));
+    closeDialog();
+  }
+
+  function arrangeAndFit(current: CanvasDocument, mode: CanvasLayoutMode, focusFamilyId?: string) {
     const active = activeCanvasBoard(current);
     const arranged = arrangeCanvas(active, mode);
-    apply(updateCanvasBoard(current, active.id, () => ({ ...arranged, viewport: fitCanvas([...visibleCanvasBoard(arranged).nodes, ...(arranged.spaces ?? [])], size) })));
+    const visible = visibleCanvasBoard(arranged).nodes;
+    const family = arranged.families?.find(({ id }) => id === focusFamilyId);
+    const people = new Set(family ? [...family.parents, ...family.children] : []);
+    const familyBounds = visible.filter(({ id }) => people.has(id));
+    return updateCanvasBoard(current, active.id, () => ({
+      ...arranged, viewport: fitCanvas(familyBounds.length ? familyBounds : [...visible, ...(arranged.spaces ?? [])], size),
+    }));
+  }
+
+  function saveFamily(form: FamilyForm) {
+    const next = saveCanvasFamily(docRef.current, form);
+    apply(arrangeAndFit(next.document, 'pedigree', next.familyId));
+    setSelectedIds([]);
+    setLinkFrom(null);
+    setMulti(false);
+    setMode('text');
     closeDialog();
+  }
+
+  function deleteFamily(family: CanvasFamily) {
+    Alert.alert('Remove family?', 'The people stay on the board.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: () => safeChange(() => {
+        apply(removeCanvasFamily(docRef.current, family.id));
+        openDialog({ kind: 'families' });
+      }) },
+    ]);
   }
 
   function restore(which: 'undo' | 'redo') {
@@ -671,7 +730,6 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     const left = start.x, top = start.y, width = Math.max(1, end.x - left), height = Math.max(1, end.y - top);
     const active = selectedIds.includes(node.id) || linkFrom === node.id;
     const expandedGroup = node.kind === 'group' && !node.collapsed;
-    const person = node.kind === 'person-circle' || node.kind === 'person-square';
     const rect: ViewStyle = { left, top, width, height };
     const fontSize = Math.max(9, Math.min(34, 14 * scale));
     const showText = scale >= 0.36 && width >= 28;
@@ -693,20 +751,40 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
         </Pressable>
       </View>;
     }
-    const symbol = Math.max(8, Math.min(width - 2, height * 0.59, 42 * scale));
-    return <Pressable key={node.id} accessibilityRole="button" accessibilityLabel={nodeName(node)}
+    const tapProps = {
+      accessibilityRole: 'button' as const, accessibilityLabel: nodeName(node),
+      accessibilityActions: [{ name: 'edit', label: 'Edit card' }], onAccessibilityAction,
+      onTouchStart: () => armNode(node.id), onPress, onLongPress: () => { if (!multi && !linkFrom) editNode(node); },
+    };
+    if (isCanvasPerson(node.kind)) {
+      const bounds = canvasPersonSymbol(node);
+      const symbol = bounds.width * scale;
+      const diamond = node.kind === 'person-diamond';
+      const side = diamond ? symbol / Math.SQRT2 : symbol;
+      const inset = (symbol - side) / 2;
+      const nameTop = (bounds.y - node.y + bounds.height + 5) * scale;
+      return <Pressable key={node.id} {...tapProps} accessibilityState={{ selected: active }} style={[styles.person, rect]}>
+        <View pointerEvents="none" style={{
+          position: 'absolute', left: (bounds.x - node.x) * scale + inset, top: (bounds.y - node.y) * scale + inset,
+          width: side, height: side, borderWidth: active ? 2 : 1.4, borderColor: active ? colors.accent : colors.ink,
+          backgroundColor: node.color ?? colors.surface, borderRadius: node.kind === 'person-circle' ? symbol / 2 : 0,
+          transform: diamond ? [{ rotate: '45deg' }] : undefined,
+        }} />
+        {showText && node.text.trim() ? <Text numberOfLines={Math.max(1, Math.floor((height - nameTop) / (fontSize * 1.2)))}
+          style={[styles.personName, { top: nameTop, fontSize, color: colors.ink, fontWeight: active ? '700' : '500' }]}>
+          {node.text}
+        </Text> : null}
+      </Pressable>;
+    }
+    return <Pressable key={node.id} {...tapProps}
       accessibilityState={{ selected: active, ...(node.kind === 'group' ? { expanded: false } : {}) }}
-      accessibilityActions={[{ name: 'edit', label: 'Edit card' }]} onAccessibilityAction={onAccessibilityAction}
-      onTouchStart={() => armNode(node.id)} onPress={onPress} onLongPress={() => { if (!multi && !linkFrom) editNode(node); }}
-      style={[styles.card, rect, { backgroundColor: person ? colors.paper : cardColor,
+      style={[styles.card, rect, { backgroundColor: cardColor,
         padding: Math.min(12, 7 * scale), borderColor: active ? colors.accent : colors.hairline,
-        borderWidth: active ? 2 : 1 }, person && styles.person, node.kind === 'partnership' && styles.partnership]}>
-      {person ? <View style={{ width: symbol, height: symbol, borderWidth: active ? 2 : 1.5, borderColor: active ? colors.accent : colors.graphite,
-        backgroundColor: node.color ?? colors.panel, borderRadius: node.kind === 'person-circle' ? symbol / 2 : 2 }} /> : null}
+        borderWidth: active ? 2 : 1 }, node.kind === 'partnership' && styles.partnership]}>
       {node.kind === 'image' && safeWebUrl(node.url) && showText ? <Image source={{ uri: node.url! }}
         style={styles.cardImage} accessibilityLabel={nodeName(node)} resizeMode="contain" /> : null}
       {showText ? <Text numberOfLines={Math.max(1, Math.floor(height / (fontSize * 1.3)) - 1)}
-        style={[styles.cardText, { fontSize, color: person ? colors.ink : ink },
+        style={[styles.cardText, { fontSize, color: ink },
           (node.kind === 'heading' || node.kind === 'group') && styles.strong,
           node.checked && styles.checked]}>
         {node.kind === 'task' || node.kind === 'checklist' ? (node.checked ? '☑ ' : '☐ ') : ''}
@@ -715,17 +793,23 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     </Pressable>;
   });
 
+  const familyBeingEdited = dialog?.kind === 'family' ? board.families?.find(({ id }) => id === dialog.familyId) : undefined;
+  const familiesShown = dialog?.kind === 'families' ? (board.families ?? []).filter((family) =>
+    !dialog.personId || family.parents.includes(dialog.personId) || family.children.includes(dialog.personId)) : [];
   const dialogTitle = dialog?.kind === 'boards' ? 'Workspaces' : dialog?.kind === 'search' ? 'Search Canvas' :
     dialog?.kind === 'layout' ? 'Auto Arrange' : dialog?.kind === 'group' ? 'Group cards' :
       dialog?.kind === 'connections' ? 'Connections' : dialog?.kind === 'edge' ? 'Connection' :
         dialog?.kind === 'space' ? (dialog.draft.id ? 'Edit space' : 'Add space') :
-          dialog?.kind === 'membership' ? 'Card spaces' : dialog?.kind === 'node' && dialog.draft.id ? 'Edit card' : 'Add card';
+          dialog?.kind === 'membership' ? 'Card spaces' : dialog?.kind === 'families' ? 'Families' :
+            dialog?.kind === 'family' ? (dialog.familyId ? 'Edit family' : 'Add family') :
+              dialog?.kind === 'node' && dialog.draft.id ? 'Edit card' : 'Add card';
 
   return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.screen}>
     <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false}
       style={styles.bar} contentContainerStyle={styles.barContent}>
-      <Tool title={board.title} accessibilityLabel={'Workspaces, current workspace ' + board.title} styles={styles}
+      <Tool title={board.title} accessibilityLabel={'Workspaces, current workspace ' + board.title} styles={styles} compact
         onPress={() => openDialog({ kind: 'boards', text: '' })} />
+      <Tool title="+ Family" accessibilityLabel="Add family" styles={styles} onPress={() => openDialog({ kind: 'family' })} />
       <Tool title="+ Card" accessibilityLabel="Add card" styles={styles} onPress={() => editNode()} />
       <Tool title="Auto Arrange" styles={styles} disabled={!board.nodes.length} onPress={() => openDialog({ kind: 'layout' })} />
       <Tool title="Select" styles={styles} selected={multi} onPress={() => {
@@ -751,6 +835,8 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
       style={styles.bar} contentContainerStyle={styles.barContent}>
       {selected ? <>
         <Tool title="Edit" styles={styles} onPress={() => editNode(selected)} />
+        {isCanvasPerson(selected.kind) ? <Tool title="Families" styles={styles}
+          onPress={() => openDialog({ kind: 'families', personId: selected.id })} /> : null}
         {selected.kind !== 'group' && board.spaces?.length ? <Tool
           title={selected.spaceIds?.length ? 'Spaces (' + selected.spaceIds.length + ')' : 'Spaces'} accessibilityLabel="Assign card to spaces"
           styles={styles} onPress={() => openDialog({ kind: 'membership', nodeId: selected.id, spaceIds: selected.spaceIds ?? [] })} /> : null}
@@ -785,6 +871,8 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
       <View pointerEvents="none" style={StyleSheet.absoluteFill}>
         {routes.map(({ edge, points }) => <EdgeDrawing key={edge.id} edge={edge} points={points} viewport={viewport}
           size={size} color={edge.kind === 'dependency' ? colors.warning : colors.muted} styles={styles} />)}
+        {familyRoutes.map(({ familyId, points, label }, index) => <FamilyDrawing key={familyId + ':' + index} points={points}
+          label={label} viewport={viewport} size={size} color={colors.ink} styles={styles} />)}
       </View>
       {drawing}
       {capture && capturePoint ? <View style={[styles.capture, {
@@ -821,7 +909,8 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
             <Text accessibilityRole="header" style={styles.dialogTitle}>{dialogTitle}</Text>
             <Tool title="Close" styles={styles} onPress={closeDialog} />
           </View>
-          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.dialogContent}>
+          <ScrollView key={dialog?.kind === 'family' ? dialog.familyId ?? 'new-family' : dialog?.kind === 'families' ? 'families' : 'dialog'}
+            keyboardShouldPersistTaps="handled" contentContainerStyle={styles.dialogContent}>
             {dialog?.kind === 'boards' ? <>
               {document.boards.map((item) => <Tool key={item.id} title={item.title} selected={item.id === board.id} styles={styles}
                 onPress={() => safeChange(() => { apply(selectCanvasBoard(docRef.current, item.id), false); closeDialog(); })} />)}
@@ -895,12 +984,35 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
                 apply(setCanvasNodeSpaces(docRef.current, dialog.nodeId, dialog.spaceIds)); closeDialog();
               })} />
             </> : null}
+            {dialog?.kind === 'families' ? <>
+              {familiesShown.map((family) => {
+                const title = family.parents.map((id) => nodeName(people.find((person) => person.id === id))).join(' + ');
+                return <Pressable key={family.id} accessibilityRole="button" style={styles.result}
+                  onPress={() => openDialog({ kind: 'family', familyId: family.id })}>
+                  <Text style={styles.toolText}>{title}</Text>
+                  <Text style={styles.hint}>{family.children.length + (family.children.length === 1 ? ' child' : ' children')}
+                    {family.relationshipLabel ? ' · ' + family.relationshipLabel : ''}</Text>
+                </Pressable>;
+              })}
+              {!familiesShown.length ? <Text style={styles.hint}>No families here yet.</Text> : null}
+              <Tool title="+ Family" accessibilityLabel="Add family" styles={styles}
+                onPress={() => openDialog({ kind: 'family', seedPersonId: dialog.personId })} />
+            </> : null}
+            {dialog?.kind === 'family' && (!dialog.familyId || familyBeingEdited) ?
+              <CanvasFamilyEditor key={dialog.familyId ?? 'new:' + (dialog.seedPersonId ?? '')} family={familyBeingEdited}
+                people={people} seedPersonId={dialog.seedPersonId} onSave={(form) => safeChange(() => saveFamily(form))}
+                onManage={board.families?.length ? () => openDialog({ kind: 'families' }) : undefined}
+                onRemove={familyBeingEdited ? () => deleteFamily(familyBeingEdited) : undefined} /> : null}
             {dialog?.kind === 'node' ? <>
               {!dialog.draft.id ? <View style={styles.wrap}>{NODE_KINDS.map(({ id, name }) =>
                 <Tool key={id} title={name} styles={styles} selected={dialog.draft.kind === id} onPress={() => {
                   const next = dimensions(id);
                   updateDraft({ kind: id, width: String(next.width), height: String(next.height) });
                 }} />)}</View> : null}
+              {dialog.draft.id && isCanvasPerson(dialog.draft.kind) ? <View style={styles.wrap}>
+                {NODE_KINDS.filter(({ id }) => isCanvasPerson(id)).map(({ id, name }) =>
+                  <Tool key={id} title={name} styles={styles} selected={dialog.draft.kind === id} onPress={() => updateDraft({ kind: id })} />)}
+              </View> : null}
               <TextInput accessibilityLabel="Card text" placeholder="Card text" placeholderTextColor={colors.muted} autoFocus
                 value={dialog.draft.text} onChangeText={(value) => updateDraft({ text: value })} multiline
                 keyboardAppearance={resolvedMode} style={[styles.field, styles.noteField]} />
@@ -916,14 +1028,15 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
                 <View style={[styles.swatch, { backgroundColor: value ?? colors.panel,
                   borderColor: dialog.draft.color === value ? colors.accent : colors.hairline }]} />
               </Pressable>)}</View>
-              <View style={styles.wrap}>
+              {dialog.draft.id && positionLocked.has(dialog.draft.id) ?
+                <Text style={styles.hint}>Pedigree layout positions this card. Edit the family to reorder children.</Text> : <View style={styles.wrap}>
                 {([{ key: 'x', label: 'X position' }, { key: 'y', label: 'Y position' },
                   { key: 'width', label: 'Width' }, { key: 'height', label: 'Height' }] as const).map(({ key, label }) => <View key={key} style={styles.dimension}>
                   <Text style={styles.hint}>{label}</Text>
                   <TextInput accessibilityLabel={label} keyboardType="numbers-and-punctuation" value={dialog.draft[key]}
                     onChangeText={(value) => updateDraft({ [key]: value })} style={styles.field} />
                 </View>)}
-              </View>
+              </View>}
               <Tool title="Save card" styles={styles} onPress={() => safeChange(() => saveNode(dialog.draft))} />
             </> : null}
             {dialog?.kind === 'edge' ? <>
@@ -966,6 +1079,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   bar: { flexGrow: 0, flexShrink: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
   barContent: { minHeight: 50, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 5, gap: 3 },
   tool: { minHeight: 44, minWidth: 42, maxWidth: 156, paddingHorizontal: 10, justifyContent: 'center', alignItems: 'center', borderRadius: 7 },
+  compactTool: { maxWidth: 88, paddingHorizontal: 7 },
   toolText: { color: colors.ink, fontSize: 14, fontWeight: '500' },
   activeTool: { backgroundColor: colors.panel },
   disabled: { opacity: 0.42 },
@@ -977,7 +1091,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   cardText: { flexShrink: 1, includeFontPadding: false },
   checked: { textDecorationLine: 'line-through', opacity: 0.65 },
   strong: { fontWeight: '700' },
-  person: { alignItems: 'center', gap: 3 },
+  person: { position: 'absolute' },
+  personName: { position: 'absolute', left: 0, right: 0, textAlign: 'center', includeFontPadding: false },
+  familyLabel: { position: 'absolute', width: 160, textAlign: 'center', color: colors.ink, fontSize: 11 },
   partnership: { alignItems: 'center', borderRadius: 40 },
   cardImage: { flex: 1, width: '100%', minHeight: 0 },
   groupFrame: { position: 'absolute', borderWidth: 1.5, borderRadius: 9, overflow: 'hidden' },
