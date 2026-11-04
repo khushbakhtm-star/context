@@ -45,6 +45,7 @@ import { CategoriesScreen } from './src/screens/CategoriesScreen';
 import { ReportsScreen } from './src/screens/ReportsScreen';
 import { ChecklistFlowScreen, type PriorityHistoryState, type PriorityScreenControls } from './src/screens/ChecklistFlowScreen';
 import { NotepadScreen } from './src/screens/NotepadScreen';
+import { CanvasWorkspace } from './src/screens/CanvasWorkspace';
 import { createChecklistList, getChecklistFlow, renameChecklistList } from './src/data/checklist-flow';
 import type { ChecklistListSummary } from './src/utils/checklist-flow';
 import { SettingsScreen } from './src/screens/SettingsScreen';
@@ -85,7 +86,7 @@ import { advanceManualSyncTiming, createManualSyncTiming, finishManualSyncTiming
 import { nativeSyncDiagnosticsText } from './src/utils/native-sync-diagnostics';
 import { accountSyncDiagnosticsText } from './src/utils/account-sync-diagnostics-text';
 
-type PrimaryTab = 'today' | 'checklist' | 'notepad';
+type PrimaryTab = 'today' | 'checklist' | 'notepad' | 'canvas';
 type Tab = PrimaryTab | 'reports' | 'search' | 'settings' | 'accounts' | 'categories';
 type DayCount = 1 | 3 | 7;
 type NavigationAction = Exclude<Tab, 'today'>;
@@ -168,10 +169,12 @@ function AppController() {
   const [tab, setTab] = useState<Tab>('today');
   const tabRef = useRef(tab); tabRef.current = tab;
   const primaryTabRef = useRef<PrimaryTab>('today');
-  if (tab === 'today' || tab === 'checklist' || tab === 'notepad') primaryTabRef.current = tab;
+  if (tab === 'today' || tab === 'checklist' || tab === 'notepad' || tab === 'canvas') primaryTabRef.current = tab;
   const checklistBeforeLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const notepadBeforeLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const notepadInputRef = useRef<ComponentRef<typeof TextInput>>(null);
+  const canvasBeforeLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
+  const [canvasFocusNodeId, setCanvasFocusNodeId] = useState<string | null>(null);
   const priorityControlsRef = useRef<PriorityScreenControls | null>(null);
   const [priorityHistory, setPriorityHistory] = useState<PriorityHistoryState>({ canUndo: false, canRedo: false, busy: false });
   const [selectedPriorityListId, setSelectedPriorityListId] = useState('main');
@@ -629,7 +632,7 @@ function AppController() {
       await awaitCalendarTransition(flushInlineMinutes(), controller.signal);
       if (!current()) throw new CalendarTransitionCancelled();
       const beforeLeave = tab === 'checklist' ? checklistBeforeLeaveRef.current :
-        tab === 'notepad' ? notepadBeforeLeaveRef.current : null;
+        tab === 'notepad' ? notepadBeforeLeaveRef.current : tab === 'canvas' ? canvasBeforeLeaveRef.current : null;
       if (beforeLeave) {
         if (!await awaitCalendarTransition(beforeLeave(), controller.signal)) return;
         if (!current()) throw new CalendarTransitionCancelled();
@@ -702,7 +705,7 @@ function AppController() {
 
   async function returnToCalendar() {
     return transitionFromCalendar(() => {
-      const target = tab === 'checklist' || tab === 'notepad' ? 'today' : primaryTabRef.current;
+      const target = tab === 'checklist' || tab === 'notepad' || tab === 'canvas' ? 'today' : primaryTabRef.current;
       if (target === 'today') setFocusRequest({ ...calendarFocusRef.current, token: ++focusSequence.current, openEditor: false });
       setTab(target);
     }, 'Could not return to calendar');
@@ -825,6 +828,13 @@ function AppController() {
 
   function navigate(action: NavigationAction) {
     return transitionFromCalendar(() => setTab(action), 'Could not open screen');
+  }
+
+  function openCanvasFromNotepad(nodeId: string) {
+    return transitionFromCalendar(() => {
+      setCanvasFocusNodeId(nodeId);
+      setTab('canvas');
+    }, 'Could not open Canvas');
   }
 
   const navigationState = { activeDate, mode: viewMode, selectedDates: selectedDateKeys, overviewMonth };
@@ -1103,7 +1113,7 @@ function AppController() {
             <ReleaseUpdateNotice updates={releaseUpdates} />
             {printPreparing ? <PrintPreparationNotice action={printPreparationAction} onCancel={() => printAbortRef.current?.abort()} /> : null}
             <View style={{ flex: 1 }} pointerEvents={viewChanging ? 'none' : 'auto'}>
-              {tab === 'today' || tab === 'checklist' || tab === 'notepad' ?
+              {tab === 'today' || tab === 'checklist' || tab === 'notepad' || tab === 'canvas' ?
                 <CalendarHeader onOpenSettings={() => void navigate('settings')} onOpenSearch={() => void openSearch()}
                   onOpenGlobalSearch={() => void openSearch(true)}
                   onPrint={() => void openPrintOptions()}
@@ -1116,6 +1126,7 @@ function AppController() {
                     } : jumpToCurrentMinute}
                   onOpenChecklist={() => void navigate('checklist')}
                   onOpenNotepad={() => void navigate('notepad')} notepad={tab === 'notepad'}
+                  onOpenCanvas={() => void navigate('canvas')} canvas={tab === 'canvas'}
                   onReturnToCalendar={() => void returnToCalendar()}
                   viewMode={viewMode} hasSelectedDates={Boolean(selectedDateKeys?.length)}
                   viewChanging={viewChanging} onViewModeChange={changeViewMode}
@@ -1184,7 +1195,10 @@ function AppController() {
                 focusTaskId={priorityFocusTaskId} onFocusConsumed={consumePriorityFocus}
                 onSwipeList={(direction) => void switchPriorityList(direction)}
                 beforeLeaveRef={checklistBeforeLeaveRef} /> : null}
-              {tab === 'notepad' ? <NotepadScreen beforeLeaveRef={notepadBeforeLeaveRef} inputRef={notepadInputRef} /> : null}
+              {tab === 'notepad' ? <NotepadScreen beforeLeaveRef={notepadBeforeLeaveRef} inputRef={notepadInputRef}
+                onOpenCanvas={(nodeId) => void openCanvasFromNotepad(nodeId)} /> : null}
+              {tab === 'canvas' ? <CanvasWorkspace beforeLeaveRef={canvasBeforeLeaveRef} focusNodeId={canvasFocusNodeId}
+                onFocusConsumed={() => setCanvasFocusNodeId(null)} /> : null}
               {tab === 'search' ? (
                 <SearchScreen dataVersion={dataVersion} scope={searchScope} onOpenResult={openSearchResult} onOpenTask={openPriorityResult} />
               ) : null}
@@ -1235,9 +1249,9 @@ const CALENDAR_VIEW_OPTIONS: { mode: CalendarViewMode; label: string }[] = [
   { mode: 'schedule', label: 'Schedule' },
 ];
 
-function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSearch, onOpenReports, onOpenChecklist, onOpenNotepad, onReturnToCalendar,
+function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSearch, onOpenReports, onOpenChecklist, onOpenNotepad, onOpenCanvas, onReturnToCalendar,
   onSync, syncing, syncError, syncDetails, syncTimingDetails, onJumpToNow, onOpenDatePicker, canGoPrevious, canGoNext, onPrevious, onNext,
-  viewMode, hasSelectedDates, viewChanging, onViewModeChange, priority, notepad = false }: {
+  viewMode, hasSelectedDates, viewChanging, onViewModeChange, priority, notepad = false, canvas = false }: {
   onOpenSettings: () => void;
   onPrint: () => void;
   onOpenSearch: () => void;
@@ -1245,8 +1259,10 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   onOpenReports: () => void;
   onOpenChecklist: () => void;
   onOpenNotepad: () => void;
+  onOpenCanvas: () => void;
   onReturnToCalendar: () => void;
   notepad?: boolean;
+  canvas?: boolean;
   onSync: () => void;
   syncing: boolean;
   syncError: string | null;
@@ -1281,7 +1297,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   const [gearMenuTop, setGearMenuTop] = useState(48);
   const [gearMenuLeft, setGearMenuLeft] = useState(8);
   const gearMenuAnchor = useRef<ComponentRef<typeof View>>(null);
-  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates' | 'checklist' | 'notepad' | 'search'; sequence: number } | null>(null);
+  const pendingGearAction = useRef<{ action: 'settings' | 'print' | 'redo' | 'reports' | 'dates' | 'checklist' | 'notepad' | 'canvas' | 'search'; sequence: number } | null>(null);
   const gearVisibleRef = useRef(false);
   const gearClosingRef = useRef(false);
   const headerMountedRef = useRef(true);
@@ -1291,11 +1307,11 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   const preparingViews = useRef(false);
   const { width, height } = useWindowDimensions();
   const [availableWidth, setAvailableWidth] = useState(width);
-  const isCalendar = !priority && !notepad;
+  const isCalendar = !priority && !notepad && !canvas;
   const controlCount = isCalendar ? 7 : 5;
   const controlWidth = Math.max(40, Math.min(44, availableWidth / controlCount));
   const controlStyle = [styles.menuButton, { width: controlWidth }];
-  const headerHistory = notepad ? { canUndo: false, canRedo: false, busy: false } : priority ?? history;
+  const headerHistory = notepad || canvas ? { canUndo: false, canRedo: false, busy: false } : priority ?? history;
   const navigationBusy = viewChanging || historyPending || headerHistory.busy;
   const hasSyncDetails = Boolean(syncDetails || syncError || syncing);
   const showSyncDetails = () => {
@@ -1437,7 +1453,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
   }, []);
 
   async function changeHistory(action: 'undo' | 'redo') {
-    if (notepad) return;
+    if (notepad || canvas) return;
     if (priority) {
       if (viewChanging || historyOperation.current || priority.busy || !(action === 'undo' ? priority.canUndo : priority.canRedo)) return;
       binderPress.cancel(); historyOperation.current = true; setHistoryPending(true); Keyboard.dismiss();
@@ -1545,6 +1561,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
     else if (pending.action === 'dates') onOpenDatePicker();
     else if (pending.action === 'checklist') onOpenChecklist();
     else if (pending.action === 'notepad') onOpenNotepad();
+    else if (pending.action === 'canvas') onOpenCanvas();
     else if (pending.action === 'search') onOpenGlobalSearch();
     else onOpenReports();
     // Also release the local lock when a transition finishes within the same React batch.
@@ -1568,7 +1585,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
       finishGearAction(sequence);
     });
   };
-  const chooseDateSelection = (action: 'dates' | 'checklist' | 'notepad' = 'dates') => {
+  const chooseDateSelection = (action: 'dates' | 'checklist' | 'notepad' | 'canvas' = 'dates') => {
     if (!headerMayNavigate() || !viewVisibleRef.current || viewClosingRef.current || pendingGearAction.current) return;
     const sequence = ++menuRequestSequence.current;
     pendingGearAction.current = { action, sequence };
@@ -1583,14 +1600,15 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
     { label: viewLabel, open: onReturnToCalendar },
     { label: 'Priority', open: onOpenChecklist },
     { label: 'Notepad', open: onOpenNotepad },
+    { label: 'Canvas', open: onOpenCanvas },
   ] as const;
-  const viewIndex = notepad ? 2 : priority ? 1 : 0;
+  const viewIndex = canvas ? 3 : notepad ? 2 : priority ? 1 : 0;
   const nextView = views[(viewIndex + 1) % views.length]!;
   const previousView = views[(viewIndex + views.length - 1) % views.length]!;
-  binderActions.current = { single: onJumpToNow, long: openViews, next: nextView.open, previous: previousView.open };
+  binderActions.current = { single: canvas ? openViews : onJumpToNow, long: openViews, next: nextView.open, previous: previousView.open };
   const calendarIcon = <CalendarViewIcon mode={hasSelectedDates ? 'month' : viewMode} currentDate={current} />;
-  const activeIcon = isCalendar ? calendarIcon : <CalendarHeaderIcon name={notepad ? 'notepad' : 'checklist'} />;
-  const binderTapLabel = notepad ? 'Focus editor' : priority ? 'Go to top' : 'Go to now';
+  const activeIcon = isCalendar ? calendarIcon : <CalendarHeaderIcon name={canvas ? 'canvas' : notepad ? 'notepad' : 'checklist'} />;
+  const binderTapLabel = canvas ? 'Choose a view' : notepad ? 'Focus editor' : priority ? 'Go to top' : 'Go to now';
 
   return <><ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.calendarHeaderScroll}
     keyboardShouldPersistTaps="always" keyboardDismissMode="none"
@@ -1616,12 +1634,13 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
         accessibilityHint="Swipe sideways to switch views. Press and hold to choose a view."
         accessibilityState={{ expanded: viewMenuOpen, disabled: navigationBusy, busy: viewChanging }} disabled={navigationBusy}
         accessibilityActions={[{ name: 'showViews', label: 'Choose view' },
-          { name: 'goToNow', label: notepad ? 'Focus the note editor' : priority ? 'Go to the top of the checklist' : 'Go to the current minute' },
+          ...(!canvas ? [{ name: 'goToNow', label: notepad ? 'Focus the note editor' :
+            priority ? 'Go to the top of the checklist' : 'Go to the current minute' }] : []),
           { name: 'switchView', label: `Switch to ${nextView.label} view` },
           { name: 'previousView', label: `Switch to ${previousView.label} view` }]}
         onAccessibilityAction={(event) => {
           if (event.nativeEvent.actionName === 'showViews') { binderPress.cancel(); openViews(); }
-          else if (event.nativeEvent.actionName === 'goToNow' && headerMayNavigate()) { binderPress.cancel(); onJumpToNow(); }
+          else if (event.nativeEvent.actionName === 'goToNow' && !canvas && headerMayNavigate()) { binderPress.cancel(); onJumpToNow(); }
           else if (event.nativeEvent.actionName === 'switchView') switchViewFamily(1);
           else if (event.nativeEvent.actionName === 'previousView') switchViewFamily(-1);
         }}
@@ -1637,6 +1656,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
             <View testID="calendar-view-dot" style={[styles.viewDot, isCalendar && styles.viewDotActive]} />
             <View testID="priority-view-dot" style={[styles.viewDot, Boolean(priority) && styles.viewDotActive]} />
             <View testID="notepad-view-dot" style={[styles.viewDot, notepad && styles.viewDotActive]} />
+            <View testID="canvas-view-dot" style={[styles.viewDot, canvas && styles.viewDotActive]} />
           </View>
         </View>
       </Pressable>
@@ -1747,6 +1767,11 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
               <CalendarHeaderIcon name="notepad" />
               <Text maxFontSizeMultiplier={1.5} style={[styles.viewOptionText, notepad && styles.viewOptionTextSelected]}>Notepad</Text>
             </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Canvas view" accessibilityState={{ selected: canvas }}
+              onPress={() => chooseDateSelection('canvas')} style={[styles.viewOption, canvas && styles.viewOptionSelected]}>
+              <CalendarHeaderIcon name="canvas" />
+              <Text maxFontSizeMultiplier={1.5} style={[styles.viewOptionText, canvas && styles.viewOptionTextSelected]}>Canvas</Text>
+            </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Pick or range dates" onPress={() => chooseDateSelection()} style={styles.viewOption}>
               <CalendarViewIcon mode="month" />
               <Text maxFontSizeMultiplier={1.5} style={styles.viewOptionText}>Pick / Range</Text>
@@ -1760,7 +1785,7 @@ function CalendarHeader({ onOpenSettings, onPrint, onOpenSearch, onOpenGlobalSea
 
 const SCREEN_TITLES: Record<Tab, string> = {
   today: 'Day', reports: 'Dashboard', search: 'Search', settings: 'Settings',
-  accounts: 'Calendar accounts', categories: 'Activity colors', checklist: 'Priority', notepad: 'Notepad',
+  accounts: 'Calendar accounts', categories: 'Activity colors', checklist: 'Priority', notepad: 'Notepad', canvas: 'Canvas',
 };
 
 function ApplicationFrame({
@@ -1787,9 +1812,9 @@ function ApplicationFrame({
       ) : null}
       <SafeAreaView edges={['top', 'right', 'bottom', 'left']} style={styles.safeArea}>
         <View style={styles.screen}>
-          {ready && tab !== 'today' && tab !== 'checklist' && tab !== 'notepad' ? (
+          {ready && tab !== 'today' && tab !== 'checklist' && tab !== 'notepad' && tab !== 'canvas' ? (
             <View style={styles.screenHeader}>
-              <Pressable accessibilityRole="button" accessibilityLabel={returnView === 'notepad' ? 'Back to Notepad' :
+              <Pressable accessibilityRole="button" accessibilityLabel={returnView === 'canvas' ? 'Back to Canvas' : returnView === 'notepad' ? 'Back to Notepad' :
                 returnView === 'checklist' ? 'Back to Priority' : 'Back to calendar'}
                 onPress={onReturnToCalendar} style={styles.menuButton}>
                 <CalendarHeaderIcon name="back" />

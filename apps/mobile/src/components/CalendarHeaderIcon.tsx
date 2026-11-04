@@ -6,7 +6,7 @@ import type { AppColors } from '../theme';
 
 /** Decorative monochrome symbols; the containing button provides its accessible name. */
 export function CalendarHeaderIcon({ name, active = false, issue = false }: {
-  name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings' | 'checklist' | 'notepad'; active?: boolean; issue?: boolean;
+  name: 'back' | 'menu' | 'search' | 'reports' | 'sync' | 'print' | 'settings' | 'checklist' | 'notepad' | 'canvas'; active?: boolean; issue?: boolean;
 }) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -39,6 +39,10 @@ export function CalendarHeaderIcon({ name, active = false, issue = false }: {
     </> : name === 'notepad' ? <>
       <View style={styles.notePage} />
       {[7, 12, 17].map((top) => <View key={top} style={[styles.noteRule, { top }]} />)}
+    </> : name === 'canvas' ? <>
+      <View style={styles.canvasLine} />
+      <View style={[styles.canvasCard, { left: 1, top: 3 }]} />
+      <View style={[styles.canvasCard, { left: 14, top: 13 }]} />
     </> : name === 'print' ? <>
       <View style={styles.printPaperTop} /><View style={styles.printBody} />
       <View style={styles.printPaperBottom} /><View style={styles.printIndicator} />
@@ -78,6 +82,10 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   notePage: { position: 'absolute', left: 3, top: 1, width: 18, height: 22, borderWidth: 1.5,
     borderColor: colors.graphite, borderRadius: 2.5 },
   noteRule: { position: 'absolute', left: 7, width: 10, height: 1.5, backgroundColor: colors.graphite, borderRadius: 0.75 },
+  canvasLine: { position: 'absolute', left: 7, top: 11.5, width: 11, height: 1.5, backgroundColor: colors.graphite,
+    transform: [{ rotate: '38deg' }] },
+  canvasCard: { position: 'absolute', width: 9, height: 8, borderWidth: 1.5, borderRadius: 1.5,
+    borderColor: colors.graphite, backgroundColor: colors.paper },
   syncRing: { position: 'absolute', left: 1, top: 1, width: 22, height: 22,
     borderWidth: 1.5, borderRadius: 11 },
   syncOpen: { borderLeftColor: 'transparent', borderRightColor: 'transparent' },

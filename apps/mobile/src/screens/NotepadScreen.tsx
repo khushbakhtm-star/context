@@ -2,105 +2,72 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef, t
 import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { useAppTheme } from '../appearance';
-import { getSetting, setSetting } from '../data/database';
+import { loadCanvasDocument, saveCanvasDocument } from '../data/canvas';
+import { useCanvasDraft } from '../hooks/useCanvasDraft';
 import type { AppColors } from '../theme';
-
-// Local settings are outside the calendar, Wear and encrypted ledger upload queues.
-const NOTEPAD_KEY = 'notepad.text.v1';
-const AUTOSAVE_DELAY = 350;
+import { addLinkedCanvasNode, setCanvasText, type CanvasTextRange } from '../utils/canvas';
 
 type Props = {
   beforeLeaveRef?: { current: (() => Promise<boolean>) | null };
   inputRef?: RefObject<ComponentRef<typeof TextInput> | null>;
+  onOpenCanvas?: (nodeId: string) => void;
 };
 
-export function NotepadScreen({ beforeLeaveRef, inputRef }: Props) {
+export function NotepadScreen({ beforeLeaveRef, inputRef, onOpenCanvas }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const [text, setText] = useState('');
-  const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState(false);
-  const [saveError, setSaveError] = useState(false);
+  const { value, loadFailed, saveFailed, update, flush, reload, latest } = useCanvasDraft(loadCanvasDocument, saveCanvasDocument);
+  const [selected, setSelected] = useState<CanvasTextRange | null>(null);
+  const selectionRef = useRef<CanvasTextRange | undefined>(undefined);
+  const [linking, setLinking] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const screenRef = useRef<ComponentRef<typeof View>>(null);
   const alive = useRef(false);
-  const loadGeneration = useRef(0);
-  const buffer = useRef({ draft: '', saved: '' });
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const saving = useRef<Promise<boolean> | null>(null);
-
-  const load = useCallback(async () => {
-    const generation = ++loadGeneration.current;
-    setLoadError(false);
-    try {
-      const value = await getSetting<unknown>(NOTEPAD_KEY, '');
-      if (!alive.current || generation !== loadGeneration.current) return;
-      const saved = typeof value === 'string' ? value : '';
-      buffer.current = { draft: saved, saved };
-      setText(saved);
-      setLoaded(true);
-    } catch {
-      if (alive.current && generation === loadGeneration.current) setLoadError(true);
-    }
-  }, []);
-
-  const flush = useCallback((): Promise<boolean> => {
-    if (timer.current !== null) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
-    if (saving.current) return saving.current;
-    if (buffer.current.draft === buffer.current.saved) {
-      if (alive.current) setSaveError(false);
-      return Promise.resolve(true);
-    }
-
-    // Serialize writes and check again after every acknowledgement. An edit
-    // that arrives during a save is part of the same navigation or blur flush.
-    async function saveLatest() {
-      while (buffer.current.draft !== buffer.current.saved) {
-        const next = buffer.current.draft;
-        await setSetting(NOTEPAD_KEY, next);
-        buffer.current.saved = next;
-      }
-    }
-
-    saving.current = saveLatest().then(
-      () => { if (alive.current) setSaveError(false); return true; },
-      () => { if (alive.current) setSaveError(true); return false; },
-    ).finally(() => { saving.current = null; });
-    return saving.current;
-  }, []);
+  const pendingLink = useRef<Promise<boolean> | null>(null);
 
   useEffect(() => {
     alive.current = true;
-    void load();
-    const subscription = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') void flush();
-    });
-    return () => {
-      alive.current = false;
-      loadGeneration.current++;
-      subscription.remove();
-      void flush();
-    };
-  }, [load, flush]);
+    return () => { alive.current = false; };
+  }, []);
+
+  const beforeLeave = useCallback(async () => {
+    await pendingLink.current;
+    return flush();
+  }, [flush]);
 
   useEffect(() => {
     if (!beforeLeaveRef) return;
-    beforeLeaveRef.current = flush;
-    return () => { if (beforeLeaveRef.current === flush) beforeLeaveRef.current = null; };
-  }, [beforeLeaveRef, flush]);
+    beforeLeaveRef.current = beforeLeave;
+    return () => { if (beforeLeaveRef.current === beforeLeave) beforeLeaveRef.current = null; };
+  }, [beforeLeaveRef, beforeLeave]);
 
   function edit(next: string) {
-    buffer.current.draft = next;
-    setText(next);
-    if (timer.current !== null) clearTimeout(timer.current);
-    if (AppState.currentState !== 'active') {
-      void flush();
-      return;
+    const current = latest();
+    if (!current) return;
+    setSelected(null);
+    setLinkError(null);
+    update(setCanvasText(current, next, selectionRef.current));
+  }
+
+  async function sendToCanvas() {
+    const current = latest();
+    if (pendingLink.current || !selected || !current || selected.end > current.text.length) return;
+    setLinking(true);
+    setLinkError(null);
+    try {
+      const result = addLinkedCanvasNode(current, selected);
+      setSelected(null);
+      update(result.document);
+      const saving = flush();
+      pendingLink.current = saving;
+      if (await saving && alive.current && AppState.currentState === 'active') onOpenCanvas?.(result.nodeId);
+    } catch (error) {
+      if (alive.current) setLinkError(error instanceof Error ? error.message : 'Could not add this text to Canvas.');
+    } finally {
+      pendingLink.current = null;
+      if (alive.current) setLinking(false);
     }
-    timer.current = setTimeout(() => void flush(), AUTOSAVE_DELAY);
   }
 
   function measureKeyboardOffset() {
@@ -113,17 +80,27 @@ export function NotepadScreen({ beforeLeaveRef, inputRef }: Props) {
   return <View ref={screenRef} collapsable={false} onLayout={measureKeyboardOffset} style={styles.screen}>
     <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={keyboardOffset}>
-      <Text accessibilityRole="header" style={styles.heading}>Notepad</Text>
-      {loadError || saveError ? <View style={styles.errorRow}>
+      <View style={styles.toolbar}>
+        <Text accessibilityRole="header" style={styles.heading}>Notepad</Text>
+        {onOpenCanvas && selected ? <Pressable accessibilityRole="button" disabled={linking}
+          onPress={() => void sendToCanvas()} style={styles.retry}>
+          <Text style={styles.retryText}>{linking ? 'Adding…' : 'Add to Canvas'}</Text>
+        </Pressable> : null}
+      </View>
+      {loadFailed || saveFailed || linkError ? <View style={styles.errorRow}>
         <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.error}>
-          {loadError ? 'Could not open the notepad.' : 'Could not save the latest changes.'}
+          {loadFailed ? 'Could not open the notepad.' : saveFailed ? 'Could not save the latest changes.' : linkError}
         </Text>
-        <Pressable accessibilityRole="button" onPress={() => { if (loadError) void load(); else void flush(); }}
-          style={styles.retry}><Text style={styles.retryText}>Retry</Text></Pressable>
+        {loadFailed || saveFailed ? <Pressable accessibilityRole="button" onPress={() => { if (loadFailed) void reload(); else void flush(); }}
+          style={styles.retry}><Text style={styles.retryText}>Retry</Text></Pressable> : null}
       </View> : null}
-      {loaded ? <TextInput ref={inputRef} accessibilityLabel="Notepad text" autoFocus multiline keyboardAppearance={resolvedMode}
-        value={text} onChangeText={edit} onBlur={() => void flush()} placeholder="Start typing…" placeholderTextColor={colors.muted}
-        underlineColorAndroid="transparent" style={styles.editor} /> : !loadError ?
+      {value ? <TextInput ref={inputRef} accessibilityLabel="Notepad text" autoFocus multiline editable={!linking} keyboardAppearance={resolvedMode}
+        value={value.text} onChangeText={edit} onBlur={() => void flush()} placeholder="Start typing…" placeholderTextColor={colors.muted}
+        onSelectionChange={({ nativeEvent: { selection } }) => {
+          selectionRef.current = selection;
+          setSelected(selection.end > selection.start ? selection : null);
+        }}
+        underlineColorAndroid="transparent" style={styles.editor} /> : !loadFailed ?
         <ActivityIndicator accessibilityLabel="Loading notepad" color={colors.muted} style={styles.loading} /> : null}
     </KeyboardAvoidingView>
   </View>;
@@ -131,7 +108,8 @@ export function NotepadScreen({ beforeLeaveRef, inputRef }: Props) {
 
 const createStyles = (colors: AppColors) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.paper },
-  heading: { color: colors.graphite, fontSize: 16, lineHeight: 23, fontWeight: '500', paddingHorizontal: 20, paddingVertical: 12 },
+  toolbar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20 },
+  heading: { color: colors.graphite, fontSize: 16, lineHeight: 23, fontWeight: '500', paddingVertical: 12 },
   editor: { flex: 1, paddingHorizontal: 20, paddingVertical: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 16, lineHeight: 23, color: colors.ink, textAlignVertical: 'top' },
   loading: { marginTop: 24 },

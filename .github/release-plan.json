@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.40",
-  "sourceAndroidVersionCode": 41,
-  "sourceIosBuildNumber": "41",
+  "version": "0.1.41",
+  "sourceAndroidVersionCode": 42,
+  "sourceIosBuildNumber": "42",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.40. The view switch shows one icon and three position dots for Calendar, Priority, and the autosaving plain-text Notepad. Priority supports checklist swipes, task moves, and a configurable capture destination. Day headings sit beneath the menu, and the calendar plus opens the Context minute editor. Publish only the verified APK signed with the existing publisher key."
+  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.41. Canvas adds local workspaces with linked Notepad selections, movable cards, groups, and typed connections. Search opens cards across workspaces, and Auto Arrange includes relationship, group, and pedigree layouts. Publish only the verified APK signed with the existing publisher key."
 }
