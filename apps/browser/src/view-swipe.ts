@@ -1,5 +1,5 @@
-export type BrowserView = 'calendar' | 'priority' | 'notepad';
-const BROWSER_VIEWS = ['calendar', 'priority', 'notepad'] as const;
+export type BrowserView = 'calendar' | 'priority' | 'notepad' | 'canvas';
+const BROWSER_VIEWS = ['calendar', 'priority', 'notepad', 'canvas'] as const;
 
 export function stepBrowserView(view: BrowserView, direction: -1 | 1): BrowserView {
   return BROWSER_VIEWS[(BROWSER_VIEWS.indexOf(view) + direction + BROWSER_VIEWS.length) % BROWSER_VIEWS.length]!;

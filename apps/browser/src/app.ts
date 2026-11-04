@@ -3,7 +3,7 @@ import { cellEventLabel, formatFromDocument, cellFormatKey } from '../shared/uti
 import { calendarCellColor } from '../shared/utils/calendar-cell-color';
 import { BrowserStore } from './store';
 import { GoogleConnection, type BrowserPlan } from './google';
-import { editCells, getMinute, minuteKey, pastedChanges, undoEdit, type CellChange, type UndoEdit } from './ledger';
+import { browserCanvas, setBrowserCanvas, editCells, getMinute, minuteKey, pastedChanges, undoEdit, type CellChange, type UndoEdit } from './ledger';
 import { flushBrowserText } from './editor';
 import { serializeSpreadsheetCells } from '../shared/utils/spreadsheet-paste';
 import { eventSelectionFingerprint, formatCells, groupSelection, ungroupSelection, resetCellsSelection,
@@ -16,6 +16,8 @@ import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
 import { bindChecklistSwipe, bindViewSwipe, stepBrowserView, type BrowserView } from './view-swipe';
 import { BrowserNotepad } from './notepad';
+import { BrowserCanvas } from './canvas-workspace';
+import { addLinkedCanvasNode } from '../shared/utils/canvas';
 import { applySyncGlyphState } from './sync-glyph';
 import { ChecklistFlowUI } from './checklist-flow-ui';
 import { browserChecklist, browserChecklistVersions, changeBrowserChecklist, replaceBrowserChecklistList,
@@ -59,8 +61,11 @@ const settings = { appearance: 'system', clock: '12', hideCompleted: false, chec
 const captureDestinationKey = (active: BrowserStore) => `context:checklist-destination:${active.state.device}`;
 let checklistVisible = false;
 let notepadVisible = false;
+let canvasVisible = false;
 let calendarScrollBeforeOtherView = 0;
-const notepad = new BrowserNotepad(element('notepad-input'), element('notepad-status'), element('notepad-retry'));
+const notepadInput = element<HTMLTextAreaElement>('notepad-input');
+const notepad = new BrowserNotepad(notepadInput, element('notepad-status'), element('notepad-retry'));
+const canvas = new BrowserCanvas(element('canvas-workspace'));
 let activeChecklistId = DEFAULT_CHECKLIST_LIST_ID;
 let priorityScope: { store: BrowserStore | null; listId: string } = { store: null, listId: activeChecklistId };
 const priorityUndos = new Map<string, { store: BrowserStore; edit: UndoEdit }>();
@@ -102,7 +107,7 @@ const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
   error: report,
 });
 function currentBrowserView(): BrowserView {
-  return notepadVisible ? 'notepad' : checklistVisible ? 'priority' : 'calendar';
+  return canvasVisible ? 'canvas' : notepadVisible ? 'notepad' : checklistVisible ? 'priority' : 'calendar';
 }
 function setBrowserView(view: BrowserView) {
   const previous = currentBrowserView();
@@ -110,12 +115,15 @@ function setBrowserView(view: BrowserView) {
   const pane = element('checklist-flow');
   checklistVisible = view === 'priority';
   notepadVisible = view === 'notepad';
+  canvasVisible = view === 'canvas';
   pane.hidden = !checklistVisible;
   element('notepad').hidden = !notepadVisible;
+  element('canvas-workspace').hidden = !canvasVisible;
   main.tabIndex = checklistVisible ? 0 : -1;
-  main.setAttribute('aria-label', checklistVisible ? 'Priority checklists. Swipe or use the left and right arrow keys to change checklists.' : notepadVisible ? 'Notepad' : 'Calendar');
+  main.setAttribute('aria-label', checklistVisible ? 'Priority checklists. Swipe or use the left and right arrow keys to change checklists.' : notepadVisible ? 'Notepad' : canvasVisible ? 'Canvas' : 'Calendar');
   document.body.classList.toggle('view-checklist', checklistVisible);
   document.body.classList.toggle('view-notepad', notepadVisible);
+  document.body.classList.toggle('view-canvas', canvasVisible);
   if (view !== 'calendar') {
     entryBarMode = null;
     updateBars();
@@ -144,7 +152,7 @@ function restoreCalendarView() {
 }
 async function showChecklistView() {
   const active = store; const scope = priorityScope;
-  cancelSelectedTap(); mouseSelection.cancel(false); await saveEditor(); await checklistUI.flush(); await notepad.flush();
+  cancelSelectedTap(); mouseSelection.cancel(false); await saveEditor(); await checklistUI.flush(); await notepad.flush(); await canvas.flush();
   if (store !== active || priorityScope !== scope) return; closeCellMenu();
   element<HTMLDialogElement>('menu-dialog').close(); element<HTMLDialogElement>('view-dialog').close(); setChecklistVisible(true);
 }
@@ -209,7 +217,7 @@ async function addEditorTextToChecklist() {
 async function choosePriorityList(listId: string) {
   const active = store, scope = priorityScope, request = ++priorityNavigation;
   if (!active) return;
-  await saveEditor(); await checklistUI.flush(); await notepad.flush();
+  await saveEditor(); await checklistUI.flush(); await notepad.flush(); await canvas.flush();
   if (store !== active || priorityScope !== scope || request !== priorityNavigation) return;
   browserChecklist(active.state, listId); // Missing IDs fail closed; never redirect to another list.
   checklistUI.clear(); bindPriorityList(active, listId); setChecklistVisible(true);
@@ -304,7 +312,7 @@ function browserSearch(state: BrowserStore['state'], query: string, scope: Brows
 let searchSession: { store: BrowserStore; priorityScope: object; scope: BrowserSearchScope } | null = null;
 async function openSearch(all = false) {
   const active = store, scope = priorityScope; if (!active) { options.showModal(); return; }
-  await saveEditor(); await checklistUI.flush(); await notepad.flush(); if (store !== active || priorityScope !== scope) return;
+  await saveEditor(); await checklistUI.flush(); await notepad.flush(); await canvas.flush(); if (store !== active || priorityScope !== scope) return;
   const selectedScope: BrowserSearchScope = all ? { kind: 'all' } : checklistVisible ? { kind: 'priority', listId: activeChecklistId } : { kind: 'calendar', dates: dates() };
   searchSession = { store: active, priorityScope: scope, scope: selectedScope };
   element('search-scope').textContent = all ? 'All minutes and checklists' : checklistVisible ? prioritySnapshot()!.name : 'Displayed dates';
@@ -586,7 +594,7 @@ function updateHeader() {
   const now = new Date(); element('month').textContent = now.toLocaleDateString(undefined, { month: 'short' }); element('date').textContent = String(now.getDate());
   dayInput.value = day; daysInput.value = String(days);
   const availableUndo = checklistVisible ? priorityUndos.get(activeChecklistId)?.store === store : Boolean(undo);
-  element<HTMLButtonElement>('undo').disabled = notepadVisible || !availableUndo || !store;
+  element<HTMLButtonElement>('undo').disabled = notepadVisible || canvasVisible || !availableUndo || !store;
   element<HTMLButtonElement>('search').disabled = notepadVisible;
   element('identity').textContent = connection?.identity?.email ?? 'No Google account connected';
   element<HTMLButtonElement>('unlock').disabled = !connection?.isAuthorized() || busy;
@@ -594,12 +602,16 @@ function updateHeader() {
   element('now').dataset.view = currentBrowserView();
   element('now').dataset.calendarSpan = String(days);
   const calendarView = days === 7 ? 'Week' : days === 3 ? '3 days' : 'Day';
-  element('now').setAttribute('aria-label', notepadVisible
+  element('now').setAttribute('aria-label', canvasVisible
+    ? 'Canvas. Tap to choose a view. Swipe or use the arrow keys to change views.'
+    : notepadVisible
     ? 'Notepad. Tap to choose a view. Swipe or use the arrow keys to change views.'
     : checklistVisible
       ? 'Priority. Tap to choose a view. Swipe or use the arrow keys to change views.'
       : `${calendarView}. Tap for the current minute, double-click for views or hold to choose dates. Swipe or use the arrow keys to change views.`);
   notepad.bind(notepadVisible ? store : null);
+  canvas.bind(canvasVisible ? store : null);
+  element<HTMLButtonElement>('notepad-to-canvas').disabled = !store;
   if (!store) checklistUI.clear();
   if (checklistVisible) checklistUI.refresh();
 }
@@ -821,9 +833,9 @@ async function pasteInternalCells(clip: CellClipboard) {
   entryBarMode = null; render(); void synchronize(false);
 }
 async function synchronize(manual = true) {
-  if (!store || !passphrase || busy || ((editor || checklistUI.hasDraft() || notepad.hasDraft()) && !manual)) return; busy = true; updateHeader(); if (manual) status('Synchronizing private ledger…');
+  if (!store || !passphrase || busy || ((editor || checklistUI.hasDraft() || notepad.hasDraft() || canvas.hasDraft()) && !manual)) return; busy = true; updateHeader(); if (manual) status('Synchronizing private ledger…');
   const active = store;
-  try { if (editor) await saveEditor(); await checklistUI.flush(); await notepad.flush(); await active.drain(); const result = await connection.sync(active, passphrase);
+  try { if (editor) await saveEditor(); await checklistUI.flush(); await notepad.flush(); await canvas.flush(); await active.drain(); const result = await connection.sync(active, passphrase);
     if (store !== active) return; render(); status(`Synchronized. ${result.downloaded} downloaded batches, ${result.uploaded} uploaded batches.${active.state.conflicts.length ? ' Other note versions are available in Settings.' : ''}`);
   } catch (error) { if (store === active) report(error); }
   finally { busy = false; updateHeader(); }
@@ -839,7 +851,7 @@ async function refreshPlans() {
 async function connect(calendarRead = false) {
   cellClipboard = null;
   const active = store, scope = priorityScope;
-  try { await saveEditor(); await checklistUI.flush(); await notepad.flush(); if (store !== active || priorityScope !== scope) return;
+  try { await saveEditor(); await checklistUI.flush(); await notepad.flush(); await canvas.flush(); if (store !== active || priorityScope !== scope) return;
     const identity = await connection.authorize(calendarRead);
     if (active && identity.subject !== active.subject && store === active) {
       active.lock(); store = null; bindPriorityList(null); checklistUI.clear(); priorityUndos.clear(); prioritySettingsSession = null; searchSession = null;
@@ -856,7 +868,7 @@ function renderCalendarChoices() {
 }
 function scrollMinute(minute: number) { main.scrollTop = Math.max(0, 50 + minute * 32 - main.clientHeight / 2); render(); }
 function goNow() { setChecklistVisible(false); selectionActivated = false; day = dateKey(new Date()); selected = { day, minute: new Date().getHours() * 60 + new Date().getMinutes() }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); }
-async function navigation(action: () => void) { if (commandBusy) return; const active = store, scope = priorityScope; cancelSelectedTap(); mouseSelection.cancel(false); try { await saveEditor(); await checklistUI.flush(); await notepad.flush(); if (store !== active || priorityScope !== scope) return; entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
+async function navigation(action: () => void) { if (commandBusy) return; const active = store, scope = priorityScope; cancelSelectedTap(); mouseSelection.cancel(false); try { await saveEditor(); await checklistUI.flush(); await notepad.flush(); await canvas.flush(); if (store !== active || priorityScope !== scope) return; entryBarMode = null; closeCellMenu(); action(); updateBars(); } catch (error) { report(error); } }
 element('menu').onclick = () => { element<HTMLDialogElement>('menu-dialog').showModal(); };
 element('open-checklist').onclick = element('view-checklist').onclick = () => { void showChecklistView().catch(report); };
 element('open-notepad').onclick = element('view-notepad').onclick = () => {
@@ -866,8 +878,46 @@ element('open-notepad').onclick = element('view-notepad').onclick = () => {
     setBrowserView('notepad');
   });
 };
+element('open-canvas').onclick = element('view-canvas').onclick = () => {
+  void navigation(() => {
+    element<HTMLDialogElement>('menu-dialog').close();
+    element<HTMLDialogElement>('view-dialog').close();
+    setBrowserView('canvas');
+  });
+};
+element('notepad-to-canvas').onpointerdown = (event) => { event.preventDefault(); };
+element('notepad-to-canvas').onclick = () => {
+  const active = store;
+  if (!active || !notepadVisible) return;
+  const { selectionStart: start, selectionEnd: end, value: text } = notepadInput;
+  if (start === end) {
+    element('notepad-status').textContent = 'Select the text to add to Canvas.';
+    notepadInput.focus();
+    return;
+  }
+  void (async () => {
+    await notepad.flush();
+    if (store !== active || !notepadVisible) return;
+    let id = '';
+    await active.update((state) => {
+      if (store !== active || !notepadVisible) throw new Error('Reopen Notepad and select the text again.');
+      const current = browserCanvas(state);
+      if (current.text !== text) throw new Error('The Notepad text changed. Select the text again.');
+      const added = addLinkedCanvasNode(current, { start, end });
+      id = added.nodeId;
+      return setBrowserCanvas(state, added.document);
+    });
+    if (store !== active || !notepadVisible) return;
+    setBrowserView('canvas');
+    await canvas.reveal(id);
+  })().catch((error: unknown) => {
+    if (store === active && notepadVisible) {
+      element('notepad-status').textContent = error instanceof Error ? error.message : 'Could not add the text.';
+    }
+  });
+};
 element('settings').onclick = () => { void navigation(() => { element<HTMLDialogElement>('menu-dialog').close(); updateHeader(); renderPrioritySettings(); options.showModal(); }); };
-element('search').onclick = () => { void openSearch().catch(report); };
+element('search').onclick = () => { if (canvasVisible && store) canvas.focusSearch(); else void openSearch().catch(report); };
 element('menu-search').onclick = () => { void openSearch(true).catch(report); };
 element<HTMLFormElement>('search-form').onsubmit = (event) => { event.preventDefault(); try { showSearchResults(); } catch (error) { report(error); } };
 element<HTMLInputElement>('hide-completed').onchange = (event) => { settings.hideCompleted = (event.target as HTMLInputElement).checked; checklistUI.setHideCompleted(settings.hideCompleted); };
@@ -896,12 +946,12 @@ element('sync').onkeydown = (event) => { if (event.key === 'ContextMenu' || (eve
 element('sync').onclick = () => { if (syncHeld) { syncHeld = false; return; } if (!store) { options.showModal(); return; } void synchronize(); };
 bindViewSwipe(element<HTMLButtonElement>('now'), {
   tap: () => {
-    if (checklistVisible || notepadVisible) element<HTMLDialogElement>('view-dialog').showModal();
+    if (checklistVisible || notepadVisible || canvasVisible) element<HTMLDialogElement>('view-dialog').showModal();
     else void navigation(goNow);
   },
   hold: () => {
     updateHeader();
-    element<HTMLDialogElement>(checklistVisible || notepadVisible ? 'view-dialog' : 'date-dialog').showModal();
+    element<HTMLDialogElement>(checklistVisible || notepadVisible || canvasVisible ? 'view-dialog' : 'date-dialog').showModal();
   },
   picker: () => element<HTMLDialogElement>('view-dialog').showModal(),
   step: (direction) => {
@@ -918,8 +968,8 @@ bindChecklistSwipe(main, () => Boolean(checklistVisible && store && !commandBusy
   (direction) => { void stepPriorityList(direction).catch(report); });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-days]')) button.onclick = () => { void navigation(() => { setChecklistVisible(false); days = Number(button.dataset.days); element<HTMLDialogElement>('view-dialog').close(); render(); void refreshPlans(); }); };
 element('apply-dates').onclick = () => { if (!dayInput.value) return; void navigation(() => { day = dayInput.value; days = Number(daysInput.value); plans = []; element<HTMLDialogElement>('date-dialog').close(); render(); void refreshPlans(); }); };
-element('previous').onclick = () => { if (!checklistVisible && !notepadVisible) void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
-element('next').onclick = () => { if (!checklistVisible && !notepadVisible) void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
+element('previous').onclick = () => { if (!checklistVisible && !notepadVisible && !canvasVisible) void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
+element('next').onclick = () => { if (!checklistVisible && !notepadVisible && !canvasVisible) void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
 async function undoCurrentView() {
   const active = store, scope = priorityScope, listId = activeChecklistId, priority = checklistVisible; if (!active) return;
   await saveEditor(); await checklistUI.flush();
@@ -983,7 +1033,7 @@ element<HTMLFormElement>('group-form').onsubmit = (event) => { event.preventDefa
     } catch (error) { element('group-range-error').textContent = error instanceof Error ? error.message : 'The event could not be grouped.'; throw error; } }); };
 for (const id of ['group-from-date', 'group-from-time', 'group-through-date', 'group-through-time']) element(id).addEventListener('input', changeGroupRange);
 const mouseSelection = bindMouseSelection(grid, main, {
-  enabled: () => Boolean(store && !checklistVisible && !notepadVisible && !commandBusy && !document.querySelector('dialog[open]')),
+  enabled: () => Boolean(store && !checklistVisible && !notepadVisible && !canvasVisible && !commandBusy && !document.querySelector('dialog[open]')),
   isSelectionActive: () => selectionActivated,
   readSelection: () => ({ anchor: selected, end: rangeEnd, active: selectionActivated }),
   restore: (selection) => { selected = selection.anchor; rangeEnd = selection.end; if (selection.active !== undefined) selectionActivated = selection.active; paintSelection(); updateBars(); },
@@ -1020,16 +1070,16 @@ document.addEventListener('pointerdown', (event) => {
   if (!element('cell-menu').contains(event.target) && !element('entry-bar').contains(event.target)) closeCellMenu();
   if (entryBarMode === 'format' && !element('cell-format-menu').contains(event.target) && !element('cell-menu').contains(event.target) && !document.querySelector('dialog[open]')) { entryBarMode = null; updateBars(); }
 });
-main.addEventListener('scroll', () => { if (checklistVisible || notepadVisible) return; const next = Math.max(0, Math.floor((main.scrollTop - 50) / 32) - 12); if (Math.abs(next - firstRendered) > 5) render(); }, { passive: true });
-document.addEventListener('paste', (event) => { if (checklistVisible || notepadVisible || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || document.querySelector('dialog[open]')) return;
+main.addEventListener('scroll', () => { if (checklistVisible || notepadVisible || canvasVisible) return; const next = Math.max(0, Math.floor((main.scrollTop - 50) / 32) - 12); if (Math.abs(next - firstRendered) > 5) render(); }, { passive: true });
+document.addEventListener('paste', (event) => { if (checklistVisible || notepadVisible || canvasVisible || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || document.querySelector('dialog[open]')) return;
   if (commandBusy) { event.preventDefault(); return; }
   event.preventDefault(); const text = event.clipboardData?.getData('text/plain'); if (text === undefined) return;
   if (cellMenuDraftPending()) { report(new Error('Save the minute before pasting into cells.')); return; }
   closeCleanEditor(); void cellCommand(() => paste(text)); });
-document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); element('undo').click(); } });
-window.addEventListener('beforeunload', (event) => { if (editor?.input.value !== editor?.original || checklistUI.hasDraft() || notepad.hasDraft() || (store && Object.keys(store.state.pending).length)) { event.preventDefault(); event.returnValue = ''; } });
-document.addEventListener('visibilitychange', () => { if (document.hidden) { void notepad.flush().catch(report); } else { updateHeader(); void synchronize(false); } });
-setInterval(() => { updateHeader(); if (!document.hidden && !editor) { if (!checklistVisible && !notepadVisible) { const minute = new Date().getHours() * 60 + new Date().getMinutes(); const current = grid.querySelector('.minute-row.current'); if (current?.getAttribute('data-row') !== String(minute)) render(); } void synchronize(false); } }, 15_000);
+document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && !canvasVisible && event.key.toLowerCase() === 'z' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); element('undo').click(); } });
+window.addEventListener('beforeunload', (event) => { if (editor?.input.value !== editor?.original || checklistUI.hasDraft() || notepad.hasDraft() || canvas.hasDraft() || (store && Object.keys(store.state.pending).length)) { event.preventDefault(); event.returnValue = ''; } });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { void Promise.all([notepad.flush(), canvas.flush()]).catch(report); } else { updateHeader(); void synchronize(false); } });
+setInterval(() => { updateHeader(); if (!document.hidden && !editor) { if (!checklistVisible && !notepadVisible && !canvasVisible) { const minute = new Date().getHours() * 60 + new Date().getMinutes(); const current = grid.querySelector('.minute-row.current'); if (current?.getAttribute('data-row') !== String(minute)) render(); } void synchronize(false); } }, 15_000);
 void fetch('./config.json', { cache: 'no-store' }).then((response) => { if (!response.ok) throw new Error('Browser configuration is unavailable.'); return response.json(); }).then((config) => {
   if (typeof config.googleWebClientId !== 'string' || !/^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(config.googleWebClientId)) throw new Error('The Google browser client is not configured.');
   connection = new GoogleConnection(config.googleWebClientId); render();

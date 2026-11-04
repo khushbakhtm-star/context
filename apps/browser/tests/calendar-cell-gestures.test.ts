@@ -30,7 +30,7 @@ function fixture() {
   const main = { ...hub(), scrollTop: 0, scrollHeight: 3000, clientHeight: 250, getBoundingClientRect: () => ({ left: 0, right: 400, top: 0, bottom: 250 }) };
   const timers = new Map<number, () => void>(); let timer = 0; const menu = { hidden: true }; const entries: any[] = [], actions: any[] = [], moves: any[] = [];
   const input = { value: 'Saved cell note', blur() {} }; const context: any = {
-    grid, main, document: doc, Element: Cell, editor: null, entryInput: input, entryBarMode: null, commandBusy: false, checklistVisible: false, notepadVisible: false, store: { state: { documents: [] } },
+    grid, main, document: doc, Element: Cell, editor: null, entryInput: input, entryBarMode: null, commandBusy: false, checklistVisible: false, notepadVisible: false, canvasVisible: false, store: { state: { documents: [] } },
     selected: { day, minute: 0 }, rangeEnd: null, selectionActivated: false, selectedTapTimer: undefined, cellMenuRequest: 0,
     movePreview: [], moveDraft: null, clock12: false,
     bindMouseSelection, dates: () => [day], minuteKey: (date: string, minute: number) => `minute:${date}:${minute}`,

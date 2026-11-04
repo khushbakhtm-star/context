@@ -2,9 +2,10 @@ import { compareRevisions, hashValue, mergeDocuments, validateBatch } from '../s
 import type { SyncBatch, SyncDocument } from '../shared/sync/types';
 import { parseSpreadsheetCells, spreadsheetPasteRanges } from '../shared/utils/spreadsheet-paste';
 import { cellEventLabel, cellFormatKey, formatFromDocument, isActivityGroupId } from '../shared/utils/cell-format';
+import { createCanvasDocument, readCanvasDocument, type CanvasDocument } from '../shared/utils/canvas';
 
 export const NOTEPAD_LIMIT = 100_000;
-export type BrowserLedgerState = { version: 1; device: string; wall: number; counter: number; notepad?: string;
+export type BrowserLedgerState = { version: 1; device: string; wall: number; counter: number; notepad?: string; canvas?: CanvasDocument;
   documents: SyncDocument[]; conflicts: SyncDocument[]; pending: Record<string, string>; seen: string[];
   upload: null | { name: string; ciphertext: string; batch: SyncBatch; driveId?: string } };
 export type CellChange = { day: string; minute: number; text: string };
@@ -19,6 +20,19 @@ export function emptyLedger(device: string): BrowserLedgerState {
   return { version: 1, device, wall: 0, counter: 0, documents: [], conflicts: [], pending: {}, seen: [], upload: null };
 }
 const clone = <T>(value: T): T => structuredClone(value);
+
+export function browserCanvas(state: BrowserLedgerState): CanvasDocument {
+  return state.canvas ?? createCanvasDocument(state.notepad);
+}
+
+/** A Canvas save migrates legacy pad text into the same encrypted local value.
+ * Neither value participates in minute revisions or the upload queue. */
+export function setBrowserCanvas(state: BrowserLedgerState, canvas: CanvasDocument): BrowserLedgerState {
+  if (canvas.text.length > NOTEPAD_LIMIT) throw new Error('Notepad has reached its browser text limit.');
+  const { notepad: _legacy, ...account } = state;
+  return { ...account, canvas };
+}
+
 export function validateState(state: BrowserLedgerState): BrowserLedgerState {
   if (state?.version !== 1 || !/^[A-Za-z0-9_-]{8,128}$/.test(state.device) ||
       !Number.isSafeInteger(state.wall) || state.wall < 0 || !Number.isInteger(state.counter) || state.counter < 0 ||
@@ -39,6 +53,11 @@ export function validateState(state: BrowserLedgerState): BrowserLedgerState {
     validateBatch(state.upload.batch);
     if (!/^context-[A-Za-z0-9._-]{1,180}\.json$/.test(state.upload.name) || typeof state.upload.ciphertext !== 'string') throw new Error('Invalid pending upload.');
     if (state.upload.driveId !== undefined && !/^[A-Za-z0-9_-]{1,200}$/.test(state.upload.driveId)) throw new Error('Invalid pending Drive identifier.');
+  }
+  if (state.canvas !== undefined) {
+    if (state.canvas === null) throw new Error('The browser Canvas cache is invalid.');
+    const canvas = readCanvasDocument(state.canvas);
+    if (canvas.text.length > NOTEPAD_LIMIT) throw new Error('The browser Canvas cache is invalid.');
   }
   return state;
 }

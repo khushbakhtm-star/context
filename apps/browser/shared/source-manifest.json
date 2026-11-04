@@ -57,6 +57,16 @@
       "path": "types.ts",
       "bytes": 1551,
       "sha256": "ba8dd8ef80b56417c7358c6cc137678dbccd6f0c903788cbe13b3136e4295739"
+    },
+    {
+      "path": "utils/canvas.ts",
+      "bytes": 22956,
+      "sha256": "1dd283196b96a2871c25ecf15d39d81ea0d7e39a8a41d1f723d67100597ea9a2"
+    },
+    {
+      "path": "utils/canvas-layout.ts",
+      "bytes": 21280,
+      "sha256": "a071cf4e6fd3dd7037257330a8d3351ed09ef3ef012eb0e182a854f2649f8f8e"
     }
   ]
 }

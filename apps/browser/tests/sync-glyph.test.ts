@@ -17,6 +17,7 @@ function fixture(fail = false) {
   const context:any={Error,busy:false,lastStatus:'Initial status',element,applySyncGlyphState,
     checklistVisible:false,checklistUI:{hasDraft:()=>false,async flush(){},refresh(){},clear(){}},
     notepadVisible:false,notepad:{hasDraft:()=>false,bind(){},async flush(){}},
+    canvasVisible:false,canvas:{hasDraft:()=>false,bind(){},async flush(){}},
     dayInput:{value:''},daysInput:{value:''},day:'2026-10-31',days:1,undo:null,
     store:{state:{conflicts:[]},async drain(){}},passphrase:'fixture',editor:null,render(){},
     connection:{identity:{email:'fixture@example.test'},isAuthorized:()=>true,async sync(){reached();if(fail)throw new Error('Synthetic connection error');return gate;}}};

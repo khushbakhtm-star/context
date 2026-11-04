@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserNotepad } from '../src/notepad';
-import { emptyLedger, mergeLedger, validateState, type BrowserLedgerState } from '../src/ledger';
+import { addLinkedCanvasNode, activeCanvasBoard, updateCanvasNode } from '../shared/utils/canvas';
+import { browserCanvas, emptyLedger, mergeLedger, setBrowserCanvas, validateState, type BrowserLedgerState } from '../src/ledger';
 
 function account(device: string) {
   return {
@@ -62,4 +63,36 @@ test('edits made during autosave are persisted and a failed save keeps its draft
   await pad.flush();
   assert.equal(active.state.notepad, 'newest');
   assert.equal(retry.hidden, true);
+});
+
+test('Notepad and Canvas edit the same linked text and rebase across separate unsaved edits', async () => {
+  const { input, pad } = fixture();
+  const active = account('browser_canvas_device');
+  active.state.notepad = 'First / linked words / Last';
+  const { document, nodeId } = addLinkedCanvasNode(browserCanvas(active.state), { start: 8, end: 20 });
+  await active.update((state) => setBrowserCanvas(state, document));
+  const card = () => activeCanvasBoard(browserCanvas(active.state)).nodes.find((node) => node.id === nodeId)!;
+  assert.equal(active.state.notepad, undefined);
+  assert.equal(card().text, 'linked words');
+  pad.bind(active);
+  input.value = 'First draft / linked words / Last';
+  input.oninput!(new Event('input'));
+  input.value = 'First draft / linked words / Last draft';
+  input.oninput!(new Event('input'));
+  await pad.flush();
+  assert.deepEqual(card().source, { start: 14, end: 26 });
+  assert.equal(card().text, 'linked words');
+  input.value = 'First draft / linked phrase / Last draft';
+  input.oninput!(new Event('input'));
+  await pad.flush();
+  assert.equal(card().text, 'linked phrase');
+  pad.bind(null);
+  await active.update((state) => setBrowserCanvas(state, updateCanvasNode(browserCanvas(state), nodeId, { text: 'changed on Canvas' })));
+  active.state = mergeLedger(active.state, []);
+  pad.bind(active);
+  assert.equal(input.value, 'First draft / changed on Canvas / Last draft');
+  assert.deepEqual(active.state.documents, []);
+  assert.deepEqual(active.state.pending, {});
+  pad.bind(account('different_canvas_account'));
+  assert.equal(input.value, '');
 });

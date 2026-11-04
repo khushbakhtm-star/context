@@ -132,7 +132,7 @@ test('changing lists waits for its draft and cannot redirect a newer selected li
   const pending = gate(); const active = { state: sample() }; const scope = {}; let switches = 0;
   const context = functions(['choosePriorityList'], { store: active, priorityScope: scope, priorityNavigation: 0,
     browserChecklist, async saveEditor() {}, checklistUI: { async flush() { pending.reached(); await pending.promise; }, clear() {} },
-    notepad: { async flush() {} }, bindPriorityList() { switches++; }, setChecklistVisible() {} });
+    notepad: { async flush() {} }, canvas: { async flush() {} }, bindPriorityList() { switches++; }, setChecklistVisible() {} });
   const move = context.choosePriorityList('list_other'); await pending.started;
   context.priorityScope = {}; pending.release(); await move;
   assert.equal(switches, 0);

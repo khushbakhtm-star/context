@@ -43,11 +43,13 @@ test('a horizontal swipe keeps the current icon still until release and consumes
   }
 });
 
-test('the view selector cycles Calendar, Priority, and Notepad in either direction', () => {
+test('the view selector cycles Calendar, Priority, Notepad, and Canvas in either direction', () => {
   assert.equal(stepBrowserView('calendar', 1), 'priority');
   assert.equal(stepBrowserView('priority', 1), 'notepad');
-  assert.equal(stepBrowserView('notepad', 1), 'calendar');
-  assert.equal(stepBrowserView('calendar', -1), 'notepad');
+  assert.equal(stepBrowserView('notepad', 1), 'canvas');
+  assert.equal(stepBrowserView('canvas', 1), 'calendar');
+  assert.equal(stepBrowserView('calendar', -1), 'canvas');
+  assert.equal(stepBrowserView('canvas', -1), 'notepad');
   assert.equal(stepBrowserView('notepad', -1), 'priority');
   assert.equal(stepBrowserView('priority', -1), 'calendar');
 });

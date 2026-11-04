@@ -1,5 +1,6 @@
 import { flushBrowserText } from './editor';
-import { NOTEPAD_LIMIT } from './ledger';
+import { setCanvasText, type CanvasDocument, type CanvasTextRange } from '../shared/utils/canvas';
+import { browserCanvas, NOTEPAD_LIMIT, setBrowserCanvas } from './ledger';
 import type { BrowserStore } from './store';
 
 type NotepadStore = Pick<BrowserStore, 'state' | 'update'>;
@@ -8,6 +9,7 @@ type NotepadSession = {
   original: string;
   revision: undefined;
   input: HTMLTextAreaElement;
+  draft?: CanvasDocument;
 };
 
 /** The pad stays in the encrypted cache for the current browser account.
@@ -20,9 +22,25 @@ export class BrowserNotepad {
   constructor(private input: HTMLTextAreaElement, private message: HTMLElement, retry: HTMLButtonElement) {
     this.retry = retry;
     input.maxLength = NOTEPAD_LIMIT;
+    let beforeInput: { text: string; range: CanvasTextRange } | undefined;
+    input.onbeforeinput = (event) => {
+      let start = input.selectionStart;
+      let end = input.selectionEnd;
+      if (start === end && event.inputType === 'deleteContentBackward') start = Math.max(0, start - 1);
+      else if (start === end && event.inputType === 'deleteContentForward') end = Math.min(input.value.length, end + 1);
+      beforeInput = { text: input.value, range: { start, end } };
+    };
     input.oninput = () => {
       clearTimeout(this.timer);
-      if (!this.session) return;
+      const session = this.session;
+      if (!session) return;
+      if (session.draft) {
+        const hint = beforeInput?.text === session.draft.text ? beforeInput.range : undefined;
+        session.draft = !this.saving && input.value === session.original
+          ? browserCanvas(session.store.state)
+          : setCanvasText(session.draft, input.value, hint);
+      }
+      beforeInput = undefined;
       this.message.textContent = 'Saving…';
       this.retry.hidden = true;
       this.timer = setTimeout(() => { void this.flush().catch(() => {}); }, 350);
@@ -36,8 +54,10 @@ export class BrowserNotepad {
     if ((this.session?.store ?? null) === store && this.input.disabled === !store) return;
     clearTimeout(this.timer);
     this.saving = null;
-    const text = store?.state.notepad ?? '';
-    this.session = store ? { store, input: this.input, original: text, revision: undefined } : null;
+    const canvas = store ? browserCanvas(store.state) : undefined;
+    const text = canvas?.text ?? '';
+    this.session = store ? { store, input: this.input, original: text, revision: undefined,
+      draft: store.state.canvas ? canvas : undefined } : null;
     this.input.value = text;
     this.input.disabled = !store;
     this.retry.hidden = true;
@@ -59,11 +79,13 @@ export class BrowserNotepad {
       return;
     }
     const pending = flushBrowserText(session, () => this.session === session, async (text) => {
+      const draft = session.draft?.text === text ? session.draft : undefined;
       await session.store.update((state) => {
-        if (this.session !== session || (state.notepad ?? '') !== session.original) {
+        const current = browserCanvas(state);
+        if (this.session !== session || current.text !== session.original) {
           throw new Error('This notepad changed elsewhere. Your draft is still here.');
         }
-        return { ...state, notepad: text };
+        return state.canvas ? setBrowserCanvas(state, draft ?? setCanvasText(current, text)) : { ...state, notepad: text };
       });
       return undefined;
     }).then((current) => {
