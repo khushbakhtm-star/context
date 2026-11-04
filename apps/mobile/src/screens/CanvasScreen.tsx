@@ -272,7 +272,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     // Android decomposes a raw affine into view properties. Nested views preserve the exact transform and its hit testing.
     const style: ViewStyle = { position: 'absolute', left: frame.offset.x, top: frame.offset.y, ...frame.size,
       transform: [{ scaleY: frame.scaleY }] };
-    const rotation: ViewStyle = { ...StyleSheet.absoluteFillObject, transform: [{ rotate: frame.rotation + 'rad' }] };
+    const rotation: ViewStyle = { transform: [{ rotate: frame.rotation + 'rad' }] };
     return { size: frame.size, offset: frame.offset, style, rotation };
   }, [size, workplane]);
   const sceneSize = scene?.size ?? size;
@@ -912,7 +912,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
         {...responder.panHandlers}>
         <Pressable accessible={false} style={StyleSheet.absoluteFill} onPress={tapBackdrop} />
         <View pointerEvents="box-none" collapsable={false} style={scene?.style ?? StyleSheet.absoluteFill}>
-          <View pointerEvents="box-none" collapsable={false} style={scene?.rotation ?? StyleSheet.absoluteFill}>
+          <View pointerEvents="box-none" collapsable={false} style={[StyleSheet.absoluteFill, scene?.rotation]}>
             {scene && workplane !== null ? <WorkplaneGrid viewport={viewport} size={size} offset={scene.offset} turn={workplane} colors={colors} /> :
               <CanvasGrid viewport={viewport} size={size} styles={styles} />}
             {ellipses}
