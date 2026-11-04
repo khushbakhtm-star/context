@@ -1,4 +1,4 @@
-import type { CanvasBoard, CanvasEdge, CanvasNode, CanvasPoint } from './canvas';
+import { CANVAS_WORLD_LIMIT, type CanvasBoard, type CanvasEdge, type CanvasNode, type CanvasPoint } from './canvas';
 
 export type CanvasLayoutMode = 'relationships' | 'pedigree' | 'groups';
 export type { CanvasPoint } from './canvas';
@@ -263,6 +263,7 @@ function layoutComponent(units: Unit[], links: Link[], unitFor: (id: string) => 
 /** Reposition the board without editing the contents, membership or connections. */
 export function arrangeCanvas(board: CanvasBoard, mode: CanvasLayoutMode = 'relationships'): CanvasBoard {
   if (!board.nodes.length) return board;
+  if (board.spaces?.length) return arrangeAroundSpaces(board, mode);
   const ids = board.nodes.map(({ id }) => id);
   const valid = new Set(ids);
   const edges = board.edges.filter(({ from, to }) => valid.has(from) && valid.has(to) && from !== to);
@@ -301,7 +302,41 @@ export function arrangeCanvas(board: CanvasBoard, mode: CanvasLayoutMode = 'rela
   return { ...board, nodes: board.nodes.map((node) => ({ ...node, ...positions.get(node.id)! })) };
 }
 
-function box(node: CanvasNode, padding = 0): Box {
+function arrangeAroundSpaces(board: CanvasBoard, mode: CanvasLayoutMode): CanvasBoard {
+  // Keep a grouped card's frame and siblings in place when it anchors that group to a Space.
+  const ids = new Set(board.nodes.map(({ id }) => id));
+  const groups = disjoint([...ids]);
+  for (const { id, groupId } of board.nodes) if (groupId && ids.has(groupId)) groups.join(groupId, id);
+  const anchored = new Set(board.nodes.filter((node) => node.spaceIds?.length).map(({ id }) => groups.root(id)));
+  const fixed: CanvasNode[] = [], movable: CanvasNode[] = [];
+  for (const node of board.nodes) (anchored.has(groups.root(node.id)) ? fixed : movable).push(node);
+  if (!movable.length) return board;
+
+  const arranged = arrangeCanvas({ ...board, spaces: undefined, nodes: movable }, mode);
+  const obstacles = [...(board.spaces ?? []), ...fixed].map((item) => box(item, COMPONENT_GAP / 2));
+  const moving = arranged.nodes.map((node) => box(node));
+  const envelope = (items: Box[]) => items.reduce((bounds, item) => ({
+    left: Math.min(bounds.left, item.left), right: Math.max(bounds.right, item.right),
+    top: Math.min(bounds.top, item.top), bottom: Math.max(bounds.bottom, item.bottom),
+  }));
+  const allMoving = envelope(moving);
+  let shift = { x: 0, y: 0 };
+  if (obstacles.some((item) => item.left < allMoving.right && allMoving.left < item.right &&
+    item.top < allMoving.bottom && allMoving.top < item.bottom)) {
+    const allFixed = envelope(obstacles);
+    shift = [
+      { x: allFixed.right - allMoving.left, y: 0 }, { x: allFixed.left - allMoving.right, y: 0 },
+      { x: 0, y: allFixed.bottom - allMoving.top }, { x: 0, y: allFixed.top - allMoving.bottom },
+    ].sort((a, b) => Math.hypot(a.x, a.y) - Math.hypot(b.x, b.y))
+      .find(({ x, y }) => arranged.nodes.every((node) => Math.abs(node.x + x) <= CANVAS_WORLD_LIMIT &&
+        Math.abs(node.y + y) <= CANVAS_WORLD_LIMIT)) ?? shift;
+    if (!shift.x && !shift.y) return board;
+  }
+  const byId = new Map(arranged.nodes.map((node) => [node.id, { ...node, x: node.x + shift.x, y: node.y + shift.y }]));
+  return { ...board, nodes: board.nodes.map((node) => byId.get(node.id) ?? node) };
+}
+
+function box(node: Pick<CanvasNode, 'x' | 'y' | 'width' | 'height'>, padding = 0): Box {
   return { left: node.x - padding, right: node.x + node.width + padding,
     top: node.y - padding, bottom: node.y + node.height + padding };
 }

@@ -57,3 +57,35 @@ test('Canvas rejects a stale full-document write without replacing newer Notepad
   assert.equal((await app.loadCanvasDocument()).text, 'New');
   assert.equal((await app.loadCanvasDocument()).boards.length, 1);
 });
+
+test('an existing Canvas can persist a sketch and one linked card in three overlapping Spaces', async () => {
+  const app = storage('Buy milk');
+  const initial = await app.loadCanvasDocument();
+  const { document, nodeId } = model.addLinkedCanvasNode(initial, { start: 0, end: 8 });
+  const companion = model.addCanvasNode(document, { kind: 'note', text: 'Check the fridge' });
+  const grouped = model.groupCanvasNodes(companion.document, [nodeId, companion.nodeId], 'Groceries');
+  // The stored document has the old Canvas schema, with no Spaces or strokes.
+  await app.saveCanvasDocument(initial, grouped.document);
+  const old = await app.loadCanvasDocument();
+  assert.equal(model.activeCanvasBoard(old).spaces, undefined);
+  assert.equal(model.activeCanvasBoard(old).strokes, undefined);
+
+  const shopping = model.addCanvasSpace(old, { title: 'Shopping', x: 0, y: 0, width: 360, height: 260 });
+  const finances = model.addCanvasSpace(shopping.document, { title: 'Finances', x: 130, y: 0, width: 360, height: 260 });
+  const nutrition = model.addCanvasSpace(finances.document, { title: 'Nutrition', x: 65, y: 100, width: 360, height: 260 });
+  const spaces = [shopping.spaceId, finances.spaceId, nutrition.spaceId];
+  const shared = model.setCanvasNodeSpaces(nutrition.document, nodeId, spaces);
+  const sketch = model.addCanvasStroke(shared, { points: [{ x: 10, y: 10 }, { x: 36, y: 48 }] });
+  await app.saveCanvasDocument(old, sketch);
+
+  const reopened = await app.loadCanvasDocument();
+  const board = model.activeCanvasBoard(reopened);
+  assert.equal(board.nodes.filter((item) => item.text === 'Buy milk').length, 1);
+  const card = board.nodes.find((item) => item.id === nodeId);
+  assert.equal(card.groupId, grouped.nodeId);
+  assert.deepEqual(card.spaceIds, spaces);
+  assert.deepEqual(model.canvasSpacesAtPoint(board.spaces, { x: card.x + card.width / 2, y: card.y + card.height / 2 }), spaces);
+  assert.deepEqual(board.strokes[0].points, [{ x: 10, y: 10 }, { x: 36, y: 48 }]);
+  await app.saveCanvasDocument(reopened, model.updateCanvasNode(reopened, nodeId, { text: 'Buy oat milk' }));
+  assert.equal((await app.loadCanvasDocument()).text, 'Buy oat milk');
+});

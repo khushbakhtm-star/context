@@ -19,6 +19,7 @@ export type CanvasNode = CanvasPoint & {
   height: number;
   color?: string;
   groupId?: string;
+  spaceIds?: string[];
   collapsed?: boolean;
   source?: CanvasTextRange;
   url?: string;
@@ -32,25 +33,42 @@ export type CanvasEdge = {
   directed: boolean;
   label?: string;
 };
+/** An elliptical region positioned by the top left of its bounding box. */
+export type CanvasSpace = CanvasPoint & {
+  id: string;
+  title: string;
+  width: number;
+  height: number;
+  color?: string;
+};
+export type CanvasStroke = { id: string; points: CanvasPoint[]; color?: string; width: number };
 export type CanvasBoard = {
   id: string;
   title: string;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   viewport: CanvasViewport;
+  spaces?: CanvasSpace[];
+  strokes?: CanvasStroke[];
 };
 export type CanvasDocument = { version: 1; text: string; activeBoardId: string; boards: CanvasBoard[] };
 export type CanvasNodeInput = Pick<CanvasNode, 'kind'> &
   Partial<Omit<CanvasNode, 'id' | 'kind' | 'source'>>;
 export type CanvasNodePatch = Partial<Omit<CanvasNode, 'id' | 'source' | 'groupId'>> & { groupId?: string | null };
 export type CanvasEdgeInput = Pick<CanvasEdge, 'from' | 'to'> & Partial<Omit<CanvasEdge, 'id' | 'from' | 'to'>>;
+export type CanvasSpaceInput = Pick<CanvasSpace, 'title'> & Partial<Omit<CanvasSpace, 'id' | 'title'>>;
+export type CanvasSpacePatch = Partial<Omit<CanvasSpace, 'id' | 'color'>> & { color?: string | null };
+export type CanvasStrokeInput = { points: readonly CanvasPoint[]; color?: string; width?: number };
 export type CanvasSearchResult = { boardId: string; boardTitle: string; node: CanvasNode };
 
 const INITIAL_BOARD_ID = 'canvas-main';
 const ORIGIN: CanvasViewport = { x: 0, y: 0, zoom: 1 };
 const INVALID = 'The saved Canvas document is invalid. Your data has not been replaced.';
 // Far beyond useful distances while keeping layout arithmetic precise.
-const WORLD_LIMIT = 1_000_000_000;
+export const CANVAS_WORLD_LIMIT = 1_000_000_000;
+const SPACE_LIMIT = 500;
+const STROKE_LIMIT = 2_000;
+export const CANVAS_STROKE_POINT_LIMIT = 2_000;
 let sequence = 0;
 
 function invalid(): never { throw new Error(INVALID); }
@@ -65,11 +83,15 @@ function finite(value: unknown): value is number {
 }
 
 function coordinate(value: unknown): value is number {
-  return finite(value) && Math.abs(value) <= WORLD_LIMIT;
+  return finite(value) && Math.abs(value) <= CANVAS_WORLD_LIMIT;
 }
 
 function identifier(value: unknown): value is string {
   return typeof value === 'string' && /^[a-z0-9_-]{1,128}$/i.test(value);
+}
+
+function hexColor(value: unknown): value is string {
+  return typeof value === 'string' && /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value);
 }
 
 function oneOf<T extends string>(values: readonly T[], value: unknown): value is T {
@@ -98,12 +120,17 @@ function readNode(value: unknown, text: string): CanvasNode {
     x: node.x, y: node.y, width: node.width, height: node.height,
   };
   if (node.color !== undefined) {
-    if (typeof node.color !== 'string' || !/^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(node.color)) invalid();
+    if (!hexColor(node.color)) invalid();
     result.color = node.color;
   }
   if (node.groupId !== undefined) {
     if (!identifier(node.groupId)) invalid();
     result.groupId = node.groupId;
+  }
+  if (node.spaceIds !== undefined) {
+    if (!Array.isArray(node.spaceIds) || node.spaceIds.length > SPACE_LIMIT || !node.spaceIds.every(identifier) ||
+      new Set(node.spaceIds).size !== node.spaceIds.length) invalid();
+    result.spaceIds = [...node.spaceIds];
   }
   if (node.collapsed !== undefined) {
     if (typeof node.collapsed !== 'boolean' || node.kind !== 'group') invalid();
@@ -137,6 +164,42 @@ function readEdge(value: unknown, nodes: Map<string, CanvasNode>): CanvasEdge {
     ...(edge.label !== undefined ? { label: edge.label } : {}) };
 }
 
+function readSpace(value: unknown): CanvasSpace {
+  const space = record(value);
+  if (!identifier(space.id) || typeof space.title !== 'string' || !space.title.trim() ||
+    !coordinate(space.x) || !coordinate(space.y) || !coordinate(space.width) || space.width < 24 ||
+    !coordinate(space.height) || space.height < 24 || (space.color !== undefined && !hexColor(space.color))) invalid();
+  return { id: space.id, title: space.title, x: space.x, y: space.y, width: space.width, height: space.height,
+    ...(space.color !== undefined ? { color: space.color } : {}) };
+}
+
+function readStroke(value: unknown): CanvasStroke {
+  const stroke = record(value);
+  if (!identifier(stroke.id) || !Array.isArray(stroke.points) || stroke.points.length === 0 ||
+    stroke.points.length > CANVAS_STROKE_POINT_LIMIT || !finite(stroke.width) || stroke.width < 0.5 ||
+    stroke.width > 32 || (stroke.color !== undefined && !hexColor(stroke.color))) invalid();
+  const points = Array.from(stroke.points, (value: unknown) => {
+    const point = record(value);
+    if (!coordinate(point.x) || !coordinate(point.y)) invalid();
+    return { x: point.x, y: point.y };
+  });
+  return { id: stroke.id, width: stroke.width, points, ...(stroke.color !== undefined ? { color: stroke.color } : {}) };
+}
+
+function readBoardItems<T extends { id: string }>(value: unknown, limit: number, read: (item: unknown) => T) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > limit) invalid();
+  const items = Array.from(value, read);
+  if (new Set(items.map((item) => item.id)).size !== items.length) invalid();
+  return items;
+}
+
+function validateSpaceIds(spaceIds: readonly string[] | undefined, spaces: CanvasSpace[] | undefined) {
+  if (spaceIds?.length && spaceIds.some((id) => !spaces?.some((space) => space.id === id))) {
+    throw new Error('This Canvas space is unavailable.');
+  }
+}
+
 function validateMembership(nodes: Map<string, CanvasNode>) {
   const validated = new Set<string>();
   for (const node of nodes.values()) {
@@ -162,9 +225,14 @@ function readBoard(value: unknown, text: string): CanvasBoard {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   if (nodesById.size !== nodes.length) invalid();
   validateMembership(nodesById);
+  const spaces = readBoardItems(board.spaces, SPACE_LIMIT, readSpace);
+  const strokes = readBoardItems(board.strokes, STROKE_LIMIT, readStroke);
+  const spaceIds = new Set(spaces?.map((space) => space.id));
+  if (nodes.some((node) => node.spaceIds?.some((id) => !spaceIds.has(id)))) invalid();
   const edges = board.edges.map((edge) => readEdge(edge, nodesById));
   if (new Set(edges.map((edge) => edge.id)).size !== edges.length) invalid();
-  return { id: board.id, title: board.title, nodes, edges, viewport: readViewport(board.viewport) };
+  return { id: board.id, title: board.title, nodes, edges, viewport: readViewport(board.viewport),
+    ...(spaces ? { spaces } : {}), ...(strokes ? { strokes } : {}) };
 }
 
 function emptyBoard(id: string, title: string): CanvasBoard {
@@ -257,6 +325,201 @@ export function updateCanvasViewport(document: CanvasDocument, viewport: CanvasV
   });
 }
 
+function center(bounds: CanvasPoint & { width: number; height: number }): CanvasPoint {
+  return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+}
+
+function containsSpacePoint(space: CanvasSpace, point: CanvasPoint) {
+  const origin = center(space);
+  const dx = (point.x - origin.x) / (space.width / 2);
+  const dy = (point.y - origin.y) / (space.height / 2);
+  return dx * dx + dy * dy <= 1 + 1e-8;
+}
+
+/** Boundaries count as inside. Results follow the board's drawing order. */
+export function canvasSpacesAtPoint(spaces: readonly CanvasSpace[], point: CanvasPoint): string[] {
+  return spaces.filter((space) => containsSpacePoint(space, point)).map((space) => space.id);
+}
+
+function verticalIntersection(spaces: readonly CanvasSpace[], x: number) {
+  let top = -Infinity, bottom = Infinity;
+  for (const space of spaces) {
+    const middle = center(space);
+    const offset = (x - middle.x) / (space.width / 2);
+    const height = space.height / 2 * Math.sqrt(Math.max(0, 1 - offset * offset));
+    top = Math.max(top, middle.y - height);
+    bottom = Math.min(bottom, middle.y + height);
+  }
+  return { top, bottom, gap: top - bottom };
+}
+
+/** Find a common point for one or more ellipses. Prefer their average center;
+ * when possible, keep clear of other card centers and unselected ellipses. */
+export function canvasSpaceOverlapPoint(spaces: readonly CanvasSpace[], board?: CanvasBoard,
+  nodeId?: string): CanvasPoint | undefined {
+  if (!spaces.length) return undefined;
+  let left = -Infinity, right = Infinity;
+  const average = { x: 0, y: 0 };
+  for (const space of spaces) {
+    left = Math.max(left, space.x);
+    right = Math.min(right, space.x + space.width);
+    const point = center(space);
+    average.x += point.x / spaces.length;
+    average.y += point.y / spaces.length;
+  }
+  if (left > right) return undefined;
+  const selected = new Set(spaces.map((space) => space.id));
+  const otherSpaces = board?.spaces?.filter((space) => !selected.has(space.id)) ?? [];
+  const otherCenters = board?.nodes.filter((node) => node.id !== nodeId && node.kind !== 'group').map(center) ?? [];
+  const target = board?.nodes.find((node) => node.id === nodeId);
+  const clearance = target ? Math.min(target.width, target.height) / 2 : 18;
+  let best: CanvasPoint | undefined;
+  let fewestExtra = Infinity, fewestCrowded = Infinity, nearest = Infinity;
+  function consider(point: CanvasPoint) {
+    if (!spaces.every((space) => containsSpacePoint(space, point))) return;
+    const extra = otherSpaces.reduce((count, space) => count + Number(containsSpacePoint(space, point)), 0);
+    const crowded = otherCenters.reduce((count, position) => count +
+      Number(Math.hypot(point.x - position.x, point.y - position.y) < clearance), 0);
+    const distance = Math.hypot(point.x - average.x, point.y - average.y);
+    if (extra > fewestExtra || (extra === fewestExtra && crowded > fewestCrowded) ||
+      (extra === fewestExtra && crowded === fewestCrowded && distance >= nearest)) return;
+    best = point;
+    fewestExtra = extra;
+    fewestCrowded = crowded;
+    nearest = distance;
+  }
+  consider(average);
+  if (fewestExtra === 0 && fewestCrowded === 0) return best;
+
+  // The aggregate top boundary is convex and the bottom is concave. Search
+  // their gap over the common horizontal span to find even a narrow lens.
+  let low = left, high = right;
+  for (let i = 0; i < 64 && low < high; i++) {
+    const a = low + (high - low) / 3, b = high - (high - low) / 3;
+    if (verticalIntersection(spaces, a).gap <= verticalIntersection(spaces, b).gap) high = b;
+    else low = a;
+  }
+  const middle = (low + high) / 2;
+  const central = verticalIntersection(spaces, middle);
+  consider({ x: middle, y: (central.top + central.bottom) / 2 });
+  if (!best) return undefined;
+
+  // Find the ends of the feasible horizontal interval, then sample its
+  // interior for alternatives if the average is outside or obstructed.
+  function feasibleEnd(edge: number) {
+    let inside = best!.x, outside = edge;
+    for (let i = 0; i < 40; i++) {
+      const x = (inside + outside) / 2;
+      if (verticalIntersection(spaces, x).gap <= 0) inside = x;
+      else outside = x;
+    }
+    return inside;
+  }
+  const from = feasibleEnd(left), to = feasibleEnd(right);
+  for (const x of [Math.max(from, Math.min(to, average.x)), ...Array.from({ length: 11 },
+    (_, index) => from + (to - from) * index / 10)]) {
+    const { top, bottom } = verticalIntersection(spaces, x);
+    for (const fraction of [0.15, 0.5, 0.85]) consider({ x, y: top + (bottom - top) * fraction });
+  }
+  return best;
+}
+
+function spaceTitle(title: string) {
+  const trimmed = title.trim();
+  if (!trimmed) throw new Error('Give this space a name.');
+  return trimmed;
+}
+
+export function addCanvasSpace(document: CanvasDocument, input: CanvasSpaceInput,
+  boardId = document.activeBoardId) {
+  const board = requireBoard(document, boardId);
+  const spaces = board.spaces ?? [];
+  if (spaces.length >= SPACE_LIMIT) throw new Error('This Canvas board has reached its space limit.');
+  const spaceId = nextId('space', (candidate) => spaces.some((space) => space.id === candidate));
+  const offset = spaces.length % 6 * 48;
+  const space = readSpace({ ...input, id: spaceId, title: spaceTitle(input.title),
+    x: input.x ?? board.viewport.x + 48 + offset, y: input.y ?? board.viewport.y + 48 + offset / 2,
+    width: input.width ?? 360, height: input.height ?? 260 });
+  return { spaceId, document: updateCanvasBoard(document, boardId, (current) => ({ ...current, spaces: [...spaces, space] })) };
+}
+
+export function updateCanvasSpace(document: CanvasDocument, spaceId: string, patch: CanvasSpacePatch,
+  boardId = document.activeBoardId): CanvasDocument {
+  const board = requireBoard(document, boardId);
+  const spaces = board.spaces ?? [];
+  const previous = spaces.find((space) => space.id === spaceId);
+  if (!previous) throw new Error('This Canvas space is unavailable.');
+  const next = readSpace({ id: spaceId, x: patch.x ?? previous.x, y: patch.y ?? previous.y,
+    width: patch.width ?? previous.width, height: patch.height ?? previous.height,
+    title: patch.title === undefined ? previous.title : spaceTitle(patch.title),
+    color: patch.color === null ? undefined : patch.color ?? previous.color });
+  const sameGeometry = previous.x === next.x && previous.y === next.y &&
+    previous.width === next.width && previous.height === next.height;
+  if (sameGeometry && previous.title === next.title && previous.color === next.color) return document;
+  let updated = updateCanvasBoard(document, boardId, (current) => ({
+    ...current, spaces: spaces.map((space) => space === previous ? next : space),
+  }));
+  if (sameGeometry) return updated;
+
+  const oldSpaces = new Map(spaces.map((space) => [space.id, space]));
+  for (const node of board.nodes) {
+    if (!node.spaceIds?.includes(spaceId)) continue;
+    const point = center(node);
+    if (containsSpacePoint(next, point) || !node.spaceIds.every((id) => containsSpacePoint(oldSpaces.get(id)!, point))) continue;
+    updated = setCanvasNodeSpaces(updated, node.id, node.spaceIds, boardId);
+  }
+  return updated;
+}
+
+export function removeCanvasSpace(document: CanvasDocument, spaceId: string,
+  boardId = document.activeBoardId): CanvasDocument {
+  return updateCanvasBoard(document, boardId, (board) => {
+    if (!board.spaces?.some((space) => space.id === spaceId)) return board;
+    return { ...board, spaces: board.spaces.filter((space) => space.id !== spaceId),
+      nodes: board.nodes.map((node) => {
+        if (!node.spaceIds?.includes(spaceId)) return node;
+        const { spaceIds, ...card } = node;
+        const remaining = spaceIds.filter((id) => id !== spaceId);
+        return remaining.length ? { ...card, spaceIds: remaining } : card;
+      }) };
+  });
+}
+
+/** Replaces the card's explicit memberships. Disjoint assignments still
+ * persist, while the card stays where the user last positioned it. */
+export function setCanvasNodeSpaces(document: CanvasDocument, nodeId: string, spaceIds: readonly string[],
+  boardId = document.activeBoardId): CanvasDocument {
+  const board = requireBoard(document, boardId);
+  const node = board.nodes.find((item) => item.id === nodeId);
+  if (!node) throw new Error('This Canvas card is unavailable.');
+  const ids = [...new Set(spaceIds)];
+  const byId = new Map(board.spaces?.map((space) => [space.id, space]));
+  const spaces = ids.map((id) => {
+    const space = byId.get(id);
+    if (!space) throw new Error('This Canvas space is unavailable.');
+    return space;
+  });
+  const point = center(node);
+  const target = spaces.every((space) => containsSpacePoint(space, point))
+    ? undefined : canvasSpaceOverlapPoint(spaces, board, nodeId);
+  const x = target && target.x - node.width / 2, y = target && target.y - node.height / 2;
+  if (!target && ids.length === (node.spaceIds?.length ?? 0) &&
+    ids.every((id) => node.spaceIds?.includes(id))) return document;
+  const position = coordinate(x) && coordinate(y) ? { x, y } : {};
+  return updateCanvasNode(document, nodeId, { ...position, spaceIds: ids.length ? ids : undefined }, boardId);
+}
+
+export function addCanvasStroke(document: CanvasDocument, input: CanvasStrokeInput,
+  boardId = document.activeBoardId): CanvasDocument {
+  return updateCanvasBoard(document, boardId, (board) => {
+    const strokes = board.strokes ?? [];
+    if (strokes.length >= STROKE_LIMIT) throw new Error('This Canvas board has reached its drawing limit.');
+    const id = nextId('stroke', (candidate) => strokes.some((stroke) => stroke.id === candidate));
+    const stroke = readStroke({ ...input, id, width: input.width ?? 2 });
+    return { ...board, strokes: [...strokes, stroke] };
+  });
+}
+
 type TextEdit = { start: number; end: number; replacement: string };
 
 function detectTextEdit(previous: string, next: string, hint?: CanvasTextRange): TextEdit {
@@ -344,6 +607,7 @@ function addNode(document: CanvasDocument, input: CanvasNodeInput, boardId: stri
   if (node.groupId && !board.nodes.some((item) => item.id === node.groupId && item.kind === 'group')) {
     throw new Error('Choose an existing Canvas group.');
   }
+  validateSpaceIds(node.spaceIds, board.spaces);
   return { document: updateCanvasBoard(document, boardId, (current) => ({ ...current, nodes: [...current.nodes, node] })), nodeId };
 }
 
@@ -397,6 +661,7 @@ export function updateCanvasNode(document: CanvasDocument, nodeId: string, patch
       kind: patch.kind ?? node.kind, text: patch.text ?? node.text,
       x: patch.x ?? node.x, y: patch.y ?? node.y, width: patch.width ?? node.width, height: patch.height ?? node.height,
       collapsed: (patch.kind ?? node.kind) === 'group' ? patch.collapsed ?? node.collapsed : undefined }, updated.text);
+    validateSpaceIds(next.spaceIds, board.spaces);
     const dx = next.x - old.x;
     const dy = next.y - old.y;
     return { ...current, nodes: current.nodes.map((item) => {
@@ -495,8 +760,10 @@ export function searchCanvas(document: CanvasDocument, query: string): CanvasSea
   const matches: CanvasSearchResult[] = [];
   for (const board of document.boards) {
     const groups = new Map(board.nodes.filter((node) => node.kind === 'group').map((node) => [node.id, node.text]));
+    const spaces = new Map(board.spaces?.map((space) => [space.id, space.title]));
     for (const node of board.nodes) {
-      const haystack = [node.text, node.kind, node.url, board.title, node.groupId && groups.get(node.groupId)]
+      const haystack = [node.text, node.kind, node.url, board.title, node.groupId && groups.get(node.groupId),
+        ...(node.spaceIds?.map((id) => spaces.get(id)) ?? [])]
         .filter(Boolean).join(' ').toLocaleLowerCase();
       if (words.every((word) => haystack.includes(word))) matches.push({ boardId: board.id, boardTitle: board.title, node });
     }

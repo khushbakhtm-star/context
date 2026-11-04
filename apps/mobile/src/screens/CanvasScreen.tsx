@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
-import { Alert, Image, KeyboardAvoidingView, Linking, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet,
+import { memo, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
+import { Alert, AppState, Image, KeyboardAvoidingView, Linking, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet,
   Switch, Text, TextInput, View, type GestureResponderEvent, type LayoutChangeEvent, type ViewStyle } from 'react-native';
 
 import { useAppTheme } from '../appearance';
 import type { AppColors } from '../theme';
-import { activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, groupCanvasNodes, removeCanvasEdge, removeCanvasNode,
-  renameCanvasBoard, searchCanvas, selectCanvasBoard, updateCanvasBoard, updateCanvasEdge, updateCanvasNode, updateCanvasViewport,
-  type CanvasBoard, type CanvasDocument, type CanvasEdge, type CanvasNode } from '../utils/canvas';
+import { activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCanvasSpace, addCanvasStroke, CANVAS_STROKE_POINT_LIMIT, canvasSpacesAtPoint,
+  groupCanvasNodes, removeCanvasEdge, removeCanvasNode, removeCanvasSpace, renameCanvasBoard, searchCanvas, selectCanvasBoard,
+  setCanvasNodeSpaces, updateCanvasBoard, updateCanvasEdge, updateCanvasNode, updateCanvasSpace, updateCanvasViewport,
+  type CanvasDocument, type CanvasEdge, type CanvasNode, type CanvasSpace, type CanvasStroke } from '../utils/canvas';
 import { arrangeCanvas, routeCanvasEdges, type CanvasLayoutMode } from '../utils/canvas-layout';
 import { canvasDragNodes, centerCanvasNode, fitCanvas, intersectsCanvasViewport, previewCanvasRoutes, screenPoint, visibleCanvasBoard, worldPoint, zoomViewport,
   type DragPreview, type Point, type Size, type Viewport } from './canvas-viewport';
@@ -16,6 +17,7 @@ type Props = {
   onChange: (next: CanvasDocument) => void;
   focusNodeId?: string | null;
   onFocusConsumed?: () => void;
+  beforeLeaveRef?: { current: (() => boolean) | null };
 };
 type NodeKind = CanvasNode['kind'];
 type NodeDraft = {
@@ -23,11 +25,16 @@ type NodeDraft = {
   x: string; y: string; width: string; height: string;
 };
 type EdgeDraft = { id?: string; from: string; to: string; kind: CanvasEdge['kind']; directed: boolean; label: string };
+type SpaceDraft = { id?: string; title: string; color?: string; x: string; y: string; width: string; height: string };
 type Dialog = { kind: 'boards' | 'group' | 'search'; text: string } | { kind: 'layout' } |
-  { kind: 'node'; draft: NodeDraft } | { kind: 'edge'; draft: EdgeDraft } | { kind: 'connections'; nodeId: string };
+  { kind: 'node'; draft: NodeDraft } | { kind: 'edge'; draft: EdgeDraft } | { kind: 'connections'; nodeId: string } |
+  { kind: 'space'; draft: SpaceDraft } | { kind: 'membership'; nodeId: string; spaceIds: string[] };
+type BoardMode = 'text' | 'draw' | 'spaces';
+type Capture = { boardId: string; point: Point; text: string };
+type SpaceDrag = { id: string; resize: boolean };
 type Gesture = { boardId: string; origin: Point; viewport: Viewport; nodeId?: string;
-  pinch?: { viewport: Viewport; center: Point; distance: number } };
-type Preview = { viewport?: Viewport; drag?: DragPreview };
+  space?: SpaceDrag; points?: Point[]; pinch?: { viewport: Viewport; center: Point; distance: number } };
+type Preview = { viewport?: Viewport; drag?: DragPreview; space?: SpaceDrag & { delta: Point }; points?: Point[] };
 type Touches = GestureResponderEvent['nativeEvent']['touches'];
 
 const NODE_KINDS: { id: NodeKind; name: string }[] = [
@@ -44,6 +51,14 @@ const CARD_COLORS = [
   { name: 'Default', value: undefined }, { name: 'Sand', value: '#F5E4A6' }, { name: 'Rose', value: '#F2CED4' },
   { name: 'Mint', value: '#CDE7D9' }, { name: 'Blue', value: '#CEDFF2' }, { name: 'Lilac', value: '#DDD5EF' },
 ];
+const SPACE_COLORS = [
+  { name: 'Sand', value: '#AB872E' }, { name: 'Rose', value: '#B95A6C' }, { name: 'Mint', value: '#458B67' },
+  { name: 'Blue', value: '#4D7BAB' }, { name: 'Lilac', value: '#8A71B0' },
+];
+const BOARD_MODES: { id: BoardMode; name: string }[] = [
+  { id: 'text', name: 'Text' }, { id: 'draw', name: 'Draw' }, { id: 'spaces', name: 'Spaces' },
+];
+const SPACE_MIN = 24;
 const LAYOUTS: { id: CanvasLayoutMode; title: string; detail: string }[] = [
   { id: 'relationships', title: 'Relationships', detail: 'Lay out connected cards and dependencies.' },
   { id: 'pedigree', title: 'Pedigree', detail: 'Arrange people, partnerships, and descendants in generations.' },
@@ -80,14 +95,58 @@ function Tool({ title, onPress, styles, disabled = false, selected, accessibilit
   </Pressable>;
 }
 
-function Stroke({ from, to, color }: { from: Point; to: Point; color: string }) {
+function Stroke({ from, to, color, thickness = 1.4 }: { from: Point; to: Point; color: string; thickness?: number }) {
   const dx = to.x - from.x, dy = to.y - from.y, length = Math.hypot(dx, dy);
   if (length < 0.5) return null;
-  return <View style={{ position: 'absolute', left: (from.x + to.x - length) / 2, top: (from.y + to.y) / 2 - 0.7,
-    width: length, height: 1.4, backgroundColor: color, transform: [{ rotate: String(Math.atan2(dy, dx)) + 'rad' }] }} />;
+  return <View style={{ position: 'absolute', left: (from.x + to.x - length) / 2, top: (from.y + to.y - thickness) / 2,
+    width: length + thickness / 2, height: thickness, borderRadius: thickness / 2,
+    backgroundColor: color, transform: [{ rotate: String(Math.atan2(dy, dx)) + 'rad' }] }} />;
 }
 
-function EdgeDrawing({ edge, points, viewport, size, color, styles }: {
+const InkDrawing = memo(function InkDrawing({ stroke, viewport, size, fallback }: {
+  stroke: Pick<CanvasStroke, 'points' | 'width' | 'color'>; viewport: Viewport; size: Size; fallback: string;
+}) {
+  const color = stroke.color ?? fallback;
+  const thickness = Math.max(0.8, stroke.width * viewport.zoom);
+  const first = stroke.points[0];
+  if (!first) return null;
+  const dot = screenPoint(first, viewport);
+  if (stroke.points.length === 1) return intersectsCanvasViewport(dot, dot, size) ? <View style={{
+    position: 'absolute', left: dot.x - thickness / 2, top: dot.y - thickness / 2,
+    width: thickness, height: thickness, borderRadius: thickness / 2, backgroundColor: color,
+  }} /> : null;
+  const lines = [];
+  let previous = dot;
+  for (let index = 1; index < stroke.points.length; index++) {
+    const point = screenPoint(stroke.points[index]!, viewport);
+    if (intersectsCanvasViewport(previous, point, size)) {
+      lines.push(<Stroke key={index} from={previous} to={point} color={color} thickness={thickness} />);
+    }
+    previous = point;
+  }
+  return <>{lines}</>;
+});
+
+function fillOpacity(color: string): string {
+  if (color.length === 7) return color + '30';
+  const [, r, g, b] = color;
+  return '#' + r + r + g + g + b + b + '30';
+}
+
+function spaceGeometry(space: CanvasSpace, resize: boolean, delta: Point) {
+  return resize ? { width: Math.max(SPACE_MIN, space.width + delta.x), height: Math.max(SPACE_MIN, space.height + delta.y) } :
+    { x: space.x + delta.x, y: space.y + delta.y };
+}
+
+function placeCardInSpaces(document: CanvasDocument, nodeId: string, boardId: string) {
+  const board = document.boards.find(({ id }) => id === boardId);
+  const node = board?.nodes.find(({ id }) => id === nodeId);
+  if (!board?.spaces?.length || !node || node.kind === 'group') return document;
+  const center = { x: node.x + node.width / 2, y: node.y + node.height / 2 };
+  return setCanvasNodeSpaces(document, node.id, canvasSpacesAtPoint(board.spaces, center), board.id);
+}
+
+const EdgeDrawing = memo(function EdgeDrawing({ edge, points, viewport, size, color, styles }: {
   edge: CanvasEdge; points: Point[]; viewport: Viewport; size: Size; color: string; styles: ReturnType<typeof createStyles>;
 }) {
   const projected = points.map((point) => screenPoint(point, viewport));
@@ -109,9 +168,9 @@ function EdgeDrawing({ edge, points, viewport, size, color, styles }: {
       <Text numberOfLines={1} style={[styles.edgeLabel, { left: (a.x + b.x) / 2 + 3, top: (a.y + b.y) / 2 - 18 }]}>{edge.label}</Text>
       : null}
   </>;
-}
+});
 
-function CanvasGrid({ viewport, size, styles }: { viewport: Viewport; size: Size; styles: ReturnType<typeof createStyles> }) {
+const CanvasGrid = memo(function CanvasGrid({ viewport, size, styles }: { viewport: Viewport; size: Size; styles: ReturnType<typeof createStyles> }) {
   const base = 48 * viewport.zoom;
   const spacing = base * Math.max(1, Math.ceil(24 / base));
   const startX = ((-viewport.x * viewport.zoom) % spacing + spacing) % spacing;
@@ -122,9 +181,9 @@ function CanvasGrid({ viewport, size, styles }: { viewport: Viewport; size: Size
     {Array.from({ length: Math.ceil(size.height / spacing) }, (_, index) =>
       <View key={'y' + index} style={[styles.gridHorizontal, { top: startY + index * spacing }]} />)}
   </View>;
-}
+});
 
-export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed }: Props) {
+export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed, beforeLeaveRef }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const board = activeCanvasBoard(document);
@@ -135,6 +194,11 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [dialogError, setDialogError] = useState('');
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [mode, setMode] = useState<BoardMode>('text');
+  const [spaceId, setSpaceId] = useState<string | null>(null);
+  const [capture, setCapture] = useState<Capture | null>(null);
+  const modeRef = useRef(mode); modeRef.current = mode;
+  const captureRef = useRef<Capture | null>(null);
   const docRef = useRef(document); docRef.current = document;
   const onChangeRef = useRef(onChange); onChangeRef.current = onChange;
   const stageRef = useRef<ComponentRef<typeof View>>(null);
@@ -146,7 +210,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
   const focusedRequest = useRef<string | null>(null);
   const lastBoardId = useRef(board.id);
 
-  const layout = useMemo(() => visibleCanvasBoard(board), [board]);
+  const layout = useMemo(() => visibleCanvasBoard(board), [board.nodes, board.edges]);
   const stableRoutes = useMemo(() => routeCanvasEdges(layout), [layout]);
   const movingId = preview?.drag?.nodeId;
   const moving = useMemo(() => movingId ? canvasDragNodes(board.nodes, movingId) : null, [board.nodes, movingId]);
@@ -159,6 +223,12 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
   const viewport = preview?.viewport ?? board.viewport;
   const selection = board.nodes.filter(({ id }) => selectedIds.includes(id));
   const selected = selection.length === 1 ? selection[0] : undefined;
+  const selectedSpace = board.spaces?.find(({ id }) => id === spaceId);
+  const ink = useMemo(() => board.strokes?.map((stroke) => ({
+    stroke, bounds: stroke.points.reduce<Point & { right: number; bottom: number }>(({ x, y, right, bottom }, point) =>
+      ({ x: Math.min(x, point.x), y: Math.min(y, point.y), right: Math.max(right, point.x), bottom: Math.max(bottom, point.y) }),
+    { x: Infinity, y: Infinity, right: -Infinity, bottom: -Infinity }),
+  })) ?? [], [board.strokes]);
   const searchResults = useMemo(() => dialog?.kind === 'search' ? searchCanvas(document, dialog.text) : [], [document, dialog]);
 
   function apply(next: CanvasDocument, remember = true) {
@@ -181,7 +251,53 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
     }
   }
 
-  function openDialog(value: Dialog) { setDialogError(''); setDialog(value); }
+  function finishCapture(save: boolean) {
+    const draft = captureRef.current;
+    if (!draft) return true;
+    if (save && draft.text.trim()) {
+      try {
+        const next = addCanvasNode(docRef.current, { kind: 'note', text: draft.text, ...draft.point, ...dimensions('note') }, draft.boardId);
+        apply(placeCardInSpaces(next.document, next.nodeId, draft.boardId));
+      } catch (failure) {
+        Alert.alert('Could not save text', failure instanceof Error ? failure.message : undefined);
+        return false;
+      }
+    }
+    captureRef.current = null;
+    setCapture(null);
+    return true;
+  }
+
+  function changeMode(next: BoardMode) {
+    if (!finishCapture(true)) return;
+    setMode(next);
+    setSpaceId(null);
+    setSelectedIds([]);
+    setLinkFrom(null);
+    setMulti(false);
+  }
+
+  function tapBackdrop(event: GestureResponderEvent) {
+    if (captureRef.current) { finishCapture(true); return; }
+    if (mode === 'draw') return;
+    const point = worldPoint({ x: event.nativeEvent.locationX, y: event.nativeEvent.locationY }, viewport);
+    if (mode === 'spaces') {
+      setSelectedIds([]);
+      setSpaceId(canvasSpacesAtPoint(board.spaces ?? [], point).at(-1) ?? null);
+      return;
+    }
+    if (selectedIds.length || multi || linkFrom) {
+      setSelectedIds([]);
+      setMulti(false);
+      setLinkFrom(null);
+      return;
+    }
+    const draft = { boardId: board.id, point, text: '' };
+    captureRef.current = draft;
+    setCapture(draft);
+  }
+
+  function openDialog(value: Dialog) { if (finishCapture(true)) { setDialogError(''); setDialog(value); } }
   function closeDialog() { setDialog(null); setDialogError(''); }
   function goToViewport(next: Viewport) { apply(updateCanvasViewport(docRef.current, next), false); }
   function zoomBy(factor: number) {
@@ -199,10 +315,19 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
   function stageLayout(event: LayoutChangeEvent) {
     const { width, height } = event.nativeEvent.layout;
     setSize({ width, height });
-    stageRef.current?.measureInWindow((x, y) => { stageOrigin.current = { x, y }; });
+    stageRef.current?.measure((_x, _y, _width, _height, pageX, pageY) => { stageOrigin.current = { x: pageX, y: pageY }; });
   }
 
   useEffect(() => () => { if (previewFrame.current !== null) cancelAnimationFrame(previewFrame.current); }, []);
+  useEffect(() => {
+    const save = () => finishCapture(true);
+    if (beforeLeaveRef) beforeLeaveRef.current = save;
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'background') save(); });
+    return () => {
+      if (beforeLeaveRef && beforeLeaveRef.current === save) beforeLeaveRef.current = null;
+      subscription.remove();
+    };
+  }, [beforeLeaveRef]);
   useEffect(() => {
     if (lastBoardId.current === board.id) return;
     lastBoardId.current = board.id;
@@ -210,6 +335,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
     clearPreview();
     setSelectedIds([]);
     setLinkFrom(null);
+    setSpaceId(null);
   }, [board.id]);
 
   function revealNode(nodeId: string, boardId: string) {
@@ -276,10 +402,23 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
         update({ viewport: zoomViewport(start.viewport, start.viewport.zoom * pinchNow.distance / start.distance, start.center, pinchNow.center) });
       } else if (!gesture.pinch && touches[0]) {
         const point = stagePoint(touches[0]);
+        if (gesture.points) {
+          const world = worldPoint(point, gesture.viewport);
+          const last = gesture.points.at(-1);
+          if (!last || Math.hypot(last.x - world.x, last.y - world.y) * gesture.viewport.zoom >= 1.5) {
+            if (gesture.points.length >= CANVAS_STROKE_POINT_LIMIT) {
+              gesture.points = gesture.points.filter((_value, index) => index % 2 === 0);
+            }
+            gesture.points.push(world);
+          } else if (previewRef.current?.points) return;
+          update({ points: gesture.points.slice() });
+          return;
+        }
         const delta = { x: (point.x - gesture.origin.x) / gesture.viewport.zoom,
           y: (point.y - gesture.origin.y) / gesture.viewport.zoom };
-        update(gesture.nodeId ? { drag: { nodeId: gesture.nodeId, delta } } :
-          { viewport: { ...gesture.viewport, x: gesture.viewport.x - delta.x, y: gesture.viewport.y - delta.y } });
+        if (gesture.space) update({ space: { ...gesture.space, delta } });
+        else if (gesture.nodeId) update({ drag: { nodeId: gesture.nodeId, delta } });
+        else update({ viewport: { ...gesture.viewport, x: gesture.viewport.x - delta.x, y: gesture.viewport.y - delta.y } });
       }
     }
     function release() {
@@ -291,25 +430,41 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
       const current = docRef.current;
       const active = activeCanvasBoard(current);
       if (active.id !== gesture.boardId) return;
-      if (last.viewport) { apply(updateCanvasViewport(current, last.viewport), false); return; }
-      const drag = last.drag;
-      const node = active.nodes.find(({ id }) => id === drag?.nodeId);
-      if (!node || !drag || (!drag.delta.x && !drag.delta.y)) return;
       try {
-        apply(updateCanvasNode(current, node.id, { x: node.x + drag.delta.x, y: node.y + drag.delta.y }));
-        setSelectedIds([node.id]);
+        if (last.viewport) { apply(updateCanvasViewport(current, last.viewport), false); return; }
+        if (last.points) { apply(addCanvasStroke(current, { points: last.points, width: 2 }, active.id)); return; }
+        if (last.space) {
+          const { id, resize, delta } = last.space;
+          const space = active.spaces?.find((item) => item.id === id);
+          if (space && (delta.x || delta.y)) {
+            apply(updateCanvasSpace(current, id, spaceGeometry(space, resize, delta), active.id));
+            setSpaceId(id);
+          }
+          return;
+        }
+        const drag = last.drag;
+        const node = active.nodes.find(({ id }) => id === drag?.nodeId);
+        if (node && drag && (drag.delta.x || drag.delta.y)) {
+          const moved = updateCanvasNode(current, node.id, { x: node.x + drag.delta.x, y: node.y + drag.delta.y });
+          apply(placeCardInSpaces(moved, node.id, active.id));
+          setSelectedIds([node.id]);
+        }
       } catch (failure) {
-        Alert.alert('Could not move card', failure instanceof Error ? failure.message : undefined);
+        Alert.alert('Could not update Canvas', failure instanceof Error ? failure.message : undefined);
       }
     }
     return PanResponder.create({
       onStartShouldSetPanResponderCapture: ({ nativeEvent }) => {
         const touch = nativeEvent.touches[0];
         if (!touch) return false;
+        if (captureRef.current) { activeGesture.current = null; return false; }
         if (activeGesture.current && nativeEvent.touches.length > 1) return false;
         const active = activeCanvasBoard(docRef.current);
-        activeGesture.current = { boardId: active.id, origin: stagePoint(touch), viewport: active.viewport };
-        return false;
+        const origin = stagePoint(touch);
+        const drawing = modeRef.current === 'draw';
+        activeGesture.current = { boardId: active.id, origin, viewport: active.viewport,
+          points: drawing ? [worldPoint(origin, active.viewport)] : undefined };
+        return drawing;
       },
       onMoveShouldSetPanResponderCapture: ({ nativeEvent }) => {
         const start = activeGesture.current, touch = nativeEvent.touches[0];
@@ -331,7 +486,12 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
     if (activeGesture.current) activeGesture.current.nodeId = id;
   }
 
+  function armSpace(id: string, resize = false) {
+    if (activeGesture.current) activeGesture.current.space = { id, resize };
+  }
+
   function chooseNode(id: string) {
+    if (!finishCapture(true)) return;
     if (linkFrom && linkFrom !== id) {
       openDialog({ kind: 'edge', draft: { from: linkFrom, to: id, kind: 'related', directed: false, label: '' } });
       setLinkFrom(null);
@@ -356,14 +516,63 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
     if (url && !safeWebUrl(url)) throw new Error('Enter a web address starting with https:// or http://.');
     const patch = { text: draft.text, x, y, width, height, color: draft.color, url, checked: draft.checked };
     if (draft.id) {
-      apply(updateCanvasNode(docRef.current, draft.id, patch));
+      const current = docRef.current;
+      const active = activeCanvasBoard(current);
+      const original = active.nodes.find(({ id }) => id === draft.id);
+      const moved = original && (original.x !== x || original.y !== y || original.width !== width || original.height !== height);
+      const next = updateCanvasNode(current, draft.id, patch);
+      apply(moved ? placeCardInSpaces(next, draft.id, active.id) : next);
       setSelectedIds([draft.id]);
     } else {
       const next = addCanvasNode(docRef.current, { ...patch, kind: draft.kind });
-      apply(next.document);
+      apply(placeCardInSpaces(next.document, next.nodeId, board.id));
       setSelectedIds([next.nodeId]);
     }
     closeDialog();
+  }
+
+  function editSpace(space?: CanvasSpace) {
+    const count = board.spaces?.length ?? 0;
+    const offset = [{ x: 0.12, y: 0.12 }, { x: 0.28, y: 0.12 }, { x: 0.2, y: 0.23 }][count % 3]!;
+    const point = worldPoint({ x: size.width * offset.x, y: size.height * offset.y }, viewport);
+    openDialog({ kind: 'space', draft: {
+      id: space?.id, title: space?.title ?? '', color: space?.color ?? SPACE_COLORS[count % SPACE_COLORS.length]!.value,
+      x: String(Math.round(space?.x ?? point.x)), y: String(Math.round(space?.y ?? point.y)),
+      width: String(Math.round(space?.width ?? Math.max(SPACE_MIN, Math.min(260, size.width * 0.63) / viewport.zoom))),
+      height: String(Math.round(space?.height ?? Math.max(SPACE_MIN, Math.min(210, size.height * 0.56) / viewport.zoom))),
+    } });
+  }
+
+  function saveSpace(draft: SpaceDraft) {
+    const numeric = [draft.x, draft.y, draft.width, draft.height];
+    if (numeric.some((value) => !value.trim() || !Number.isFinite(Number(value)))) throw new Error('Enter valid coordinates and dimensions.');
+    const [x, y, width, height] = numeric.map(Number);
+    if (width! < SPACE_MIN || height! < SPACE_MIN) throw new Error('Width and height must be at least ' + SPACE_MIN + '.');
+    const patch = { title: draft.title.trim(), color: draft.color, x, y, width, height };
+    if (draft.id) apply(updateCanvasSpace(docRef.current, draft.id, patch));
+    else {
+      const next = addCanvasSpace(docRef.current, patch);
+      apply(next.document);
+      setSpaceId(next.spaceId);
+    }
+    setMode('spaces');
+    setSelectedIds([]);
+    setLinkFrom(null);
+    closeDialog();
+  }
+
+  function updateSpaceDraft(patch: Partial<SpaceDraft>) {
+    setDialog((current) => current?.kind === 'space' ? { ...current, draft: { ...current.draft, ...patch } } : current);
+    setDialogError('');
+  }
+
+  function deleteSpace(space: CanvasSpace) {
+    Alert.alert('Delete ' + space.title + '?', 'Its cards will stay on the board.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => safeChange(() => {
+        apply(removeCanvasSpace(docRef.current, space.id)); setSpaceId(null);
+      }) },
+    ]);
   }
 
   function saveEdge(draft: EdgeDraft) {
@@ -379,11 +588,12 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
     const current = docRef.current;
     const active = activeCanvasBoard(current);
     const arranged = arrangeCanvas(active, mode);
-    apply(updateCanvasBoard(current, active.id, () => ({ ...arranged, viewport: fitCanvas(visibleCanvasBoard(arranged).nodes, size) })));
+    apply(updateCanvasBoard(current, active.id, () => ({ ...arranged, viewport: fitCanvas([...visibleCanvasBoard(arranged).nodes, ...(arranged.spaces ?? [])], size) })));
     closeDialog();
   }
 
   function restore(which: 'undo' | 'redo') {
+    if (!finishCapture(true)) return;
     const stack = history.current[which];
     const previous = stack.pop();
     if (!previous) return;
@@ -417,6 +627,41 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
     setDialog((current) => current && 'text' in current ? { ...current, text: value } : current);
     setDialogError('');
   }
+
+  const ellipses = (board.spaces ?? []).map((stored) => {
+    const movingSpace = preview?.space;
+    const space = movingSpace?.id === stored.id ? { ...stored, ...spaceGeometry(stored, movingSpace.resize, movingSpace.delta) } : stored;
+    const start = screenPoint(space, viewport);
+    const width = space.width * viewport.zoom, height = space.height * viewport.zoom;
+    if (!intersectsCanvasViewport(start, { x: start.x + width, y: start.y + height }, size)) return null;
+    const diameter = Math.min(width, height);
+    const color = space.color ?? SPACE_COLORS[0]!.value;
+    const active = space.id === spaceId && mode === 'spaces';
+    const showHandles = mode === 'spaces';
+    return <View key={space.id} pointerEvents="box-none" style={[styles.space, { left: start.x, top: start.y, width, height }]}>
+      <View pointerEvents="none" style={{ position: 'absolute', width: diameter, height: diameter, borderRadius: diameter / 2,
+        left: (width - diameter) / 2, top: (height - diameter) / 2, backgroundColor: fillOpacity(color),
+        borderColor: color, borderWidth: active ? 2 : 1, transform: [{ scaleX: width / diameter }, { scaleY: height / diameter }] }} />
+      {showHandles ? <Pressable accessibilityRole="button" accessibilityLabel={'Select or drag ' + space.title}
+        accessibilityState={{ selected: active }} onPress={() => { setSpaceId(space.id); setSelectedIds([]); }}
+        onTouchStart={() => armSpace(space.id)} style={[styles.spaceTitle, { maxWidth: Math.max(44, width * 0.58) }]}>
+        <Text numberOfLines={1} style={styles.spaceTitleText}>{space.title}</Text>
+      </Pressable> : width >= 40 ? <View pointerEvents="none" style={[styles.spaceTitle, { maxWidth: width * 0.65 }]}>
+        <Text numberOfLines={1} style={styles.spaceTitleText}>{space.title}</Text>
+      </View> : null}
+      {active ? <Pressable accessibilityRole="button" accessibilityLabel={'Resize ' + space.title}
+        accessibilityHint="Drag to resize or tap to enter dimensions"
+        onTouchStart={() => armSpace(space.id, true)} onPress={() => editSpace(stored)}
+        style={[styles.spaceResize, { left: width * 0.85 - 22, top: height * 0.85 - 22 }]}>
+        <View pointerEvents="none" style={[styles.resizeDot, { backgroundColor: color }]} />
+      </Pressable> : null}
+    </View>;
+  });
+
+  const capturePoint = capture && screenPoint(capture.point, viewport);
+  const captureWidth = Math.min(290, Math.max(120, size.width - 16));
+  const fitBounds = [...visualNodes, ...(board.spaces ?? []), ...ink.map(({ bounds }) => ({ x: bounds.x, y: bounds.y,
+    width: Math.max(1, bounds.right - bounds.x), height: Math.max(1, bounds.bottom - bounds.y) }))];
 
   const drawing = visualNodes.map((node) => {
     const start = screenPoint(node, viewport);
@@ -473,9 +718,10 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
   const dialogTitle = dialog?.kind === 'boards' ? 'Workspaces' : dialog?.kind === 'search' ? 'Search Canvas' :
     dialog?.kind === 'layout' ? 'Auto Arrange' : dialog?.kind === 'group' ? 'Group cards' :
       dialog?.kind === 'connections' ? 'Connections' : dialog?.kind === 'edge' ? 'Connection' :
-        dialog?.kind === 'node' && dialog.draft.id ? 'Edit card' : 'Add card';
+        dialog?.kind === 'space' ? (dialog.draft.id ? 'Edit space' : 'Add space') :
+          dialog?.kind === 'membership' ? 'Card spaces' : dialog?.kind === 'node' && dialog.draft.id ? 'Edit card' : 'Add card';
 
-  return <View style={styles.screen}>
+  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.screen}>
     <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false}
       style={styles.bar} contentContainerStyle={styles.barContent}>
       <Tool title={board.title} accessibilityLabel={'Workspaces, current workspace ' + board.title} styles={styles}
@@ -489,6 +735,15 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
       <Tool title="Undo" styles={styles} disabled={!history.current.undo.length} onPress={() => restore('undo')} />
       <Tool title="Redo" styles={styles} disabled={!history.current.redo.length} onPress={() => restore('redo')} />
     </ScrollView>
+    {mode === 'spaces' && !selection.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false}
+      style={styles.bar} contentContainerStyle={styles.barContent}>
+      <Tool title="+ Space" accessibilityLabel="Add space" styles={styles} onPress={() => editSpace()} />
+      {selectedSpace ? <>
+        <Text style={styles.selectionLabel} numberOfLines={1}>{selectedSpace.title}</Text>
+        <Tool title="Edit" accessibilityLabel="Edit selected space" styles={styles} onPress={() => editSpace(selectedSpace)} />
+        <Tool title="Delete" accessibilityLabel="Delete selected space" styles={styles} onPress={() => deleteSpace(selectedSpace)} />
+      </> : <Text style={styles.hint}>Drag a space by its label.</Text>}
+    </ScrollView> : null}
     {linkFrom ? <View style={styles.hintRow}>
       <Text accessibilityLiveRegion="polite" style={styles.hint}>Tap a destination card to connect it.</Text>
       <Tool title="Cancel" styles={styles} onPress={() => setLinkFrom(null)} />
@@ -496,6 +751,9 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
       style={styles.bar} contentContainerStyle={styles.barContent}>
       {selected ? <>
         <Tool title="Edit" styles={styles} onPress={() => editNode(selected)} />
+        {selected.kind !== 'group' && board.spaces?.length ? <Tool
+          title={selected.spaceIds?.length ? 'Spaces (' + selected.spaceIds.length + ')' : 'Spaces'} accessibilityLabel="Assign card to spaces"
+          styles={styles} onPress={() => openDialog({ kind: 'membership', nodeId: selected.id, spaceIds: selected.spaceIds ?? [] })} /> : null}
         <Tool title="Connect" styles={styles} onPress={() => setLinkFrom(selected.id)} />
         <Tool title="Connections" styles={styles} onPress={() => openDialog({ kind: 'connections', nodeId: selected.id })} />
         {selected.kind === 'group' ? <Tool title={selected.collapsed ? 'Expand' : 'Collapse'} styles={styles}
@@ -516,21 +774,42 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
 
     <View ref={stageRef} collapsable={false} onLayout={stageLayout} style={styles.stage} {...responder.panHandlers}>
       <CanvasGrid viewport={viewport} size={size} styles={styles} />
+      <Pressable accessible={false} style={StyleSheet.absoluteFill} onPress={tapBackdrop} />
+      {ellipses}
+      <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+        {ink.map(({ stroke, bounds }) => intersectsCanvasViewport(screenPoint(bounds, viewport),
+          screenPoint({ x: bounds.right, y: bounds.bottom }, viewport), size) ?
+          <InkDrawing key={stroke.id} stroke={stroke} viewport={viewport} size={size} fallback={colors.ink} /> : null)}
+        {preview?.points ? <InkDrawing stroke={{ points: preview.points, width: 2 }} viewport={viewport} size={size} fallback={colors.ink} /> : null}
+      </View>
       <View pointerEvents="none" style={StyleSheet.absoluteFill}>
         {routes.map(({ edge, points }) => <EdgeDrawing key={edge.id} edge={edge} points={points} viewport={viewport}
           size={size} color={edge.kind === 'dependency' ? colors.warning : colors.muted} styles={styles} />)}
       </View>
       {drawing}
-      {!board.nodes.length ? <View pointerEvents="none" style={styles.empty}>
+      {capture && capturePoint ? <View style={[styles.capture, {
+        left: Math.max(8, Math.min(size.width - captureWidth - 8, capturePoint.x)),
+        top: Math.max(8, Math.min(size.height - 116, capturePoint.y)), width: captureWidth,
+      }]}>
+        <TextInput accessibilityLabel="Canvas text" placeholder="Type here" placeholderTextColor={colors.muted} autoFocus multiline
+          defaultValue={capture.text} onChangeText={(value) => { if (captureRef.current) captureRef.current.text = value; }}
+          keyboardAppearance={resolvedMode} style={[styles.field, styles.captureInput]} />
+        <View style={styles.captureActions}>
+          <Tool title="×" accessibilityLabel="Cancel canvas text" styles={styles} onPress={() => finishCapture(false)} />
+          <Tool title="✓" accessibilityLabel="Save canvas text" styles={styles} onPress={() => finishCapture(true)} />
+        </View>
+      </View> : null}
+      {!board.nodes.length && !board.spaces?.length && !board.strokes?.length && !capture && mode === 'text' ? <View pointerEvents="none" style={styles.empty}>
         <Text accessibilityRole="header" style={styles.emptyHeading}>Canvas</Text>
-        <Text style={styles.emptyText}>Add a card here, or highlight text in Notepad to put it on this board.</Text>
+        <Text style={styles.emptyText}>Tap anywhere to type.</Text>
       </View> : null}
     </View>
     <View style={styles.footer}>
-      <Text style={styles.hint}>{Math.round(viewport.zoom * 100)}%</Text>
+      <View style={styles.footerActions}>{BOARD_MODES.map(({ id, name }) => <Tool key={id} title={name} styles={styles}
+        selected={mode === id} onPress={() => changeMode(id)} />)}</View>
       <View style={styles.footerActions}>
         <Tool title="−" accessibilityLabel="Zoom out" styles={styles} onPress={() => zoomBy(0.8)} />
-        <Tool title="Fit" accessibilityLabel="Fit board to screen" styles={styles} onPress={() => goToViewport(fitCanvas(visualNodes, size))} />
+        <Tool title="Fit" accessibilityLabel="Fit board to screen" styles={styles} onPress={() => goToViewport(fitCanvas(fitBounds, size))} />
         <Tool title="+" accessibilityLabel="Zoom in" styles={styles} onPress={() => zoomBy(1.25)} />
       </View>
     </View>
@@ -579,6 +858,41 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
               <Tool title="Create group" styles={styles} disabled={!dialog.text.trim()} onPress={() => safeChange(() => {
                 const next = groupCanvasNodes(docRef.current, selectedIds, dialog.text.trim());
                 apply(next.document); setSelectedIds([next.nodeId]); setMulti(false); closeDialog();
+              })} />
+            </> : null}
+            {dialog?.kind === 'space' ? <>
+              <TextInput accessibilityLabel="Space name" placeholder="Space name" placeholderTextColor={colors.muted}
+                autoFocus value={dialog.draft.title} maxLength={120} onChangeText={(title) => updateSpaceDraft({ title })}
+                style={styles.field} />
+              <Text style={styles.hint}>Color</Text>
+              <View style={styles.wrap}>{SPACE_COLORS.map(({ name, value }) => <Pressable key={name}
+                accessibilityRole="button" accessibilityLabel={name + ' space color'} accessibilityState={{ selected: dialog.draft.color === value }}
+                onPress={() => updateSpaceDraft({ color: value })} style={styles.swatchTarget}>
+                <View style={[styles.swatch, { backgroundColor: value,
+                  borderColor: dialog.draft.color === value ? colors.ink : colors.hairline }]} />
+              </Pressable>)}</View>
+              <View style={styles.wrap}>
+                {([{ key: 'x', label: 'X position' }, { key: 'y', label: 'Y position' },
+                  { key: 'width', label: 'Width' }, { key: 'height', label: 'Height' }] as const).map(({ key, label }) => <View key={key} style={styles.dimension}>
+                  <Text style={styles.hint}>{label}</Text>
+                  <TextInput accessibilityLabel={label} keyboardType="numbers-and-punctuation" value={dialog.draft[key]}
+                    onChangeText={(value) => updateSpaceDraft({ [key]: value })} style={styles.field} />
+                </View>)}
+              </View>
+              <Tool title="Save space" styles={styles} disabled={!dialog.draft.title.trim()} onPress={() => safeChange(() => saveSpace(dialog.draft))} />
+            </> : null}
+            {dialog?.kind === 'membership' ? <>
+              {(board.spaces ?? []).map((space) => <Pressable key={space.id} accessibilityRole="checkbox"
+                accessibilityState={{ checked: dialog.spaceIds.includes(space.id) }} accessibilityLabel={space.title}
+                style={styles.membershipRow} onPress={() => setDialog((current) => current?.kind === 'membership' ? {
+                  ...current, spaceIds: current.spaceIds.includes(space.id) ? current.spaceIds.filter((id) => id !== space.id) : [...current.spaceIds, space.id],
+                } : current)}>
+                <View style={[styles.membershipDot, { backgroundColor: space.color ?? SPACE_COLORS[0]!.value }]} />
+                <Text numberOfLines={1} style={[styles.toolText, styles.membershipName]}>{space.title}</Text>
+                <Text style={styles.toolText}>{dialog.spaceIds.includes(space.id) ? '☑' : '☐'}</Text>
+              </Pressable>)}
+              <Tool title="Save memberships" styles={styles} onPress={() => safeChange(() => {
+                apply(setCanvasNodeSpaces(docRef.current, dialog.nodeId, dialog.spaceIds)); closeDialog();
               })} />
             </> : null}
             {dialog?.kind === 'node' ? <>
@@ -644,7 +958,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed 
         </View>
       </KeyboardAvoidingView>
     </Modal>
-  </View>;
+  </KeyboardAvoidingView>;
 }
 
 const createStyles = (colors: AppColors) => StyleSheet.create({
@@ -655,7 +969,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   toolText: { color: colors.ink, fontSize: 14, fontWeight: '500' },
   activeTool: { backgroundColor: colors.panel },
   disabled: { opacity: 0.42 },
-  selectionLabel: { color: colors.muted, paddingHorizontal: 10, fontSize: 13 },
+  selectionLabel: { color: colors.muted, paddingHorizontal: 10, fontSize: 13, maxWidth: 160 },
   stage: { flex: 1, overflow: 'hidden', backgroundColor: colors.surface },
   gridVertical: { position: 'absolute', top: 0, bottom: 0, width: StyleSheet.hairlineWidth, backgroundColor: colors.hairline, opacity: 0.65 },
   gridHorizontal: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: colors.hairline, opacity: 0.65 },
@@ -669,9 +983,22 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   groupFrame: { position: 'absolute', borderWidth: 1.5, borderRadius: 9, overflow: 'hidden' },
   groupHeading: { paddingHorizontal: 8, justifyContent: 'center' },
   edgeLabel: { position: 'absolute', maxWidth: 145, paddingHorizontal: 3, color: colors.graphite, backgroundColor: colors.surface, fontSize: 11 },
-  footer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 10,
+  footer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 4,
     borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline },
   footerActions: { flexDirection: 'row', alignItems: 'center' },
+  space: { position: 'absolute' },
+  spaceTitle: { position: 'absolute', left: '7%', top: 0, minHeight: 32, borderRadius: 6,
+    backgroundColor: colors.panel, justifyContent: 'center', paddingHorizontal: 6 },
+  spaceTitleText: { color: colors.ink, fontSize: 12, fontWeight: '600' },
+  spaceResize: { position: 'absolute', width: 44, height: 44, justifyContent: 'center', alignItems: 'center' },
+  resizeDot: { width: 13, height: 13, borderRadius: 7, borderWidth: 1, borderColor: colors.surface },
+  capture: { position: 'absolute', padding: 5, borderWidth: 1, borderColor: colors.accent,
+    borderRadius: 9, backgroundColor: colors.panel },
+  captureInput: { minHeight: 50, maxHeight: 60, textAlignVertical: 'top' },
+  captureActions: { flexDirection: 'row', justifyContent: 'flex-end' },
+  membershipRow: { flexDirection: 'row', minHeight: 44, alignItems: 'center', gap: 9, paddingHorizontal: 9 },
+  membershipDot: { width: 14, height: 14, borderRadius: 7 },
+  membershipName: { flex: 1 },
   empty: { ...StyleSheet.absoluteFill, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 35, gap: 8 },
   emptyHeading: { fontSize: 24, fontWeight: '600', color: colors.ink },
   emptyText: { maxWidth: 340, color: colors.muted, fontSize: 15, lineHeight: 21, textAlign: 'center' },

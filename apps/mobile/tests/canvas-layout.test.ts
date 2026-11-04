@@ -112,6 +112,27 @@ test('a large unconnected board expands onto shelves with unique positions', () 
   assertNoOverlaps(output.nodes);
 });
 
+test('Auto Arrange keeps a shared Space card and its group in place', () => {
+  const shared = node('milk', 'note', { x: 100, y: 112, groupId: 'errands', spaceIds: ['shopping', 'nutrition'] });
+  const group = node('errands', 'group', { x: 85, y: 76, width: 150, height: 150 });
+  const independent = node('email', 'note');
+  const input: CanvasBoard = { ...board([shared, group, independent], [edge('milk', 'email', 'related')]), spaces: [
+    { id: 'shopping', title: 'Shopping', x: 0, y: 0, width: 260, height: 260 },
+    { id: 'nutrition', title: 'Nutrition', x: 70, y: 15, width: 260, height: 260 },
+  ] };
+  const arranged = arrangeCanvas(input);
+  assert.deepEqual(arranged.nodes.slice(0, 2), [shared, group]);
+  assert.deepEqual(arranged.spaces, input.spaces);
+  assert.deepEqual(arranged.edges, input.edges);
+  assert.notDeepEqual(arranged.nodes[2], independent);
+  for (const space of input.spaces!) {
+    const item = arranged.nodes[2]!;
+    assert.ok(item.x + item.width <= space.x || item.x >= space.x + space.width ||
+      item.y + item.height <= space.y || item.y >= space.y + space.height);
+  }
+  assert.deepEqual(arrangeCanvas(arranged), arranged);
+});
+
 test('multiple connections between the same two cards use separate visible lines', () => {
   const relation = edge('a', 'b', 'related');
   const dependency = edge('b', 'a', 'dependency');

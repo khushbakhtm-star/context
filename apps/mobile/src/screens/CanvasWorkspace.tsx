@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useAppTheme } from '../appearance';
 import { loadCanvasDocument, saveCanvasDocument } from '../data/canvas';
@@ -14,9 +14,11 @@ export function CanvasWorkspace({ beforeLeaveRef, focusNodeId, onFocusConsumed }
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const { value, loadFailed, saveFailed, update, flush, reload } = useCanvasDraft(loadCanvasDocument, saveCanvasDocument);
+  const finishCapture = useRef<(() => boolean) | null>(null);
   useEffect(() => {
-    beforeLeaveRef.current = flush;
-    return () => { if (beforeLeaveRef.current === flush) beforeLeaveRef.current = null; };
+    const finishAndSave = () => finishCapture.current?.() === false ? Promise.resolve(false) : flush();
+    beforeLeaveRef.current = finishAndSave;
+    return () => { if (beforeLeaveRef.current === finishAndSave) beforeLeaveRef.current = null; };
   }, [beforeLeaveRef, flush]);
 
   return <View style={styles.container}>
@@ -29,7 +31,8 @@ export function CanvasWorkspace({ beforeLeaveRef, focusNodeId, onFocusConsumed }
         <Text style={styles.retryText}>Retry</Text>
       </Pressable>
     </View> : null}
-    {value ? <CanvasScreen document={value} onChange={update} focusNodeId={focusNodeId} onFocusConsumed={onFocusConsumed} />
+    {value ? <CanvasScreen document={value} onChange={update} focusNodeId={focusNodeId} onFocusConsumed={onFocusConsumed}
+      beforeLeaveRef={finishCapture} />
       : !loadFailed ? <ActivityIndicator accessibilityLabel="Loading Canvas" color={colors.muted} style={styles.spinner} /> : null}
   </View>;
 }

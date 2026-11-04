@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addLinkedCanvasNode, createCanvasDocument,
-  groupCanvasNodes, readCanvasDocument, removeCanvasNode, searchCanvas, selectCanvasBoard, setCanvasText,
-  updateCanvasEdge, updateCanvasNode, updateCanvasViewport, type CanvasDocument,
+  activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCanvasSpace, addCanvasStroke,
+  addLinkedCanvasNode, CANVAS_STROKE_POINT_LIMIT, canvasSpaceOverlapPoint, canvasSpacesAtPoint, createCanvasDocument,
+  groupCanvasNodes, readCanvasDocument, removeCanvasNode, removeCanvasSpace, searchCanvas, selectCanvasBoard,
+  setCanvasNodeSpaces, setCanvasText, updateCanvasEdge, updateCanvasNode, updateCanvasSpace, updateCanvasViewport,
+  type CanvasDocument, type CanvasSpace,
 } from '../src/utils/canvas';
 
 function find(document: CanvasDocument, id: string) {
@@ -82,4 +84,76 @@ test('legacy Notepad migration is deterministic and corrupted saved Canvas data 
   assert.throws(() => readCanvasDocument({ ...original, activeBoardId: 'missing' }, original.text), /not been replaced/);
   const linked = addLinkedCanvasNode(original, { start: 2, end: 6 });
   assert.throws(() => readCanvasDocument({ ...linked.document, text: 'something unrelated' }), /not been replaced/);
+});
+
+test('ellipse hit testing and overlap placement handle corners, narrow lenses, and tangent spaces', () => {
+  const broad: CanvasSpace = { id: 'broad', title: 'Broad', x: 0, y: 0, width: 200, height: 90 };
+  const narrow: CanvasSpace = { id: 'narrow', title: 'Narrow', x: 190, y: 26, width: 30, height: 42 };
+  assert.deepEqual(canvasSpacesAtPoint([broad, narrow], { x: 0, y: 0 }), []);
+  assert.deepEqual(canvasSpacesAtPoint([broad, narrow], { x: 200, y: 45 }), ['broad', 'narrow']);
+  const lens = canvasSpaceOverlapPoint([broad, narrow]);
+  assert.ok(lens);
+  assert.deepEqual(canvasSpacesAtPoint([broad, narrow], lens), ['broad', 'narrow']);
+  assert.ok(lens.x >= 190 && lens.x <= 200);
+  const tangent: CanvasSpace = { ...narrow, x: 200, y: 24 };
+  assert.deepEqual(canvasSpaceOverlapPoint([broad, tangent]), { x: 200, y: 45 });
+  assert.equal(canvasSpaceOverlapPoint([broad, { ...tangent, x: 201 }]), undefined);
+  assert.equal(canvasSpaceOverlapPoint([broad, narrow, { ...tangent, id: 'third', x: 193, y: 60 }]), undefined);
+});
+
+test('cards can belong to several Spaces, and a geometric Space edit moves only members previously inside it', () => {
+  const a = addCanvasSpace(createCanvasDocument(), { title: ' Work ', x: 0, y: 0, width: 200, height: 200, color: '#ABCDEF' });
+  const b = addCanvasSpace(a.document, { title: 'Evening', x: 150, y: 0, width: 200, height: 200 });
+  const note = addCanvasNode(b.document, { kind: 'note', text: 'Read', x: -200, y: -200, width: 40, height: 40 });
+  const unassigned = addCanvasNode(note.document, { kind: 'note', text: 'Unassigned', x: 70, y: 70, width: 40, height: 40 });
+  const assigned = setCanvasNodeSpaces(unassigned.document, note.nodeId, [a.spaceId, b.spaceId, a.spaceId]);
+  const matches = (doc: CanvasDocument) => {
+    const card = find(doc, note.nodeId);
+    return canvasSpacesAtPoint(activeCanvasBoard(doc).spaces!, { x: card.x + 20, y: card.y + 20 });
+  };
+  assert.deepEqual(matches(assigned), [a.spaceId, b.spaceId]);
+  assert.deepEqual(find(assigned, note.nodeId).spaceIds, [a.spaceId, b.spaceId]);
+  assert.equal(setCanvasNodeSpaces(assigned, note.nodeId, [a.spaceId, b.spaceId]), assigned);
+  assert.equal(find(unassigned.document, note.nodeId).x, -200);
+  assert.deepEqual(searchCanvas(assigned, 'work read').map((item) => item.node.id), [note.nodeId]);
+
+  const resized = updateCanvasSpace(assigned, a.spaceId, { width: 160, title: 'Office', color: null });
+  assert.deepEqual(matches(resized), [a.spaceId, b.spaceId]);
+  assert.equal(find(resized, unassigned.nodeId), find(assigned, unassigned.nodeId));
+  assert.equal(activeCanvasBoard(resized).spaces?.[0]?.color, undefined);
+  const disjoint = updateCanvasSpace(resized, a.spaceId, { x: -300 });
+  assert.equal(find(disjoint, note.nodeId), find(resized, note.nodeId), 'disjoint membership does not move the card');
+  assert.deepEqual(find(disjoint, note.nodeId).spaceIds, [a.spaceId, b.spaceId]);
+  assert.deepEqual(find(removeCanvasSpace(disjoint, a.spaceId), note.nodeId).spaceIds, [b.spaceId]);
+  const cleared = setCanvasNodeSpaces(disjoint, note.nodeId, []);
+  assert.equal(find(cleared, note.nodeId).spaceIds, undefined);
+  assert.equal(find(cleared, note.nodeId).text, 'Read');
+  assert.throws(() => setCanvasNodeSpaces(disjoint, note.nodeId, ['missing']), /unavailable/);
+});
+
+test('drawing strokes and Space membership round-trip independently of legacy groups, and invalid references are rejected', () => {
+  const initial = createCanvasDocument();
+  const space = addCanvasSpace(initial, { title: 'House' });
+  const note = addCanvasNode(space.document, { kind: 'sticky', spaceIds: [space.spaceId] });
+  const grouped = groupCanvasNodes(note.document, [note.nodeId], 'Furniture');
+  const points = [{ x: 25, y: -14 }, { x: 31, y: -15 }];
+  const drawing = addCanvasStroke(grouped.document, { points, color: '#12FA8B', width: 1.5 });
+  const withDot = addCanvasStroke(drawing, { points: [{ x: 0, y: 1 }] });
+  points[0]!.x = 700;
+  assert.equal(activeCanvasBoard(withDot).strokes?.[0]?.points[0]?.x, 25, 'input points are copied');
+  assert.equal(activeCanvasBoard(withDot).strokes?.[1]?.width, 2);
+  assert.deepEqual(readCanvasDocument(JSON.parse(JSON.stringify(withDot))), withDot);
+  const removed = removeCanvasSpace(withDot, space.spaceId);
+  assert.equal(find(removed, note.nodeId).spaceIds, undefined);
+  assert.equal(find(removed, note.nodeId).groupId, grouped.nodeId);
+  assert.equal(activeCanvasBoard(removed).strokes, activeCanvasBoard(withDot).strokes);
+  const board = activeCanvasBoard(withDot);
+  const invalid = (patch: Partial<typeof board>) => readCanvasDocument({ ...withDot, boards: [{ ...board, ...patch }] });
+  assert.throws(() => invalid({ spaces: [] }), /invalid/);
+  assert.throws(() => invalid({ spaces: [...board.spaces!, ...board.spaces!] }), /invalid/);
+  assert.throws(() => invalid({ strokes: [{ ...board.strokes![0]!, points: [] }] }), /invalid/);
+  assert.throws(() => addCanvasStroke(withDot, { points: [{ x: Infinity, y: 0 }] }), /invalid/);
+  assert.throws(() => addCanvasStroke(withDot, { points: Array(CANVAS_STROKE_POINT_LIMIT + 1).fill({ x: 0, y: 0 }) }), /invalid/);
+  const other = addCanvasBoard(withDot, 'Other');
+  assert.throws(() => addCanvasNode(other, { kind: 'note', spaceIds: [space.spaceId] }), /unavailable/);
 });

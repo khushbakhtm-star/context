@@ -28,7 +28,7 @@ export function centerCanvasNode(node: CanvasNode, size: Size, zoom: number): Vi
     y: node.y + (node.height - size.height / zoom) / 2, zoom };
 }
 
-export function fitCanvas(nodes: CanvasNode[], size: Size): Viewport {
+export function fitCanvas(nodes: (Point & Size)[], size: Size): Viewport {
   if (!nodes.length || size.width <= 0 || size.height <= 0) return { x: 0, y: 0, zoom: 1 };
   let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
   for (const node of nodes) {
