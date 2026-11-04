@@ -28,6 +28,8 @@ type Props = {
   priorityRevision?: string | null;
   priorityHideCompleted?: boolean;
   onPriorityHideCompletedChange?: (value: boolean) => Promise<void>;
+  priorityCaptureListId?: string | null;
+  onPriorityCaptureListChange?: (listId: string | null) => Promise<void>;
   onCreatePriorityList?: (name: string, expectedRevision: string | null) => Promise<void>;
   onRenamePriorityList?: (id: string, name: string, expectedRevision: string | null) => Promise<void>;
   priorityError?: string | null;
@@ -47,6 +49,7 @@ export function SettingsScreen({
   updates,
   activeDate = dateKey(new Date()),
   priorityLists = [], priorityRevision, priorityHideCompleted = false, onPriorityHideCompletedChange,
+  priorityCaptureListId, onPriorityCaptureListChange,
   onCreatePriorityList, onRenamePriorityList, priorityError,
 }: Props) {
   const { colors, mode, setMode, persistenceError } = useAppTheme();
@@ -57,10 +60,12 @@ export function SettingsScreen({
   const [checkError, setCheckError] = useState<string | null>(null);
   const [showOtherCalendars, setShowOtherCalendars] = useState(false);
   const [priorityDraft, setPriorityDraft] = useState<{ id: string | null; name: string; revision: string | null } | null>(null);
+  const [priorityDestinationOpen, setPriorityDestinationOpen] = useState(false);
   const [priorityBusy, setPriorityBusy] = useState(false);
   const priorityBusyRef = useRef(false);
   const [prioritySaveError, setPrioritySaveError] = useState<string | null>(null);
   const mounted = useRef(true);
+  const captureList = priorityLists.find((list) => list.id === priorityCaptureListId);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   async function priorityAction(action: () => Promise<void>, closeEditor = false) {
     if (priorityBusyRef.current) return;
@@ -170,7 +175,7 @@ export function SettingsScreen({
 
       <View style={styles.sectionHeadingRow}>
         <Text accessibilityRole="header" style={styles.sectionTitle}>Priority</Text>
-        <InfoButton title="Checklist task flow" message="Create or rename checklists here. In Priority, use the arrows to switch lists and + to add a task. Drag a task to change its priority; nested subtasks move with it. Checked tasks fade and can be hidden. Reset removes all checks in the current list." />
+        <InfoButton title="Checklist task flow" message="Create or rename checklists here. Choose where text selected in the calendar becomes a task. In Priority, swipe sideways to switch lists and use + to add a task. Drag a task to change its priority; nested subtasks move with it. Checked tasks fade and can be hidden. Reset removes all checks in the current list." />
       </View>
       <View style={styles.priorityToggle}>
         <Text style={styles.priorityLabel}>Hide completed tasks</Text>
@@ -178,6 +183,30 @@ export function SettingsScreen({
           disabled={priorityBusy || !onPriorityHideCompletedChange}
           onValueChange={(value) => { if (onPriorityHideCompletedChange) void priorityAction(() => onPriorityHideCompletedChange(value)); }}
           trackColor={{ false: colors.switchTrackOff, true: colors.switchTrackOn }} thumbColor={colors.switchThumb} />
+      </View>
+      <View style={styles.priorityLists}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Calendar task destination"
+          accessibilityState={{ expanded: priorityDestinationOpen }}
+          accessibilityValue={{ text: captureList?.name ?? 'Ask every time' }}
+          disabled={priorityBusy || !onPriorityCaptureListChange || priorityRevision === undefined}
+          onPress={() => setPriorityDestinationOpen((open) => !open)} style={styles.priorityListRow}>
+          <Text style={styles.priorityLabel}>Calendar task destination</Text>
+          <Text style={styles.priorityDestinationValue} numberOfLines={1}>{captureList?.name ?? 'Ask every time'}</Text>
+        </Pressable>
+        {priorityDestinationOpen && onPriorityCaptureListChange ? <View accessibilityRole="radiogroup" accessibilityLabel="Add calendar tasks to">
+          {[{ id: null, name: 'Ask every time' }, ...priorityLists].map((option) => {
+            const checked = option.id === (captureList?.id ?? null);
+            return <Pressable key={option.id === null ? 'ask' : `list:${option.id}`} accessibilityRole="radio" accessibilityLabel={option.name}
+              accessibilityState={{ checked, disabled: priorityBusy }} disabled={priorityBusy}
+              style={styles.priorityListRow} onPress={() => void priorityAction(async () => {
+                await onPriorityCaptureListChange(option.id);
+                if (mounted.current) setPriorityDestinationOpen(false);
+              })}>
+              <Text style={styles.priorityLabel}>{option.name}</Text>
+              {checked ? <Text accessible={false} style={styles.priorityEdit}>✓</Text> : null}
+            </Pressable>;
+          })}
+        </View> : null}
       </View>
       <View style={styles.priorityLists}>
         {priorityLists.map((list) => <Pressable key={list.id} accessibilityRole="button" accessibilityLabel={`Rename checklist ${list.name}`}
@@ -359,6 +388,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   sectionTitle: { flex: 1, color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '600' },
   priorityToggle: { flexDirection: 'row', alignItems: 'center', minHeight: 52, gap: 8 },
   priorityLabel: { flex: 1, color: colors.graphite, fontSize: 14, lineHeight: 21 },
+  priorityDestinationValue: { maxWidth: '48%', color: colors.muted, fontSize: 13 },
   priorityLists: { borderWidth: StyleSheet.hairlineWidth, borderColor: colors.hairline, borderRadius: 12, paddingHorizontal: 14, backgroundColor: colors.surface },
   priorityListRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10 },
   priorityEdit: { fontSize: 22, color: colors.muted, width: 26, textAlign: 'center' },

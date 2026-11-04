@@ -14,11 +14,11 @@ import { minuteCellPresentation, MINUTE_NOTE_STYLE, MINUTE_TIME_STYLE } from './
 import { effectiveTextColor, noteColorOnFill } from './text-color';
 import { bindComposerViewport } from './composer-viewport';
 import { bindMouseSelection, type GridPoint } from './mouse-selection';
-import { bindViewSwipe } from './view-swipe';
+import { bindChecklistSwipe, bindViewSwipe } from './view-swipe';
 import { applySyncGlyphState } from './sync-glyph';
 import { ChecklistFlowUI } from './checklist-flow-ui';
 import { browserChecklist, browserChecklistVersions, changeBrowserChecklist, replaceBrowserChecklistList,
-  createBrowserChecklistList, renameBrowserChecklistList,
+  createBrowserChecklistList, moveBrowserChecklistTask, renameBrowserChecklistList,
   minuteTaskSnapshot, newBrowserTask, type MinuteTaskSnapshot } from './checklist-flow';
 import { DEFAULT_CHECKLIST_LIST_ID, checklistRows, type ChecklistChange, type ChecklistFlow } from '../shared/utils/checklist-flow';
 
@@ -54,7 +54,8 @@ let moveDraft: { store: BrowserStore; coords: GridPoint[]; grabbed: GridPoint; o
 let movePreview: GridPoint[] = [];
 type CellClipboard = { store: BrowserStore; coords: GridPoint[]; origin: GridPoint; fingerprint: string; text: string; cut: boolean };
 let cellClipboard: CellClipboard | null = null;
-const settings = { appearance: 'system', clock: '12', hideCompleted: false };
+const settings = { appearance: 'system', clock: '12', hideCompleted: false, checklistDestination: '' };
+const captureDestinationKey = (active: BrowserStore) => `context:checklist-destination:${active.state.device}`;
 let checklistVisible = false;
 let calendarScrollBeforeChecklist = 0;
 let activeChecklistId = DEFAULT_CHECKLIST_LIST_ID;
@@ -68,7 +69,8 @@ function prioritySnapshot() {
   if (!store || priorityScope.store !== store) return null;
   const current = browserChecklist(store.state, activeChecklistId);
   return { ...current, name: current.lists.find((list) => list.id === activeChecklistId)!.name,
-    scope: priorityScope, versions: browserChecklistVersions(store.state, activeChecklistId).filter((version) => version.listId === activeChecklistId) };
+    scope: priorityScope, canMoveToList: current.lists.length > 1,
+    versions: browserChecklistVersions(store.state, activeChecklistId).filter((version) => version.listId === activeChecklistId) };
 }
 const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
   snapshot: prioritySnapshot,
@@ -90,6 +92,7 @@ const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
     if (changedUndo?.after.length) priorityUndos.set(listId, { store: active, edit: changedUndo });
     updateHeader(); void synchronize(false);
   },
+  moveToList: movePriorityTaskToList,
   source: (source) => { const point = source.ranges[0]; if (!point) return; setChecklistVisible(false);
     day = point.dateKey; selected = { day, minute: point.startMinute }; rangeEnd = null; plans = []; render(); scrollMinute(selected.minute); void refreshPlans(); },
   back: restoreCalendarView,
@@ -97,9 +100,29 @@ const checklistUI = new ChecklistFlowUI(element('checklist-flow'), {
 });
 function setChecklistVisible(visible: boolean) {
   if (visible && !checklistVisible) calendarScrollBeforeChecklist = main.scrollTop;
-  checklistVisible = visible; element('checklist-flow').hidden = !visible;
+  const pane = element('checklist-flow');
+  checklistVisible = visible;
+  pane.hidden = !visible;
+  main.tabIndex = visible ? 0 : -1;
+  main.setAttribute('aria-label', visible ? 'Priority checklists. Swipe or use the left and right arrow keys to change checklists.' : 'Calendar');
   document.body.classList.toggle('view-checklist', visible);
-  if (visible) { entryBarMode = null; updateBars(); main.scrollTop = 0; checklistUI.refresh(true); }
+  if (visible) {
+    entryBarMode = null;
+    updateBars();
+    main.scrollTop = 0;
+    pane.style.minHeight = '';
+    checklistUI.refresh(true);
+    const scope = priorityScope;
+    requestAnimationFrame(() => {
+      if (!checklistVisible || priorityScope !== scope || main.scrollTop > 0) return;
+      const first = pane.querySelector('.checklist-row');
+      const unfinished = pane.querySelector('.checklist-row:not(.completed)');
+      if (!unfinished || unfinished === first) return;
+      const top = unfinished.getBoundingClientRect().top - main.getBoundingClientRect().top;
+      pane.style.minHeight = `${Math.ceil(top + main.clientHeight)}px`;
+      main.scrollTop = top;
+    });
+  }
   updateHeader();
 }
 function restoreCalendarView() {
@@ -113,9 +136,10 @@ async function showChecklistView() {
   if (store !== active || priorityScope !== scope) return; closeCellMenu();
   element<HTMLDialogElement>('menu-dialog').close(); element<HTMLDialogElement>('view-dialog').close(); setChecklistVisible(true);
 }
-function pickChecklistDestination(lists: { id: string; name: string }[]): Promise<string | undefined> {
+function pickChecklistDestination(lists: { id: string; name: string }[], title = 'Add to checklist'): Promise<string | undefined> {
   const dialog = element<HTMLDialogElement>('checklist-destination');
   const choices = element('checklist-destination-lists');
+  element('checklist-destination-title').textContent = title;
   choices.replaceChildren();
   for (const list of lists) {
     const button = document.createElement('button');
@@ -129,10 +153,31 @@ function pickChecklistDestination(lists: { id: string; name: string }[]): Promis
     resolve(lists.find((list) => list.id === dialog.returnValue)?.id);
   }, { once: true }));
 }
+async function movePriorityTaskToList(taskId: string, expected: string | undefined, scope: object) {
+  if (!store || priorityScope !== scope || priorityScope.store !== store) throw new Error('The account or checklist changed. Reopen Priority.');
+  const active = store;
+  const sourceListId = activeChecklistId;
+  const destinations = browserChecklist(active.state).lists.filter((list) => list.id !== sourceListId);
+  if (!destinations.length) return;
+  const destinationId = await pickChecklistDestination(destinations, 'Move to checklist');
+  if (!destinationId) return;
+  let moved: ReturnType<typeof moveBrowserChecklistTask> | undefined;
+  await active.update((state) => {
+    if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Reopen Priority.');
+    moved = moveBrowserChecklistTask(state, expected, sourceListId, taskId, destinationId);
+    return moved.state;
+  });
+  if (store !== active || priorityScope !== scope) return;
+  if (moved?.undo.after.length) priorityUndos.set(sourceListId, { store: active, edit: moved.undo });
+  updateHeader();
+  void synchronize(false);
+}
 async function createChecklistTask(snapshot: MinuteTaskSnapshot) {
   if (!store || priorityScope.store !== store) throw new Error('Unlock your private ledger first.'); const active = store; const scope = priorityScope;
   const { lists, revision: expected } = browserChecklist(active.state);
-  const listId = lists.length > 1 ? await pickChecklistDestination(lists) : lists[0]?.id;
+  const preferred = settings.checklistDestination;
+  const listId = lists.find((list) => list.id === preferred)?.id ??
+    (lists.length === 1 && !preferred ? lists[0]!.id : await pickChecklistDestination(lists));
   if (!listId) return;
   if (store !== active || priorityScope !== scope) throw new Error('The account or checklist changed. Select the task text again.');
   let changedUndo: UndoEdit | undefined;
@@ -176,6 +221,16 @@ function renderPrioritySettings(drafts = new Map<string, string>()) {
   element<HTMLButtonElement>('priority-reset').disabled = !canReset;
   element<HTMLInputElement>('priority-new-name').disabled = !current;
   element<HTMLInputElement>('hide-completed').checked = settings.hideCompleted;
+  const destination = element<HTMLSelectElement>('priority-capture-destination');
+  destination.disabled = !current;
+  destination.replaceChildren();
+  for (const list of [{ id: '', name: 'Ask every time' }, ...(current?.lists ?? [])]) {
+    const choice = document.createElement('option');
+    choice.value = list.id;
+    choice.textContent = list.name;
+    destination.append(choice);
+  }
+  destination.value = current?.lists.some((list) => list.id === settings.checklistDestination) ? settings.checklistDestination : '';
   if (!current || !prioritySettingsSession) return;
   const session = prioritySettingsSession;
   for (const list of current.lists) {
@@ -392,7 +447,7 @@ async function showCellMenu(x: number, y: number) {
   const source = { stamp, expected: new Map(coords.map((point) => [minuteKey(point.day, point.minute), documents.get(minuteKey(point.day, point.minute))?.revision])) };
   const copiedText = new Map(coords.map((point, index) => [minuteKey(point.day, point.minute), textValues[index]!]));
   const distinct = [...new Set(textValues.filter((text) => text.length))];
-  const add = (label: string, action: () => Promise<void>) => {
+  const add = (label: string, action: () => Promise<void>, preserveEditor = false) => {
     const button = document.createElement('button');
     button.textContent = label;
     button.setAttribute('role', 'menuitem');
@@ -401,7 +456,7 @@ async function showCellMenu(x: number, y: number) {
           commandBusy || cellMenuDraftPending()) return;
       // Clipboard access must start inside this click. An untouched editor
       // can close immediately, while a draft stays available for Save.
-      closeCleanEditor();
+      if (!preserveEditor) closeCleanEditor();
       void cellCommand(action);
     };
     menu.append(button);
@@ -420,8 +475,13 @@ async function showCellMenu(x: number, y: number) {
   if (coords.length > 1 && distinct.length === 1) add('AutoFill', () => writeSelectedText(coords.map((point) => ({ ...point, text: distinct[0]! })), source));
   if (distinct.some((text) => text.trim())) add('Add to Priority', async () => {
     if (store !== active || selectionStamp() !== stamp) throw new Error('The selection changed. Choose your task text again.');
+    if (coords.length === 1 && editor?.day === anchor.day && editor.minute === anchor.minute &&
+        editor.input.selectionEnd > editor.input.selectionStart) {
+      await addEditorTextToChecklist();
+      return;
+    }
     await createChecklistTask(minuteTaskSnapshot(coords.map((point, index) => ({ ...point, text: textValues[index]! }))));
-  });
+  }, true);
   const sameDay = coords.every((point) => point.day === coords[0]!.day);
   const hasGroup = coords.some((point) => {
     const minute = documents.get(minuteKey(point.day, point.minute))?.value;
@@ -524,14 +584,6 @@ function updateHeader() {
   element('now').setAttribute('aria-label', checklistVisible
     ? 'Priority. Tap to choose a view. Swipe or use the arrow keys to return to your calendar.'
     : `${calendarView}. Tap for the current minute, double-click for views or hold to choose dates. Swipe or use the arrow keys for Priority.`);
-  let listNavigationDisabled = false;
-  if (checklistVisible) {
-    try { const lists = store ? browserChecklist(store.state).lists : [];
-      listNavigationDisabled = !lists.length || (lists.length < 2 && lists.some((list) => list.id === activeChecklistId));
-    } catch { listNavigationDisabled = true; }
-  }
-  element<HTMLButtonElement>('previous').disabled = listNavigationDisabled; element<HTMLButtonElement>('next').disabled = listNavigationDisabled;
-  element('previous').setAttribute('aria-label', checklistVisible ? 'Previous checklist' : 'Previous dates'); element('next').setAttribute('aria-label', checklistVisible ? 'Next checklist' : 'Next dates');
   if (!store) checklistUI.clear();
   if (checklistVisible) checklistUI.refresh();
 }
@@ -605,10 +657,17 @@ function render() {
   const scrollTop = main.scrollTop; const scrollLeft = main.scrollLeft;
   grid.replaceChildren(); const visible = dates(); const timeWidth = clock12 ? '78px' : '51px';
   grid.style.setProperty('--time-width', timeWidth); grid.style.setProperty('--columns', `${timeWidth} repeat(${visible.length},minmax(0,1fr))`);
-  const heading = document.createElement('div'); heading.className = 'grid-heading'; heading.setAttribute('role', 'row'); heading.append(document.createElement('div'));
-  for (const date of visible) { const node = document.createElement('div'); const parsed = new Date(`${date}T12:00:00`); node.append(document.createTextNode(parsed.toLocaleDateString(undefined, { weekday: 'short', month: 'short' })));
-    if (visible.length === 1) { node.style.textAlign = 'left'; node.style.paddingLeft = '8px'; }
-    const strong = document.createElement('strong'); strong.textContent = String(parsed.getDate()); node.append(strong); heading.append(node); }
+  const singleDay = visible.length === 1;
+  const heading = document.createElement('div'); heading.className = singleDay ? 'grid-heading day-heading' : 'grid-heading'; heading.setAttribute('role', 'row');
+  if (!singleDay) heading.append(document.createElement('div'));
+  for (const date of visible) {
+    const node = document.createElement('div');
+    const label = singleDay ? document.createElement('span') : node;
+    if (singleDay) { label.className = 'day-heading-label'; node.append(label); }
+    const parsed = new Date(`${date}T12:00:00`);
+    label.append(document.createTextNode(parsed.toLocaleDateString(undefined, singleDay ? { weekday: 'short' } : { weekday: 'short', month: 'short' })));
+    const strong = document.createElement('strong'); strong.textContent = String(parsed.getDate()); label.append(strong); heading.append(node);
+  }
   grid.append(heading); const docs = new Map(store.state.documents.map((doc) => [doc.key, doc]));
   const today = dateKey(new Date()); const minuteNow = new Date().getHours() * 60 + new Date().getMinutes();
   const first = Math.max(0, Math.floor((scrollTop - 50) / 32) - 12); const through = Math.min(1440, first + Math.ceil(main.clientHeight / 32) + 30); firstRendered = first;
@@ -789,6 +848,14 @@ element('search').onclick = () => { void openSearch().catch(report); };
 element('menu-search').onclick = () => { void openSearch(true).catch(report); };
 element<HTMLFormElement>('search-form').onsubmit = (event) => { event.preventDefault(); try { showSearchResults(); } catch (error) { report(error); } };
 element<HTMLInputElement>('hide-completed').onchange = (event) => { settings.hideCompleted = (event.target as HTMLInputElement).checked; checklistUI.setHideCompleted(settings.hideCompleted); };
+element<HTMLSelectElement>('priority-capture-destination').onchange = (event) => {
+  const active = store;
+  if (!active || prioritySettingsSession?.store !== active) return;
+  const id = (event.target as HTMLSelectElement).value;
+  if (id && !browserChecklist(active.state).lists.some((list) => list.id === id)) return;
+  settings.checklistDestination = id;
+  try { localStorage.setItem(captureDestinationKey(active), id); } catch { /* This browser can keep the setting for the current session. */ }
+};
 element('priority-hide-info').onclick = () => { info('Hide completed', 'Checked tasks and their completed subtasks fade out. Turn this on to hide them in Priority and its current-list search. Uncheck tasks or reset checks to show them again.'); };
 element('priority-reset').onclick = () => { void checklistUI.resetChecks().then(() => renderPrioritySettings()).catch(report); };
 element<HTMLFormElement>('priority-create').onsubmit = (event) => { event.preventDefault(); const session = prioritySettingsSession; if (session) void changePriorityCatalog(session, () => element<HTMLInputElement>('priority-new-name').value); };
@@ -823,10 +890,12 @@ bindViewSwipe(element<HTMLButtonElement>('now'), {
     });
   },
 });
+bindChecklistSwipe(main, () => Boolean(checklistVisible && store && !commandBusy && !document.querySelector('dialog[open]')),
+  (direction) => { void stepPriorityList(direction).catch(report); });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-days]')) button.onclick = () => { void navigation(() => { setChecklistVisible(false); days = Number(button.dataset.days); element<HTMLDialogElement>('view-dialog').close(); render(); void refreshPlans(); }); };
 element('apply-dates').onclick = () => { if (!dayInput.value) return; void navigation(() => { day = dayInput.value; days = Number(daysInput.value); plans = []; element<HTMLDialogElement>('date-dialog').close(); render(); void refreshPlans(); }); };
-element('previous').onclick = () => { if (checklistVisible) void stepPriorityList(-1).catch(report); else void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
-element('next').onclick = () => { if (checklistVisible) void stepPriorityList(1).catch(report); else void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
+element('previous').onclick = () => { if (!checklistVisible) void navigation(() => { day = dateKey(addDays(day, -days)); plans = []; render(); void refreshPlans(); }); };
+element('next').onclick = () => { if (!checklistVisible) void navigation(() => { day = dateKey(addDays(day, days)); plans = []; render(); void refreshPlans(); }); };
 async function undoCurrentView() {
   const active = store, scope = priorityScope, listId = activeChecklistId, priority = checklistVisible; if (!active) return;
   await saveEditor(); await checklistUI.flush();
@@ -848,6 +917,8 @@ element<HTMLFormElement>('unlock-form').onsubmit = (event) => { event.preventDef
     // A new browser must discover and decrypt the phone ledger before enabling new entries.
     if (!unlocked.hasSavedLedger()) { try { await connection.sync(unlocked, entered); } catch (error) { unlocked.lock(); if (store === unlocked) { store = null; passphrase = ''; } throw error; } }
     if (request !== unlockRequest || store !== unlocked) return;
+    settings.checklistDestination = '';
+    try { settings.checklistDestination = localStorage.getItem(captureDestinationKey(unlocked)) ?? ''; } catch { /* The default is to ask. */ }
     options.close(); goNow(); status('Ledger unlocked. Select a minute and type, or paste spreadsheet cells.'); void synchronize(false);
   })().catch((error) => { if (request === unlockRequest) report(error); }).finally(() => { if (request === unlockRequest) { busy = false; updateHeader(); } });
 };

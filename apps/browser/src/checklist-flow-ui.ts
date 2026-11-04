@@ -1,11 +1,13 @@
-import { checklistRows, checklistSubtreeIds, type ChecklistChange, type ChecklistFlow, type ChecklistTask } from '../shared/utils/checklist-flow';
+import { checklistRows, checklistSubtreeIds, prioritizeChecklistRows, type ChecklistChange, type ChecklistFlow, type ChecklistTask } from '../shared/utils/checklist-flow';
 import { newBrowserTask } from './checklist-flow';
 
-type Snapshot = { scope: object; name?: string; flow: ChecklistFlow; revision: string | undefined; versions: { revision: string; flow: ChecklistFlow }[] };
+type Snapshot = { scope: object; name?: string; flow: ChecklistFlow; revision: string | undefined;
+  versions: { revision: string; flow: ChecklistFlow }[]; canMoveToList?: boolean };
 export type ChecklistFlowHooks = {
   snapshot(): Snapshot | null;
   change(command: ChecklistChange, expected: string | undefined, scope: object): Promise<string | undefined>;
   restore(value: ChecklistFlow, expected: string | undefined, scope: object): Promise<void>;
+  moveToList?(taskId: string, expected: string | undefined, scope: object): Promise<void>;
   source(source: NonNullable<ChecklistTask['source']>): void;
   back(): void;
   error(error: unknown): void;
@@ -55,7 +57,7 @@ export class ChecklistFlowUI {
     if (current.name) { const title = document.createElement('h1'); title.className = 'priority-list-name'; title.textContent = current.name; this.host.append(title); }
     this.message = document.createElement('p'); this.message.className = 'checklist-message'; this.message.setAttribute('role', 'status'); this.host.append(this.message);
     const list = document.createElement('div'); list.className = 'checklist-rows'; list.setAttribute('role', 'list'); list.setAttribute('aria-label', current.name ?? 'Priority');
-    const rows = checklistRows(current.flow, this.hiddenCompleted);
+    const rows = prioritizeChecklistRows(checklistRows(current.flow, this.hiddenCompleted));
     for (const { task, depth } of rows) list.append(this.row(task, depth, current));
     this.host.append(list);
     if (this.composerOpen || this.composerDraft) this.composer(current, composerHadFocus);
@@ -182,6 +184,12 @@ export class ChecklistFlowUI {
       button('Indent task', '→', () => { void this.command({ type: 'indent', id: task.id }, snapshot.revision, snapshot.scope); }),
       button('Outdent task', '←', () => { void this.command({ type: 'outdent', id: task.id }, snapshot.revision, snapshot.scope); }),
       button('Delete task and subtasks', 'Delete', () => { void this.command({ type: 'delete', id: task.id }, snapshot.revision, snapshot.scope); }));
+    if (snapshot.canMoveToList && this.hooks.moveToList) actions.append(button('Move to checklist', 'Move to checklist', () => {
+      void this.act(async () => {
+        const current = this.hooks.snapshot();
+        if (current) await this.hooks.moveToList!(task.id, current.revision, snapshot.scope);
+      }, snapshot);
+    }));
     if (task.source) actions.append(button('Open source minute', '↗', () => { void this.flush().then(() => this.hooks.source(task.source!)).catch(this.hooks.error); }));
     details.append(actions); row.append(tick, input, handle, details);
     requestAnimationFrame(size); return row;

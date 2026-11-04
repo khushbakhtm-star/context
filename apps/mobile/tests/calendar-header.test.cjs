@@ -92,9 +92,10 @@ function headerHarness(props = {}, options = {}) {
   const hold = (button) => { button.props.onPressIn?.({ nativeEvent: { touches: [{}] } }); advance(450);
     button.props.onLongPress(); button.props.onPress(); };
   const binder = () => nodes().find((node) => /^.* view\. Go to (now|top)/.test(node.props.accessibilityLabel ?? ''));
-  const iconTrack = () => nodes(binder()).find((node) => node.type === 'AnimatedView').props;
-  return { calls, history, advance, render, nodes, press, hold, binder, iconTrack,
-    centerIcon: () => iconTrack().children[1].props.children,
+  return { calls, history, advance, render, nodes, press, hold, binder,
+    centerIcon: () => nodes(binder()).find((node) => node.type === 'CalendarViewIcon' || node.type === 'CalendarHeaderIcon'),
+    dots: () => nodes(binder()).filter((node) => /^(calendar|priority)-view-dot$/.test(node.props.testID ?? ''))
+      .map((node) => Boolean(node.props.style[1]?.backgroundColor)),
     swipeHandlers: () => nodes().find((node) => node.props.onPanResponderRelease).props,
     async settle() { for (let i = 0; i < 25; i++) await Promise.resolve(); render(); },
     changeHeight: (height) => { dimensions.height = height; render(); },
@@ -124,27 +125,21 @@ function beginBinderSwipe(h) {
   return swipe;
 }
 
-test('view icon previews the other view in either direction and a release switches once without a tap', () => {
+test('the view switch keeps one complete icon and changes views once on release', () => {
   for (const direction of [-1, 1]) {
     const h = headerHarness({ viewMode: 'week' });
-    const track = h.iconTrack();
-    const viewport = h.binder().props.children;
-    const offset = track.style[1].transform[0].translateX;
-    assert.equal(viewport.props.style.overflow, 'hidden');
-    assert.equal(track.style[1].left, -44);
-    assert.equal(offset.value, 0);
     assert.equal(h.centerIcon().props.mode, 'week');
+    assert.deepEqual(h.dots(), [true, false]);
     const swipe = beginBinderSwipe(h);
     assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(12 * direction)), true);
     swipe.onPanResponderGrant(swipeEvent(12 * direction));
     swipe.onPanResponderMove(swipeEvent(20 * direction));
-    assert.equal(offset.value, 20 * direction);
-    assert.equal(track.children[direction === -1 ? 2 : 0].props.children.props.name, 'checklist');
+    assert.equal(h.nodes(h.binder()).filter((node) => node.type === 'CalendarViewIcon' || node.type === 'CalendarHeaderIcon').length, 1);
+    assert.deepEqual(h.dots(), [true, false]);
     assert.equal(h.calls.checklist, 0);
     swipe.onPanResponderRelease(swipeEvent(29 * direction, 2, 0));
     swipe.onPanResponderRelease(swipeEvent(29 * direction, 2, 0));
     h.binder().props.onPress();
-    assert.equal(offset.value, 0);
     assert.equal(h.calls.checklist, 1);
     assert.equal(h.calls.now, 0);
   }
@@ -155,7 +150,7 @@ test('Priority swipes back to Pick / Range without selecting a new calendar mode
   const h = headerHarness({ viewMode: 'day', hasSelectedDates: true, priority });
   const swipe = beginBinderSwipe(h);
   assert.equal(h.centerIcon().props.name, 'checklist');
-  assert.equal(h.iconTrack().children[0].props.children.props.mode, 'month');
+  assert.deepEqual(h.dots(), [false, true]);
   assert.equal(h.binder().props.accessibilityActions.find((action) => action.name === 'switchView').label,
     'Switch to Pick / Range view');
   assert.equal(swipe.onMoveShouldSetPanResponderCapture(swipeEvent(15)), true);
@@ -183,7 +178,6 @@ test('short, vertical, interrupted and multi-finger icon gestures do not change 
       swipe.onPanResponderRelease(swipeEvent(cancel === 'short' ? 18 : 35, 0, 0));
     }
     h.binder().props.onPress();
-    assert.equal(h.iconTrack().style[1].transform[0].translateX.value, 0, cancel);
     assert.equal(h.calls.checklist, 0, cancel);
     assert.equal(h.calls.now, 0, cancel);
   }
@@ -279,17 +273,17 @@ test('actual hamburger menu orders Dashboard, Print, Redo, global Search, Settin
   }
 });
 
-test('Priority keeps the complete toolbar, uses a clipboard, and never borrows calendar Undo', async () => {
+test('Priority omits navigation arrows, uses a clipboard, and never borrows calendar Undo', async () => {
   let undo = 0; let redo = 0; let flushes = 0;
   const priority = { listId: 'family', canUndo: true, canRedo: true, busy: false,
     undo: async () => { undo++; return true; }, redo: async () => { redo++; return true; }, beforeLeave: async () => true };
   const h = headerHarness({ priority, canGoPrevious: false }, { history: { canUndo: false, canRedo: false, busy: true }, flush: async () => { flushes++; } });
   const toolbar = h.nodes().find((node) => node.type === 'ScrollView');
   const buttons = h.nodes(toolbar).filter((node) => node.type === 'Pressable');
-  assert.deepEqual(buttons.map((node) => node.props.accessibilityLabel), ['Open menu', 'Previous checklist', 'Priority view. Go to top',
-    'Next checklist', 'Undo Context edit', 'Open Search', 'Sync attached calendars']);
-  assert.equal(h.centerIcon().props.name, 'checklist'); assert.equal(buttons[1].props.disabled, true);
-  assert.equal(buttons[4].props.disabled, false); h.press(buttons[4]); await h.settle(); assert.equal(undo, 1); assert.equal(h.calls.undo, 0);
+  assert.deepEqual(buttons.map((node) => node.props.accessibilityLabel), ['Open menu', 'Priority view. Go to top',
+    'Undo Context edit', 'Open Search', 'Sync attached calendars']);
+  assert.equal(h.centerIcon().props.name, 'checklist');
+  assert.equal(buttons[2].props.disabled, false); h.press(buttons[2]); await h.settle(); assert.equal(undo, 1); assert.equal(h.calls.undo, 0);
   h.nodes().find((node) => node.props.accessibilityLabel === 'Open menu').props.onPress(); h.render();
   h.nodes().find((node) => node.props.accessibilityLabel === 'Redo Context edit').props.onPress(); h.advance(0); await h.settle();
   assert.equal(redo, 1); assert.equal(h.calls.redo, 0); assert.equal(flushes, 0);

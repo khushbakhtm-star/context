@@ -77,11 +77,17 @@ body.view-checklist #grid,body.view-checklist #welcome{display:none!important}
 @media(max-width:600px){#checklist-flow{padding:18px 12px 70px}.checklist-heading{gap:6px;margin-bottom:14px}.checklist-heading h1{font-size:19px}.checklist-row{gap:6px;padding-left:calc(var(--task-depth)*14px)}.checklist-row>textarea{font-size:15px}.checklist-controls{gap:7px}.checklist-controls label{font-size:12px}}
 
 /* Priority keeps the same navigation and working space as the minute ledger. */
+:root { --context-menu-inset: 14px; --context-menu-width: 38px; }
+@media (max-width: 600px) { :root { --context-menu-inset: 8px; --context-menu-width: 32px; } }
+#menu { flex: 0 0 var(--context-menu-width); min-width: var(--context-menu-width); padding-inline: 0; }
+.grid-heading.day-heading { grid-template-columns: 1fr; }
+.grid-heading.day-heading>div { text-align: start; padding-left: var(--context-menu-inset); border-right: 0; }
+.day-heading-label { display: inline-block; width: var(--context-menu-width); text-align: center; }
 header>button svg{display:block;width:24px;height:24px;pointer-events:none}
 #now {
   position: relative;
   flex: 0 0 48px;
-  height: 40px;
+  height: 47px;
   border: 0;
   padding: 0;
   overflow: hidden;
@@ -89,26 +95,31 @@ header>button svg{display:block;width:24px;height:24px;pointer-events:none}
   touch-action: pan-y pinch-zoom;
   user-select: none;
   -webkit-touch-callout: none;
-  --calendar-slide: var(--view-swipe-offset, 0px);
-  --priority-slide: calc(var(--view-swipe-offset, 0px) + var(--view-swipe-edge, 0%));
 }
-#now[data-view=priority] {
-  --calendar-slide: calc(var(--view-swipe-offset, 0px) + var(--view-swipe-edge, 0%));
-  --priority-slide: var(--view-swipe-offset, 0px);
-}
-#now[data-swipe=left] { --view-swipe-edge: 100%; }
-#now[data-swipe=right] { --view-swipe-edge: -100%; }
 #now .view-icon {
   position: absolute;
-  inset: 0;
+  inset: 0 0 8px;
   display: grid;
   place-items: center;
   pointer-events: none;
 }
-#now .calendar-icon { transform: translateX(var(--calendar-slide)); }
-#now .priority-icon { transform: translateX(var(--priority-slide)); }
-#now:not([data-swipe]):not([data-view=priority]) .priority-icon,
-#now:not([data-swipe])[data-view=priority] .calendar-icon { visibility: hidden; }
+#now:not([data-view=priority]) .priority-icon,
+#now[data-view=priority] .calendar-icon { visibility: hidden; }
+#now .view-dots {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  pointer-events: none;
+}
+#now .view-dots>span { width: 5px; height: 5px; border: 1px solid var(--ink); border-radius: 50%; }
+#now:not([data-view=priority]) .view-dots>span:first-child,
+#now[data-view=priority] .view-dots>span:last-child { background: var(--ink); }
+body.view-checklist :is(#previous, #next) { display: none; }
+body.view-checklist main { touch-action: pan-y pinch-zoom; }
 #now .calendar-day-binder {
   width: 100%;
   border: 1.5px solid var(--ink);
@@ -122,7 +133,7 @@ header>button svg{display:block;width:24px;height:24px;pointer-events:none}
   font-size: 10px;
   text-transform: uppercase;
 }
-#now #date { display: block; font-size: 20px; line-height: 24px; font-weight: 600; }
+#now #date { display: block; font-size: 20px; line-height: 22px; font-weight: 600; }
 #now svg { width: 30px; height: 30px; }
 #now .calendar-range-binder, #now .calendar-week { display: none; }
 #now:is([data-calendar-span="3"], [data-calendar-span="7"]) .calendar-day-binder { display: none; }
@@ -132,6 +143,7 @@ header>button svg{display:block;width:24px;height:24px;pointer-events:none}
 .menu-items button{display:flex;align-items:center;gap:12px}
 .menu-items svg{display:block;width:24px;height:24px;flex:none}
 .priority-list-name{font-size:19px;font-weight:500;letter-spacing:0;margin:0 0 22px}
+.format-trigger { font-style: oblique 23deg; }
 .priority-add{position:fixed;right:24px;bottom:24px;width:54px;height:54px;border-radius:16px;background:var(--header);font-size:30px;line-height:1;padding:0;z-index:7;box-shadow:0 3px 14px #0002}
 .checklist-add{position:fixed;left:max(16px,calc((100vw - 940px)/2));right:max(16px,calc((100vw - 940px)/2));bottom:16px;z-index:7;background:var(--header);border:1px solid var(--line);border-radius:10px;padding:8px;margin:0;box-shadow:0 3px 14px #0002}
 .checklist-add textarea{max-height:160px;background:var(--surface)}

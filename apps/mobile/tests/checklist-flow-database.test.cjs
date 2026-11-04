@@ -193,6 +193,32 @@ test('whole-collection conflict restore recovers all list names and rows and onl
   assert.equal(kept.listId, 'main'); assert.equal(kept.collection.lists.length, 2);
 });
 
+test('a checklist transfer commits one exact revision and moves a nested task with its descendants', async (t) => {
+  const r = repository(t); await r.database.initializeDatabase();
+  const source = { ranges: [{ dateKey: '2026-11-02', startMinute: 500, endMinute: 500 }] };
+  const before = await r.database.putSyncDocument(key, { kind: 'checklistFlow', version: 2, lists: [
+    { id: 'main', name: 'Priority', items: [task('parent'), { ...task('moving', 'Move me', 'parent'), source, format: { bold: true } },
+      { ...task('subtask', 'Subtask', 'moving'), checked: true }] },
+    { id: 'work', name: 'Work', items: [task('existing')] },
+  ] }, { expectedRevision: null });
+  const initialState = state(r.sqlite);
+  await assert.rejects(r.tasks.transferChecklistTask('main', 'moving', 'missing', before.revision), /no longer available/);
+  assert.deepEqual(state(r.sqlite), initialState);
+  const moved = await r.tasks.transferChecklistTask('main', 'moving', 'work', before.revision);
+  assert.deepEqual(plain(moved.collection.lists[0].items), [task('parent')]);
+  assert.deepEqual(plain(moved.collection.lists[1].items), [task('existing'),
+    { ...task('moving', 'Move me'), source, format: { bold: true } },
+    { ...task('subtask', 'Subtask', 'moving'), checked: true }]);
+  assert.equal((await r.database.getSyncDocuments(key)).length, 1);
+  const movedState = state(r.sqlite);
+  await assert.rejects(r.tasks.transferChecklistTask('main', 'moving', 'work', before.revision), /changed on another device/);
+  assert.deepEqual(state(r.sqlite), movedState);
+  await r.tasks.replaceChecklistCollection('main', before.value, moved.revision);
+  assert.deepEqual(plain((await r.tasks.getChecklistFlow()).collection), plain(before.value));
+  assert.deepEqual(state(r.sqlite).native, initialState.native);
+  assert.deepEqual(state(r.sqlite).inline, initialState.inline);
+});
+
 test('the returned commit receipt cannot adopt a peer write that lands immediately after the transaction', async (t) => {
   const r = repository(t); await r.database.initializeDatabase();
   const first = await r.tasks.addChecklistTask('My task');

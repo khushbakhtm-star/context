@@ -157,6 +157,10 @@ export function checklistRows(flow: ChecklistFlow, hideCompleted = false): { tas
     return [{ task, depth }];
   });
 }
+
+export function prioritizeChecklistRows(rows: readonly { task: ChecklistTask; depth: number }[]) {
+  return [...rows.filter(({ task }) => task.checked), ...rows.filter(({ task }) => !task.checked)];
+}
 function uncheckAncestors(flow: ChecklistFlow, parentId: string | null) {
   while (parentId) { const parent = flow.items[taskIndex(flow, parentId)]!; parent.checked = false; parentId = parent.parentId; }
 }
@@ -302,6 +306,21 @@ export function checklistListSummaries(value: ChecklistCollection): ChecklistLis
 export function applyChecklistListChange(value: ChecklistCollection, listId: string, change: ChecklistChange): ChecklistCollection {
   const collection = readChecklistCollection(value); const list = collectionList(collection, listId);
   list.items = applyChecklistChange({ kind: 'checklistFlow', version: 1, items: list.items }, change).items;
+  return readChecklistCollection(collection);
+}
+
+/** Keep the moved task and its children together in one collection edit. */
+export function moveChecklistTaskToList(value: ChecklistCollection, sourceListId: string, taskId: string,
+  destinationListId: string): ChecklistCollection {
+  const collection = readChecklistCollection(value);
+  const source = collectionList(collection, sourceListId);
+  const destination = collectionList(collection, destinationListId);
+  if (source === destination) throw new Error('Choose a different checklist.');
+  const flow: ChecklistFlow = { kind: 'checklistFlow', version: 1, items: source.items };
+  const start = taskIndex(flow, taskId);
+  const moving = source.items.splice(start, endIndex(flow, start) - start);
+  moving[0]!.parentId = null;
+  destination.items.push(...moving);
   return readChecklistCollection(collection);
 }
 

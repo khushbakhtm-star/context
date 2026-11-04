@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bindViewSwipe } from '../src/view-swipe';
+import { bindChecklistSwipe, bindViewSwipe } from '../src/view-swipe';
 
 function fixture() {
   const actions: string[] = [];
@@ -24,14 +24,14 @@ function fixture() {
   return { actions, style, button, point, click };
 }
 
-test('a horizontal swipe peeks from the entering side and consumes the resulting click', (t) => {
+test('a horizontal swipe keeps the current icon still until release and consumes the resulting click', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   for (const direction of [-1, 1]) {
     const { actions, style, button, point, click } = fixture();
     button.onpointerdown!(point());
     button.onpointermove!(point(100 + direction * 14));
-    assert.equal(button.dataset.swipe, direction < 0 ? 'left' : 'right');
-    assert.equal(style.get('--view-swipe-offset'), `${direction * 14}px`);
+    assert.equal(button.dataset.swipe, undefined);
+    assert.equal(style.size, 0);
     t.mock.timers.tick(600);
     assert.deepEqual(actions, []);
     button.onpointerup!(point(100 + direction * 30));
@@ -83,4 +83,26 @@ test('tap, double-click, and hold still dispatch their existing actions', (t) =>
   button.onclick!(click);
   t.mock.timers.tick(260);
   assert.deepEqual(actions, ['tap', 'picker', 'hold']);
+});
+
+test('checklist navigation accepts horizontal touch and keyboard without capturing vertical scrolls or text editing', () => {
+  const listeners = new Map<string, (event: any) => void>();
+  const scroller = { addEventListener: (type: string, listener: (event: any) => void) => listeners.set(type, listener) } as unknown as HTMLElement;
+  const steps: number[] = [];
+  let enabled = true;
+  bindChecklistSwipe(scroller, () => enabled, (direction) => steps.push(direction));
+  const gesture = (x: number, y: number, editing = false) => {
+    const target = { closest: () => editing };
+    const event = { isPrimary: true, pointerType: 'touch', pointerId: 1, clientX: 100, clientY: 30, target };
+    listeners.get('pointerdown')!(event);
+    listeners.get('pointerup')!({ ...event, clientX: x, clientY: y, timeStamp: 100 });
+  };
+  gesture(42, 34);
+  gesture(160, 26);
+  gesture(90, 100);
+  gesture(160, 26, true);
+  listeners.get('keydown')!({ key: 'ArrowRight', target: scroller, preventDefault() {} });
+  enabled = false;
+  gesture(42, 34);
+  assert.deepEqual(steps, [1, -1, 1]);
 });

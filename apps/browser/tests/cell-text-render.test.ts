@@ -43,14 +43,14 @@ function renderFixture(texts: string[], clock12 = true, minute = 0, planned = fa
   return {grid,documents:sourceDocuments,heading:grid.children[0]!,row,cell:(index:number)=>row(index).children[1]!,note:(index:number)=>row(index).children[1]!.children.find((child)=>child.className==='cell-note')!};
 }
 
-test('Day view left-aligns its weekday and day number while multi-day headings retain their centered layout', () => {
+test('Day view aligns its weekday and number below the menu while multi-day headings keep the time gutter', () => {
   const single = renderFixture([]).heading;
-  assert.equal(single.children[1]!.style.textAlign, 'left');
-  assert.equal(single.children[1]!.style.paddingLeft, '8px');
-  assert.equal(single.children[1]!.children[0]!.textContent,
-    new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short' }));
-  assert.equal(single.children[1]!.children[1]!.textContent, '31');
-  assert.equal(single.children[0]!.style.textAlign, undefined, 'the time gutter is unaffected');
+  assert.equal(single.className, 'grid-heading day-heading');
+  assert.equal(single.children.length, 1);
+  const label = single.children[0]!.children[0]!;
+  assert.equal(label.className, 'day-heading-label');
+  assert.equal(label.children[0]!.textContent, new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short' }));
+  assert.equal(label.children[1]!.textContent, '31');
   for (const count of [3, 7]) {
     const visible = Array.from({ length: count }, (_, index) => dateKey(new Date(2026, 9, 31 + index)));
     const heading = renderFixture([], true, 0, false, visible).heading;
@@ -62,6 +62,8 @@ test('Day view left-aligns its weekday and day number while multi-day headings r
   }
   const css = fs.readFileSync(new URL('../app.css', import.meta.url), 'utf8');
   assert.match(css, /\.grid-heading>div\{[^}]*text-align:center/);
+  assert.match(css, /\.day-heading-label\s*\{[^}]*width:\s*var\(--context-menu-width\)/);
+  assert.match(css, /#menu\s*\{[^}]*min-width:\s*var\(--context-menu-width\)/);
 });
 
 test('actual browser rendering keeps short, long and multiline notes at one size with natural width wrapping', () => {

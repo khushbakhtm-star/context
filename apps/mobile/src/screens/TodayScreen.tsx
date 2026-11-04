@@ -98,6 +98,7 @@ type Props = {
   onDataChanged: () => void;
   onOpenSettings: () => void;
   onOpenChecklist?: (task: { listId: string; taskId: string }) => void;
+  priorityCaptureListId?: string | null;
   onSyncWarningChange?: (message: string | null) => void;
   dayCount?: CalendarDayCount;
   onDayCountChange?: (count: CalendarDayCount) => void;
@@ -107,15 +108,15 @@ type Props = {
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
   clockFormat?: '12h' | '24h';
-  onCreatePlan?: () => void;
   viewResetToken?: number;
   onPeriodSwipe?: (direction: CalendarPeriodDirection) => void;
 };
 
 export function TodayScreen({
   activeDate, onDateChange, calendars, preferences, dataVersion, focusRequest,
+  priorityCaptureListId = null,
   onFocusConsumed, onFocusedMinuteChange, onDataChanged, onOpenSettings, onSyncWarningChange, dayCount = 1, onDayCountChange, selectedDates, dateSelectionOpen = false,
-  zoom = 1, onZoomChange, clockFormat = '12h', onCreatePlan, viewResetToken = 0, onPeriodSwipe, onOpenChecklist,
+  zoom = 1, onZoomChange, clockFormat = '12h', viewResetToken = 0, onPeriodSwipe, onOpenChecklist,
 }: Props) {
   const { colors, resolvedMode } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -242,7 +243,7 @@ export function TodayScreen({
   const [spreadsheetState, setSpreadsheetState] = useState(() => spreadsheetEditor.snapshot());
   const [spanEditor, setSpanEditor] = useState<MinuteSpanEditorSession | null>(null);
   const spanEditorScopeRef = useRef<{ selection: CalendarMinuteSelection; token: number; generation: number; id: number;
-    source?: MinuteSpanSource } | null>(null);
+    source?: MinuteSpanSource; fromPlus?: boolean } | null>(null);
   const spanEditorIdRef = useRef(0);
   const spanEditorEpochRef = useRef(0);
   const [categoryPicker, setCategoryPicker] = useState<(CellCommandSelection & { token: number }) | null>(null);
@@ -1481,6 +1482,7 @@ export function TodayScreen({
         keepColor: Boolean(selection.entry && !selection.entry.text.trim()) });
       setActionError(null);
       setEditor(null);
+      inlineSelectionRef.current = selection;
       setInlineSelection(selection);
       focusedDayRef.current = day;
       focusCallbackRef.current?.({ dateKey: day, minuteIndex: minute });
@@ -1498,6 +1500,7 @@ export function TodayScreen({
       if (selectRange) setCellMenuOpen(true);
       if (!editText || group || selectRange) Keyboard.dismiss();
       if (!keepViewport) revealInlineMinute(minute, day);
+      return selection;
     } catch {
       if (mountedRef.current && token === selectionTokenRef.current) setActionError('This minute could not be opened. Please try again.');
     }
@@ -1832,10 +1835,9 @@ export function TodayScreen({
     finally { toolBusyRef.current = false; if (mountedRef.current) setToolBusy(false); }
   }
 
-  async function dispatchCellCommand(action: (scope: CellCommandSelection) => Promise<unknown>) {
+  async function dispatchCellCommand(action: (scope: CellCommandSelection) => Promise<unknown>, range = parsedRange()) {
     if (inlineDoneBusyRef.current || menuCommandPendingRef.current || toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
     const selection = inlineSelectionRef.current;
-    const range = parsedRange();
     if (!selection || !range) return;
     // Capture intent before a save can re-render virtualized rows. Keep pointer
     // selection and menu dismissal locked until local acknowledgement or error.
@@ -1940,7 +1942,7 @@ export function TodayScreen({
     categoryPickerRef.current = null; setCategoryPicker(null);
   }, [navigationKey, dateSelectionOpen]);
 
-  async function openSpanDetails(command?: CellCommandSelection) {
+  async function openSpanDetails(command?: CellCommandSelection, fromPlus = false) {
     const selection = command?.selection ?? inlineSelectionRef.current;
     const range = command?.range ?? parsedRange();
     if (!selection || !range || !await prepareOptions(selection)) return;
@@ -1949,7 +1951,7 @@ export function TodayScreen({
     // Resolve this edit from committed cells rather than turning a stale tap
     // into a new, unrelated event.
     const [groups, selectedEntry] = await Promise.all([
-      getDayActivityGroups(selection.dateKey), getMinuteEntry(selection.dateKey, selection.minuteIndex),
+      fromPlus ? [] : getDayActivityGroups(selection.dateKey), getMinuteEntry(selection.dateKey, selection.minuteIndex),
     ]);
     if (!selectionStillCurrent(selection, token, generation)) return;
     const group = groups.find((value) => value.blockId === selectedEntry?.blockId &&
@@ -1977,10 +1979,34 @@ export function TodayScreen({
       entries.find((entry) => entry.minuteIndex === range.startMinute + offset)?.text ?? '');
     const text = source ? source.cell.entry!.text : values.every((value) => value === values[0]) ? values[0] ?? '' : undefined;
     const id = ++spanEditorIdRef.current;
-    spanEditorScopeRef.current = { selection: { ...selection }, token, generation, id, source };
+    spanEditorScopeRef.current = { selection: { ...selection }, token, generation, id, source, fromPlus };
     setSpanEditor({ id, span, text, categoryId: group?.categoryId ?? source?.cell.entry?.categoryId ?? entries[0]?.categoryId ?? selection.plan?.categoryId ?? 'unaccounted',
       ...(group ? { event: { title: group.title, categoryId: group.categoryId, blockId: group.blockId } } : {}) });
     setCellMenuOpen(false); setGroupComposerOpen(false); setInlineEditing(false); Keyboard.dismiss();
+  }
+
+  async function editMinuteFromPlus() {
+    if (inlineSelectionRef.current || spanEditorScopeRef.current || menuCommandPendingRef.current ||
+        toolBusyRef.current || spreadsheetEditor.snapshot().busy) return;
+    const current = new Date();
+    const day = visibleDaysRef.current.includes(activeDate) ? activeDate : visibleDaysRef.current[0];
+    if (!day) return;
+    const minute = day === dateKey(current) ? minuteIndexForDate(current) :
+      Math.min(1439, Math.max(0, Math.floor(verticalOffsetRef.current / gridLayoutRef.current.rowHeight)));
+    const selection = await openInlineMinute(day, minute, false, undefined, false, true, null);
+    if (!selection || inlineSelectionRef.current !== selection) return;
+    await dispatchCellCommand((scope) => openSpanDetails(scope, true), { dateKey: day, startMinute: minute, endMinute: minute });
+  }
+
+  function closeSpanDetails() {
+    const scope = spanEditorScopeRef.current;
+    spanEditorScopeRef.current = null;
+    setSpanEditor(null);
+    if (scope?.fromPlus && selectionStillCurrent(scope.selection, scope.token, scope.generation)) {
+      inlineMinuteDrafts.close(inlineMinuteKey(scope.selection.dateKey, scope.selection.minuteIndex));
+      inlineSelectionRef.current = null;
+      setInlineSelection(null);
+    }
   }
 
   async function saveSpanDetails(span: MinuteSpan, input: MinuteSpanFillInput): Promise<boolean> {
@@ -2206,7 +2232,8 @@ export function TodayScreen({
     const text = passage && passage.end > passage.start ? passage.text : texts.join('\n');
     if (!text.trim()) throw new Error('Enter some text before adding a checklist task.');
     const format = dayData[range.dateKey]?.formats?.get(range.startMinute) ?? {};
-    const listId = lists.length === 1 ? lists[0]!.id : await new Promise<string | null>((resolve) => {
+    const preferredList = lists.find((list) => list.id === priorityCaptureListId);
+    const listId = preferredList?.id ?? await new Promise<string | null>((resolve) => {
       const choice = { lists, resolve };
       checklistChoiceRef.current = choice;
       Keyboard.dismiss();
@@ -2300,6 +2327,10 @@ export function TodayScreen({
     if (range && selection && await prepareOptions(selection)) return runSpreadsheetTool(() => applyCellFormat(range, patch));
   }
 
+  const singleDayHeading = dayCount === 1 && days.length === 1;
+  const dateHeadingWidth = singleDayHeading ? Math.max(40, Math.min(44, gridLayout.viewportWidth / 7)) : gridLayout.dayWidth;
+  const dateCircleSize = Math.min(46, Math.max(1, dateHeadingWidth - 4));
+
   return (
     <KeyboardAvoidingView style={styles.container} behavior="padding"
       keyboardVerticalOffset={keyboardParentOffset} onLayout={(event) => {
@@ -2322,7 +2353,7 @@ export function TodayScreen({
         onScroll={onHorizontalScroll} scrollEventThrottle={16}>
         <View style={[styles.gridContent, { width: gridLayout.contentWidth }]}>
           <View style={styles.dateHeader}>
-            <Animated.View style={[styles.headerRail, { transform: [{ translateX: horizontalOffset }] }]} />
+            {!singleDayHeading ? <Animated.View style={[styles.headerRail, { transform: [{ translateX: horizontalOffset }] }]} /> : null}
             {days.map((day) => (
               <Pressable key={day} accessibilityRole="button" accessibilityLabel={dayLabels.get(day) +
                   (day === today ? ', go to the current minute' : '')}
@@ -2331,13 +2362,11 @@ export function TodayScreen({
                   if (day === dateKey(new Date())) goToCurrentMinute();
                   else { onDateChange(day); onDayCountChange?.(1); }
                 }}
-                style={[styles.dateColumn, dayCount === 1 && days.length === 1 && styles.dayDateColumn,
-                  { width: gridLayout.dayWidth }]}>
+                style={[styles.dateColumn, { width: dateHeadingWidth }]}>
                 <Text numberOfLines={1} maxFontSizeMultiplier={1.25} style={[styles.weekday, day === today && styles.todayWeekday]}>
                   {new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(parseDateKey(day))}
                 </Text>
-                <View style={[styles.dateCircle, { width: Math.min(46, Math.max(1, gridLayout.dayWidth - 4)),
-                  height: Math.min(46, Math.max(1, gridLayout.dayWidth - 4)) }, day === today && styles.todayCircle]}>
+                <View style={[styles.dateCircle, { width: dateCircleSize, height: dateCircleSize }, day === today && styles.todayCircle]}>
                   <Text maxFontSizeMultiplier={1.25} style={[styles.dateNumber, day === today && styles.todayNumber]}>
                     {parseDateKey(day).getDate()}
                   </Text>
@@ -2764,11 +2793,10 @@ export function TodayScreen({
         </View>
       ) : null}
 
-      {onCreatePlan && !inlineSelection && !rangeSelecting && !editor ? (
-        <Pressable accessibilityRole="button" accessibilityLabel="Create calendar event"
-          accessibilityHint="Opens your phone calendar's event form."
-          onPress={() => { Keyboard.dismiss(); onCreatePlan(); }} style={styles.createEventButton}>
-          <Text style={styles.createEventIcon}>+</Text>
+      {!inlineSelection && !rangeSelecting && !editor ? (
+        <Pressable accessibilityRole="button" accessibilityLabel="Edit a calendar minute"
+          onPress={() => void editMinuteFromPlus()} style={styles.addMinuteButton}>
+          <Text style={styles.addMinuteIcon}>+</Text>
         </Pressable>
       ) : null}
 
@@ -2797,7 +2825,7 @@ export function TodayScreen({
         onClose={closeCategoryPicker} onSelect={chooseCategory} onCategoriesChanged={refreshCategoryChoices} />
       <MinuteSpanEditor session={spanEditor} clockFormat={clockFormat} colorChoices={pickerColors}
         onCategoriesChanged={refreshSpanCategoryChoices}
-        onClose={() => { spanEditorScopeRef.current = null; setSpanEditor(null); }} onSave={saveSpanDetails} />
+        onClose={closeSpanDetails} onSave={saveSpanDetails} />
       <MinuteEditor visible={editor != null} dateKey={editor?.dateKey ?? activeDate}
         clockFormat={clockFormat}
         minuteIndex={editor?.minuteIndex ?? 0} entry={editor?.entry ?? null} plan={editor?.plan ?? null}
@@ -2832,9 +2860,9 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
       borderColor: colors.hairline, borderRadius: 6, backgroundColor: colors.surface },
     bottomTool: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
     bottomCheck: { fontSize: 27, color: colors.ink },
-    createEventButton: { position: 'absolute', right: 16, bottom: 16, width: 56, height: 56, borderRadius: 16,
+    addMinuteButton: { position: 'absolute', right: 16, bottom: 16, width: 56, height: 56, borderRadius: 16,
       justifyContent: 'center', alignItems: 'center', backgroundColor: colors.accent },
-    createEventIcon: { color: colors.onAccent, fontSize: 34, fontWeight: '400', lineHeight: 40 },
+    addMinuteIcon: { color: colors.onAccent, fontSize: 34, fontWeight: '400', lineHeight: 40 },
     gridViewport: { flex: 1 },
     horizontalViewport: { flex: 1, backgroundColor: grid },
     horizontalContent: { height: '100%' },
@@ -2844,7 +2872,6 @@ function createStyles(colors: AppColors, mode: 'light' | 'dark', layout: ReturnT
     dateHeader: { flexDirection: 'row', alignItems: 'center', height: 66,
       borderBottomWidth: 1, borderBottomColor: gridLine, backgroundColor: colors.paper },
     dateColumn: { height: 66, alignItems: 'center', justifyContent: 'center' },
-    dayDateColumn: { alignItems: 'flex-start', paddingLeft: 8 },
     weekday: { color: colors.muted, fontSize: 14, fontWeight: '600' },
     todayWeekday: { color: mode === 'dark' ? '#C4B8E7' : '#8D7FAD' },
     dateCircle: { width: 46, height: 46, marginTop: 3, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },

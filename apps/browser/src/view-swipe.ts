@@ -19,11 +19,6 @@ export function bindViewSwipe(button: HTMLButtonElement, actions: ViewActions) {
   let holdTimer: ReturnType<typeof setTimeout> | undefined;
   let suppressPointerClick = false;
 
-  function clearPreview() {
-    delete button.dataset.swipe;
-    button.style.removeProperty('--view-swipe-offset');
-  }
-
   function updateAxis(gesture: ViewPointer, dx: number, dy: number) {
     if (gesture.axis || Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
     gesture.axis = Math.abs(dx) > Math.abs(dy) * 1.7 ? 'horizontal' : 'vertical';
@@ -36,7 +31,6 @@ export function bindViewSwipe(button: HTMLButtonElement, actions: ViewActions) {
       pointer = undefined;
       clearTimeout(holdTimer);
       clearTimeout(tapTimer);
-      clearPreview();
       suppressPointerClick = true;
       return;
     }
@@ -56,10 +50,6 @@ export function bindViewSwipe(button: HTMLButtonElement, actions: ViewActions) {
     if (pointer?.id !== event.pointerId || pointer.held) return;
     const dx = event.clientX - pointer.x;
     updateAxis(pointer, dx, event.clientY - pointer.y);
-    if (pointer.axis !== 'horizontal') return;
-    const width = button.clientWidth;
-    button.dataset.swipe = dx < 0 ? 'left' : 'right';
-    button.style.setProperty('--view-swipe-offset', `${Math.max(-width, Math.min(width, dx))}px`);
   };
 
   function finish(event: PointerEvent, released: boolean) {
@@ -70,7 +60,6 @@ export function bindViewSwipe(button: HTMLButtonElement, actions: ViewActions) {
     const gesture = pointer;
     pointer = undefined;
     clearTimeout(holdTimer);
-    clearPreview();
     suppressPointerClick = !released || gesture.held || Boolean(gesture.axis);
     if (released && !gesture.held && gesture.axis === 'horizontal' &&
         Math.abs(dx) >= 24 && Math.abs(dx) > Math.abs(dy) * 1.7) actions.toggle();
@@ -96,4 +85,38 @@ export function bindViewSwipe(button: HTMLButtonElement, actions: ViewActions) {
     clearTimeout(tapTimer);
     actions.toggle();
   };
+}
+
+export function bindChecklistSwipe(scroller: HTMLElement, enabled: () => boolean, step: (direction: -1 | 1) => void) {
+  let gesture: { id: number; x: number; y: number } | undefined;
+  let lastSwipe = -Infinity;
+  scroller.addEventListener('pointerdown', (event) => {
+    if (!event.isPrimary) { gesture = undefined; return; }
+    lastSwipe = -Infinity;
+    if (!enabled() || event.pointerType === 'mouse' ||
+        (event.target as Element | null)?.closest('button, input, summary, .checklist-actions, textarea:focus')) return;
+    gesture = { id: event.pointerId, x: event.clientX, y: event.clientY };
+  });
+  scroller.addEventListener('pointercancel', () => { gesture = undefined; });
+  scroller.addEventListener('pointerup', (event) => {
+    if (gesture?.id !== event.pointerId) return;
+    const dx = event.clientX - gesture.x;
+    const dy = event.clientY - gesture.y;
+    gesture = undefined;
+    if (!enabled() || Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.7) return;
+    lastSwipe = event.timeStamp;
+    step(dx < 0 ? 1 : -1);
+  });
+  scroller.addEventListener('click', (event) => {
+    if (event.detail > 0 && event.timeStamp - lastSwipe < 450) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, { capture: true });
+  scroller.addEventListener('keydown', (event) => {
+    if (!enabled() || event.target !== scroller || event.repeat ||
+        (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+    event.preventDefault();
+    step(event.key === 'ArrowRight' ? 1 : -1);
+  });
 }

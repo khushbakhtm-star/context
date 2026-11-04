@@ -1,5 +1,5 @@
 import { CHECKLIST_FLOW_KEY, DEFAULT_CHECKLIST_LIST_ID, applyChecklistListChange, readChecklistCollection,
-  createChecklistListInCollection, renameChecklistListInCollection, replaceChecklistListInCollection,
+  createChecklistListInCollection, moveChecklistTaskToList, renameChecklistListInCollection, replaceChecklistListInCollection,
   type ChecklistChange, type ChecklistFlow, type ChecklistTask } from '../shared/utils/checklist-flow';
 import { applyDocumentValues, type BrowserLedgerState } from './ledger';
 
@@ -29,6 +29,14 @@ export function createBrowserChecklistList(state: BrowserLedgerState, expected: 
   const current = browserChecklist(state);
   if (current.revision !== expected) throw new Error('Your checklists changed on another device. Refresh them before adding a list.');
   const next = createChecklistListInCollection(current.collection, listId, name);
+  return applyDocumentValues(state, [{ key: CHECKLIST_FLOW_KEY, value: next as unknown as Record<string, unknown> }], now);
+}
+
+export function moveBrowserChecklistTask(state: BrowserLedgerState, expected: string | undefined,
+  sourceListId: string, taskId: string, destinationListId: string, now = Date.now()) {
+  const current = browserChecklist(state);
+  if (current.revision !== expected) throw new Error('Your checklists changed. Review the latest list before moving a task.');
+  const next = moveChecklistTaskToList(current.collection, sourceListId, taskId, destinationListId);
   return applyDocumentValues(state, [{ key: CHECKLIST_FLOW_KEY, value: next as unknown as Record<string, unknown> }], now);
 }
 

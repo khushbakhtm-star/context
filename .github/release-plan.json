@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.38",
-  "sourceAndroidVersionCode": 39,
-  "sourceIosBuildNumber": "39",
+  "version": "0.1.39",
+  "sourceAndroidVersionCode": 40,
+  "sourceIosBuildNumber": "40",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.38. Moving a standalone minute note in the time editor clears its original cell in the same undoable edit. Adding text to Priority lets you pick a checklist if there is more than one. Publish only the verified APK signed with the existing publisher key."
+  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.39. The view switch shows one icon and two position dots. Priority supports checklist swipes, task moves, and a configurable capture destination. Day headings sit beneath the menu, and the calendar plus opens the Context minute editor. Publish only the verified APK signed with the existing publisher key."
 }

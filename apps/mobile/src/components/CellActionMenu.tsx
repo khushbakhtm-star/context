@@ -89,7 +89,7 @@ export function CellActionMenu({ busy, onCut, onCopy, onAutoFill, onReset, onGro
       textStyle: { fontStyle: 'italic' as const } }] : []),
     ...(onToggleUnderline ? [{ id: 'underline', label: 'Underline', glyph: 'U', selected: Boolean(format.underline), run: onToggleUnderline,
       textStyle: { textDecorationLine: 'underline' as const } }] : []),
-    ...(onTextColor ? [{ id: 'text', label: 'Choose text color', glyph: 'A', selected: palette === 'text',
+    ...(onTextColor ? [{ id: 'text', label: 'Choose text color', glyph: 'T', selected: palette === 'text',
       run: () => setPalette((mode) => mode === 'text' ? null : 'text'), textStyle: { color: textColor ?? colors.ink } }] : []),
     ...(onCellColor ? [{ id: 'cell', label: 'Choose cell color', glyph: '', selected: palette === 'cell',
       run: () => setPalette((mode) => mode === 'cell' ? null : 'cell'), textStyle: {} }] : []),

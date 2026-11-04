@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CHECKLIST_FLOW_KEY, readChecklistCollection, type ChecklistTask } from '../shared/utils/checklist-flow';
-import { browserChecklist, browserChecklistVersions, changeBrowserChecklist, createBrowserChecklistList,
+import { browserChecklist, browserChecklistVersions, changeBrowserChecklist, createBrowserChecklistList, moveBrowserChecklistTask,
   renameBrowserChecklistList, replaceBrowserChecklistList, restoreBrowserChecklist } from '../src/checklist-flow';
-import { emptyLedger, mergeLedger } from '../src/ledger';
+import { emptyLedger, mergeLedger, undoEdit } from '../src/ledger';
 
 const item = (id: string, text = id): ChecklistTask => ({ id, text, checked: false, parentId: null, format: {} });
 const revision = (wall: number) => `${String(wall).padStart(16, '0')}:00000000:priority_browser`;
@@ -45,6 +45,20 @@ test('browser selected-list Undo uses the exact whole revision and preserves oth
   const before = structuredClone(peer);
   assert.throws(() => replaceBrowserChecklistList(peer, own.revision, 'work', captured.flow, 15), /changed/);
   assert.deepEqual(peer, before);
+});
+
+test('moving a browser task keeps its subtasks and Undo restores both checklists', () => {
+  let state = changeBrowserChecklist(emptyLedger('priority_browser'), undefined, { type: 'add', item: item('a') }, 10).state;
+  state = changeBrowserChecklist(state, browserChecklist(state).revision,
+    { type: 'add', item: { ...item('child'), parentId: 'a', format: { bold: true } } }, 11).state;
+  state = createBrowserChecklistList(state, browserChecklist(state).revision, 'work', 'Work', 12).state;
+  const before = browserChecklist(state);
+  assert.throws(() => moveBrowserChecklistTask(state, undefined, 'main', 'a', 'work', 13), /changed/);
+  const moved = moveBrowserChecklistTask(state, before.revision, 'main', 'a', 'work', 13);
+  assert.equal(browserChecklist(moved.state).flow.items.length, 0);
+  assert.deepEqual(browserChecklist(moved.state, 'work').flow.items, before.flow.items);
+  const undone = undoEdit(moved.state, moved.undo, 14);
+  assert.deepEqual(browserChecklist(undone).collection, before.collection);
 });
 
 test('foreign list and task identities never retarget or damage another browser list', () => {

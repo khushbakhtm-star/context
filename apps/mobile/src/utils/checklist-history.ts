@@ -1,6 +1,7 @@
-import { readChecklistFlow, type ChecklistFlow } from './checklist-flow';
+import { readChecklistCollection, readChecklistFlow, type ChecklistCollection, type ChecklistFlow } from './checklist-flow';
 
-export type ChecklistHistoryEntry = { before: ChecklistFlow; after: ChecklistFlow };
+type ChecklistTransferHistory = { before: ChecklistCollection; after: ChecklistCollection };
+export type ChecklistHistoryEntry = { before: ChecklistFlow; after: ChecklistFlow; transfer?: ChecklistTransferHistory };
 export type ChecklistHistory = { listId: string; revision: string | null;
   undo: ChecklistHistoryEntry[]; redo: ChecklistHistoryEntry[] };
 export type ChecklistHistoryAction = 'undo' | 'redo';
@@ -20,10 +21,13 @@ export function observeChecklistHistory(history: ChecklistHistory, listId: strin
 }
 
 export function recordChecklistHistory(history: ChecklistHistory, listId: string,
-  before: { flow: ChecklistFlow; revision: string | null }, after: { flow: ChecklistFlow; revision: string | null }): ChecklistHistory {
+  before: { flow: ChecklistFlow; revision: string | null }, after: { flow: ChecklistFlow; revision: string | null },
+  transfer?: ChecklistTransferHistory): ChecklistHistory {
   if (same(before.flow, after.flow)) return observeChecklistHistory(history, listId, after.revision);
   const current = observeChecklistHistory(history, listId, before.revision);
-  const undo = [...current.undo, { before: copy(before.flow), after: copy(after.flow) }].slice(-MAX_ENTRIES);
+  const entry: ChecklistHistoryEntry = { before: copy(before.flow), after: copy(after.flow) };
+  if (transfer) entry.transfer = { before: readChecklistCollection(transfer.before), after: readChecklistCollection(transfer.after) };
+  const undo = [...current.undo, entry].slice(-MAX_ENTRIES);
   // This is an in-memory estimate using JS UTF-16 storage, not a synchronization
   // payload calculation. Keep the newest complete edit, even for a very long list.
   while (undo.length > 1 && JSON.stringify(undo).length * 2 > MAX_ESTIMATED_BYTES) undo.shift();

@@ -312,6 +312,8 @@ test('one checklist action captures the committed selected minute range as one t
   h.drafts.edit(h.day, 600, { text: 'Read the newest instructions' });
   const capture = h.menu().onTask;
   assert.equal(typeof capture, 'function'); capture(); capture(); await h.settle();
+  assert.ok(h.checklistPicker()); assert.equal(h.calls.length, 0, 'Ask every time also prompts for a single list');
+  h.action('Priority').onPress(); await h.settle();
   const tasks = h.calls.filter((call) => call.action === 'checklist-task');
   assert.equal(tasks.length, 1, 'one action completes once, including a repeated tap during acknowledgement');
   assert.deepEqual(tasks[0], { action: 'checklist-task', text: 'Read the newest instructions\nFollow the instructions',
@@ -326,18 +328,21 @@ test('one checklist action captures the committed selected minute range as one t
 
 test('highlighted minute text creates a task sourced only from that minute and retains exact passage offsets', async (t) => {
   let opened = 0;
-  const h = screen(t, { readFormats: async () => new Map([[600, { italic: true, underline: true }]]),
-    props: { onOpenChecklist() { opened++; } } });
+  const h = screen(t, { checklistLists: [{ id: 'main', name: 'Priority' }, { id: 'list_work', name: 'Work' }],
+    readFormats: async () => new Map([[600, { italic: true, underline: true }]]),
+    props: { priorityCaptureListId: 'missing', onOpenChecklist() { opened++; } } });
   h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Make coffee; talk to Mum', categoryId: 'family', blockId: 'source' });
   h.rows.set(`${h.day}:601`, { dateKey: h.day, minuteIndex: 601, text: 'Another independent note', categoryId: 'work', blockId: 'next' });
   await h.start(); await h.tap(600); await h.edit(600);
   const before = JSON.stringify([...h.rows]);
   h.input().onSelectionChange({ nativeEvent: { selection: { start: 13, end: 24 } } });
   h.action('Add minute or highlighted text to checklist').onPress(); await h.settle();
+  assert.ok(h.checklistPicker()); assert.equal(h.calls.length, 0, 'an unavailable saved destination must ask');
+  h.action('Work').onPress(); await h.settle();
   const task = h.calls.find((call) => call.action === 'checklist-task');
   assert.deepEqual(task, { action: 'checklist-task', text: 'talk to Mum',
     source: { ranges: [{ dateKey: h.day, startMinute: 600, endMinute: 600 }], selection: { start: 13, end: 24 } },
-    format: { italic: true, underline: true }, listId: 'main' });
+    format: { italic: true, underline: true }, listId: 'list_work' });
   assert.equal(JSON.stringify([...h.rows]), before); assert.equal(opened, 1);
 });
 
@@ -401,10 +406,13 @@ test('navigation or backgrounding during a checklist source read cannot create a
 test('a late checklist write acknowledgement reports saved data without closing or navigating a newer screen', async (t) => {
   for (const action of ['navigate', 'background', 'unmount']) {
     let release; const gate = new Promise((resolve) => { release = resolve; }); let opened = 0, changed = 0;
-    const h = screen(t, { checklistWriteGate: gate, props: { onOpenChecklist() { opened++; }, onDataChanged() { changed++; } } });
+    const h = screen(t, { checklistWriteGate: gate, checklistLists: [{ id: 'main', name: 'Priority' }, { id: 'list_work', name: 'Work' }],
+      props: { priorityCaptureListId: 'list_work', onOpenChecklist() { opened++; }, onDataChanged() { changed++; } } });
     h.rows.set(`${h.day}:600`, { dateKey: h.day, minuteIndex: 600, text: 'Task snapshot', categoryId: 'family', blockId: 'source' });
     await h.start(); await h.hold(600); h.menu().onTask(); await h.settle();
     assert.equal(h.calls.filter((call) => call.action === 'checklist-task').length, 1);
+    assert.equal(h.calls.find((call) => call.action === 'checklist-task').listId, 'list_work');
+    assert.equal(h.checklistPicker(), undefined, 'a valid saved destination skips the picker');
     if (action === 'navigate') await h.navigate('2026-10-26'); else if (action === 'background') await h.background(); else h.unmount();
     const dismisses = h.dismisses; release(); if (action !== 'unmount') await h.settle(); else for (let round = 0; round < 80; round++) await Promise.resolve();
     assert.equal(opened, 0, action); assert.ok(changed >= 1, action); assert.equal(h.dismisses, dismisses, action);
@@ -464,7 +472,7 @@ test('the entry-bar category box sits next to Save and opens the same guarded pi
   assert.equal(h.rows.get(`${h.day}:600`).text, 'A live note');
 });
 
-test('only the single-day Day header aligns its weekday and date circle to the left inside the date column', async (t) => {
+test('the single-day heading occupies the menu button column at the far left', async (t) => {
   const flatten = (style) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
   function headers(node, into = []) {
     if (!node || typeof node !== 'object') return into;
@@ -474,6 +482,15 @@ test('only the single-day Day header aligns its weekday and date circle to the l
     for (const child of [children].flat(Infinity)) headers(child, into);
     return into;
   }
+  function headerRow(node) {
+    if (!node || typeof node !== 'object') return;
+    const children = node.props?.children;
+    if (Array.isArray(children) && Array.isArray(children[1]) && headers(children[1][0]).length === 1) return children;
+    for (const child of [children].flat(Infinity)) {
+      const row = headerRow(child);
+      if (row) return row;
+    }
+  }
   for (const props of [{ dayCount: 1 }, { dayCount: 3 }, { dayCount: 7 },
     { dayCount: 1, selectedDates: ['2026-10-25', '2026-10-27'] }, { dayCount: 7, selectedDates: ['2026-10-25'] }]) {
     const h = screen(t, { props }); await h.start(); const columns = headers(h.tree);
@@ -481,9 +498,9 @@ test('only the single-day Day header aligns its weekday and date circle to the l
     for (const column of columns) {
       const singleDay = props.dayCount === 1 && columns.length === 1;
       const style = flatten(column.props.style), [weekday, circle] = column.props.children;
-      assert.equal(style.alignItems, singleDay ? 'flex-start' : 'center');
-      assert.equal(style.paddingLeft, singleDay ? 8 : undefined);
-      assert.ok(style.width > (style.paddingLeft ?? 0) + 46 || !singleDay, 'the left padding stays inside the date column after the time gutter');
+      assert.equal(style.alignItems, 'center');
+      if (singleDay) assert.equal(style.width, 44);
+      assert.equal(headerRow(h.tree)[0] === null, singleDay, 'only the single-day heading skips the time gutter');
       assert.equal(weekday.props.numberOfLines, 1); assert.equal(typeof weekday.props.children, 'string');
       const circleStyle = flatten(circle.props.style);
       assert.equal(circleStyle.width, circleStyle.height); assert.equal(circleStyle.borderRadius, 23);
@@ -491,10 +508,36 @@ test('only the single-day Day header aligns its weekday and date circle to the l
       assert.equal(flatten(circle.props.children.props.style).fontSize, 25);
       if (circle.props.children.props.children === 25) {
         assert.ok(circleStyle.backgroundColor, 'the current-day circle remains visible');
-        if (singleDay) assert.equal(circleStyle.width, 46);
+        if (singleDay) assert.equal(circleStyle.width, 40);
       }
     }
   }
+});
+
+test('calendar plus opens the Context minute editor at the current minute and Cancel restores the plus', async (t) => {
+  const now = new Date('2026-10-25T12:00:00-04:00');
+  const minute = now.getHours() * 60 + now.getMinutes();
+  const group = { dateKey: '2026-10-25', blockId: 'activity_work', title: 'Work', categoryId: 'study',
+    startMinute: minute - 2, endMinute: minute + 2 };
+  const h = screen(t, { readGroups: async () => [group] });
+  h.rows.set(`${h.day}:${minute}`, { dateKey: h.day, minuteIndex: minute, text: 'Working', categoryId: 'study', blockId: group.blockId });
+  await h.start();
+  h.action('Edit a calendar minute').onPress();
+  await h.settle();
+  const span = h.details().session.span;
+  assert.equal(span.startDateKey, h.day);
+  assert.equal(span.startMinute, minute);
+  assert.equal(span.endMinute, span.startMinute + 1);
+  assert.equal(h.details().session.event, undefined);
+  h.details().onClose();
+  await h.settle();
+  assert.ok(h.action('Edit a calendar minute'));
+  assert.equal(h.calls.length, 0);
+  h.action('Edit a calendar minute').onPress();
+  await h.settle();
+  assert.equal(await h.details().onSave(span, { text: 'Updated minute' }), true);
+  assert.equal(h.spanPreviews[0].input.event, undefined);
+  assert.equal(h.calls.filter((call) => call.action === 'span-fill').length, 1);
 });
 
 test('one Categorize tap waits for saving, applies the captured range once and preserves independent minute text', async (t) => {

@@ -7,6 +7,7 @@ const ts = require('typescript');
 const model = require('../src/utils/checklist-flow.ts');
 const dragModel = require('../src/utils/checklist-drag.ts');
 const historyModel = require('../src/utils/checklist-history.ts');
+const swipeModel = require('../src/utils/calendar-period-swipe.ts');
 
 const task = (id, text, parentId = null, checked = false) => ({ id, text, parentId, checked, format: {} });
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -23,7 +24,17 @@ function harness(items, options = {}) {
   const controlsRef = { current: null }; let historyState; let hideCompleted = Boolean(options.hideCompleted);
   const receiveHistory = (value) => { historyState = value; };
   const listId = options.listId ?? 'main';
-  const fullSnapshot = () => ({ ...clone(snapshot), listId, lists: [{ id: listId, name: options.name ?? 'Priority', taskCount: snapshot.flow.items.length }] });
+  let otherLists = clone(options.otherLists ?? (listId === 'main' ? [] : [{ id: 'main', name: 'Priority', items: [] }]));
+  const fullSnapshot = () => {
+    const collection = model.readChecklistCollection({ kind: 'checklistFlow', version: 2,
+      lists: [{ id: listId, name: options.name ?? 'Priority', items: snapshot.flow.items }, ...otherLists] });
+    return { ...clone(snapshot), collection, listId, lists: model.checklistListSummaries(collection) };
+  };
+  function setCollection(collection, nextRevision) {
+    snapshot = { flow: model.checklistListFlow(collection, listId), revision: nextRevision };
+    otherLists = collection.lists.filter((list) => list.id !== listId);
+    return fullSnapshot();
+  }
   const keyboardListeners = new Map();
   const lifecycleListeners = new Set();
   const appState = { currentState: 'active', addEventListener(_event, listener) { lifecycleListeners.add(listener);
@@ -73,6 +84,19 @@ function harness(items, options = {}) {
       if (snapshot.revision !== expected) throw Error('The checklist changed on another device. Refresh it before applying this edit.');
       commands.push({ type: 'restore', expected, listId: requestedId }); snapshot = { flow: clone(flow), revision: `history_${++revision}` }; return fullSnapshot();
     },
+    transferChecklistTask: async (requestedId, id, destinationListId, expected) => {
+      assert.equal(requestedId, listId);
+      if (snapshot.revision !== expected) throw Error('The checklist changed on another device.');
+      const collection = model.moveChecklistTaskToList(fullSnapshot().collection, requestedId, id, destinationListId);
+      commands.push({ type: 'transfer', id, destinationListId, expected });
+      return setCollection(collection, `transfer_${++revision}`);
+    },
+    replaceChecklistCollection: async (requestedId, collection, expected) => {
+      assert.equal(requestedId, listId);
+      if (snapshot.revision !== expected) throw Error('The checklist changed on another device.');
+      commands.push({ type: 'restore-collection', expected });
+      return setCollection(collection, `history_${++revision}`);
+    },
     restoreChecklistFlowConflict: async (document, expected) => {
       assert.equal(expected, snapshot.revision); snapshot = { flow: model.readChecklistFlow(document.value), revision: `restore_${++revision}` };
       failRead = false; conflicts = []; return fullSnapshot();
@@ -95,12 +119,13 @@ function harness(items, options = {}) {
       if (name === '../utils/checklist-flow') return model;
       if (name === '../utils/checklist-drag') return dragModel;
       if (name === '../utils/checklist-history') return historyModel;
+      if (name === '../utils/calendar-period-swipe') return swipeModel;
       throw Error('Unexpected checklist screen import: ' + name);
     } }, { filename });
   function render() { let iterations = 0;
     do { assert.ok(iterations++ < 12); active = root; root.cursor = 0; root.dirty = false;
       root.tree = module.exports.ChecklistFlowScreen({ dataVersion, onDataChanged: () => { changed++; }, beforeLeaveRef,
-        listId, hideCompleted, controlsRef, onHistoryChange: receiveHistory });
+        listId, hideCompleted, controlsRef, onHistoryChange: receiveHistory, onSwipeList: options.onSwipeList });
       for (const effect of root.effects.splice(0)) effect();
     } while (root.dirty); return root.tree;
   }
@@ -109,6 +134,7 @@ function harness(items, options = {}) {
   const find = (label) => nodes().find((node) => node.props.accessibilityLabel === label);
   render();
   return { render, nodes, find, commands, get snapshot() { return snapshot; }, get changed() { return changed; },
+    get collection() { return fullSnapshot().collection; },
     async ready() { await settle(); render(); },
     async press(label) { const node = find(label); assert.ok(node, label); assert.equal(Boolean(node.props.disabled), false, label + ' enabled');
       node.props.onPress(); render(); await settle(); render(); },
@@ -155,6 +181,80 @@ test('Priority uses its selected list for edits and native Undo/Redo restores th
   assert.equal(h.historyState.canRedo, true);
   assert.equal(await h.history('redo'), true); assert.deepEqual(h.snapshot.flow.items.map((item) => item.checked), [true, true]);
   assert.equal(h.commands.filter((command) => command.type === 'restore').length, 2); h.unmount();
+});
+
+test('a cross-list move asks for its destination and Undo restores both lists', async () => {
+  const h = harness([task('parent', 'Family'), task('child', 'Call mum', 'parent')], {
+    otherLists: [{ id: 'work', name: 'Work', items: [task('meeting', 'Meeting')] }],
+  });
+  await h.ready();
+  await h.press('Actions for Family');
+  await h.press('Move task to checklist');
+  assert.equal(h.find('Move to Priority'), undefined);
+  await h.press('Move to Work');
+  assert.deepEqual(h.snapshot.flow.items, []);
+  assert.deepEqual(h.collection.lists[1].items.map(({ id, parentId }) => [id, parentId]),
+    [['meeting', null], ['parent', null], ['child', 'parent']]);
+  assert.equal(await h.history('undo'), true);
+  assert.deepEqual(h.snapshot.flow.items.map(({ id }) => id), ['parent', 'child']);
+  assert.deepEqual(h.collection.lists[1].items.map(({ id }) => id), ['meeting']);
+  assert.equal(await h.history('redo'), true);
+  assert.deepEqual(h.collection.lists[1].items.map(({ id }) => id), ['meeting', 'parent', 'child']);
+  h.unmount();
+});
+
+test('Priority opens at the first unfinished task and preserves completed rows above it', async () => {
+  const h = harness([task('active', 'Unfinished'), task('done', 'Completed', null, true)]);
+  await h.ready();
+  const scroll = h.nodes().find((node) => node.type === 'ScrollView' && node.props.ref);
+  const bodyEnd = h.nodes(scroll).find((node) => node.type === 'View' && node.props.collapsable === false && node.props.onLayout);
+  const layouts = [];
+  scroll.props.ref.current = { measureInWindow(callback) { callback(0, 100, 360, 300); }, scrollTo(value) { layouts.push(value); } };
+  assert.deepEqual(h.nodes(scroll).filter((node) => node.props.accessibilityRole === 'checkbox')
+    .map((node) => node.props.accessibilityLabel), ['Complete Completed', 'Complete Unfinished']);
+  scroll.props.onLayout();
+  h.layout('done', 0, 64);
+  h.layout('active', 64, 64);
+  bodyEnd.props.onLayout({ nativeEvent: { layout: { y: 128 } } });
+  scroll.props.onContentSizeChange(360, 216);
+  assert.equal(layouts.length, 0, 'wait for enough scroll height before placing the unfinished row');
+  const padded = h.nodes().find((node) => node.type === 'ScrollView' && node.props.ref);
+  assert.equal(padded.props.contentContainerStyle[1].paddingBottom, 236);
+  padded.props.onContentSizeChange(360, 364);
+  assert.deepEqual(clone(layouts), [{ y: 64, animated: false }]);
+  padded.props.onContentSizeChange(360, 365);
+  assert.equal(layouts.length, 1, 'subsequent layout does not undo a manual scroll');
+  h.unmount();
+});
+
+test('Priority horizontal swipes switch lists without taking a vertical or multi-touch gesture', async () => {
+  const directions = [];
+  const h = harness([task('active', 'Unfinished')], {
+    otherLists: [{ id: 'work', name: 'Work', items: [] }], onSwipeList: (direction) => directions.push(direction),
+  });
+  await h.ready();
+  const gesture = h.nodes().find((node) => node.type === 'View' && node.props.responder).props.responder;
+  const event = (x, y, touches = 1) => ({ nativeEvent: {
+    touches: Array.from({ length: touches }, () => ({ pageX: x, pageY: y })), changedTouches: [{ pageX: x, pageY: y }],
+  } });
+  gesture.onStartShouldSetPanResponderCapture(event(160, 200));
+  assert.equal(gesture.onMoveShouldSetPanResponderCapture(event(138, 201)), true);
+  gesture.onPanResponderMove(event(120, 203), { dx: -18, dy: 2 });
+  gesture.onPanResponderRelease(event(100, 205, 0), { dx: -38, dy: 4 });
+  assert.deepEqual(directions, [1], 'measure the full swipe even after PanResponder resets its origin');
+  gesture.onStartShouldSetPanResponderCapture(event(160, 200));
+  assert.equal(gesture.onMoveShouldSetPanResponderCapture(event(157, 230)), false);
+  assert.equal(gesture.onMoveShouldSetPanResponderCapture(event(60, 235)), false);
+  gesture.onPanResponderRelease(event(60, 235, 0));
+  gesture.onStartShouldSetPanResponderCapture(event(160, 200));
+  assert.equal(gesture.onMoveShouldSetPanResponderCapture(event(135, 201)), true);
+  gesture.onPanResponderStart(event(135, 201, 2));
+  gesture.onPanResponderRelease(event(75, 202, 0));
+  assert.deepEqual(directions, [1]);
+  const title = h.nodes().find((node) => node.props.accessibilityRole === 'header' && node.props.children === 'Priority');
+  title.props.onAccessibilityAction({ nativeEvent: { actionName: 'nextChecklist' } });
+  assert.deepEqual(directions, [1, 1]);
+  h.unmount();
 });
 
 test('Priority Undo cannot overwrite a peer update and a refresh drops its stale local history', async () => {

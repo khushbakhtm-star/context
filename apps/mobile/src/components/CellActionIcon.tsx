@@ -68,7 +68,8 @@ export function CellActionIcon({ name, color, backgroundColor = 'transparent', s
     : name === 'format' ? <View testID="format-circle" style={[line, { left: 1, top: 1, width: 24, height: 24,
       borderRadius: 12, alignItems: 'center', justifyContent: 'center' }]}>
       <Text testID="format-letter" allowFontScaling={false} style={{ color, fontSize: 18, lineHeight: 21,
-        fontWeight: '800', fontStyle: 'italic', textDecorationLine: 'underline', includeFontPadding: false }}>A</Text>
+        fontWeight: '800', fontStyle: 'italic', textDecorationLine: 'underline', includeFontPadding: false,
+        transform: [{ skewX: '-8deg' }] }}>A</Text>
     </View> : null}
   </View>;
 }

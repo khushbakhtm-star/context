@@ -107,8 +107,23 @@ test('the completed-task preference lives in Settings with its optional explanat
   for (let tick = 0; tick < 8; tick++) await Promise.resolve(); h.render();
   assert.deepEqual(values, [true]); assert.equal(h.nodes().find((node) => node.props.accessibilityLabel === 'Hide completed Priority tasks').props.value, true);
   const info = h.nodes().find((node) => node.type === 'InfoButton' && node.props.title === 'Checklist task flow');
-  assert.match(info.props.message, /arrows to switch lists/); assert.match(info.props.message, /Reset removes all checks/);
+  assert.match(info.props.message, /swipe sideways to switch lists/); assert.match(info.props.message, /Reset removes all checks/);
   assert.equal(h.nodes().some((node) => node.props.accessibilityLabel === 'Checklist name'), false);
+});
+
+test('Priority Settings chooses a named capture destination or asks on every selection', async () => {
+  const h = settingsFixture(); const values = [];
+  h.props.priorityLists = [{ id: 'main', name: 'Priority' }, { id: 'family', name: 'Family' }];
+  h.props.onPriorityCaptureListChange = async (id) => { values.push(id); h.props.priorityCaptureListId = id; };
+  const disclosure = () => h.nodes().find((node) => node.props.accessibilityLabel === 'Calendar task destination');
+  const radio = (name) => h.nodes().find((node) => node.props.accessibilityRole === 'radio' && node.props.accessibilityLabel === name);
+  h.render(); assert.equal(disclosure().props.accessibilityValue.text, 'Ask every time');
+  disclosure().props.onPress(); h.render(); assert.equal(radio('Ask every time').props.accessibilityState.checked, true);
+  radio('Family').props.onPress(); for (let tick = 0; tick < 8; tick++) await Promise.resolve(); h.render();
+  assert.deepEqual(values, ['family']); assert.equal(disclosure().props.accessibilityValue.text, 'Family');
+  disclosure().props.onPress(); h.render(); assert.equal(radio('Family').props.accessibilityState.checked, true);
+  radio('Ask every time').props.onPress(); for (let tick = 0; tick < 8; tick++) await Promise.resolve(); h.render();
+  assert.deepEqual(values, ['family', null]); assert.equal(disclosure().props.accessibilityValue.text, 'Ask every time');
 });
 
 test('Watch synchronization and update checks use the same action styling and section heading as Settings', async () => {

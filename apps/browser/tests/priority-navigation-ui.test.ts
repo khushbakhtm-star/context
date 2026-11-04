@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { setImmediate } from 'node:timers/promises';
 import ts from 'typescript';
 import { emptyLedger, editCells, getMinute, undoEdit, type BrowserLedgerState } from '../src/ledger';
 import { browserChecklist, changeBrowserChecklist, createBrowserChecklistList, minuteTaskSnapshot, newBrowserTask, renameBrowserChecklistList } from '../src/checklist-flow';
@@ -32,15 +33,16 @@ function gate() {
   return { promise: new Promise<void>((resolve) => { release = resolve; }), started: new Promise<void>((resolve) => { reached = resolve; }), release: () => release(), reached: () => reached() };
 }
 
-function destinationFixture(state: BrowserLedgerState) {
+function destinationFixture(state: BrowserLedgerState, checklistDestination = '') {
   const choices = { buttons: [] as HTMLButtonElement[], replaceChildren() { this.buttons = []; }, append(button: HTMLButtonElement) { this.buttons.push(button); } };
   let onClose: () => void = () => {};
   const dialog = { opens: 0, returnValue: '', showModal() { this.opens++; }, addEventListener(_event: string, listener: () => void) { onClose = listener; },
     close(value = '') { this.returnValue = value; onClose(); } };
   const active = { state, writes: 0, async update(change: (state: BrowserLedgerState) => BrowserLedgerState) { this.writes++; this.state = change(this.state); } };
   const visited: string[] = [];
-  const context = functions(['createChecklistTask', 'pickChecklistDestination'], { store: active, priorityScope: { store: active },
-    browserChecklist, changeBrowserChecklist, newBrowserTask, activeChecklistId: 'main', priorityUndos: new Map(), synchronize() {},
+  const context = functions(['addEditorTextToChecklist', 'createChecklistTask', 'pickChecklistDestination'], { store: active, priorityScope: { store: active },
+    browserChecklist, changeBrowserChecklist, minuteTaskSnapshot, newBrowserTask, activeChecklistId: 'main', priorityUndos: new Map(), synchronize() {},
+    settings: { checklistDestination },
     element: (id: string) => id === 'checklist-destination' ? dialog : choices, document: { createElement: () => ({}) },
     async choosePriorityList(id: string) { visited.push(id); }, async showChecklistView() { visited.push('main'); } });
   const snapshot = minuteTaskSnapshot([{ day: '2026-11-02', minute: 510, text: 'Call dentist' }]);
@@ -67,6 +69,35 @@ test('canceling the destination or changing accounts while it is open cannot add
   const h = destinationFixture(sample()); const canceled = h.add(); h.dialog.close(); await canceled;
   const stale = h.add(); h.context.store = {}; h.dialog.close('list_other'); await assert.rejects(stale, /account or checklist changed/);
   assert.equal(h.active.writes, 0); assert.deepEqual(h.visited, []);
+});
+
+test('a configured checklist receives captured text directly while a missing destination still asks', async () => {
+  const selected = destinationFixture(sample(), 'list_other');
+  await selected.add();
+  assert.equal(selected.dialog.opens, 0);
+  assert.deepEqual(selected.visited, ['list_other']);
+  assert.equal(browserChecklist(selected.active.state, 'list_other').flow.items.at(-1)?.text, 'Call dentist');
+
+  const missing = destinationFixture(sample(), 'list_deleted');
+  const pending = missing.add();
+  assert.equal(missing.dialog.opens, 1);
+  missing.dialog.close();
+  await pending;
+  assert.equal(missing.active.writes, 0);
+});
+
+test('highlighted minute text uses the same destination prompt and saves only the passage', async () => {
+  const h = destinationFixture(sample());
+  h.context.editor = { day: '2026-11-02', minute: 510, input: { value: 'Call dentist now', selectionStart: 5, selectionEnd: 12 } };
+  h.context.saveEditor = async () => {};
+  const pending = h.context.addEditorTextToChecklist();
+  await setImmediate();
+  assert.deepEqual(h.choices.buttons.map((button) => button.textContent), ['Priority', 'Later']);
+  h.dialog.close('list_other');
+  await pending;
+  const captured = browserChecklist(h.active.state, 'list_other').flow.items.at(-1);
+  assert.equal(captured?.text, 'dentist');
+  assert.deepEqual(copy(captured?.source?.selection), { start: 5, end: 12 });
 });
 
 test('top Search restricts the actual list or exact visible dates, while menu Search includes every list and minute', () => {
@@ -107,7 +138,7 @@ test('changing lists waits for its draft and cannot redirect a newer selected li
   assert.equal(switches, 0);
 });
 
-test('a missing selected list is resolved only by an explicit arrow action, using catalog IDs without adopting another list for edits', async () => {
+test('a missing selected list is resolved only by explicit list navigation, using catalog IDs without adopting another list for edits', async () => {
   const active = { state: sample() }; const chosen: string[] = [];
   const context = functions(['stepPriorityList'], { store: active, priorityScope: { store: active }, activeChecklistId: 'list_removed_by_peer', browserChecklist,
     async choosePriorityList(id: string) { chosen.push(id); } });

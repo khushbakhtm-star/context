@@ -3,7 +3,7 @@ import { dismissLedgerConflict, getLedgerConflicts, getSyncDocuments, putSyncDoc
 import type { SyncDocument } from '../sync/types';
 import { applyChecklistListChange, CHECKLIST_FLOW_KEY, DEFAULT_CHECKLIST_LIST_ID,
   readChecklistCollection, createChecklistListInCollection, renameChecklistListInCollection,
-  replaceChecklistListInCollection, type ChecklistChange, type ChecklistCollection, type ChecklistListSummary,
+  moveChecklistTaskToList, replaceChecklistListInCollection, type ChecklistChange, type ChecklistCollection, type ChecklistListSummary,
   type ChecklistFlow, type ChecklistTaskFormat, type ChecklistTaskSource } from '../utils/checklist-flow';
 
 export type ChecklistFlowSnapshot = { flow: ChecklistFlow; revision: string | null;
@@ -56,11 +56,23 @@ export async function renameChecklistList(listId: string, name: string,
   return changeCollection((collection) => renameChecklistListInCollection(collection, listId, name), expectedRevision, listId);
 }
 
+export async function transferChecklistTask(sourceListId: string, taskId: string, destinationListId: string,
+  expectedRevision: string | null): Promise<ChecklistFlowSnapshot> {
+  return changeCollection((collection) => moveChecklistTaskToList(collection, sourceListId, taskId, destinationListId),
+    expectedRevision, sourceListId);
+}
+
 /** History supplies the original list ID and observed collection revision. No
  * fresh peer version may be adopted to make an old Undo/Redo appear successful. */
 export async function replaceChecklistList(listId: string, flow: ChecklistFlow,
   expectedRevision: string | null): Promise<ChecklistFlowSnapshot> {
   return changeCollection((collection) => replaceChecklistListInCollection(collection, listId, flow), expectedRevision, listId);
+}
+
+/** A transfer undo restores both affected lists at one observed revision. */
+export async function replaceChecklistCollection(listId: string, collection: ChecklistCollection,
+  expectedRevision: string | null): Promise<ChecklistFlowSnapshot> {
+  return changeCollection(() => readChecklistCollection(collection), expectedRevision, listId);
 }
 
 /** Imported task text is a snapshot. Creating/checking/deleting a task does not
