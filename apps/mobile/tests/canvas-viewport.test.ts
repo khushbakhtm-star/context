@@ -3,7 +3,7 @@ import test from 'node:test';
 import { canvasDragNodes, canvasWorkplaneFrame, fitCanvas, fitCanvasWorkplane, previewCanvasRoutes, screenPoint,
   visibleCanvasBoard, worldPoint, zoomViewport } from '../src/screens/canvas-viewport';
 import type { CanvasBoard, CanvasEdge, CanvasNode } from '../src/utils/canvas';
-import { projectCanvasWorkplane, unprojectCanvasWorkplane } from '../src/utils/canvas-workplane';
+import { canvasWorkplanePreset, projectCanvasWorkplane, projectCanvasWorkplaneVector, unprojectCanvasWorkplane } from '../src/utils/canvas-workplane';
 
 const node = (id: string, x: number, y: number, options: Partial<CanvasNode> = {}): CanvasNode =>
   ({ id, x, y, width: 150, height: 100, kind: 'note', text: id, ...options });
@@ -23,29 +23,56 @@ test('pinch zoom keeps the world point under the fingers and Fit includes negati
   assert.ok(screenPoint({ x: 620, y: 300 }, viewport).x <= 360);
 });
 
-test('native workplane transforms keep corner touches interactive and fit projected content at every turn', () => {
+test('the three native Workplane layers agree with hit testing and Fit for presets and freely orbited cameras', () => {
   const boards = [{ width: 340, height: 720 }, { width: 720, height: 340 }];
   const cards = [node('west', -300, -230), node('east', 290, 120), node('north', 190, -270)];
-  for (const size of boards) for (const turn of [0, 1, 2, 3] as const) {
-    const frame = canvasWorkplaneFrame(size, turn);
+  const cameras = [0, 1, 2, 3, canvasWorkplanePreset('sagittal'), canvasWorkplanePreset('coronal'),
+    canvasWorkplanePreset('transverse'), canvasWorkplanePreset('oblique'),
+    { yaw: 61, pitch: 84, roll: 127 }, { yaw: -174, pitch: -84, roll: -63 }, { yaw: 33, pitch: 0, roll: 105 }] as const;
+  const rotate = ({ x, y }: { x: number; y: number }, radians: number) => {
+    const cosine = Math.cos(radians), sine = Math.sin(radians);
+    return { x: cosine * x - sine * y, y: sine * x + cosine * y };
+  };
+  for (const size of boards) for (const camera of cameras) {
+    const frame = canvasWorkplaneFrame(size, camera);
     const center = { x: size.width / 2, y: size.height / 2 };
+    assert.ok(Math.abs(frame.offset.x + frame.size.width / 2 - center.x) < 1e-9);
+    assert.ok(Math.abs(frame.offset.y + frame.size.height / 2 - center.y) < 1e-9);
+    const samples = [];
     for (const x of [0, size.width]) for (const y of [0, size.height]) {
-      const logical = unprojectCanvasWorkplane({ x, y }, size, turn);
-      const local = { x: logical.x - frame.offset.x, y: logical.y - frame.offset.y };
-      assert.ok(local.x >= 0 && local.x <= frame.size.width && local.y >= 0 && local.y <= frame.size.height);
-      const dx = logical.x - center.x, dy = logical.y - center.y;
-      const cosine = Math.cos(frame.rotation), sine = Math.sin(frame.rotation);
-      const rotated = { x: center.x + cosine * dx - sine * dy, y: center.y + sine * dx + cosine * dy };
-      assert.ok(rotated.x >= frame.offset.x && rotated.x <= frame.offset.x + frame.size.width);
-      assert.ok(rotated.y >= frame.offset.y && rotated.y <= frame.offset.y + frame.size.height);
-      assert.ok(Math.abs(rotated.x - x) < 1e-9);
-      assert.ok(Math.abs(center.y + (rotated.y - center.y) * frame.scaleY - y) < 1e-9);
+      const logical = unprojectCanvasWorkplane({ x, y }, size, camera);
+      const centered = { x: logical.x - center.x, y: logical.y - center.y };
+      const rotated = rotate(centered, frame.innerRotation);
+      const scaled = { x: rotated.x * frame.scaleX, y: rotated.y * frame.scaleY };
+      const physical = rotate(scaled, frame.outerRotation);
+      assert.ok(Math.abs(center.x + physical.x - x) < 1e-9);
+      assert.ok(Math.abs(center.y + physical.y - y) < 1e-9);
+      samples.push(centered, rotated, scaled, physical);
     }
-    const viewport = fitCanvasWorkplane(cards, size, turn);
+    // Each nested View covers the actual preimage of the stage corners,
+    // with only the normal 32-point overscan along each side.
+    assert.ok(Math.abs(frame.size.width - (2 * Math.max(...samples.map(({ x }) => Math.abs(x))) + 64)) < 1e-8);
+    assert.ok(Math.abs(frame.size.height - (2 * Math.max(...samples.map(({ y }) => Math.abs(y))) + 64)) < 1e-8);
+    const viewport = fitCanvasWorkplane(cards, size, camera);
     for (const card of cards) for (const x of [card.x, card.x + card.width]) for (const y of [card.y, card.y + card.height]) {
-      const point = projectCanvasWorkplane(screenPoint({ x, y }, viewport), size, turn);
+      const point = projectCanvasWorkplane(screenPoint({ x, y }, viewport), size, camera);
       assert.ok(point.x >= 27 && point.x <= size.width - 27);
       assert.ok(point.y >= 43 && point.y <= size.height - 43);
+    }
+  }
+});
+
+test('Fit leaves room for raised objects in side views and after screen rotation', () => {
+  const size = { width: 310, height: 480 };
+  const bounds = [{ x: -220, y: -190, width: 100, height: 110, elevation: 75 },
+    { x: 300, y: 200, width: 140, height: 150, elevation: 80 }];
+  for (const camera of [canvasWorkplanePreset('sagittal'), { yaw: 30, pitch: -84, roll: 51 }]) {
+    const viewport = fitCanvasWorkplane(bounds, size, camera);
+    for (const box of bounds) for (const x of [box.x, box.x + box.width]) for (const y of [box.y, box.y + box.height]) {
+      const origin = projectCanvasWorkplane(screenPoint({ x, y }, viewport), size, camera);
+      const lift = projectCanvasWorkplaneVector({ x: 0, y: 0, z: box.elevation * viewport.zoom }, camera);
+      assert.ok(origin.x + lift.x >= 27 && origin.x + lift.x <= size.width - 27);
+      assert.ok(origin.y + lift.y >= 43 && origin.y + lift.y <= size.height - 43);
     }
   }
 });

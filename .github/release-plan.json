@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.43",
-  "sourceAndroidVersionCode": 44,
-  "sourceIosBuildNumber": "44",
+  "version": "0.1.44",
+  "sourceAndroidVersionCode": 45,
+  "sourceIosBuildNumber": "45",
   "nativeVerification": {
     "android": false,
     "ios": false,
     "fdroid": false
   },
-  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.43. Canvas generates pedigrees from parent pairs and ordered children, with conventional person symbols, shared descent lines, centered names, and double lines for consanguinity. Canvas offers a tilted 3D Workplane and a flat view. Calendar range selection preserves the scroll position. Saving an erased checklist item removes its row and preserves subtasks. Manual sync moves to Settings. The main toolbar offers contextual add choices and a shared slot for each view's Undo and Redo. Publish only the verified APK signed with the existing publisher key."
+  "notes": "Prepare the Wear-enabled Android preview for Context 0.1.44. Canvas Workplane adds clockwise and counterclockwise rotation, free orbit, and sagittal, coronal, transverse, and oblique views. In 3D, pedigree circles become spheres, squares become cubes, and diamonds become octahedra. Publish only the verified APK signed with the existing publisher key."
 }

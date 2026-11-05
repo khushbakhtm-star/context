@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ComponentRef, type ReactElement } from 'react';
 import { Alert, AppState, Image, KeyboardAvoidingView, Linking, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet,
   Switch, Text, TextInput, View, type GestureResponderEvent, type LayoutChangeEvent, type ViewStyle } from 'react-native';
 
@@ -11,9 +11,11 @@ import { activeCanvasBoard, addCanvasBoard, addCanvasEdge, addCanvasNode, addCan
   setCanvasNodeSpaces, updateCanvasBoard, updateCanvasEdge, updateCanvasNode, updateCanvasSpace, updateCanvasViewport,
   type CanvasDocument, type CanvasEdge, type CanvasFamily, type CanvasNode, type CanvasSpace, type CanvasStroke } from '../utils/canvas';
 import { arrangeCanvas, canvasPersonSymbol, routeCanvasEdges, routeCanvasFamilies, type CanvasLayoutMode } from '../utils/canvas-layout';
-import { canvasWorkplaneGrid, nextCanvasWorkplaneTurn, projectCanvasWorkplane, unprojectCanvasWorkplane,
-  type CanvasWorkplaneTurn } from '../utils/canvas-workplane';
+import { canvasWorkplaneGrid, canvasWorkplanePreset, canvasWorkplaneSolidDepth, projectCanvasWorkplane, projectCanvasWorkplaneSolid,
+  projectCanvasWorkplaneVector, rotateCanvasWorkplane, unprojectCanvasWorkplane,
+  type CanvasWorkplaneCamera } from '../utils/canvas-workplane';
 import { CanvasFamilyEditor, type FamilyForm } from './CanvasFamilyEditor';
+import { WorkplaneFaces, WorkplaneSphere } from './CanvasWorkplaneSolids';
 import type { ViewAddAction, ViewAddActionsRef } from './view-add-actions';
 import { EMPTY_VIEW_HISTORY, type ViewHistoryControls, type ViewHistoryState } from './view-history';
 import { canvasDragNodes, canvasWorkplaneFrame, centerCanvasNode, fitCanvasWorkplane, intersectsCanvasViewport,
@@ -37,7 +39,7 @@ type NodeDraft = {
 };
 type EdgeDraft = { id?: string; from: string; to: string; kind: CanvasEdge['kind']; directed: boolean; label: string };
 type SpaceDraft = { id?: string; title: string; color?: string; x: string; y: string; width: string; height: string };
-type Dialog = { kind: 'boards' | 'group' | 'search'; text: string } | { kind: 'layout' } |
+type Dialog = { kind: 'boards' | 'group' | 'search'; text: string } | { kind: 'layout' | 'workplane' } |
   { kind: 'node'; draft: NodeDraft } | { kind: 'edge'; draft: EdgeDraft } | { kind: 'connections'; nodeId: string } |
   { kind: 'space'; draft: SpaceDraft } | { kind: 'membership'; nodeId: string; spaceIds: string[] } |
   { kind: 'family'; familyId?: string; seedPersonId?: string } | { kind: 'families'; personId?: string };
@@ -45,8 +47,10 @@ type BoardMode = 'text' | 'draw' | 'spaces';
 type Capture = { boardId: string; point: Point; text: string };
 type SpaceDrag = { id: string; resize: boolean };
 type Gesture = { boardId: string; origin: Point; viewport: Viewport; nodeId?: string;
-  space?: SpaceDrag; points?: Point[]; pinch?: { viewport: Viewport; center: Point; distance: number } };
-type Preview = { viewport?: Viewport; drag?: DragPreview; space?: SpaceDrag & { delta: Point }; points?: Point[] };
+  space?: SpaceDrag; points?: Point[]; pinch?: { viewport: Viewport; center: Point; distance: number };
+  orbit?: { camera: CanvasWorkplaneCamera; origin: Point } };
+type Preview = { viewport?: Viewport; drag?: DragPreview; space?: SpaceDrag & { delta: Point }; points?: Point[];
+  workplane?: CanvasWorkplaneCamera };
 type Touches = GestureResponderEvent['nativeEvent']['touches'];
 
 const NODE_KINDS: { id: NodeKind; name: string }[] = [
@@ -71,6 +75,13 @@ const SPACE_COLORS = [
 const BOARD_MODES: { id: BoardMode; name: string }[] = [
   { id: 'text', name: 'Text' }, { id: 'draw', name: 'Draw' }, { id: 'spaces', name: 'Spaces' },
 ];
+const WORKPLANE_VIEWS = [
+  { id: 'oblique', title: 'Oblique', detail: 'Angled view' },
+  { id: 'transverse', title: 'Transverse', detail: 'Top view' },
+  { id: 'coronal', title: 'Coronal', detail: 'Front view' },
+  { id: 'sagittal', title: 'Sagittal', detail: 'Side view' },
+] as const;
+const WORKPLANE_ROLL_STEP = 15;
 const SPACE_MIN = 24;
 const LAYOUTS: { id: CanvasLayoutMode; title: string; detail: string }[] = [
   { id: 'relationships', title: 'Relationships', detail: 'Lay out connected cards and dependencies.' },
@@ -82,6 +93,17 @@ const nodeName = (node?: CanvasNode) => node?.text.trim().split('\n')[0]?.slice(
   NODE_KINDS.find(({ id }) => id === node?.kind)?.name || 'Group';
 const edgeName = (kind: CanvasEdge['kind']) => EDGE_KINDS.find(({ id }) => id === kind)?.name ?? 'Connection';
 const safeWebUrl = (value?: string) => Boolean(value && /^https?:\/\/[^\s]+$/i.test(value));
+
+function workplaneElevation(node: CanvasNode) {
+  if (isCanvasPerson(node.kind)) return canvasPersonSymbol(node).width;
+  if (node.kind === 'group' && !node.collapsed) return 0;
+  return canvasWorkplaneSolidDepth('block', node);
+}
+
+function workplaneBounds(node: CanvasNode) {
+  const { x, y, width, height } = node;
+  return { x, y, width, height, elevation: workplaneElevation(node) };
+}
 
 function dimensions(kind: NodeKind): Size {
   if (isCanvasPerson(kind)) return { width: 120, height: 96 };
@@ -215,10 +237,10 @@ const CanvasGrid = memo(function CanvasGrid({ viewport, size, styles }: { viewpo
   </View>;
 });
 
-const WorkplaneGrid = memo(function WorkplaneGrid({ viewport, size, offset, turn, colors }: {
-  viewport: Viewport; size: Size; offset: Point; turn: CanvasWorkplaneTurn; colors: AppColors;
+const WorkplaneGrid = memo(function WorkplaneGrid({ viewport, size, offset, camera, colors }: {
+  viewport: Viewport; size: Size; offset: Point; camera: CanvasWorkplaneCamera; colors: AppColors;
 }) {
-  const lines = canvasWorkplaneGrid(viewport, size, turn);
+  const lines = canvasWorkplaneGrid(viewport, size, camera);
   const offsetPoint = ({ x, y }: Point) => ({ x: x - offset.x, y: y - offset.y });
   return <View pointerEvents="none" style={StyleSheet.absoluteFill}>
     {lines.map(({ start, end, major, axis }, index) => <Stroke key={index}
@@ -241,12 +263,14 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   const [dialogError, setDialogError] = useState('');
   const [preview, setPreview] = useState<Preview | null>(null);
   const [mode, setMode] = useState<BoardMode>('text');
-  const [workplane, setWorkplane] = useState<CanvasWorkplaneTurn | null>(null);
-  const lastWorkplaneTurn = useRef<CanvasWorkplaneTurn>(0);
+  const [workplane, setWorkplane] = useState<CanvasWorkplaneCamera | null>(null);
+  const lastWorkplane = useRef(canvasWorkplanePreset('oblique'));
+  const [orbiting, setOrbiting] = useState(false);
   const [spaceId, setSpaceId] = useState<string | null>(null);
   const [capture, setCapture] = useState<Capture | null>(null);
   const modeRef = useRef(mode); modeRef.current = mode;
-  const camera = useRef({ workplane, size }); camera.current = { workplane, size };
+  const displayedWorkplane = preview?.workplane ?? workplane;
+  const camera = useRef({ workplane, size, orbiting }); camera.current = { workplane, size, orbiting };
   const captureRef = useRef<Capture | null>(null);
   const docRef = useRef(document); docRef.current = document;
   const onChangeRef = useRef(onChange); onChangeRef.current = onChange;
@@ -295,14 +319,15 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     [layout, visualNodes]);
   const viewport = preview?.viewport ?? board.viewport;
   const scene = useMemo(() => {
-    if (workplane === null || !size.width || !size.height) return null;
-    const frame = canvasWorkplaneFrame(size, workplane);
-    // Android decomposes a raw affine into view properties. Nested views preserve the exact transform and its hit testing.
+    if (displayedWorkplane === null || !size.width || !size.height) return null;
+    const frame = canvasWorkplaneFrame(size, displayedWorkplane);
+    // Nested transforms preserve the projected axes and touch coordinates on Android.
     const style: ViewStyle = { position: 'absolute', left: frame.offset.x, top: frame.offset.y, ...frame.size,
-      transform: [{ scaleY: frame.scaleY }] };
-    const rotation: ViewStyle = { transform: [{ rotate: frame.rotation + 'rad' }] };
-    return { size: frame.size, offset: frame.offset, style, rotation };
-  }, [size, workplane]);
+      transform: [{ rotate: frame.outerRotation + 'rad' }] };
+    const scale: ViewStyle = { transform: [{ scaleX: frame.scaleX }, { scaleY: frame.scaleY }] };
+    const rotation: ViewStyle = { transform: [{ rotate: frame.innerRotation + 'rad' }] };
+    return { size: frame.size, offset: frame.offset, style, scale, rotation };
+  }, [size, displayedWorkplane]);
   const sceneSize = scene?.size ?? size;
   const sceneViewport = useMemo(() => scene ? { ...viewport, x: viewport.x + scene.offset.x / viewport.zoom,
     y: viewport.y + scene.offset.y / viewport.zoom } : viewport, [viewport, scene]);
@@ -369,12 +394,20 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     setMulti(false);
   }
 
-  function changeWorkplane(next: CanvasWorkplaneTurn | null) {
+  function changeWorkplane(next: CanvasWorkplaneCamera | null) {
     if (!finishCapture(true)) return;
     activeGesture.current = null;
     clearPreview();
-    if (next !== null) lastWorkplaneTurn.current = next;
+    if (next !== null) lastWorkplane.current = next;
+    else setOrbiting(false);
     setWorkplane(next);
+  }
+
+  function toggleOrbit() {
+    if (!finishCapture(true)) return;
+    activeGesture.current = null;
+    clearPreview();
+    setOrbiting((enabled) => !enabled);
   }
 
   function worldFromStage(point: Point) {
@@ -382,6 +415,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   }
 
   function tapBackdrop(event: GestureResponderEvent) {
+    if (orbiting) return;
     if (captureRef.current) { finishCapture(true); return; }
     if (mode === 'draw') return;
     const point = worldFromStage({ x: event.nativeEvent.locationX, y: event.nativeEvent.locationY });
@@ -485,7 +519,8 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
       return { x: touch.pageX - stageOrigin.current.x, y: touch.pageY - stageOrigin.current.y };
     }
     function logicalPoint(point: Point): Point {
-      const { workplane, size } = camera.current;
+      const { workplane: committed, size } = camera.current;
+      const workplane = previewRef.current?.workplane ?? committed;
       return workplane === null ? point : unprojectCanvasWorkplane(point, size, workplane);
     }
     function stagePoint(touch: Touches[number]): Point { return logicalPoint(physicalPoint(touch)); }
@@ -508,8 +543,17 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
       if (pinchNow) {
         gesture.pinch ??= { ...pinchNow, viewport: previewRef.current?.viewport ?? gesture.viewport };
         const start = gesture.pinch;
-        update({ viewport: zoomViewport(start.viewport, start.viewport.zoom * pinchNow.distance / start.distance, start.center, pinchNow.center) });
+        update({ workplane: previewRef.current?.workplane,
+          viewport: zoomViewport(start.viewport, start.viewport.zoom * pinchNow.distance / start.distance, start.center, pinchNow.center) });
       } else if (!gesture.pinch && touches[0]) {
+        if (gesture.orbit) {
+          const point = physicalPoint(touches[0]);
+          const { origin, camera } = gesture.orbit;
+          const dx = point.x - origin.x, dy = point.y - origin.y;
+          if (!dx && !dy && !previewRef.current?.workplane) return;
+          update({ workplane: rotateCanvasWorkplane(camera, { yaw: dx * 0.45, pitch: dy * 0.35 }) });
+          return;
+        }
         const point = stagePoint(touches[0]);
         if (gesture.points) {
           const world = worldPoint(point, gesture.viewport);
@@ -540,6 +584,10 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
       const active = activeCanvasBoard(current);
       if (active.id !== gesture.boardId) return;
       try {
+        if (last.workplane) {
+          lastWorkplane.current = last.workplane;
+          setWorkplane(last.workplane);
+        }
         if (last.viewport) { apply(updateCanvasViewport(current, last.viewport), false); return; }
         if (last.points) { apply(addCanvasStroke(current, { points: last.points, width: 2 }, active.id)); return; }
         if (last.space) {
@@ -570,10 +618,12 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
         if (activeGesture.current && nativeEvent.touches.length > 1) return false;
         const active = activeCanvasBoard(docRef.current);
         const origin = stagePoint(touch);
-        const drawing = modeRef.current === 'draw';
+        const { orbiting, workplane } = camera.current;
+        const orbit = orbiting && workplane ? { camera: workplane, origin: physicalPoint(touch) } : undefined;
+        const drawing = !orbit && modeRef.current === 'draw';
         activeGesture.current = { boardId: active.id, origin, viewport: active.viewport,
-          points: drawing ? [worldPoint(origin, active.viewport)] : undefined };
-        return drawing;
+          points: drawing ? [worldPoint(origin, active.viewport)] : undefined, orbit };
+        return drawing || Boolean(orbit);
       },
       onMoveShouldSetPanResponderCapture: ({ nativeEvent }) => {
         const start = activeGesture.current, touch = nativeEvent.touches[0];
@@ -708,7 +758,8 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     const people = new Set(family ? [...family.parents, ...family.children] : []);
     const familyBounds = visible.filter(({ id }) => people.has(id));
     return updateCanvasBoard(current, active.id, () => ({
-      ...arranged, viewport: fitCanvasWorkplane(familyBounds.length ? familyBounds : [...visible, ...(arranged.spaces ?? [])], size, workplane),
+      ...arranged, viewport: fitCanvasWorkplane(familyBounds.length ? familyBounds.map(workplaneBounds) :
+        [...visible.map(workplaneBounds), ...(arranged.spaces ?? [])], size, workplane),
     }));
   }
 
@@ -802,18 +853,20 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   const captureLogical = capture && screenPoint(capture.point, viewport);
   const capturePoint = captureLogical && (workplane === null ? captureLogical : projectCanvasWorkplane(captureLogical, size, workplane));
   const captureWidth = Math.min(290, Math.max(120, size.width - 16));
-  const fitBounds = [...visualNodes, ...(board.spaces ?? []), ...ink.map(({ bounds }) => ({ x: bounds.x, y: bounds.y,
+  const fitBounds = [...visualNodes.map(workplaneBounds), ...(board.spaces ?? []), ...ink.map(({ bounds }) => ({ x: bounds.x, y: bounds.y,
     width: Math.max(1, bounds.right - bounds.x), height: Math.max(1, bounds.bottom - bounds.y) }))];
+  const solidPeople: { depth: number; element: ReactElement }[] = [];
+  const cardSides: { depth: number; element: ReactElement }[] = [];
 
   const drawing = visualNodes.map((node) => {
     const start = screenPoint(node, sceneViewport);
     const end = screenPoint({ x: node.x + node.width, y: node.y + node.height }, sceneViewport);
-    if (!intersectsCanvasViewport(start, end, sceneSize)) return null;
     const scale = sceneViewport.zoom;
     const left = start.x, top = start.y, width = Math.max(1, end.x - left), height = Math.max(1, end.y - top);
     const active = selectedIds.includes(node.id) || linkFrom === node.id;
     const expandedGroup = node.kind === 'group' && !node.collapsed;
-    const rect: ViewStyle = { left, top, width, height };
+    if ((!displayedWorkplane || expandedGroup) && !intersectsCanvasViewport(start, end, sceneSize)) return null;
+    const rect = { left, top, width, height };
     const fontSize = Math.max(9, Math.min(34, 14 * scale));
     const showText = scale >= 0.36 && width >= 28;
     const cardColor = node.color ?? colors.panel;
@@ -842,6 +895,39 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
     if (isCanvasPerson(node.kind)) {
       const bounds = canvasPersonSymbol(node);
       const symbol = bounds.width * scale;
+      if (displayedWorkplane) {
+        const ground = screenPoint({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }, viewport);
+        const origin = projectCanvasWorkplane(ground, size, displayedWorkplane);
+        const radius = symbol / 2;
+        const lift = projectCanvasWorkplaneVector({ x: 0, y: 0, z: radius }, displayedWorkplane);
+        const sphere = node.kind === 'person-circle';
+        const faces = sphere ? [] : projectCanvasWorkplaneSolid(node.kind === 'person-square' ? 'cube' : 'octahedron',
+          { width: symbol, height: symbol, depth: symbol }, displayedWorkplane);
+        const points = sphere ? [{ x: lift.x - radius, y: lift.y - radius }, { x: lift.x + radius, y: lift.y + radius }]
+          : faces.flatMap((face) => face.points);
+        if (!points.length) return null;
+        const minX = Math.min(...points.map((point) => point.x)), maxX = Math.max(...points.map((point) => point.x));
+        const minY = Math.min(...points.map((point) => point.y)), maxY = Math.max(...points.map((point) => point.y));
+        const centerX = (minX + maxX) / 2;
+        const label = showText && node.text.trim() ? node.text : null;
+        const hitWidth = Math.max(maxX - minX, label ? Math.min(180, width) : 0, 22);
+        const hitHeight = Math.max(22, maxY - minY + (label ? fontSize * 2.5 : 0));
+        const hitLeft = origin.x + centerX - hitWidth / 2, hitTop = origin.y + minY;
+        if (!intersectsCanvasViewport({ x: hitLeft, y: hitTop }, { x: hitLeft + hitWidth, y: hitTop + hitHeight }, size)) return null;
+        const localOrigin = { x: hitWidth / 2 - centerX, y: -minY };
+        const color = node.color ?? (resolvedMode === 'dark' ? '#A3A0AC' : '#B1ADB9');
+        const { depth } = projectCanvasWorkplaneVector({ x: ground.x, y: ground.y, z: radius }, displayedWorkplane);
+        solidPeople.push({ depth, element: <Pressable key={node.id} {...tapProps} accessibilityState={{ selected: active }}
+          style={[styles.person, { left: hitLeft, top: hitTop, width: hitWidth, height: hitHeight }]}>
+          {sphere ? <WorkplaneSphere center={{ x: localOrigin.x + lift.x, y: localOrigin.y + lift.y }} radius={radius} color={color} />
+            : <WorkplaneFaces faces={faces} origin={localOrigin} color={color} />}
+          {active ? <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.selectedSolid]} /> : null}
+          {label ? <Text pointerEvents="none" numberOfLines={2} style={[styles.personName, {
+            top: maxY - minY + 4, fontSize, color: colors.ink, fontWeight: active ? '700' : '500',
+          }]}>{label}</Text> : null}
+        </Pressable> });
+        return null;
+      }
       const diamond = node.kind === 'person-diamond';
       const side = diamond ? symbol / Math.SQRT2 : symbol;
       const inset = (symbol - side) / 2;
@@ -859,9 +945,25 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
         </Text> : null}
       </Pressable>;
     }
+    if (displayedWorkplane) {
+      const ground = screenPoint({ x: node.x + node.width / 2, y: node.y + node.height / 2 }, viewport);
+      const origin = projectCanvasWorkplane(ground, size, displayedWorkplane);
+      const elevation = workplaneElevation(node) * scale;
+      const lift = projectCanvasWorkplaneVector({ x: 0, y: 0, z: elevation }, displayedWorkplane);
+      const offset = unprojectCanvasWorkplane(lift, { width: 0, height: 0 }, displayedWorkplane);
+      if (!intersectsCanvasViewport({ x: start.x + Math.min(0, offset.x), y: start.y + Math.min(0, offset.y) },
+        { x: end.x + Math.max(0, offset.x), y: end.y + Math.max(0, offset.y) }, sceneSize)) return null;
+      const faces = projectCanvasWorkplaneSolid('block', { width, height, depth: elevation }, displayedWorkplane).filter((face) => !face.top);
+      rect.left = left + offset.x;
+      rect.top = top + offset.y;
+      if (faces.length) cardSides.push({
+        depth: projectCanvasWorkplaneVector({ x: ground.x, y: ground.y, z: elevation / 2 }, displayedWorkplane).depth,
+        element: <WorkplaneFaces key={node.id} faces={faces} origin={origin} color={cardColor} />,
+      });
+    }
     return <Pressable key={node.id} {...tapProps}
       accessibilityState={{ selected: active, ...(node.kind === 'group' ? { expanded: false } : {}) }}
-      style={[styles.card, scene && styles.workplaneCard, rect, { backgroundColor: cardColor,
+      style={[styles.card, rect, { backgroundColor: cardColor,
         padding: Math.min(12, 7 * scale), borderColor: active ? colors.accent : colors.hairline,
         borderWidth: active ? 2 : 1 }, node.kind === 'partnership' && styles.partnership]}>
       {node.kind === 'image' && safeWebUrl(node.url) && showText ? <Image source={{ uri: node.url! }}
@@ -880,7 +982,7 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
   const familiesShown = dialog?.kind === 'families' ? (board.families ?? []).filter((family) =>
     !dialog.personId || family.parents.includes(dialog.personId) || family.children.includes(dialog.personId)) : [];
   const dialogTitle = dialog?.kind === 'boards' ? 'Workspaces' : dialog?.kind === 'search' ? 'Search Canvas' :
-    dialog?.kind === 'layout' ? 'Auto Arrange' : dialog?.kind === 'group' ? 'Group cards' :
+    dialog?.kind === 'layout' ? 'Auto Arrange' : dialog?.kind === 'workplane' ? 'Workplane views' : dialog?.kind === 'group' ? 'Group cards' :
       dialog?.kind === 'connections' ? 'Connections' : dialog?.kind === 'edge' ? 'Connection' :
         dialog?.kind === 'space' ? (dialog.draft.id ? 'Edit space' : 'Add space') :
           dialog?.kind === 'membership' ? 'Card spaces' : dialog?.kind === 'families' ? 'Families' :
@@ -945,9 +1047,10 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
       <View ref={stageRef} collapsable={false} onLayout={stageLayout} style={[styles.stage, scene && styles.workplaneStage]}
         {...responder.panHandlers}>
         <Pressable accessible={false} style={StyleSheet.absoluteFill} onPress={tapBackdrop} />
-        <View pointerEvents="box-none" collapsable={false} style={scene?.style ?? StyleSheet.absoluteFill}>
+        <View pointerEvents={orbiting ? 'none' : 'box-none'} collapsable={false} style={scene?.style ?? StyleSheet.absoluteFill}>
+          <View pointerEvents="box-none" collapsable={false} style={[StyleSheet.absoluteFill, scene?.scale]}>
           <View pointerEvents="box-none" collapsable={false} style={[StyleSheet.absoluteFill, scene?.rotation]}>
-            {scene && workplane !== null ? <WorkplaneGrid viewport={viewport} size={size} offset={scene.offset} turn={workplane} colors={colors} /> :
+            {scene && displayedWorkplane !== null ? <WorkplaneGrid viewport={viewport} size={size} offset={scene.offset} camera={displayedWorkplane} colors={colors} /> :
               <CanvasGrid viewport={viewport} size={size} styles={styles} />}
             {ellipses}
             <View pointerEvents="none" style={StyleSheet.absoluteFill}>
@@ -965,7 +1068,16 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
             </View>
             {drawing}
           </View>
+          </View>
         </View>
+        {displayedWorkplane ? <>
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            {cardSides.sort((a, b) => a.depth - b.depth).map(({ element }) => element)}
+          </View>
+          <View pointerEvents={orbiting ? 'none' : 'box-none'} style={StyleSheet.absoluteFill}>
+            {solidPeople.sort((a, b) => a.depth - b.depth).map(({ element }) => element)}
+          </View>
+        </> : null}
         {capture && capturePoint ? <View style={[styles.capture, {
           left: Math.max(8, Math.min(size.width - captureWidth - 8, capturePoint.x)),
           top: Math.max(8, Math.min(size.height - 116, capturePoint.y)), width: captureWidth,
@@ -984,10 +1096,17 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
         </View> : null}
       </View>
       {!capture ? <View pointerEvents="box-none" style={styles.workplaneActions}>
-        {workplane !== null ? <Tool title="↻" accessibilityLabel="Rotate workplane" styles={styles}
-          onPress={() => changeWorkplane(nextCanvasWorkplaneTurn(workplane))} /> : null}
+        {workplane !== null ? <>
+          <Tool title="↺" accessibilityLabel="Rotate workplane counterclockwise" styles={styles} compact
+            onPress={() => changeWorkplane(rotateCanvasWorkplane(workplane, { roll: -WORKPLANE_ROLL_STEP }))} />
+          <Tool title="↻" accessibilityLabel="Rotate workplane clockwise" styles={styles} compact
+            onPress={() => changeWorkplane(rotateCanvasWorkplane(workplane, { roll: WORKPLANE_ROLL_STEP }))} />
+          <Tool title="Views" accessibilityLabel="Workplane views" styles={styles} compact
+            onPress={() => openDialog({ kind: 'workplane' })} />
+          <Tool title="Orbit" accessibilityLabel="Drag to orbit" selected={orbiting} styles={styles} compact onPress={toggleOrbit} />
+        </> : null}
         <Tool title={workplane === null ? '3D' : 'Flat'} accessibilityLabel={workplane === null ? '3D Workplane' : 'Flat canvas'}
-          styles={styles} onPress={() => changeWorkplane(workplane === null ? lastWorkplaneTurn.current : null)} />
+          styles={styles} compact onPress={() => changeWorkplane(workplane === null ? lastWorkplane.current : null)} />
       </View> : null}
     </View>
     <View style={styles.footer}>
@@ -1010,6 +1129,16 @@ export function CanvasScreen({ document, onChange, focusNodeId, onFocusConsumed,
           </View>
           <ScrollView key={dialog?.kind === 'family' ? dialog.familyId ?? 'new-family' : dialog?.kind === 'families' ? 'families' : 'dialog'}
             keyboardShouldPersistTaps="handled" contentContainerStyle={styles.dialogContent}>
+            {dialog?.kind === 'workplane' ? WORKPLANE_VIEWS.map(({ id, title, detail }) => {
+              const next = canvasWorkplanePreset(id);
+              const selected = workplane?.yaw === next.yaw && workplane.pitch === next.pitch && workplane.roll === next.roll;
+              return <Pressable key={id} accessibilityRole="button" accessibilityLabel={title + ', ' + detail}
+                accessibilityState={{ selected }} style={[styles.result, selected && styles.activeTool]}
+                onPress={() => { changeWorkplane(next); closeDialog(); }}>
+                <Text style={styles.toolText}>{title}</Text>
+                <Text style={styles.hint}>{detail}</Text>
+              </Pressable>;
+            }) : null}
             {dialog?.kind === 'boards' ? <>
               {document.boards.map((item) => <Tool key={item.id} title={item.title} selected={item.id === board.id} styles={styles}
                 onPress={() => safeChange(() => { apply(selectCanvasBoard(docRef.current, item.id), false); closeDialog(); })} />)}
@@ -1190,7 +1319,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   workplaneStage: { backgroundColor: colors.panel },
   workplaneActions: { position: 'absolute', top: 7, right: 7, flexDirection: 'row', borderRadius: 8,
     borderColor: colors.hairline, borderWidth: StyleSheet.hairlineWidth, backgroundColor: colors.paper },
-  workplaneCard: { boxShadow: '1px 3px 0px 0px rgba(0, 0, 0, 0.12)' },
+  selectedSolid: { borderWidth: 1, borderRadius: 5, borderColor: colors.accent },
   gridVertical: { position: 'absolute', top: 0, bottom: 0, width: StyleSheet.hairlineWidth, backgroundColor: colors.hairline, opacity: 0.65 },
   gridHorizontal: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: colors.hairline, opacity: 0.65 },
   card: { position: 'absolute', overflow: 'hidden', borderWidth: 1, borderRadius: 7, justifyContent: 'center' },

@@ -189,6 +189,8 @@ body.view-checklist main { touch-action: pan-y pinch-zoom; }
 }
 .canvas-toolbar :is(button,select) { min-height: 32px; padding: 4px 8px; font-size: 13px; }
 .canvas-toolbar .canvas-history-icon { min-width: 36px; font-size: 23px; line-height: 1; }
+.canvas-toolbar .canvas-rotate { min-width: 32px; font-size: 19px; line-height: 1; }
+.canvas-camera-controls { flex: none; }
 .canvas-toolbar select { max-width: 180px; }
 .canvas-toolbar button[aria-pressed=true] { border-color: var(--selected); background: color-mix(in srgb,var(--selected) 19%,var(--surface)); }
 .canvas-tools { display: flex; gap: 2px; padding-inline: 4px; border-inline: 1px solid var(--line); }
@@ -207,6 +209,8 @@ body.view-checklist main { touch-action: pan-y pinch-zoom; }
 .canvas-surface:active { cursor: grabbing; }
 .canvas-surface:is([data-tool=draw],[data-tool=space]) { cursor: crosshair; }
 .canvas-surface:is([data-tool=draw],[data-tool=space]) :is(.canvas-card,.canvas-wire,.canvas-space-title,.canvas-space-resize) { cursor: crosshair; }
+.canvas-surface[data-orbit=true],.canvas-surface[data-orbit=true] :is(.canvas-card,.canvas-solid-object,.canvas-wire,.canvas-space-title,.canvas-space-resize) { cursor: grab; }
+.canvas-surface[data-orbit=true]:active,.canvas-surface[data-orbit=true]:active :is(.canvas-card,.canvas-solid-object,.canvas-wire,.canvas-space-title,.canvas-space-resize) { cursor: grabbing; }
 .canvas-surface:focus-visible { outline: 2px solid var(--selected); outline-offset: -2px; }
 .canvas-plane { position: absolute; inset: 0; transform-origin: center; }
 .canvas-plane-grid { display: none; position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
@@ -214,21 +218,29 @@ body.view-checklist main { touch-action: pan-y pinch-zoom; }
 .canvas-plane-grid-minor { color: color-mix(in srgb,var(--ink) 13%,transparent); }
 .canvas-plane-grid-major { color: color-mix(in srgb,var(--ink) 22%,transparent); }
 .canvas-plane-grid-x,.canvas-plane-grid-y { color: color-mix(in srgb,var(--ink) 35%,transparent); }
+.canvas-solid-layer { display: none; position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.canvas-solid-blocks { transform: var(--canvas-upright); transform-origin: center; }
+.canvas-solid-object :is(circle,polygon,text) { pointer-events: visiblePainted; cursor: inherit; }
+.canvas-solid-object { cursor: grab; }
+.canvas-solid-outline { stroke: color-mix(in srgb,var(--ink) 44%,transparent); stroke-width: 1; stroke-linejoin: round; }
+.canvas-solid-object.is-selected .canvas-solid-outline { stroke: var(--selected); stroke-width: 2; }
+.canvas-solid-label { fill: var(--ink); stroke: var(--surface); stroke-width: 3; paint-order: stroke; font-size: 13px; }
 .canvas-surface[data-workplane=true] { background: radial-gradient(ellipse at 50% 35%,var(--surface),var(--bg) 90%); }
-.canvas-surface[data-workplane=true] .canvas-plane-grid { display: block; }
+.canvas-surface[data-workplane=true] :is(.canvas-plane-grid,.canvas-solid-layer) { display: block; }
 .canvas-surface[data-workplane=true] .canvas-card:not(.canvas-person,.canvas-group) {
-  background: color-mix(in srgb,var(--card-color,var(--surface)) 50%,var(--surface));
-  box-shadow: 0 4px 0 color-mix(in srgb,var(--card-color,var(--ink)) 30%,var(--line)), 0 8px 13px #0002;
+  background: color-mix(in srgb,var(--card-color,var(--surface)) 80%,var(--surface));
+  translate: calc(var(--canvas-lift-x) * var(--canvas-card-depth)) calc(var(--canvas-lift-y) * var(--canvas-card-depth));
+  box-shadow: none;
 }
 .canvas-surface[data-workplane=true] .canvas-card:not(.canvas-person,.canvas-group,.canvas-image) .canvas-card-text {
-  position: absolute; top: 50%; left: 50%; width: min(76%,140px);
+  position: absolute; top: 50%; left: 50%;
+  width: min(calc(100% * var(--canvas-upright-width)),calc(var(--canvas-card-height) * var(--canvas-upright-height)),140px);
   transform: translate(-50%,-50%) var(--canvas-upright);
   text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.canvas-surface[data-workplane=true]:is([data-workplane-turn="1"],[data-workplane-turn="3"])
-  .canvas-card:not(.canvas-person,.canvas-group,.canvas-image) .canvas-card-text { width: min(60%,82px); }
 .canvas-surface[data-workplane=true] .canvas-person { overflow: visible; }
-.canvas-surface[data-workplane=true] .canvas-person .canvas-card-text { transform: var(--canvas-upright); }
+.canvas-surface[data-workplane=true] .canvas-person :is(.canvas-person-symbol,.canvas-card-text) { visibility: hidden; }
+.canvas-surface[data-workplane=true] .canvas-person[aria-pressed=true]:not(:focus-visible) { outline: none; }
 .canvas-surface[data-workplane=true] .canvas-space-title { transform: translate(-50%,-50%) var(--canvas-upright); }
 .canvas-surface[data-workplane=true] .canvas-wire-label { transform-box: fill-box; transform-origin: center; transform: var(--canvas-upright); }
 .canvas-scene,.canvas-cards,.canvas-space-controls { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: top left; }

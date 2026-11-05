@@ -7,17 +7,20 @@ import {
   type CanvasFamilyPersonInput, type CanvasNodeKind, type CanvasPoint, type CanvasSpace, type CanvasStroke, type CanvasViewport,
 } from '../shared/utils/canvas';
 import { arrangeCanvas, canvasPersonSymbol, routeCanvasEdges, routeCanvasFamilies, type CanvasLayoutMode } from '../shared/utils/canvas-layout';
-import { canvasWorkplaneGrid, canvasWorkplaneMatrix, nextCanvasWorkplaneTurn, projectCanvasWorkplane,
-  unprojectCanvasWorkplane, type CanvasWorkplaneTurn } from '../shared/utils/canvas-workplane';
+import { canvasWorkplaneGrid, canvasWorkplaneMatrix, canvasWorkplanePreset, canvasWorkplaneSolidDepth, projectCanvasWorkplane,
+  projectCanvasWorkplaneVector, rotateCanvasWorkplane, unprojectCanvasWorkplane,
+  type CanvasWorkplaneCamera, type CanvasWorkplanePreset } from '../shared/utils/canvas-workplane';
+import { paintCanvasSolids } from './canvas-solids';
 import { browserCanvas, setBrowserCanvas } from './ledger';
 import type { BrowserStore } from './store';
 
 type Store = Pick<BrowserStore, 'state' | 'update'>;
 type Tool = 'select' | 'draw' | 'space';
 type SpaceBounds = Pick<CanvasSpace, 'x' | 'y' | 'width' | 'height'>;
-type Gesture = { id: number; start: CanvasPoint; viewport: CanvasViewport; dx: number; dy: number; moved: boolean } &
+type Gesture = { id: number; start: CanvasPoint; screenStart: CanvasPoint; viewport: CanvasViewport; dx: number; dy: number; moved: boolean } &
   ({ kind: 'pan'; captureText: boolean } | { kind: 'card'; node: CanvasNode; fixed: boolean } | { kind: 'draw'; points: CanvasPoint[] } |
-    { kind: 'create-space' } | { kind: 'move-space' | 'resize-space'; space: CanvasSpace });
+    { kind: 'create-space' } | { kind: 'move-space' | 'resize-space'; space: CanvasSpace } |
+    { kind: 'orbit'; camera: CanvasWorkplaneCamera; preset: CanvasWorkplanePreset | null });
 type SpaceElements = { shape: SVGEllipseElement; title: HTMLButtonElement; resize: HTMLButtonElement };
 type Pinch = { distance: number; center: CanvasPoint; viewport: CanvasViewport };
 type Edit = (document: CanvasDocument) => CanvasDocument;
@@ -35,6 +38,10 @@ const MAX_HISTORY = 24;
 const SPACE_COLORS = ['#8d8277', '#748795', '#778879', '#887993'];
 const SPACE_MIN_SIZE = 80;
 const STROKE_WIDTH = 3;
+const CAMERA_VIEWS: { id: CanvasWorkplanePreset; label: string }[] = [
+  { id: 'oblique', label: 'Oblique' }, { id: 'sagittal', label: 'Sagittal · Side' },
+  { id: 'coronal', label: 'Coronal · Front' }, { id: 'transverse', label: 'Transverse · Top' },
+];
 
 function html<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) {
   const result = document.createElement(tag);
@@ -132,7 +139,9 @@ export class BrowserCanvas {
   private viewportDraft: { boardId: string; viewport: CanvasViewport } | undefined;
   private viewport: CanvasViewport = { x: 0, y: 0, zoom: 1 };
   private workplane = false;
-  private turn: CanvasWorkplaneTurn = 0;
+  private camera = canvasWorkplanePreset('oblique');
+  private cameraPreset: CanvasWorkplanePreset | null = 'oblique';
+  private orbitMode = false;
   private undoStack: CanvasDocument[] = [];
   private redoStack: CanvasDocument[] = [];
   private historyOperation: object | null = null;
@@ -146,6 +155,9 @@ export class BrowserCanvas {
   private pointers = new Map<number, CanvasPoint>();
   private lastTap: { id: string; time: number } | undefined;
   private cards = new Map<string, HTMLButtonElement>();
+  private visibleCards: CanvasNode[] = [];
+  private solidsFrame: number | null = null;
+  private solidsDrag?: { ids: ReadonlySet<string>; x: number; y: number };
   private fixedFamilyCards = new Set<string>();
   private spaces = new Map<string, SpaceElements>();
   private inlineDraft: { boardId: string; point: CanvasPoint; input: HTMLTextAreaElement; form: HTMLFormElement } | undefined;
@@ -178,15 +190,20 @@ export class BrowserCanvas {
   private fit = action('Fit board', () => this.fitBoard());
   private flatView = action('Flat', () => this.changeWorkplane(false));
   private planeView = action('3D', () => this.changeWorkplane(true));
-  private rotateView = action('Rotate', () => {
+  private rotateLeft = action('↺', () => this.turnCamera(-90));
+  private rotateRight = action('↻', () => this.turnCamera(90));
+  private cameraViews = html('select');
+  private orbit = action('Orbit', () => {
     if (!this.workplane || this.pointers.size) return;
-    this.turn = nextCanvasWorkplaneTurn(this.turn);
-    this.paintViewport();
+    this.orbitMode = !this.orbitMode;
+    this.lastTap = undefined;
+    this.updateCameraControls();
   });
   private status = html('p');
   private surface = html('div');
   private plane = html('div');
   private planeGrid = document.createElementNS(SVG, 'svg');
+  private solidLayers = { people: document.createElementNS(SVG, 'svg'), blocks: document.createElementNS(SVG, 'svg') };
   private gridPaths = {
     minor: document.createElementNS(SVG, 'path'), major: document.createElementNS(SVG, 'path'),
     x: document.createElementNS(SVG, 'path'), y: document.createElementNS(SVG, 'path'),
@@ -229,12 +246,27 @@ export class BrowserCanvas {
     this.drawTool.title = 'Draw freehand on the board.';
     this.spaceTool.title = 'Click or drag to create an overlapping space.';
     const views = html('div');
-    views.className = 'canvas-tools';
+    views.className = 'canvas-tools canvas-camera-controls';
     views.setAttribute('role', 'group');
     views.setAttribute('aria-label', 'Canvas view');
     this.planeView.title = 'View the same board on the angled Workplane.';
-    this.rotateView.title = 'Rotate the Workplane by a quarter turn.';
-    views.append(this.flatView, this.planeView, this.rotateView);
+    this.flatView.title = 'Return to the flat canvas.';
+    this.rotateLeft.className = this.rotateRight.className = 'canvas-rotate';
+    this.rotateLeft.title = 'Rotate counterclockwise';
+    this.rotateRight.title = 'Rotate clockwise';
+    this.rotateLeft.setAttribute('aria-label', this.rotateLeft.title);
+    this.rotateRight.setAttribute('aria-label', this.rotateRight.title);
+    this.cameraViews.setAttribute('aria-label', 'Workplane views');
+    const custom = option('', 'Views');
+    custom.disabled = true;
+    this.cameraViews.append(custom, ...CAMERA_VIEWS.map(({ id, label }) => option(id, label)));
+    this.cameraViews.onchange = () => {
+      const preset = CAMERA_VIEWS.find(({ id }) => id === this.cameraViews.value)?.id;
+      if (preset && this.workplane && !this.pointers.size) this.changeCamera(canvasWorkplanePreset(preset), preset);
+      else this.updateCameraControls();
+    };
+    this.orbit.title = 'Drag the board, or use arrow keys on it, to turn and tilt the camera.';
+    views.append(this.planeView, this.rotateLeft, this.rotateRight, this.cameraViews, this.orbit, this.flatView);
     for (const [button, name] of [[this.undoButton, 'Undo'], [this.redoButton, 'Redo']] as const) {
       button.className = 'canvas-history-icon';
       button.setAttribute('aria-label', name);
@@ -272,8 +304,11 @@ export class BrowserCanvas {
     this.wires.setAttribute('aria-hidden', 'true');
     this.cardLayer.className = 'canvas-cards';
     this.scene.append(this.spaceShapes, this.strokes, this.wires, this.spaceControls, this.cardLayer);
-    this.plane.append(this.planeGrid, this.scene);
-    this.surface.append(this.plane, this.status);
+    this.solidLayers.blocks.setAttribute('class', 'canvas-solid-layer canvas-solid-blocks');
+    this.solidLayers.people.setAttribute('class', 'canvas-solid-layer canvas-solid-people');
+    for (const layer of Object.values(this.solidLayers)) layer.setAttribute('aria-hidden', 'true');
+    this.plane.append(this.planeGrid, this.solidLayers.blocks, this.scene);
+    this.surface.append(this.plane, this.solidLayers.people, this.status);
     this.dialog.className = 'canvas-dialog';
     this.dialogHeading.id = 'canvas-dialog-title';
     this.dialog.setAttribute('aria-labelledby', this.dialogHeading.id);
@@ -300,12 +335,14 @@ export class BrowserCanvas {
     this.selected.clear();
     this.selectedSpace = undefined;
     this.tool = 'select';
+    this.orbitMode = false;
     this.closeInline();
     this.pointers.clear();
     this.gesture = undefined;
     this.pinch = undefined;
     this.lastTap = undefined;
     this.inlineSave = undefined;
+    this.solidsDrag = undefined;
     this.dialog.close();
     this.dialogContent.replaceChildren();
     this.dialogActions.replaceChildren();
@@ -380,6 +417,8 @@ export class BrowserCanvas {
   }
 
   private changeTool(tool: Tool) {
+    if (this.pointers.size) return;
+    if (this.orbitMode) { this.orbitMode = false; this.updateCameraControls(); }
     if (tool === this.tool) return;
     const store = this.store;
     void this.flush().then(() => {
@@ -392,8 +431,38 @@ export class BrowserCanvas {
   private changeWorkplane(enabled: boolean) {
     if (this.workplane === enabled || this.pointers.size) return;
     this.workplane = enabled;
-    this.updateSelection();
+    this.orbitMode = false;
+    this.lastTap = undefined;
+    this.updateCameraControls();
     this.paintViewport();
+  }
+
+  private changeCamera(camera: CanvasWorkplaneCamera, preset: CanvasWorkplanePreset | null = null) {
+    const changedView = this.cameraPreset !== preset;
+    this.camera = camera;
+    this.cameraPreset = preset;
+    this.lastTap = undefined;
+    if (changedView) this.updateCameraControls();
+    this.paintViewport();
+  }
+
+  private turnCamera(roll: -90 | 90) {
+    if (this.workplane && !this.pointers.size) this.changeCamera(rotateCanvasWorkplane(this.camera, { roll }));
+  }
+
+  private updateCameraControls(disabled = !this.board() || Boolean(this.pending || this.historyOperation)) {
+    this.planeView.hidden = this.workplane;
+    this.planeView.disabled = disabled;
+    for (const control of [this.rotateLeft, this.rotateRight, this.cameraViews, this.orbit, this.flatView]) {
+      control.hidden = !this.workplane;
+      control.disabled = disabled || !this.workplane;
+    }
+    this.cameraViews.value = this.cameraPreset ?? '';
+    this.orbit.setAttribute('aria-pressed', String(this.orbitMode));
+    this.surface.dataset.orbit = String(this.orbitMode);
+    this.surface.setAttribute('aria-label', this.orbitMode
+      ? 'Canvas workplane orbit. Drag or use the arrow keys to turn and tilt the camera.'
+      : 'Canvas board. Click empty space to write. Drag the background to pan.');
   }
 
   private startInline(point: CanvasPoint) {
@@ -427,7 +496,7 @@ export class BrowserCanvas {
     const { form, point } = this.inlineDraft;
     const screen = viewPoint(point, this.viewport);
     const { width, height } = this.surfaceSize();
-    const anchor = this.workplane ? projectCanvasWorkplane(screen, { width, height }, this.turn) : screen;
+    const anchor = this.workplane ? projectCanvasWorkplane(screen, { width, height }, this.camera) : screen;
     form.style.left = Math.max(0, Math.min(anchor.x, width - form.offsetWidth)) + 'px';
     form.style.top = Math.max(0, Math.min(anchor.y, height - form.offsetHeight)) + 'px';
   }
@@ -533,10 +602,8 @@ export class BrowserCanvas {
     }
     const disabled = !board || Boolean(this.pending || this.historyOperation);
     for (const control of [this.boards, this.newBoard, this.rename, this.add, this.addFamily, this.multi, this.layout, this.search,
-      this.selectTool, this.drawTool, this.spaceTool, this.zoomOut, this.zoomIn, this.fit, this.flatView, this.planeView]) control.disabled = disabled;
-    this.flatView.setAttribute('aria-pressed', String(!this.workplane));
-    this.planeView.setAttribute('aria-pressed', String(this.workplane));
-    this.rotateView.disabled = disabled || !this.workplane;
+      this.selectTool, this.drawTool, this.spaceTool, this.zoomOut, this.zoomIn, this.fit]) control.disabled = disabled;
+    this.updateCameraControls(disabled);
     this.surface.dataset.tool = this.tool;
     this.selectTool.setAttribute('aria-pressed', String(this.tool === 'select'));
     this.drawTool.setAttribute('aria-pressed', String(this.tool === 'draw'));
@@ -551,6 +618,7 @@ export class BrowserCanvas {
     this.arrange.disabled = disabled || !board?.nodes.length;
     this.updateHistoryControls();
     this.multi.setAttribute('aria-pressed', String(this.multiple));
+    this.scheduleSolidPaint();
   }
 
   private render() {
@@ -558,6 +626,7 @@ export class BrowserCanvas {
     this.boards.replaceChildren(...(this.document?.boards.map((item) => option(item.id, item.title)) ?? []));
     if (board) this.boards.value = board.id;
     this.cards.clear();
+    this.visibleCards = [];
     this.fixedFamilyCards.clear();
     this.spaces.clear();
     this.spaceShapes.replaceChildren();
@@ -573,6 +642,7 @@ export class BrowserCanvas {
       this.fixedFamilyCards = canvasFamilyPositionIds(board);
       const hierarchy = new Map(board.nodes.map((node) => [node.id, groupAncestors(node, byId)]));
       const visible = board.nodes.filter((node) => !hierarchy.get(node.id)!.some((group) => group.collapsed));
+      this.visibleCards = visible;
       const visibleIds = new Set(visible.map((node) => node.id));
       this.selected = new Set([...this.selected].filter((id) => visibleIds.has(id)));
       this.renderConnections(board);
@@ -587,6 +657,8 @@ export class BrowserCanvas {
         card.style.top = node.y + 'px';
         card.style.width = node.width + 'px';
         card.style.height = node.height + 'px';
+        card.style.setProperty('--canvas-card-height', node.height + 'px');
+        if (!person && node.kind !== 'group') card.style.setProperty('--canvas-card-depth', String(canvasWorkplaneSolidDepth('block', node)));
         if (node.color) card.style.setProperty('--card-color', node.color);
         if (node.collapsed) card.classList.add('is-collapsed');
         if (node.checked) card.classList.add('is-checked');
@@ -660,7 +732,7 @@ export class BrowserCanvas {
       wire.setAttribute('points', points.map(({ x, y }) => x + ',' + y).join(' '));
       wire.setAttribute('class', 'canvas-wire canvas-family-wire');
       wire.dataset.family = familyId;
-      wire.onclick = () => this.familyDialog(familyId);
+      wire.onclick = () => { if (!this.orbitMode) this.familyDialog(familyId); };
       this.wires.append(wire);
       if (caption) {
         const note = document.createElementNS(SVG, 'text');
@@ -678,7 +750,7 @@ export class BrowserCanvas {
       wire.setAttribute('points', points.map(({ x, y }) => x + ',' + y).join(' '));
       wire.setAttribute('class', 'canvas-wire');
       if (edge.directed) wire.setAttribute('marker-end', 'url(#canvas-arrow)');
-      wire.onclick = () => this.edgeDialog(edge.id);
+      wire.onclick = () => { if (!this.orbitMode) this.edgeDialog(edge.id); };
       this.wires.append(wire);
       if (edge.label) {
         const middle = points[Math.floor(points.length / 2)]!;
@@ -777,26 +849,48 @@ export class BrowserCanvas {
     const { x, y, zoom } = this.viewport;
     this.scene.style.transform = 'translate(' + -x * zoom + 'px,' + -y * zoom + 'px) scale(' + zoom + ')';
     this.surface.dataset.workplane = String(this.workplane);
-    this.surface.dataset.workplaneTurn = String(this.turn);
+    this.surface.dataset.workplanePreset = this.cameraPreset ?? 'custom';
     if (this.workplane) {
       this.surface.style.backgroundSize = '';
       this.surface.style.backgroundPosition = '';
-      const { a, b, c, d } = canvasWorkplaneMatrix(this.turn);
+      const { a, b, c, d } = canvasWorkplaneMatrix(this.camera);
       this.plane.style.transform = `matrix(${a},${b},${c},${d},0,0)`;
       const determinant = a * d - b * c;
       this.plane.style.setProperty('--canvas-upright', `matrix(${d / determinant},${-b / determinant},${-c / determinant},${a / determinant},0,0)`);
+      this.plane.style.setProperty('--canvas-upright-width', String(0.76 / Math.max(1, Math.abs(d / determinant))));
+      this.plane.style.setProperty('--canvas-upright-height', String(0.72 / Math.max(0.01, Math.abs(b / determinant))));
+      const lift = unprojectCanvasWorkplane(projectCanvasWorkplaneVector({ x: 0, y: 0, z: 1 }, this.camera),
+        { width: 0, height: 0 }, this.camera);
+      this.plane.style.setProperty('--canvas-lift-x', lift.x + 'px');
+      this.plane.style.setProperty('--canvas-lift-y', lift.y + 'px');
       this.paintWorkplaneGrid();
     } else {
       this.plane.style.transform = '';
       this.surface.style.backgroundSize = 24 * zoom + 'px ' + 24 * zoom + 'px';
       this.surface.style.backgroundPosition = -x * zoom + 'px ' + -y * zoom + 'px';
     }
+    this.scheduleSolidPaint();
     this.positionInline();
+  }
+
+  private scheduleSolidPaint() {
+    if (!this.workplane) {
+      if (this.solidsFrame !== null) cancelAnimationFrame(this.solidsFrame);
+      this.solidsFrame = null;
+      this.solidLayers.people.replaceChildren();
+      this.solidLayers.blocks.replaceChildren();
+      return;
+    }
+    if (this.solidsFrame !== null) return;
+    this.solidsFrame = requestAnimationFrame(() => {
+      this.solidsFrame = null;
+      paintCanvasSolids(this.solidLayers, this.visibleCards, this.selected, this.viewport, this.surfaceSize(), this.camera, this.solidsDrag);
+    });
   }
 
   private paintWorkplaneGrid() {
     const commands: Record<keyof typeof this.gridPaths, string[]> = { minor: [], major: [], x: [], y: [] };
-    for (const { start, end, major, axis } of canvasWorkplaneGrid(this.viewport, this.surfaceSize(), this.turn)) {
+    for (const { start, end, major, axis } of canvasWorkplaneGrid(this.viewport, this.surfaceSize(), this.camera)) {
       commands[axis ?? (major ? 'major' : 'minor')].push(`M${start.x.toFixed(2)},${start.y.toFixed(2)}L${end.x.toFixed(2)},${end.y.toFixed(2)}`);
     }
     this.gridPaths.minor.setAttribute('d', commands.minor.join(''));
@@ -815,12 +909,12 @@ export class BrowserCanvas {
   }
 
   private unproject(point: CanvasPoint) {
-    return this.workplane ? unprojectCanvasWorkplane(point, this.surfaceSize(), this.turn) : point;
+    return this.workplane ? unprojectCanvasWorkplane(point, this.surfaceSize(), this.camera) : point;
   }
 
   private panBy(delta: CanvasPoint) {
     // A displacement needs the linear inverse, without the stage-center offset.
-    const offset = this.workplane ? unprojectCanvasWorkplane(delta, { width: 0, height: 0 }, this.turn) : delta;
+    const offset = this.workplane ? unprojectCanvasWorkplane(delta, { width: 0, height: 0 }, this.camera) : delta;
     this.viewport = { ...boardPoint(offset, this.viewport), zoom: this.viewport.zoom };
   }
 
@@ -847,26 +941,44 @@ export class BrowserCanvas {
   private fitBoard() {
     const board = this.board();
     if (!board) return;
+    const size = this.surfaceSize();
+    if (!size.width || !size.height) return;
+    const { a, b, c, d } = this.workplane ? canvasWorkplaneMatrix(this.camera) : { a: 1, b: 0, c: 0, d: 1 };
+    const lift = this.workplane ? projectCanvasWorkplaneVector({ x: 0, y: 0, z: 1 }, this.camera) : { x: 0, y: 0 };
     let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
-    const extend = (x: number, y: number, width: number, height: number) => {
-      left = Math.min(left, x);
-      right = Math.max(right, x + width);
-      top = Math.min(top, y);
-      bottom = Math.max(bottom, y + height);
+    const extendProjected = (x: number, y: number, halfWidth: number, halfHeight: number, depth = 0) => {
+      left = Math.min(left, x - halfWidth + Math.min(0, lift.x * depth));
+      right = Math.max(right, x + halfWidth + Math.max(0, lift.x * depth));
+      top = Math.min(top, y - halfHeight + Math.min(0, lift.y * depth));
+      bottom = Math.max(bottom, y + halfHeight + Math.max(0, lift.y * depth));
     };
-    for (const { x, y, width, height } of [...board.nodes, ...(board.spaces ?? [])]) extend(x, y, width, height);
+    const extend = (x: number, y: number, width: number, height: number, depth = 0) => {
+      const cx = x + width / 2, cy = y + height / 2;
+      extendProjected(a * cx + c * cy, b * cx + d * cy,
+        (Math.abs(a) * width + Math.abs(c) * height) / 2, (Math.abs(b) * width + Math.abs(d) * height) / 2, depth);
+    };
+    for (const node of this.workplane ? this.visibleCards : board.nodes) {
+      if (!this.workplane || node.kind === 'group') extend(node.x, node.y, node.width, node.height);
+      else if (isCanvasPerson(node.kind)) {
+        const symbol = canvasPersonSymbol(node);
+        if (node.kind === 'person-circle') {
+          const radius = symbol.width / 2;
+          const center = projectCanvasWorkplaneVector({ ...symbol.center, z: radius }, this.camera);
+          extendProjected(center.x, center.y, radius, radius);
+        } else extend(symbol.x, symbol.y, symbol.width, symbol.height, symbol.width);
+      } else extend(node.x, node.y, node.width, node.height, canvasWorkplaneSolidDepth('block', node));
+    }
+    for (const { x, y, width, height } of board.spaces ?? []) extend(x, y, width, height);
     for (const stroke of board.strokes ?? []) {
       const radius = stroke.width / 2;
       for (const point of stroke.points) extend(point.x - radius, point.y - radius, stroke.width, stroke.width);
     }
     if (left === Infinity) return;
-    const size = this.surfaceSize();
-    const { a, b, c, d } = this.workplane ? canvasWorkplaneMatrix(this.turn) : { a: 1, b: 0, c: 0, d: 1 };
-    const width = Math.abs(a) * (right - left) + Math.abs(c) * (bottom - top);
-    const height = Math.abs(b) * (right - left) + Math.abs(d) * (bottom - top);
-    const zoom = Math.max(0.15, Math.min(1.8, (size.width - 48) / width, (size.height - 48) / height));
-    this.viewport = { zoom, x: (left + right) / 2 - size.width / (2 * zoom),
-      y: (top + bottom) / 2 - size.height / (2 * zoom) };
+    const projectedCenter = { x: (left + right) / 2, y: (top + bottom) / 2 };
+    const center = this.workplane ? unprojectCanvasWorkplane(projectedCenter, { width: 0, height: 0 }, this.camera) : projectedCenter;
+    const zoom = Math.max(0.15, Math.min(1.8, (size.width - 48) / Math.max(1, right - left),
+      (size.height - 48) / Math.max(1, bottom - top)));
+    this.viewport = { zoom, x: center.x - size.width / (2 * zoom), y: center.y - size.height / (2 * zoom) };
     this.paintViewport();
     this.scheduleViewport();
   }
@@ -885,7 +997,7 @@ export class BrowserCanvas {
     this.surface.onpointerdown = (event) => {
       const target = event.target as Element;
       if (!this.store || this.pending || (event.button !== 0 && event.button !== 1) || target.closest('.canvas-inline') ||
-        (this.tool === 'select' && event.button === 0 && target.closest('.canvas-wire'))) return;
+        (!this.orbitMode && this.tool === 'select' && event.button === 0 && target.closest('.canvas-wire'))) return;
       const screen = this.point(event);
       this.pointers.set(event.pointerId, screen);
       this.surface.setPointerCapture(event.pointerId);
@@ -899,16 +1011,17 @@ export class BrowserCanvas {
       }
       if (this.pointers.size > 1) return;
       const point = this.unproject(screen);
-      const base = { id: event.pointerId, start: point, viewport: this.viewport, dx: 0, dy: 0, moved: false };
+      const base = { id: event.pointerId, start: point, screenStart: screen, viewport: this.viewport, dx: 0, dy: 0, moved: false };
       const board = this.board();
-      if (event.button === 1 || this.inlineDraft) this.gesture = { ...base, kind: 'pan', captureText: event.button === 0 };
+      if (event.button === 0 && this.orbitMode) this.gesture = { ...base, kind: 'orbit', camera: this.camera, preset: this.cameraPreset };
+      else if (event.button === 1 || this.inlineDraft) this.gesture = { ...base, kind: 'pan', captureText: event.button === 0 };
       else if (this.tool === 'draw') {
         this.gesture = { ...base, kind: 'draw', points: [boardPoint(point, this.viewport)] };
         this.strokes.append(this.strokePreview);
       } else if (this.tool === 'space') {
         this.gesture = { ...base, kind: 'create-space' };
       } else {
-        const nodeId = target.closest<HTMLElement>('.canvas-card')?.dataset.node;
+        const nodeId = target.closest('.canvas-card, .canvas-solid-object')?.getAttribute('data-node');
         const spaceId = target.closest<HTMLElement | SVGElement>('[data-space]')?.dataset.space;
         const node = board?.nodes.find((item) => item.id === nodeId);
         const space = board?.spaces?.find((item) => item.id === spaceId);
@@ -917,7 +1030,8 @@ export class BrowserCanvas {
         else this.gesture = { ...base, kind: 'pan', captureText: true };
       }
     };
-    this.surface.onpointermove = (event) => {
+    const surfaceDocument = this.surface.ownerDocument;
+    surfaceDocument.addEventListener('pointermove', (event) => {
       if (!this.pointers.has(event.pointerId)) return;
       const screen = this.point(event);
       this.pointers.set(event.pointerId, screen);
@@ -930,6 +1044,13 @@ export class BrowserCanvas {
       }
       const gesture = this.gesture;
       if (!gesture || gesture.id !== event.pointerId) return;
+      const screenDX = screen.x - gesture.screenStart.x, screenDY = screen.y - gesture.screenStart.y;
+      if (gesture.kind === 'orbit') {
+        if (!gesture.moved && Math.hypot(screenDX, screenDY) < 4) return;
+        gesture.moved = true;
+        this.changeCamera(rotateCanvasWorkplane(gesture.camera, { yaw: screenDX * 0.48, pitch: -screenDY * 0.38 }));
+        return;
+      }
       const point = this.unproject(screen);
       if (gesture.kind === 'draw') {
         this.recordStrokePoint(gesture, point);
@@ -937,7 +1058,7 @@ export class BrowserCanvas {
         return;
       }
       const dx = point.x - gesture.start.x, dy = point.y - gesture.start.y;
-      if (Math.hypot(dx, dy) < 4 && !gesture.moved) return;
+      if (Math.hypot(screenDX, screenDY) < 4 && !gesture.moved) return;
       gesture.moved = true;
       gesture.dx = dx / gesture.viewport.zoom;
       gesture.dy = dy / gesture.viewport.zoom;
@@ -955,7 +1076,7 @@ export class BrowserCanvas {
         this.viewport = { ...gesture.viewport, x: gesture.viewport.x - gesture.dx, y: gesture.viewport.y - gesture.dy };
         this.paintViewport();
       }
-    };
+    });
     const end = (event: PointerEvent, cancelled: boolean) => {
       if (!this.pointers.delete(event.pointerId)) return;
       if (this.pinch) {
@@ -966,6 +1087,10 @@ export class BrowserCanvas {
       if (!gesture || gesture.id !== event.pointerId) return;
       this.gesture = undefined;
       this.clearPreview(gesture);
+      if (gesture.kind === 'orbit') {
+        if (cancelled && gesture.moved) this.changeCamera(gesture.camera, gesture.preset);
+        return;
+      }
       if (gesture.kind === 'pan') {
         if (gesture.moved) {
           if (cancelled) { this.viewport = gesture.viewport; this.paintViewport(); }
@@ -1012,8 +1137,13 @@ export class BrowserCanvas {
         }) }));
       });
     };
-    this.surface.onpointerup = (event) => end(event, false);
-    this.surface.onpointercancel = this.surface.onlostpointercapture = (event) => end(event, true);
+    // Redrawing an SVG solid can release capture while the pointer is still
+    // pressed. Keep tracking the same pointer through its actual release.
+    surfaceDocument.addEventListener('pointerup', (event) => end(event, false));
+    surfaceDocument.addEventListener('pointercancel', (event) => end(event, true));
+    surfaceDocument.defaultView?.addEventListener('blur', () => {
+      for (const pointerId of this.pointers.keys()) end(new PointerEvent('pointercancel', { pointerId }), true);
+    });
     this.surface.onkeydown = (event) => {
       if (event.target !== this.surface || !this.store || this.pending || this.dialog.open) return;
       const directions: Record<string, CanvasPoint> = {
@@ -1023,11 +1153,19 @@ export class BrowserCanvas {
       const direction = directions[event.key];
       if (direction) {
         event.preventDefault();
-        this.panBy(direction);
-        this.paintViewport();
-        this.scheduleViewport();
+        if (this.orbitMode) this.changeCamera(rotateCanvasWorkplane(this.camera, { yaw: direction.x * 0.24, pitch: -direction.y * 0.16 }));
+        else {
+          this.panBy(direction);
+          this.paintViewport();
+          this.scheduleViewport();
+        }
       } else if (event.key === '+' || event.key === '=') this.zoomBy(1.25);
       else if (event.key === '-') this.zoomBy(0.8);
+      else if (event.key === 'Escape' && this.orbitMode) {
+        event.preventDefault();
+        this.orbitMode = false;
+        this.updateCameraControls();
+      }
       else if (event.key.toLowerCase() === 'n') {
         this.startInline(boardPoint({ x: this.surface.clientWidth / 2, y: this.surface.clientHeight / 2 }, this.viewport));
       }
@@ -1089,6 +1227,8 @@ export class BrowserCanvas {
     const byId = new Map(board.nodes.map((node) => [node.id, node]));
     const moving = new Set(board.nodes.filter((node) => node.id === nodeId ||
       groupAncestors(node, byId).some((parent) => parent.id === nodeId)).map((node) => node.id));
+    this.solidsDrag = { ids: moving, x: gesture.dx, y: gesture.dy };
+    this.scheduleSolidPaint();
     for (const id of moving) {
       const card = this.cards.get(id);
       if (card) card.style.transform = 'translate(' + gesture.dx + 'px,' + gesture.dy + 'px)';
@@ -1104,6 +1244,8 @@ export class BrowserCanvas {
   }
 
   private clearCardPreview() {
+    this.solidsDrag = undefined;
+    this.scheduleSolidPaint();
     for (const card of this.cards.values()) card.style.transform = '';
     const board = this.board();
     if (board) {
