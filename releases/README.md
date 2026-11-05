@@ -1,6 +1,12 @@
 # Installed-app update notices
 
-Current phone availability is **0.1.43/code44** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+Current phone availability is **0.1.44/code45** for Wear-enabled Android and **0.1.36/code37** for FOSS. The Watch preview is **0.1.16/code100017**.
+
+## Published 0.1.44 Wear-enabled phone update
+
+The [0.1.44 phone preview](https://github.com/khushbakhtm-star/context/releases/tag/v0.1.44) was published at **2026-11-05T02:35:01Z**. Canvas Workplane adds clockwise and counterclockwise rotation, free orbit, and sagittal, coronal, transverse, and oblique views. In 3D, pedigree circles become spheres, squares become cubes, and diamonds become octahedra.
+
+The [publisher-signed APK](https://github.com/khushbakhtm-star/context/releases/download/v0.1.44/context-0.1.44-wear-phone-preview.apk) has SHA-256 `ed00681c86c290b8aca5a1e09f553b7d48fa2a6c14f04e2bf1ffcd421f8d104d`. [Application source](https://github.com/khushbakhtm-star/context/commit/e50d14738ecf6e664e776d01bae452ffe3d0d492) and [Android build](https://github.com/khushbakhtm-star/context/actions/runs/41954690177).
 
 ## Published 0.1.43 Wear-enabled phone update
 
