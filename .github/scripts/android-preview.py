@@ -10,9 +10,9 @@ import struct
 import subprocess
 import zipfile
 
-SOURCE = "0e0a790f8b8ac54c4df551002c30ec5467462b73"
-VERSION = "0.1.43"
-CODE = 44
+SOURCE = "e50d14738ecf6e664e776d01bae452ffe3d0d492"
+VERSION = "0.1.44"
+CODE = 45
 APP_ID = "com.context.minuteledger"
 MARKER = "// Context unsigned Wear-phone preview: local publisher signing is separate"
 NATIVE_RULE_MARKER = "# Context audited native module identities for packaging verification"
@@ -22,6 +22,10 @@ NATIVE_MODULES = (
     "expo.modules.contextcalendarcolors.ContextCalendarColorsModule",
     "expo.modules.clipboard.ClipboardModule",
     "expo.modules.contextledgercrypto.ContextLedgerCryptoModule",
+)
+WORKPLANE_MARKERS = (
+    "Rotate workplane clockwise", "Rotate workplane counterclockwise", "Views", "Workplane views",
+    "Sagittal", "Coronal", "Transverse", "Oblique", "Orbit", "Drag to orbit",
 )
 
 
@@ -120,7 +124,7 @@ def verify(source, reports, receipt):
         raise ValueError("The audited native module rules changed during the build")
     tools = Path(os.environ["ANDROID_HOME"]) / "build-tools/37.0.0"
     original = mobile / "android/app/build/outputs/apk/release/app-release-unsigned.apk"
-    apk = reports / "context-0.1.43-wear-phone-unsigned.apk"
+    apk = reports / f"context-{VERSION}-wear-phone-unsigned.apk"
     run([tools / "zipalign", "-P", "16", "-f", "4", original, apk])
     run([tools / "zipalign", "-c", "-P", "16", "-v", "4", apk])
     data = apk.read_bytes()
@@ -146,6 +150,9 @@ def verify(source, reports, receipt):
         for marker in checklist_markers:
             if not contains(bundle, marker):
                 raise ValueError("Actual checklist task-flow UI marker missing: " + marker)
+        for marker in WORKPLANE_MARKERS:
+            if not contains(bundle, marker):
+                raise ValueError("Actual Canvas Workplane UI marker missing: " + marker)
         clients = {}
         for key in ("EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID", "EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID"):
             value = os.environ.get(key, "")
@@ -180,7 +187,7 @@ def verify(source, reports, receipt):
                     "zipIntegrity": True, "zipAlignment": "16 KB native libraries; checked before signing",
                     "nativeIdentityVerified": True, "noApkSigningBlock": True, "noJarSignature": True,
                     "apksignerExpectedUnsignedExit": 1, "googleClientIds": clients,
-                    "wearAndGoogleNativeMarkers": True,
+                    "wearAndGoogleNativeMarkers": True, "workplaneUiMarkersVerified": True,
                     **{name: True for name in native_markers}, "bundleSha256": sha(bundle),
                     "scope": "Unsigned aligned APK only. Publisher signing, signature verification and phone Google sign-in testing remain separate. No Expo/EAS build service or signing credential was used."})
     return receipt
@@ -202,7 +209,7 @@ def main():
         # A failed verifier may have produced an aligned intermediate. Retain diagnostics,
         # but never let upload-artifact expose that APK as a usable unsigned build.
         if args.mode == "verify":
-            (reports / "context-0.1.43-wear-phone-unsigned.apk").unlink(missing_ok=True)
+            (reports / f"context-{VERSION}-wear-phone-unsigned.apk").unlink(missing_ok=True)
         receipt.update({"status": "failed", "scope": "Not a verified build; never install or publish this output.",
                         "error": str(error)})
         path.write_text(json.dumps(receipt, indent=2) + "\n")
